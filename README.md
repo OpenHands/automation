@@ -24,7 +24,7 @@ make lint
 ## Project Structure
 
 ```
-openhands_automation/   # Main package
+automation/             # Main package
 tests/
 ├── conftest.py         # Shared test fixtures
 └── unit/               # Unit tests

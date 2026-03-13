@@ -10,6 +10,9 @@ requires-python = ">=3.12"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["automation"]
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.3.0",
@@ -52,7 +55,7 @@ extend-immutable-calls = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["openhands_automation"]
+known-first-party = ["automation"]
 combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
@@ -71,7 +74,7 @@ asyncio_mode = "auto"
 # Pyright configuration
 [tool.pyright]
 include = [
-    "openhands_automation",
+    "automation",
     "tests",
 ]
 venvPath = "."

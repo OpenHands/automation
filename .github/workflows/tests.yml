@@ -31,7 +31,7 @@ jobs:
               run: |
                   rm -f .coverage
                   CI=true uv run python -m pytest -vvs \
-                    --cov=openhands_automation \
+                    --cov=automation \
                     --cov-report=term-missing \
                     --cov-fail-under=0 \
                     tests/unit
