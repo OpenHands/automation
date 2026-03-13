@@ -12,3 +12,13 @@ def test_version():
 def test_import():
     """Verify the automation package can be imported."""
     assert hasattr(automation, "__version__")
+
+
+def test_models_import():
+    """Verify all models can be imported."""
+    from automation.models import Automation, AutomationRun, AutomationRunStatus, Base
+
+    assert Base is not None
+    assert Automation.__tablename__ == "automations"
+    assert AutomationRun.__tablename__ == "automation_runs"
+    assert AutomationRunStatus.PENDING == "PENDING"

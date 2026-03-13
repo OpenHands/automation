@@ -1,0 +1,89 @@
+image:
+  repository: ghcr.io/openhands/automations
+  tag: ""  # Defaults to Chart.appVersion
+
+imagePullSecrets: []
+
+deployment:
+  replicas: 1
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+securityContext:
+  runAsUser: 42420
+  runAsGroup: 42420
+  runAsNonRoot: true
+
+serviceAccount:
+  name: openhands-automations
+  annotations: {}
+
+# OpenHands SaaS API base URL
+openhandsApiBaseUrl: "https://app.openhands.ai"
+
+# Scheduler interval in seconds
+schedulerIntervalSeconds: 60
+
+# Log level
+logLevel: "info"
+
+# Database configuration
+db:
+  host: ""
+  port: 5432
+  name: "automations"
+  user: "postgres"
+  poolSize: 10
+  maxOverflow: 5
+
+# GCP Cloud SQL (leave empty for non-GCP)
+gcp:
+  dbInstance: ""
+  project: ""
+  region: ""
+
+# Secrets (reference existing K8s secrets)
+secrets:
+  dbPassword:
+    existingSecret: automations-db-password
+    key: password
+  encryptionKey:
+    existingSecret: automations-encryption-key
+    key: key
+
+# Migration job
+migrationJob:
+  enabled: true
+
+# Health/readiness probes
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 10
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+
+# Ingress (optional)
+ingress:
+  enabled: false
+  host: ""
+  class: traefik
+  annotations: {}
+
+# Datadog APM (optional)
+datadog:
+  enabled: false
+  env: "dev"
+  service: "automations"
+  agentHost: "datadog-agent"

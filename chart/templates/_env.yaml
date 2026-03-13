@@ -1,0 +1,48 @@
+{{- define "automations.env" }}
+- name: AUTOMATION_DB_HOST
+  value: {{ .Values.db.host | quote }}
+- name: AUTOMATION_DB_PORT
+  value: {{ .Values.db.port | quote }}
+- name: AUTOMATION_DB_NAME
+  value: {{ .Values.db.name | quote }}
+- name: AUTOMATION_DB_USER
+  value: {{ .Values.db.user | quote }}
+- name: AUTOMATION_DB_PASS
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.dbPassword.existingSecret }}
+      key: {{ .Values.secrets.dbPassword.key }}
+- name: AUTOMATION_DB_POOL_SIZE
+  value: {{ .Values.db.poolSize | quote }}
+- name: AUTOMATION_DB_MAX_OVERFLOW
+  value: {{ .Values.db.maxOverflow | quote }}
+{{- if .Values.gcp.dbInstance }}
+- name: AUTOMATION_GCP_DB_INSTANCE
+  value: {{ .Values.gcp.dbInstance | quote }}
+- name: AUTOMATION_GCP_PROJECT
+  value: {{ .Values.gcp.project | quote }}
+- name: AUTOMATION_GCP_REGION
+  value: {{ .Values.gcp.region | quote }}
+{{- end }}
+- name: AUTOMATION_OPENHANDS_API_BASE_URL
+  value: {{ .Values.openhandsApiBaseUrl | quote }}
+- name: AUTOMATION_SCHEDULER_INTERVAL_SECONDS
+  value: {{ .Values.schedulerIntervalSeconds | quote }}
+- name: AUTOMATION_ENCRYPTION_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.encryptionKey.existingSecret }}
+      key: {{ .Values.secrets.encryptionKey.key }}
+- name: AUTOMATION_LOG_LEVEL
+  value: {{ .Values.logLevel | quote }}
+{{- if .Values.datadog.enabled }}
+- name: DD_ENV
+  value: {{ .Values.datadog.env | quote }}
+- name: DD_SERVICE
+  value: {{ .Values.datadog.service | quote }}
+- name: DD_AGENT_HOST
+  value: {{ .Values.datadog.agentHost | quote }}
+- name: DD_TRACE_ENABLED
+  value: "true"
+{{- end }}
+{{- end }}
