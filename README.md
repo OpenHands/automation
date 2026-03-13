@@ -1,4 +1,4 @@
-# Automation
+# OpenHands Automation
 
 OpenHands automation service.
 
@@ -24,8 +24,8 @@ make lint
 ## Project Structure
 
 ```
-automation/          # Main package
+openhands_automation/   # Main package
 tests/
-├── conftest.py      # Shared test fixtures
-└── unit/            # Unit tests
+├── conftest.py         # Shared test fixtures
+└── unit/               # Unit tests
 ```

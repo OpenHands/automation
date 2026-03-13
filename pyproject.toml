@@ -1,5 +1,5 @@
 [project]
-name = "automation"
+name = "openhands-automation"
 version = "0.1.0"
 description = "OpenHands automation service"
 readme = "README.md"
@@ -52,7 +52,7 @@ extend-immutable-calls = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["automation"]
+known-first-party = ["openhands_automation"]
 combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
@@ -71,7 +71,7 @@ asyncio_mode = "auto"
 # Pyright configuration
 [tool.pyright]
 include = [
-    "automation",
+    "openhands_automation",
     "tests",
 ]
 venvPath = "."
