@@ -73,7 +73,8 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
         retry_state.attempt_number,
     )
     # outcome is guaranteed to be set when retry_error_callback is invoked
-    assert retry_state.outcome is not None
+    if retry_state.outcome is None:
+        raise RuntimeError("retry_error_callback invoked without outcome")
     return retry_state.outcome.result()
 
 
