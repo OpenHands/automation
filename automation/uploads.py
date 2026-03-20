@@ -58,9 +58,10 @@ class UploadResponse(BaseModel):
     def from_model(cls, upload: TarballUpload) -> "UploadResponse":
         """Create response from database model."""
         # Only expose tarball_path when upload is completed
+        # Use oh-internal:// scheme for internal uploads
         tarball_path = None
         if upload.status == UploadStatus.COMPLETED:
-            tarball_path = f"gs://{upload.storage_path}"
+            tarball_path = f"oh-internal://uploads/{upload.id}"
 
         return cls(
             id=upload.id,

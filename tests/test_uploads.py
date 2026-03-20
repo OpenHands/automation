@@ -40,7 +40,8 @@ class TestUploadResponse:
     def test_from_model_completed(self):
         """Create response from completed upload."""
         upload = MagicMock(spec=TarballUpload)
-        upload.id = uuid.uuid4()
+        upload_id = uuid.uuid4()
+        upload.id = upload_id
         upload.user_id = uuid.uuid4()
         upload.org_id = uuid.uuid4()
         upload.name = "test-upload"
@@ -57,7 +58,8 @@ class TestUploadResponse:
         response = UploadResponse.from_model(upload)
 
         assert response.status == UploadStatusEnum.COMPLETED
-        assert response.tarball_path == "gs://uploads/org/user/id.tar"
+        # tarball_path uses oh-internal:// scheme for internal uploads
+        assert response.tarball_path == f"oh-internal://uploads/{upload_id}"
 
     def test_from_model_failed(self):
         """Create response from failed upload."""
