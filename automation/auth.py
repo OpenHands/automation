@@ -5,13 +5,19 @@ We validate it against the OpenHands API /api/keys/current endpoint to get
 the user and organization identity.
 """
 
-import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
+from tenacity import (
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
 
 from automation.config import get_settings
 
@@ -25,7 +31,6 @@ HTTP_CLIENT_TIMEOUT = 10.0
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 10.0
-BACKOFF_MULTIPLIER = 2.0
 
 
 def create_http_client() -> httpx.AsyncClient:
@@ -55,21 +60,43 @@ class AuthenticatedUser:
     api_key: str  # The raw API key (needed for downstream API calls)
 
 
+def _is_rate_limited(response: httpx.Response) -> bool:
+    """Check if response is a 429 rate limit response."""
+    return response.status_code == 429
+
+
+def _return_last_response(retry_state) -> httpx.Response:
+    """Return the last response when retries are exhausted."""
+    logger.error(
+        "Rate limit retries exhausted after %d attempts",
+        retry_state.attempt_number,
+    )
+    return retry_state.outcome.result()
+
+
+@retry(
+    retry=retry_if_result(_is_rate_limited),
+    stop=stop_after_attempt(MAX_RETRIES + 1),
+    wait=wait_exponential(
+        multiplier=INITIAL_BACKOFF_SECONDS,
+        max=MAX_BACKOFF_SECONDS,
+    ),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    retry_error_callback=_return_last_response,
+)
 async def _make_auth_request_with_retry(
     client: httpx.AsyncClient,
     url: str,
     headers: dict[str, str],
-    max_retries: int = MAX_RETRIES,
-    initial_backoff: float = INITIAL_BACKOFF_SECONDS,
 ) -> httpx.Response:
     """Make an auth request with exponential backoff retry on 429 responses.
+
+    Uses tenacity for retry logic with exponential backoff.
 
     Args:
         client: The httpx client to use for requests
         url: The URL to request
         headers: Request headers
-        max_retries: Maximum number of retry attempts for 429 responses
-        initial_backoff: Initial backoff time in seconds
 
     Returns:
         The HTTP response (may still be a 429 if all retries exhausted)
@@ -77,42 +104,7 @@ async def _make_auth_request_with_retry(
     Raises:
         httpx.RequestError: If there's a network/connection error
     """
-    backoff = initial_backoff
-    last_response: httpx.Response | None = None
-
-    for attempt in range(max_retries + 1):
-        resp = await client.get(url, headers=headers)
-        last_response = resp
-
-        if resp.status_code != 429:
-            return resp
-
-        if attempt < max_retries:
-            # Check for Retry-After header
-            retry_after = resp.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    wait_time = min(float(retry_after), MAX_BACKOFF_SECONDS)
-                except ValueError:
-                    wait_time = backoff
-            else:
-                wait_time = backoff
-
-            logger.warning(
-                "Rate limited (429) on auth request, attempt %d/%d. "
-                "Retrying in %.1f seconds",
-                attempt + 1,
-                max_retries + 1,
-                wait_time,
-            )
-            await asyncio.sleep(wait_time)
-            backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF_SECONDS)
-
-    # All retries exhausted, return the last 429 response
-    logger.error(
-        "Rate limit retries exhausted after %d attempts", max_retries + 1
-    )
-    return last_response  # type: ignore[return-value]
+    return await client.get(url, headers=headers)
 
 
 async def authenticate_request(

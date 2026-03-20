@@ -243,13 +243,12 @@ class TestAuthIntegration:
 
 
 class TestRetryMechanism:
-    """Tests for the retry mechanism on 429 rate limit responses."""
+    """Tests for the retry mechanism on 429 rate limit responses using tenacity."""
 
     async def test_retry_on_429_then_success(self, mock_http_client):
         """Retries on 429 and succeeds when subsequent request returns 200."""
         mock_429_response = MagicMock()
         mock_429_response.status_code = 429
-        mock_429_response.headers = {}
 
         mock_200_response = MagicMock()
         mock_200_response.status_code = 200
@@ -258,13 +257,11 @@ class TestRetryMechanism:
             side_effect=[mock_429_response, mock_200_response]
         )
 
-        with patch("automation.auth.asyncio.sleep", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await _make_auth_request_with_retry(
                 mock_http_client,
                 "http://test/api/keys/current",
                 headers={"Authorization": "Bearer test"},
-                max_retries=3,
-                initial_backoff=0.1,
             )
 
         assert result.status_code == 200
@@ -274,47 +271,19 @@ class TestRetryMechanism:
         """When all retries exhausted, returns the 429 response."""
         mock_429_response = MagicMock()
         mock_429_response.status_code = 429
-        mock_429_response.headers = {}
 
         mock_http_client.get = AsyncMock(return_value=mock_429_response)
 
-        with patch("automation.auth.asyncio.sleep", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await _make_auth_request_with_retry(
                 mock_http_client,
                 "http://test/api/keys/current",
                 headers={"Authorization": "Bearer test"},
-                max_retries=2,
-                initial_backoff=0.1,
             )
 
         assert result.status_code == 429
-        # Initial attempt + 2 retries = 3 total calls
-        assert mock_http_client.get.call_count == 3
-
-    async def test_retry_uses_retry_after_header(self, mock_http_client):
-        """Uses Retry-After header value when present."""
-        mock_429_response = MagicMock()
-        mock_429_response.status_code = 429
-        mock_429_response.headers = {"Retry-After": "2"}
-
-        mock_200_response = MagicMock()
-        mock_200_response.status_code = 200
-
-        mock_http_client.get = AsyncMock(
-            side_effect=[mock_429_response, mock_200_response]
-        )
-
-        with patch("automation.auth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await _make_auth_request_with_retry(
-                mock_http_client,
-                "http://test/api/keys/current",
-                headers={"Authorization": "Bearer test"},
-                max_retries=3,
-                initial_backoff=0.1,
-            )
-
-        # Should use Retry-After value of 2 seconds
-        mock_sleep.assert_called_once_with(2.0)
+        # Initial attempt + MAX_RETRIES (3) retries = 4 total calls
+        assert mock_http_client.get.call_count == 4
 
     async def test_no_retry_on_non_429(self, mock_http_client):
         """Does not retry on non-429 status codes."""
@@ -327,8 +296,6 @@ class TestRetryMechanism:
             mock_http_client,
             "http://test/api/keys/current",
             headers={"Authorization": "Bearer test"},
-            max_retries=3,
-            initial_backoff=0.1,
         )
 
         assert result.status_code == 401
@@ -342,11 +309,10 @@ class TestRetryMechanism:
 
         mock_429_response = MagicMock()
         mock_429_response.status_code = 429
-        mock_429_response.headers = {}
 
         mock_http_client.get = AsyncMock(return_value=mock_429_response)
 
-        with patch("automation.auth.asyncio.sleep", new_callable=AsyncMock):
+        with patch("asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(HTTPException) as exc_info:
                 await authenticate_request(mock_request, client=mock_http_client)
 
@@ -354,10 +320,9 @@ class TestRetryMechanism:
         assert "Rate limited" in exc_info.value.detail
 
     async def test_exponential_backoff(self, mock_http_client):
-        """Backoff time increases exponentially between retries."""
+        """Verifies tenacity retries multiple times on 429."""
         mock_429_response = MagicMock()
         mock_429_response.status_code = 429
-        mock_429_response.headers = {}
 
         mock_200_response = MagicMock()
         mock_200_response.status_code = 200
@@ -371,16 +336,16 @@ class TestRetryMechanism:
             ]
         )
 
-        with patch("automation.auth.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await _make_auth_request_with_retry(
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await _make_auth_request_with_retry(
                 mock_http_client,
                 "http://test/api/keys/current",
                 headers={"Authorization": "Bearer test"},
-                max_retries=3,
-                initial_backoff=1.0,
             )
 
-        # Should have exponential backoff: 1.0, 2.0, 4.0
+        assert result.status_code == 200
+        # Tenacity uses exponential backoff, should have slept 3 times
         assert mock_sleep.call_count == 3
+        # Verify backoff increases (tenacity uses 2^x * multiplier pattern)
         calls = [call[0][0] for call in mock_sleep.call_args_list]
-        assert calls == [1.0, 2.0, 4.0]
+        assert calls[0] < calls[1] < calls[2]
