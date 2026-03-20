@@ -87,24 +87,6 @@ class GoogleCloudFileStore(FileStore):
         else:
             blob.upload_from_string(contents, content_type="application/octet-stream")
 
-    def read(self, path: str) -> str:
-        """
-        Read contents from a file at the given path.
-
-        Args:
-            path: The path/key in the bucket to read from (will be prefixed
-                  with "automation/").
-
-        Returns:
-            The file contents as a string.
-
-        Raises:
-            google.cloud.exceptions.NotFound: If the file doesn't exist.
-        """
-        full_path = self._prefixed_path(path)
-        blob = self.bucket.blob(full_path)
-        return blob.download_as_text()
-
     def list(self, path: str) -> list[str]:
         """
         List all files under the given path prefix.

@@ -100,26 +100,6 @@ class TestGoogleCloudFileStore:
                 b"binary data", content_type="application/octet-stream"
             )
 
-    def test_read(self):
-        """Read content from storage with automation prefix."""
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
-            mock_client = MagicMock()
-            mock_bucket = MagicMock()
-            mock_blob = MagicMock()
-            mock_blob.download_as_text.return_value = "file content"
-
-            mock_storage.Client.return_value = mock_client
-            mock_client.bucket.return_value = mock_bucket
-            mock_bucket.blob.return_value = mock_blob
-
-            store = GoogleCloudFileStore(bucket_name="test-bucket")
-            result = store.read("test/path.txt")
-
-            assert result == "file content"
-            # Verify the path is prefixed
-            mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
-            mock_blob.download_as_text.assert_called_once()
-
     def test_list(self):
         """List files under a prefix, with automation prefix added and stripped."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:

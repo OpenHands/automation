@@ -2,16 +2,17 @@ from abc import ABC, abstractmethod
 
 
 class FileStore(ABC):
-    """Abstract base class for file storage operations."""
+    """Abstract base class for file storage operations.
+
+    Note: This interface is currently upload-only. Read methods are not included
+    because this service only handles file uploads. Files are read by other
+    services (e.g., the dispatcher) that access storage directly. This may
+    change in the future if read functionality is needed.
+    """
 
     @abstractmethod
     def write(self, path: str, contents: str | bytes) -> None:
         """Write contents to a file at the given path."""
-        pass
-
-    @abstractmethod
-    def read(self, path: str) -> str:
-        """Read contents from a file at the given path."""
         pass
 
     @abstractmethod

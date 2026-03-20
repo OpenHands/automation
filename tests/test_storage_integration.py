@@ -73,29 +73,34 @@ def file_store(gcs_emulator):
 
 
 class TestGoogleCloudFileStoreIntegration:
-    """Integration tests for GoogleCloudFileStore with real GCS emulator."""
+    """Integration tests for GoogleCloudFileStore with real GCS emulator.
 
-    def test_write_and_read_string(self, file_store):
-        """Write string content and read it back."""
+    Note: This service is upload-only, so tests verify writes by accessing
+    the GCS blob directly rather than through read methods.
+    """
+
+    def test_write_string(self, file_store):
+        """Write string content to storage."""
         test_content = "Hello, GCS!"
         test_path = "test/hello.txt"
 
         file_store.write(test_path, test_content)
-        result = file_store.read(test_path)
 
+        # Verify by reading blob directly (not via interface)
+        blob = file_store.bucket.blob(f"{BUCKET_PREFIX}/{test_path}")
+        result = blob.download_as_text()
         assert result == test_content
 
-    def test_write_and_read_bytes(self, file_store):
-        """Write bytes content and read it back."""
+    def test_write_bytes(self, file_store):
+        """Write bytes content to storage."""
         test_content = b"\x00\x01\x02binary data\xff"
         test_path = "test/binary.bin"
 
         file_store.write(test_path, test_content)
-        # Read returns string, so we need to encode for comparison
-        # For binary, use download_as_bytes directly
+
+        # Verify by reading blob directly
         blob = file_store.bucket.blob(f"{BUCKET_PREFIX}/{test_path}")
         result = blob.download_as_bytes()
-
         assert result == test_content
 
     def test_list_files(self, file_store):
@@ -116,20 +121,21 @@ class TestGoogleCloudFileStoreIntegration:
 
     def test_delete_file(self, file_store):
         """Delete a file from storage."""
+        from google.cloud.exceptions import NotFound
+
         test_path = "test/to_delete.txt"
         file_store.write(test_path, "delete me")
 
-        # Verify it exists
-        assert file_store.read(test_path) == "delete me"
+        # Verify it exists via blob
+        blob = file_store.bucket.blob(f"{BUCKET_PREFIX}/{test_path}")
+        assert blob.download_as_text() == "delete me"
 
         # Delete it
         file_store.delete(test_path)
 
         # Verify it's gone
-        from google.cloud.exceptions import NotFound
-
         with pytest.raises(NotFound):
-            file_store.read(test_path)
+            blob.download_as_bytes()
 
     def test_automation_prefix_applied(self, file_store):
         """Verify all operations use the automation/ prefix."""
@@ -224,8 +230,8 @@ class TestGoogleCloudFileStoreIntegration:
             mp.setenv("STORAGE_EMULATOR_HOST", emulator_host)
             # Use a new bucket name
             store = GoogleCloudFileStore(bucket_name="auto-created-bucket")
-            # Access bucket property to trigger creation
-            _ = store.bucket
             # Write should work without explicit bucket creation
             store.write("test.txt", "hello")
-            assert store.read("test.txt") == "hello"
+            # Verify via blob directly
+            blob = store.bucket.blob(f"{BUCKET_PREFIX}/test.txt")
+            assert blob.download_as_text() == "hello"
