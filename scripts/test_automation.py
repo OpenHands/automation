@@ -322,21 +322,21 @@ async def run_test(api_url: str, api_key: str) -> bool:
             await upload_tarball(client, agent_url, session_key, tarball)
 
             # 4. Start command (non-blocking)
-            print("\n--- sandbox stdout ---")
             await start_command(client, agent_url, session_key, cmd)
 
-            # 5. Stream output
+            # 5. Stream output live to terminal
+            log.info("--- sandbox stdout ---")
             exit_code, stdout, stderr = await stream_output(
                 client, agent_url, session_key
             )
-            print("--- end stdout ---\n")
+            log.info("--- end stdout (exit_code=%s) ---", exit_code)
 
             # 6. Verify
             ok = exit_code == 0 and "ALL_OK" in stdout
             if ok:
-                log.info("PASS (exit_code=%s)", exit_code)
+                log.info("PASS")
             else:
-                log.error("FAIL (exit_code=%s)", exit_code)
+                log.error("FAIL")
                 if stderr:
                     log.error("stderr: %s", stderr[:500])
             return ok
