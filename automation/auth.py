@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import httpx
 from fastapi import Depends, HTTPException, Request, status
 from tenacity import (
+    RetryCallState,
     before_sleep_log,
     retry,
     retry_if_result,
@@ -65,7 +66,7 @@ def _is_rate_limited(response: httpx.Response) -> bool:
     return response.status_code == 429
 
 
-def _return_last_response(retry_state) -> httpx.Response:
+def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
     """Return the last response when retries are exhausted."""
     logger.warning(
         "Rate limit retries exhausted after %d attempts",
