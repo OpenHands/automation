@@ -23,13 +23,15 @@ router = APIRouter(prefix="/api/v1/uploads", tags=["Uploads"])
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
 
 # Allowed content types for tarball uploads
-ALLOWED_CONTENT_TYPES = frozenset({
-    "application/x-tar",
-    "application/x-gzip",
-    "application/gzip",
-    "application/x-compressed-tar",
-    "application/octet-stream",  # Generic binary, often used by clients
-})
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "application/x-tar",
+        "application/x-gzip",
+        "application/gzip",
+        "application/x-compressed-tar",
+        "application/octet-stream",  # Generic binary, often used by clients
+    }
+)
 
 
 def get_file_store() -> GoogleCloudFileStore:
@@ -150,9 +152,10 @@ async def create_upload(
     # Validate Content-Type
     content_type = request.headers.get("content-type", "").split(";")[0].strip()
     if content_type not in ALLOWED_CONTENT_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_CONTENT_TYPES))
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Content-Type must be one of: {', '.join(sorted(ALLOWED_CONTENT_TYPES))}",
+            detail=f"Content-Type must be one of: {allowed}",
         )
 
     # Early rejection based on Content-Length header if provided.

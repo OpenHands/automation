@@ -104,12 +104,11 @@ async def validate_tarball_path(
         )
     else:
         # Unknown scheme
+        internal_fmt = f"{INTERNAL_URL_SCHEME}://uploads/{{uuid}}"
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Invalid tarball_path. Must be {INTERNAL_URL_SCHEME}://uploads/{{uuid}} "
-                "or a public URL (https://, s3://, gs://)"
-            ),
+            detail=f"Invalid tarball_path. Must be {internal_fmt} "
+            "or a public URL (https://, s3://, gs://)",
         )
 
 

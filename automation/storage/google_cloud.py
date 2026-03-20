@@ -185,7 +185,7 @@ class GoogleCloudFileStore(FileStore):
                 f.write(chunk)  # type: ignore[arg-type]
 
         # If size limit was exceeded, delete the partial upload and raise
-        if size_exceeded:
+        if size_exceeded and max_size is not None:
             try:
                 blob.delete()
             except Exception:
