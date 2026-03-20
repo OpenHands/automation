@@ -10,9 +10,11 @@ from httpx import ASGITransport, AsyncClient
 
 from automation.app import app
 from automation.auth import (
+    AUTH_CACHE_TTL_SECONDS,
     AuthenticatedUser,
     _make_auth_request_with_retry,
     authenticate_request,
+    clear_auth_cache,
 )
 from automation.db import get_session
 
@@ -20,6 +22,14 @@ from automation.db import get_session
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Clear auth cache before and after each test."""
+    clear_auth_cache()
+    yield
+    clear_auth_cache()
 
 
 @pytest.fixture
@@ -240,6 +250,111 @@ class TestAuthIntegration:
             assert "Invalid or expired API key" in response.json()["detail"]
         finally:
             app.dependency_overrides.clear()
+
+
+class TestAuthCache:
+    """Tests for authentication caching functionality."""
+
+    async def test_cache_hit_skips_api_call(self, mock_request, mock_http_client):
+        """Second call with same API key uses cache and skips API call."""
+        mock_request.headers.get.return_value = "Bearer cached-key"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "user_id": str(TEST_USER_ID),
+            "org_id": str(TEST_ORG_ID),
+        }
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        # First call - should hit API
+        result1 = await authenticate_request(mock_request, client=mock_http_client)
+        assert mock_http_client.get.call_count == 1
+
+        # Second call - should use cache
+        result2 = await authenticate_request(mock_request, client=mock_http_client)
+        assert mock_http_client.get.call_count == 1  # No additional API call
+
+        assert result1.user_id == result2.user_id
+        assert result1.org_id == result2.org_id
+
+    async def test_cache_expires_after_ttl(self, mock_request, mock_http_client):
+        """Cache entry expires after TTL and API is called again."""
+        mock_request.headers.get.return_value = "Bearer expiring-key"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "user_id": str(TEST_USER_ID),
+            "org_id": str(TEST_ORG_ID),
+        }
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        # First call
+        await authenticate_request(mock_request, client=mock_http_client)
+        assert mock_http_client.get.call_count == 1
+
+        # Expire the cache entry by clearing it (simulates TTL expiry)
+        clear_auth_cache()
+
+        # Second call after "expiry" - should hit API again
+        await authenticate_request(mock_request, client=mock_http_client)
+        assert mock_http_client.get.call_count == 2
+
+    async def test_different_keys_cached_separately(self, mock_request, mock_http_client):
+        """Different API keys are cached independently."""
+        user2_id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+        org2_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+
+        mock_response1 = MagicMock()
+        mock_response1.status_code = 200
+        mock_response1.json.return_value = {
+            "user_id": str(TEST_USER_ID),
+            "org_id": str(TEST_ORG_ID),
+        }
+
+        mock_response2 = MagicMock()
+        mock_response2.status_code = 200
+        mock_response2.json.return_value = {
+            "user_id": str(user2_id),
+            "org_id": str(org2_id),
+        }
+
+        mock_http_client.get = AsyncMock(side_effect=[mock_response1, mock_response2])
+
+        # First key
+        mock_request.headers.get.return_value = "Bearer key-1"
+        result1 = await authenticate_request(mock_request, client=mock_http_client)
+
+        # Second key
+        mock_request.headers.get.return_value = "Bearer key-2"
+        result2 = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert mock_http_client.get.call_count == 2
+        assert result1.user_id == TEST_USER_ID
+        assert result2.user_id == user2_id
+
+    async def test_failed_auth_not_cached(self, mock_request, mock_http_client):
+        """Failed authentication attempts are not cached."""
+        mock_request.headers.get.return_value = "Bearer bad-key"
+
+        mock_401_response = MagicMock()
+        mock_401_response.status_code = 401
+        mock_http_client.get = AsyncMock(return_value=mock_401_response)
+
+        # First attempt - should fail
+        with pytest.raises(HTTPException):
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        # Second attempt - should still call API (not cached)
+        with pytest.raises(HTTPException):
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert mock_http_client.get.call_count == 2
+
+    def test_cache_ttl_is_20_seconds(self):
+        """Verify the cache TTL is set to 20 seconds."""
+        assert AUTH_CACHE_TTL_SECONDS == 20.0
 
 
 class TestRetryMechanism:
