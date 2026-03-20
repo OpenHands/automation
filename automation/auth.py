@@ -5,6 +5,7 @@ We validate it against the OpenHands API /api/keys/current endpoint to get
 the user and organization identity.
 """
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -19,6 +20,12 @@ logger = logging.getLogger("automation.auth")
 
 # Default timeout for HTTP client
 HTTP_CLIENT_TIMEOUT = 10.0
+
+# Retry configuration for rate limiting
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 10.0
+BACKOFF_MULTIPLIER = 2.0
 
 
 def create_http_client() -> httpx.AsyncClient:
@@ -48,6 +55,66 @@ class AuthenticatedUser:
     api_key: str  # The raw API key (needed for downstream API calls)
 
 
+async def _make_auth_request_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    max_retries: int = MAX_RETRIES,
+    initial_backoff: float = INITIAL_BACKOFF_SECONDS,
+) -> httpx.Response:
+    """Make an auth request with exponential backoff retry on 429 responses.
+
+    Args:
+        client: The httpx client to use for requests
+        url: The URL to request
+        headers: Request headers
+        max_retries: Maximum number of retry attempts for 429 responses
+        initial_backoff: Initial backoff time in seconds
+
+    Returns:
+        The HTTP response (may still be a 429 if all retries exhausted)
+
+    Raises:
+        httpx.RequestError: If there's a network/connection error
+    """
+    backoff = initial_backoff
+    last_response: httpx.Response | None = None
+
+    for attempt in range(max_retries + 1):
+        resp = await client.get(url, headers=headers)
+        last_response = resp
+
+        if resp.status_code != 429:
+            return resp
+
+        if attempt < max_retries:
+            # Check for Retry-After header
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait_time = min(float(retry_after), MAX_BACKOFF_SECONDS)
+                except ValueError:
+                    wait_time = backoff
+            else:
+                wait_time = backoff
+
+            logger.warning(
+                "Rate limited (429) on auth request, attempt %d/%d. "
+                "Retrying in %.1f seconds",
+                attempt + 1,
+                max_retries + 1,
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
+            backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF_SECONDS)
+
+    # All retries exhausted, return the last 429 response
+    logger.error(
+        "Rate limit retries exhausted after %d attempts", max_retries + 1
+    )
+    return last_response  # type: ignore[return-value]
+
+
 async def authenticate_request(
     request: Request,
     client: httpx.AsyncClient = Depends(get_http_client),
@@ -55,7 +122,7 @@ async def authenticate_request(
     """Extract and validate the OpenHands API key from the Authorization header.
 
     Calls the OpenHands API /api/keys/current to verify the key and get
-    user/org identity.
+    user/org identity. Implements retry with exponential backoff for rate limiting.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -74,7 +141,8 @@ async def authenticate_request(
 
     settings = get_settings()
     try:
-        resp = await client.get(
+        resp = await _make_auth_request_with_retry(
+            client,
             f"{settings.openhands_api_base_url}/api/keys/current",
             headers={"Authorization": f"Bearer {api_key}"},
         )
@@ -89,6 +157,11 @@ async def authenticate_request(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired API key",
+        )
+    if resp.status_code == 429:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limited by authentication service",
         )
     if resp.status_code != 200:
         logger.error(
