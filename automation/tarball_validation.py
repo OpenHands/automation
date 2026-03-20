@@ -1,38 +1,57 @@
 """Validation helpers for tarball_path in automations.
 
 Supports two types of tarball sources:
-1. Internal uploads: oh-internal://uploads/{uuid}
+1. Internal uploads: {scheme}://uploads/{uuid} (scheme configurable via env var)
 2. External public URLs: https://, s3://, gs://
 """
 
 import re
+from functools import lru_cache
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from automation.config import get_settings
 from automation.models import TarballUpload, UploadStatus
 
-
-# Pattern: oh-internal://uploads/{uuid}
-INTERNAL_URL_PATTERN = re.compile(
-    r"^oh-internal://uploads/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
-    re.IGNORECASE,
-)
 
 # Valid external URL schemes (must be publicly accessible)
 EXTERNAL_URL_SCHEMES = ("https://", "s3://", "gs://")
 
 
+@lru_cache
+def _get_internal_url_pattern() -> re.Pattern:
+    """Get compiled regex pattern for internal URLs based on config."""
+    scheme = get_settings().internal_url_scheme
+    # Pattern: {scheme}://uploads/{uuid}
+    return re.compile(
+        rf"^{re.escape(scheme)}://uploads/"
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+        re.IGNORECASE,
+    )
+
+
+def get_internal_url_prefix() -> str:
+    """Get the internal URL prefix (e.g., 'oh-internal://uploads/')."""
+    scheme = get_settings().internal_url_scheme
+    return f"{scheme}://uploads/"
+
+
+def build_internal_url(upload_id: UUID) -> str:
+    """Build an internal URL for an upload."""
+    return f"{get_internal_url_prefix()}{upload_id}"
+
+
 def parse_internal_upload_id(tarball_path: str) -> UUID | None:
     """
-    Extract upload_id from oh-internal:// URL.
+    Extract upload_id from internal URL.
 
     Returns the UUID if the path matches the internal format,
     or None if it's not an internal URL.
     """
-    match = INTERNAL_URL_PATTERN.match(tarball_path)
+    match = _get_internal_url_pattern().match(tarball_path)
     if match:
         return UUID(match.group(1))
     return None
@@ -40,7 +59,8 @@ def parse_internal_upload_id(tarball_path: str) -> UUID | None:
 
 def is_internal_url(tarball_path: str) -> bool:
     """Check if the tarball_path is an internal upload URL."""
-    return tarball_path.startswith("oh-internal://")
+    scheme = get_settings().internal_url_scheme
+    return tarball_path.startswith(f"{scheme}://")
 
 
 def is_valid_external_url(tarball_path: str) -> bool:
@@ -71,23 +91,25 @@ async def validate_tarball_path(
     # Check for internal upload
     upload_id = parse_internal_upload_id(tarball_path)
 
+    scheme = get_settings().internal_url_scheme
+
     if upload_id:
         await _validate_internal_upload(upload_id, user_id, org_id, session)
     elif is_valid_external_url(tarball_path):
         # External URL - scheme is valid, accessibility checked at runtime
         pass
     elif is_internal_url(tarball_path):
-        # Malformed internal URL (starts with oh-internal:// but doesn't match pattern)
+        # Malformed internal URL (starts with scheme:// but doesn't match pattern)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid internal upload URL format. Expected: oh-internal://uploads/{uuid}",
+            detail=f"Invalid internal upload URL format. Expected: {scheme}://uploads/{{uuid}}",
         )
     else:
         # Unknown scheme
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "Invalid tarball_path. Must be oh-internal://uploads/{uuid} "
+                f"Invalid tarball_path. Must be {scheme}://uploads/{{uuid}} "
                 "or a public URL (https://, s3://, gs://)"
             ),
         )

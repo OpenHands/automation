@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from automation.models import TarballUpload, UploadStatus
 from automation.tarball_validation import (
     EXTERNAL_URL_SCHEMES,
+    build_internal_url,
+    get_internal_url_prefix,
     is_internal_url,
     is_valid_external_url,
     parse_internal_upload_id,
@@ -21,25 +23,31 @@ class TestParseInternalUploadId:
     """Tests for parse_internal_upload_id function."""
 
     def test_valid_internal_url(self):
-        """Valid oh-internal:// URL returns UUID."""
-        url = "oh-internal://uploads/12345678-1234-1234-1234-123456789abc"
+        """Valid internal URL returns UUID."""
+        test_uuid = uuid.UUID("12345678-1234-1234-1234-123456789abc")
+        url = build_internal_url(test_uuid)
         result = parse_internal_upload_id(url)
-        assert result == uuid.UUID("12345678-1234-1234-1234-123456789abc")
+        assert result == test_uuid
 
     def test_valid_internal_url_uppercase(self):
         """UUID matching is case-insensitive."""
-        url = "oh-internal://uploads/12345678-1234-1234-1234-123456789ABC"
+        prefix = get_internal_url_prefix()
+        url = f"{prefix}12345678-1234-1234-1234-123456789ABC"
         result = parse_internal_upload_id(url)
         assert result == uuid.UUID("12345678-1234-1234-1234-123456789abc")
 
     def test_invalid_uuid_returns_none(self):
         """Invalid UUID in URL returns None."""
-        url = "oh-internal://uploads/not-a-uuid"
+        prefix = get_internal_url_prefix()
+        url = f"{prefix}not-a-uuid"
         assert parse_internal_upload_id(url) is None
 
     def test_wrong_path_returns_none(self):
         """Wrong path structure returns None."""
-        url = "oh-internal://files/12345678-1234-1234-1234-123456789abc"
+        from automation.config import get_settings
+
+        scheme = get_settings().internal_url_scheme
+        url = f"{scheme}://files/12345678-1234-1234-1234-123456789abc"
         assert parse_internal_upload_id(url) is None
 
     def test_external_url_returns_none(self):
@@ -53,9 +61,12 @@ class TestIsInternalUrl:
     """Tests for is_internal_url function."""
 
     def test_internal_url(self):
-        """Recognizes oh-internal:// URLs."""
-        assert is_internal_url("oh-internal://uploads/123")
-        assert is_internal_url("oh-internal://anything")
+        """Recognizes internal URLs with configured scheme."""
+        from automation.config import get_settings
+
+        scheme = get_settings().internal_url_scheme
+        assert is_internal_url(f"{scheme}://uploads/123")
+        assert is_internal_url(f"{scheme}://anything")
 
     def test_external_url(self):
         """External URLs return False."""
@@ -191,7 +202,7 @@ class TestValidateTarballPath:
         mock_result.scalars.return_value.first.return_value = completed_upload
         mock_session.execute.return_value = mock_result
 
-        tarball_path = f"oh-internal://uploads/{completed_upload.id}"
+        tarball_path = build_internal_url(completed_upload.id)
         await validate_tarball_path(tarball_path, user_id, org_id, mock_session)
 
     @pytest.mark.asyncio
@@ -206,7 +217,7 @@ class TestValidateTarballPath:
         fake_id = uuid.uuid4()
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"oh-internal://uploads/{fake_id}",
+                build_internal_url(fake_id),
                 user_id,
                 org_id,
                 mock_session,
@@ -227,7 +238,7 @@ class TestValidateTarballPath:
 
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"oh-internal://uploads/{completed_upload.id}",
+                build_internal_url(completed_upload.id),
                 user_id,
                 org_id,
                 mock_session,
@@ -247,7 +258,7 @@ class TestValidateTarballPath:
 
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"oh-internal://uploads/{completed_upload.id}",
+                build_internal_url(completed_upload.id),
                 user_id,
                 org_id,
                 mock_session,
@@ -268,7 +279,7 @@ class TestValidateTarballPath:
 
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"oh-internal://uploads/{completed_upload.id}",
+                build_internal_url(completed_upload.id),
                 user_id,
                 org_id,
                 mock_session,
@@ -289,7 +300,7 @@ class TestValidateTarballPath:
 
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"oh-internal://uploads/{completed_upload.id}",
+                build_internal_url(completed_upload.id),
                 user_id,
                 org_id,
                 mock_session,
@@ -301,10 +312,13 @@ class TestValidateTarballPath:
     async def test_malformed_internal_url_raises_422(
         self, mock_session, user_id, org_id
     ):
-        """Malformed oh-internal:// URL raises 422."""
+        """Malformed internal URL raises 422."""
+        from automation.config import get_settings
+
+        scheme = get_settings().internal_url_scheme
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                "oh-internal://invalid/path",
+                f"{scheme}://invalid/path",
                 user_id,
                 org_id,
                 mock_session,

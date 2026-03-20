@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
     cors_origins: str = ""
 
+    # Internal URL scheme for uploaded tarballs
+    # Used to distinguish internal uploads from external public URLs
+    internal_url_scheme: str = "oh-internal"
+
     model_config = {"env_prefix": "AUTOMATION_"}
 
 
