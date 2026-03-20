@@ -5,6 +5,10 @@ from google.cloud import storage
 from automation.storage.file_store import FileStore
 
 
+# All files are stored under this prefix in the bucket
+BUCKET_PREFIX = "automation"
+
+
 class GoogleCloudFileStore(FileStore):
     """
     Google Cloud Storage file store implementation.
@@ -12,6 +16,9 @@ class GoogleCloudFileStore(FileStore):
     Supports both real GCS and fake-gcs-server emulator.
     When STORAGE_EMULATOR_HOST environment variable is set, the client
     automatically connects to the emulator instead of real GCS.
+
+    All files are stored under the "automation/" prefix in the bucket
+    to isolate automation service data from other services.
     """
 
     def __init__(self, bucket_name: str | None = None):
@@ -30,6 +37,12 @@ class GoogleCloudFileStore(FileStore):
 
         self._client: storage.Client | None = None
         self._bucket: storage.Bucket | None = None
+
+    def _prefixed_path(self, path: str) -> str:
+        """Add the automation prefix to a path."""
+        # Remove leading slash if present
+        path = path.lstrip("/")
+        return f"{BUCKET_PREFIX}/{path}"
 
     @property
     def client(self) -> storage.Client:
@@ -63,10 +76,12 @@ class GoogleCloudFileStore(FileStore):
         Write contents to a file at the given path.
 
         Args:
-            path: The path/key in the bucket to write to.
+            path: The path/key in the bucket to write to (will be prefixed
+                  with "automation/").
             contents: The content to write (string or bytes).
         """
-        blob = self.bucket.blob(path)
+        full_path = self._prefixed_path(path)
+        blob = self.bucket.blob(full_path)
         if isinstance(contents, str):
             blob.upload_from_string(contents, content_type="text/plain")
         else:
@@ -77,7 +92,8 @@ class GoogleCloudFileStore(FileStore):
         Read contents from a file at the given path.
 
         Args:
-            path: The path/key in the bucket to read from.
+            path: The path/key in the bucket to read from (will be prefixed
+                  with "automation/").
 
         Returns:
             The file contents as a string.
@@ -85,7 +101,8 @@ class GoogleCloudFileStore(FileStore):
         Raises:
             google.cloud.exceptions.NotFound: If the file doesn't exist.
         """
-        blob = self.bucket.blob(path)
+        full_path = self._prefixed_path(path)
+        blob = self.bucket.blob(full_path)
         return blob.download_as_text()
 
     def list(self, path: str) -> list[str]:
@@ -93,23 +110,29 @@ class GoogleCloudFileStore(FileStore):
         List all files under the given path prefix.
 
         Args:
-            path: The prefix to search for.
+            path: The prefix to search for (will be prefixed with "automation/").
 
         Returns:
-            A list of file paths matching the prefix.
+            A list of file paths matching the prefix (without the "automation/"
+            prefix).
         """
-        blobs = self.client.list_blobs(self.bucket_name, prefix=path)
-        return [blob.name for blob in blobs]
+        full_path = self._prefixed_path(path)
+        blobs = self.client.list_blobs(self.bucket_name, prefix=full_path)
+        # Strip the automation prefix from returned paths
+        prefix_len = len(BUCKET_PREFIX) + 1  # +1 for the trailing slash
+        return [blob.name[prefix_len:] for blob in blobs]
 
     def delete(self, path: str) -> None:
         """
         Delete the file at the given path.
 
         Args:
-            path: The path/key in the bucket to delete.
+            path: The path/key in the bucket to delete (will be prefixed
+                  with "automation/").
 
         Raises:
             google.cloud.exceptions.NotFound: If the file doesn't exist.
         """
-        blob = self.bucket.blob(path)
+        full_path = self._prefixed_path(path)
+        blob = self.bucket.blob(full_path)
         blob.delete()

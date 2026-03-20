@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from automation.storage import FileStore, GoogleCloudFileStore
+from automation.storage.google_cloud import BUCKET_PREFIX
 
 
 class TestFileStoreAbstraction:
@@ -39,8 +40,15 @@ class TestGoogleCloudFileStore:
             with pytest.raises(ValueError, match="Bucket name must be provided"):
                 GoogleCloudFileStore()
 
+    def test_prefixed_path(self):
+        """Paths are prefixed with automation/."""
+        with patch("automation.storage.google_cloud.storage"):
+            store = GoogleCloudFileStore(bucket_name="test-bucket")
+            assert store._prefixed_path("test/path.txt") == "automation/test/path.txt"
+            assert store._prefixed_path("/test/path.txt") == "automation/test/path.txt"
+
     def test_write_string(self):
-        """Write string content to storage."""
+        """Write string content to storage with automation prefix."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
@@ -53,12 +61,14 @@ class TestGoogleCloudFileStore:
             store = GoogleCloudFileStore(bucket_name="test-bucket")
             store.write("test/path.txt", "hello world")
 
+            # Verify the path is prefixed
+            mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
             mock_blob.upload_from_string.assert_called_once_with(
                 "hello world", content_type="text/plain"
             )
 
     def test_write_bytes(self):
-        """Write bytes content to storage."""
+        """Write bytes content to storage with automation prefix."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
@@ -71,12 +81,14 @@ class TestGoogleCloudFileStore:
             store = GoogleCloudFileStore(bucket_name="test-bucket")
             store.write("test/path.bin", b"binary data")
 
+            # Verify the path is prefixed
+            mock_bucket.blob.assert_called_once_with("automation/test/path.bin")
             mock_blob.upload_from_string.assert_called_once_with(
                 b"binary data", content_type="application/octet-stream"
             )
 
     def test_read(self):
-        """Read content from storage."""
+        """Read content from storage with automation prefix."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
@@ -91,32 +103,37 @@ class TestGoogleCloudFileStore:
             result = store.read("test/path.txt")
 
             assert result == "file content"
+            # Verify the path is prefixed
+            mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
             mock_blob.download_as_text.assert_called_once()
 
     def test_list(self):
-        """List files under a prefix."""
+        """List files under a prefix, with automation prefix added and stripped."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
+            # Blobs have the full path including automation prefix
             mock_blob1 = MagicMock()
-            mock_blob1.name = "prefix/file1.txt"
+            mock_blob1.name = "automation/users/file1.txt"
             mock_blob2 = MagicMock()
-            mock_blob2.name = "prefix/file2.txt"
+            mock_blob2.name = "automation/users/file2.txt"
 
             mock_storage.Client.return_value = mock_client
             mock_client.bucket.return_value = mock_bucket
             mock_client.list_blobs.return_value = [mock_blob1, mock_blob2]
 
             store = GoogleCloudFileStore(bucket_name="test-bucket")
-            result = store.list("prefix/")
+            result = store.list("users/")
 
-            assert result == ["prefix/file1.txt", "prefix/file2.txt"]
+            # Results should have automation prefix stripped
+            assert result == ["users/file1.txt", "users/file2.txt"]
+            # list_blobs should be called with prefixed path
             mock_client.list_blobs.assert_called_once_with(
-                "test-bucket", prefix="prefix/"
+                "test-bucket", prefix="automation/users/"
             )
 
     def test_delete(self):
-        """Delete a file from storage."""
+        """Delete a file from storage with automation prefix."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
@@ -129,6 +146,8 @@ class TestGoogleCloudFileStore:
             store = GoogleCloudFileStore(bucket_name="test-bucket")
             store.delete("test/path.txt")
 
+            # Verify the path is prefixed
+            mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
             mock_blob.delete.assert_called_once()
 
     def test_emulator_creates_bucket(self):
@@ -147,3 +166,7 @@ class TestGoogleCloudFileStore:
                 _ = store.bucket
 
                 mock_client.create_bucket.assert_called_once_with("test-bucket")
+
+    def test_bucket_prefix_constant(self):
+        """Verify the bucket prefix constant is set correctly."""
+        assert BUCKET_PREFIX == "automation"
