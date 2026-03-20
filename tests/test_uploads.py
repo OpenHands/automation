@@ -1,14 +1,10 @@
 """Tests for tarball upload functionality."""
 
 import uuid
-from io import BytesIO
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import status
-from fastapi.testclient import TestClient
 
-from automation.app import app
 from automation.models import TarballUpload, UploadStatus
 from automation.storage.google_cloud import FileSizeLimitExceeded
 from automation.uploads import (
@@ -97,10 +93,13 @@ class TestWriteStream:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
+            mock_file = MagicMock()
 
             mock_storage.Client.return_value = mock_client
             mock_client.bucket.return_value = mock_bucket
             mock_bucket.blob.return_value = mock_blob
+            mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
+            mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
             from automation.storage import GoogleCloudFileStore
 
@@ -118,9 +117,10 @@ class TestWriteStream:
             )
 
             assert size == 18  # len("chunk1") * 3
-            mock_blob.upload_from_string.assert_called_once()
-            call_args = mock_blob.upload_from_string.call_args
-            assert call_args[0][0] == b"chunk1chunk2chunk3"
+            # Verify blob.open was called with "wb"
+            mock_blob.open.assert_called_once_with("wb")
+            # Verify all chunks were written
+            assert mock_file.write.call_count == 3
 
     @pytest.mark.asyncio
     async def test_write_stream_exceeds_limit(self):
@@ -129,10 +129,13 @@ class TestWriteStream:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
+            mock_file = MagicMock()
 
             mock_storage.Client.return_value = mock_client
             mock_client.bucket.return_value = mock_bucket
             mock_bucket.blob.return_value = mock_blob
+            mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
+            mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
             from automation.storage import GoogleCloudFileStore
 
@@ -152,8 +155,8 @@ class TestWriteStream:
 
             assert exc_info.value.max_size == 1000
             assert exc_info.value.actual_size == 1500
-            # Partial upload should have been written
-            mock_blob.upload_from_string.assert_called_once()
+            # First two chunks should have been written before failure
+            assert mock_file.write.call_count == 2
 
 
 class TestFileSizeLimitExceeded:

@@ -159,9 +159,10 @@ class GoogleCloudFileStore(FileStore):
         """
         Stream content to a file, enforcing an optional size limit.
 
-        Streams data chunk by chunk to GCS. If max_size is specified and
-        the total size exceeds it, raises FileSizeLimitExceeded. Note that
-        some data may have already been written to GCS when this happens.
+        Streams data chunk by chunk directly to GCS. If max_size is specified
+        and the total size exceeds it, raises FileSizeLimitExceeded. Note that
+        some data may have already been written to GCS when this happens
+        (partial upload).
 
         Args:
             path: The path/key in the bucket to write to (will be prefixed
@@ -178,22 +179,20 @@ class GoogleCloudFileStore(FileStore):
         """
         full_path = self._prefixed_path(path)
         blob = self.bucket.blob(full_path)
+        blob.content_type = content_type
 
-        # Collect chunks while enforcing size limit
-        # For files up to a few MB, buffering is acceptable
-        chunks: list[bytes] = []
         total_size = 0
 
-        async for chunk in stream:
-            total_size += len(chunk)
-            if max_size is not None and total_size > max_size:
-                # Write what we have so far (partial upload)
-                if chunks:
-                    blob.upload_from_string(b"".join(chunks), content_type=content_type)
-                raise FileSizeLimitExceeded(max_size=max_size, actual_size=total_size)
-            chunks.append(chunk)
+        # Stream directly to GCS using blob.open() for true streaming
+        with blob.open("wb") as f:
+            async for chunk in stream:
+                total_size += len(chunk)
+                if max_size is not None and total_size > max_size:
+                    # Close the file (partial upload written)
+                    # and raise the exception
+                    raise FileSizeLimitExceeded(
+                        max_size=max_size, actual_size=total_size
+                    )
+                f.write(chunk)
 
-        # Upload complete content
-        content = b"".join(chunks)
-        blob.upload_from_string(content, content_type=content_type)
         return total_size

@@ -3,7 +3,7 @@
 import uuid
 from enum import StrEnum
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,9 +19,6 @@ router = APIRouter(prefix="/api/v1/uploads", tags=["Uploads"])
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
-
-# Chunk size for reading upload stream
-CHUNK_SIZE = 64 * 1024  # 64KB
 
 
 def get_file_store() -> GoogleCloudFileStore:
@@ -101,35 +98,42 @@ def _build_storage_path(
     return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
 
 
-async def _stream_upload_file(file: UploadFile):
-    """Async generator to stream upload file in chunks."""
-    while chunk := await file.read(CHUNK_SIZE):
-        yield chunk
-
-
 # --- Endpoints ---
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_upload(
-    file: UploadFile,
-    name: str = Form(..., min_length=1, max_length=255),
-    description: str | None = Form(default=None, max_length=2000),
+    request: Request,
+    name: str = Query(..., min_length=1, max_length=255),
+    description: str | None = Query(default=None, max_length=2000),
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
     file_store: GoogleCloudFileStore = Depends(get_file_store),
 ) -> UploadResponse:
     """Upload a tarball for use in automations.
 
-    Streams the file to GCS with a 1MB size limit. If the upload exceeds
-    the limit, it will be marked as FAILED but the partial upload will
-    remain in storage until explicitly deleted.
+    Streams the file directly to GCS with a 1MB size limit. If the upload
+    exceeds the limit, streaming stops immediately and the upload is marked
+    as FAILED. The partial upload remains in storage until explicitly deleted.
 
-    Form fields:
-    - file: The tarball file (required)
+    The request body should be the raw tarball file content (not multipart).
+
+    Query parameters:
     - name: A readable name for the upload (required, max 255 chars)
     - description: Optional description (max 2000 chars)
+
+    Headers:
+    - Content-Type: application/x-tar or application/gzip recommended
+    - Content-Length: Optional but recommended for early rejection
     """
+    # Early rejection based on Content-Length header if provided
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE} bytes",
+        )
+
     # Generate upload ID and storage path
     upload_id = uuid.uuid4()
     storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
@@ -147,13 +151,13 @@ async def create_upload(
     session.add(upload)
     await session.flush()
 
-    # Stream upload to GCS
+    # Stream upload directly to GCS
     try:
         size_bytes = await file_store.write_stream(
             path=storage_path,
-            stream=_stream_upload_file(file),
+            stream=request.stream(),
             max_size=MAX_UPLOAD_SIZE,
-            content_type="application/x-tar",
+            content_type=request.headers.get("content-type", "application/x-tar"),
         )
 
         # Update record on success
