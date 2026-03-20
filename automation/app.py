@@ -17,7 +17,8 @@ from automation.logger import setup_all_loggers
 from automation.router import router
 from automation.scheduler import scheduler_loop
 
-logger = logging.getLogger('automation.app')
+
+logger = logging.getLogger("automation.app")
 
 
 @asynccontextmanager
@@ -30,10 +31,10 @@ async def lifespan(app: FastAPI):
     setup_all_loggers()
 
     # Silence noisy third-party loggers
-    for noisy_logger in ('ddtrace', 'httpx', 'httpcore'):
+    for noisy_logger in ("ddtrace", "httpx", "httpcore"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-    logger.info('Starting OpenHands Automations Service')
+    logger.info("Starting OpenHands Automations Service")
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
         )
     )
     app.state.scheduler_task = scheduler_task
-    logger.info('Background scheduler started')
+    logger.info("Background scheduler started")
 
     # Dispatcher: picks up PENDING runs and dispatches them
     dispatcher_task = asyncio.create_task(
@@ -67,23 +68,23 @@ async def lifespan(app: FastAPI):
         )
     )
     app.state.dispatcher_task = dispatcher_task
-    logger.info('Background dispatcher started')
+    logger.info("Background dispatcher started")
 
     yield
 
     # Shutdown
-    logger.info('Shutting down background tasks...')
+    logger.info("Shutting down background tasks...")
     shutdown_event.set()
 
     # Wait for both tasks to exit gracefully
     for task_name, task in [
-        ('scheduler', scheduler_task),
-        ('dispatcher', dispatcher_task),
+        ("scheduler", scheduler_task),
+        ("dispatcher", dispatcher_task),
     ]:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
-            logger.warning('%s did not exit in time, cancelling', task_name)
+            logger.warning("%s did not exit in time, cancelling", task_name)
             task.cancel()
             try:
                 await task
@@ -92,22 +93,22 @@ async def lifespan(app: FastAPI):
 
     await app.state.http_client.aclose()
     await app.state.engine.dispose()
-    logger.info('Automations service shut down')
+    logger.info("Automations service shut down")
 
 
 def _build_cors_origins() -> list[str]:
     """Build the list of allowed CORS origins from settings."""
     settings = get_settings()
-    origins = [o.strip() for o in settings.cors_origins.split(',') if o.strip()]
+    origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     if not origins:
         origins = [settings.openhands_api_base_url]
     return origins
 
 
 app = FastAPI(
-    title='OpenHands Automations Service',
-    description='Scheduled and event-driven automation execution for OpenHands Cloud',
-    version='0.1.0',
+    title="OpenHands Automations Service",
+    description="Scheduled and event-driven automation execution for OpenHands Cloud",
+    version="0.1.0",
     lifespan=lifespan,
 )
 
@@ -115,19 +116,19 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_build_cors_origins(),
     allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(router)
 
 
-@app.get('/health')
+@app.get("/health")
 async def health():
-    return {'status': 'ok'}
+    return {"status": "ok"}
 
 
-@app.get('/ready')
+@app.get("/ready")
 async def readiness():
     """Readiness probe — checks DB connectivity.
 
@@ -135,11 +136,11 @@ async def readiness():
     """
     try:
         async with app.state.engine.connect() as conn:
-            await conn.execute(text('SELECT 1'))
-        return {'status': 'ready'}
+            await conn.execute(text("SELECT 1"))
+        return {"status": "ready"}
     except Exception as e:
-        logger.error('Readiness check failed: %s', e)
+        logger.error("Readiness check failed: %s", e)
         return JSONResponse(
             status_code=503,
-            content={'status': 'not_ready', 'error': 'database unavailable'},
+            content={"status": "not_ready", "error": "database unavailable"},
         )

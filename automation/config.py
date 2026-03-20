@@ -7,11 +7,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    db_host: str = 'localhost'
+    db_host: str = "localhost"
     db_port: int = 5432
-    db_name: str = 'automations'
-    db_user: str = 'postgres'
-    db_pass: str = 'postgres'
+    db_name: str = "automations"
+    db_user: str = "postgres"
+    db_pass: str = "postgres"
 
     # GCP Cloud SQL (if set, takes precedence over host/port)
     gcp_db_instance: str | None = None
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
 
     # OpenHands SaaS API
-    openhands_api_base_url: str = 'https://app.all-hands.dev'
+    openhands_api_base_url: str = "https://app.all-hands.dev"
 
     # Scheduler (polls automations table for due cron jobs)
     scheduler_interval_seconds: int = 60
@@ -32,19 +32,19 @@ class Settings(BaseSettings):
     dispatcher_interval_seconds: int = 10
 
     # Admin API key for issuing per-user automation API keys via SaaS
-    admin_api_key: str = ''
+    admin_api_key: str = ""
 
     # Service
-    host: str = '0.0.0.0'
+    host: str = "0.0.0.0"
     # Use "server_port" to avoid collision with Kubernetes service discovery
     # (K8s auto-injects AUTOMATION_PORT=tcp://... for the 'automation' service)
     server_port: int = 8000
-    log_level: str = 'info'
+    log_level: str = "info"
 
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
-    cors_origins: str = ''
+    cors_origins: str = ""
 
-    model_config = {'env_prefix': 'AUTOMATION_'}
+    model_config = {"env_prefix": "AUTOMATION_"}
 
 
 @lru_cache

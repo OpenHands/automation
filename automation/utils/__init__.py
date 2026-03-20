@@ -7,9 +7,10 @@ from automation.utils.cron import (
 )
 from automation.utils.time import utcnow
 
+
 __all__ = [
-    'get_next_fire_time',
-    'get_prev_fire_time',
-    'is_automation_due',
-    'utcnow',
+    "get_next_fire_time",
+    "get_prev_fire_time",
+    "is_automation_due",
+    "utcnow",
 ]

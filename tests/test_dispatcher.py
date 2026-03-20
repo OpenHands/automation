@@ -18,9 +18,10 @@ from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils import utcnow
 from automation.utils.run import mark_run_status
 
+
 # Test UUIDs
-TEST_USER_ID = uuid.UUID('12345678-1234-5678-1234-567812345678')
-TEST_ORG_ID = uuid.UUID('87654321-4321-8765-4321-876543218765')
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
 class TestMarkRunStatus:
@@ -32,10 +33,10 @@ class TestMarkRunStatus:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -67,10 +68,10 @@ class TestMarkRunStatus:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -98,10 +99,10 @@ class TestMarkRunStatus:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -136,10 +137,10 @@ class TestMarkRunStatus:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -178,10 +179,10 @@ class TestDispatchPendingRuns:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -214,10 +215,10 @@ class TestDispatchPendingRuns:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -241,10 +242,10 @@ class TestDispatchPendingRuns:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -269,10 +270,10 @@ class TestDispatchPendingRuns:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -297,10 +298,10 @@ class TestDispatchPendingRuns:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -349,7 +350,7 @@ class TestDispatcherLoop:
             await asyncio.wait_for(task, timeout=2.0)
         except TimeoutError:
             task.cancel()
-            pytest.fail('Dispatcher did not exit on shutdown signal')
+            pytest.fail("Dispatcher did not exit on shutdown signal")
 
     async def test_dispatcher_loop_dispatches_runs(self, async_session_factory, caplog):
         """Dispatcher polls and dispatches pending runs."""
@@ -357,10 +358,10 @@ class TestDispatcherLoop:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -378,7 +379,7 @@ class TestDispatcherLoop:
 
         import logging
 
-        with caplog.at_level(logging.INFO, logger='automation.dispatcher'):
+        with caplog.at_level(logging.INFO, logger="automation.dispatcher"):
             task = asyncio.create_task(
                 dispatcher_loop(
                     async_session_factory,
@@ -394,9 +395,9 @@ class TestDispatcherLoop:
 
         # Check logs
         assert any(
-            'Dispatching automation run' in record.message for record in caplog.records
+            "Dispatching automation run" in record.message for record in caplog.records
         )
-        assert any('Dispatched 1 run' in record.message for record in caplog.records)
+        assert any("Dispatched 1 run" in record.message for record in caplog.records)
 
         # Verify run status changed
         async with async_session_factory() as session:

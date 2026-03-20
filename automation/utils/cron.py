@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
-
-from croniter import croniter
 from zoneinfo import ZoneInfo
 
+from croniter import croniter
+
 from automation.utils.time import utcnow
+
 
 if TYPE_CHECKING:
     from automation.models import Automation
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 def get_next_fire_time(
     cron_schedule: str,
-    timezone: str = 'UTC',
+    timezone: str = "UTC",
     base_time: datetime | None = None,
 ) -> datetime:
     """Calculate the next fire time for a cron schedule.
@@ -41,7 +42,7 @@ def get_next_fire_time(
 
     # Ensure base_time is aware (treat naive as UTC for safety)
     if base_time.tzinfo is None:
-        base_time = base_time.replace(tzinfo=ZoneInfo('UTC'))
+        base_time = base_time.replace(tzinfo=ZoneInfo("UTC"))
 
     # Convert to the target timezone, then strip tzinfo for croniter
     base_in_tz_naive = base_time.astimezone(tz).replace(tzinfo=None)
@@ -51,12 +52,12 @@ def get_next_fire_time(
     next_fire_in_tz = cron.get_next(datetime)
 
     # Convert back to UTC-aware
-    return next_fire_in_tz.replace(tzinfo=tz).astimezone(ZoneInfo('UTC'))
+    return next_fire_in_tz.replace(tzinfo=tz).astimezone(ZoneInfo("UTC"))
 
 
 def get_prev_fire_time(
     cron_schedule: str,
-    timezone: str = 'UTC',
+    timezone: str = "UTC",
     base_time: datetime | None = None,
 ) -> datetime:
     """Calculate the previous (most recent) fire time for a cron schedule.
@@ -76,7 +77,7 @@ def get_prev_fire_time(
 
     # Ensure base_time is aware (treat naive as UTC for safety)
     if base_time.tzinfo is None:
-        base_time = base_time.replace(tzinfo=ZoneInfo('UTC'))
+        base_time = base_time.replace(tzinfo=ZoneInfo("UTC"))
 
     # Convert to the target timezone, then strip tzinfo for croniter
     base_in_tz_naive = base_time.astimezone(tz).replace(tzinfo=None)
@@ -86,7 +87,7 @@ def get_prev_fire_time(
     prev_fire_in_tz = cron.get_prev(datetime)
 
     # Convert back to UTC-aware
-    return prev_fire_in_tz.replace(tzinfo=tz).astimezone(ZoneInfo('UTC'))
+    return prev_fire_in_tz.replace(tzinfo=tz).astimezone(ZoneInfo("UTC"))
 
 
 def is_automation_due(
@@ -114,14 +115,14 @@ def is_automation_due(
         return False
 
     triggers = automation.triggers
-    if triggers.get('type') != 'cron':
+    if triggers.get("type") != "cron":
         return False
 
-    schedule = triggers.get('schedule')
+    schedule = triggers.get("schedule")
     if not schedule:
         return False
 
-    timezone = triggers.get('timezone', 'UTC')
+    timezone = triggers.get("timezone", "UTC")
 
     # Calculate the previous fire time (most recent time the cron should have fired)
     # in the user's configured timezone, converted back to UTC
@@ -136,7 +137,7 @@ def is_automation_due(
 
     # Ensure reference_time is aware (treat naive as UTC for safety)
     if reference_time.tzinfo is None:
-        reference_time = reference_time.replace(tzinfo=ZoneInfo('UTC'))
+        reference_time = reference_time.replace(tzinfo=ZoneInfo("UTC"))
 
     # Due if a scheduled fire time has passed since the reference time
     return prev_fire_time > reference_time

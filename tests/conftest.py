@@ -10,9 +10,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
+
 # Disable JSON logging before importing automation modules to ensure log propagation
 # works correctly with pytest's caplog fixture
-os.environ['LOG_JSON'] = '0'
+os.environ["LOG_JSON"] = "0"
 
 from automation.app import app  # noqa: E402
 from automation.auth import (  # noqa: E402
@@ -28,9 +29,9 @@ from automation.models import Base  # noqa: E402
 def ensure_log_propagation():
     """Ensure automation loggers propagate to root for caplog capture."""
     loggers_to_fix = [
-        'automation',
-        'automation.scheduler',
-        'automation.dispatcher',
+        "automation",
+        "automation.scheduler",
+        "automation.dispatcher",
     ]
     original_propagate = {}
     for name in loggers_to_fix:
@@ -45,10 +46,10 @@ def ensure_log_propagation():
         logging.getLogger(name).propagate = propagate
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture(scope="session")
 def postgres_container():
     """Start a PostgreSQL container for the test session."""
-    with PostgresContainer('postgres:15') as postgres:
+    with PostgresContainer("postgres:15") as postgres:
         yield postgres
 
 
@@ -57,7 +58,7 @@ async def async_engine(postgres_container):
     """Create an async PostgreSQL engine for testing."""
     # Convert sync URL to async URL
     sync_url = postgres_container.get_connection_url()
-    async_url = sync_url.replace('postgresql+psycopg2://', 'postgresql+asyncpg://')
+    async_url = sync_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
 
     engine = create_async_engine(async_url, echo=False)
     async with engine.begin() as conn:
@@ -92,9 +93,9 @@ def mock_authenticated_user():
     import uuid
 
     return AuthenticatedUser(
-        user_id=uuid.UUID('12345678-1234-5678-1234-567812345678'),
-        org_id=uuid.UUID('87654321-4321-8765-4321-876543218765'),
-        api_key='test-api-key',
+        user_id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
+        api_key="test-api-key",
     )
 
 
@@ -121,7 +122,7 @@ async def async_client(
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url='http://test',
+        base_url="http://test",
     ) as client:
         yield client
 

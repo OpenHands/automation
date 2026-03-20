@@ -65,12 +65,12 @@ async def mark_run_status(
     """
     now = utcnow()
 
-    values: dict = {'status': status}
+    values: dict = {"status": status}
     if status == AutomationRunStatus.RUNNING:
-        values['started_at'] = now
+        values["started_at"] = now
         run.started_at = now
     elif status in (AutomationRunStatus.COMPLETED, AutomationRunStatus.FAILED):
-        values['completed_at'] = now
+        values["completed_at"] = now
         run.completed_at = now
 
     await session.execute(

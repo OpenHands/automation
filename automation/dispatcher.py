@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from automation.models import AutomationRun, AutomationRunStatus
 from automation.utils.run import mark_run_status
 
-logger = logging.getLogger('automation.dispatcher')
+
+logger = logging.getLogger("automation.dispatcher")
 
 # Default batch size for polling pending runs
 DEFAULT_BATCH_SIZE = 10
@@ -79,12 +80,12 @@ async def dispatch_pending_runs(
                 # Phase 1b will integrate with OpenHands SaaS API to actually
                 # execute the user's tarball/entrypoint. For now, this is a
                 # CRUD API + scheduler queue only.
-                logger.info('Dispatching automation run %s', run.id)
+                logger.info("Dispatching automation run %s", run.id)
                 await mark_run_status(session, run, AutomationRunStatus.RUNNING)
                 dispatched_runs.append(run)
                 # TODO(Phase 1b): Call SaaS API to create conversation
             except Exception:
-                logger.exception('Failed to dispatch run %s', run.id)
+                logger.exception("Failed to dispatch run %s", run.id)
 
         # Always commit to release row locks from FOR UPDATE SKIP LOCKED,
         # even if no runs were dispatched
@@ -108,7 +109,7 @@ async def dispatcher_loop(
         batch_size: Maximum number of runs to process per batch
     """
     logger.info(
-        'Dispatcher started, polling every %d seconds (batch_size=%d)',
+        "Dispatcher started, polling every %d seconds (batch_size=%d)",
         interval_seconds,
         batch_size,
     )
@@ -116,7 +117,7 @@ async def dispatcher_loop(
     while True:
         # Check for shutdown signal
         if shutdown_event is not None and shutdown_event.is_set():
-            logger.info('Dispatcher received shutdown signal, exiting')
+            logger.info("Dispatcher received shutdown signal, exiting")
             break
 
         try:
@@ -125,12 +126,12 @@ async def dispatcher_loop(
             )
 
             if dispatched:
-                logger.info('Dispatched %d run(s)', len(dispatched))
+                logger.info("Dispatched %d run(s)", len(dispatched))
             else:
-                logger.debug('No pending runs to dispatch')
+                logger.debug("No pending runs to dispatch")
 
         except Exception:
-            logger.error('Error dispatching pending runs', exc_info=True)
+            logger.error("Error dispatching pending runs", exc_info=True)
 
         # Wait for the next poll interval (or shutdown)
         if shutdown_event is not None:
@@ -140,7 +141,7 @@ async def dispatcher_loop(
                     timeout=interval_seconds,
                 )
                 # If we get here, shutdown was signaled
-                logger.info('Dispatcher received shutdown signal, exiting')
+                logger.info("Dispatcher received shutdown signal, exiting")
                 break
             except TimeoutError:
                 # Normal timeout, continue polling

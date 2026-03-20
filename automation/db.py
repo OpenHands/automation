@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import (
 
 from automation.config import Settings, get_settings
 
-logger = logging.getLogger('automation.db')
+
+logger = logging.getLogger("automation.db")
 
 
 async def create_engine(settings: Settings | None = None) -> AsyncEngine:
@@ -31,7 +32,7 @@ async def create_engine(settings: Settings | None = None) -> AsyncEngine:
         return await _create_gcp_engine(settings)
 
     url = URL.create(
-        'postgresql+asyncpg',
+        "postgresql+asyncpg",
         username=settings.db_user,
         password=settings.db_pass,
         host=settings.db_host,
@@ -59,13 +60,13 @@ async def _create_gcp_engine(settings: Settings) -> AsyncEngine:
 
     connector = Connector()
     instance = (
-        f'{settings.gcp_project}:{settings.gcp_region}:{settings.gcp_db_instance}'
+        f"{settings.gcp_project}:{settings.gcp_region}:{settings.gcp_db_instance}"
     )
 
     async def _connect():
         return await connector.connect_async(
             instance,
-            'asyncpg',
+            "asyncpg",
             user=settings.db_user,
             password=settings.db_pass,
             db=settings.db_name,
@@ -81,7 +82,7 @@ async def _create_gcp_engine(settings: Settings) -> AsyncEngine:
         )
 
     return create_async_engine(
-        'postgresql+asyncpg://',
+        "postgresql+asyncpg://",
         creator=adapted_creator,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,

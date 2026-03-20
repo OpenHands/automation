@@ -21,11 +21,12 @@ from automation.utils import (
 )
 from automation.utils.run import create_pending_run
 
+
 UTC = UTC
 
 # Test UUIDs
-TEST_USER_ID = uuid.UUID('12345678-1234-5678-1234-567812345678')
-TEST_ORG_ID = uuid.UUID('87654321-4321-8765-4321-876543218765')
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
 def _utc(*args: int) -> datetime:
@@ -40,7 +41,7 @@ class TestGetNextFireTime:
         """Daily cron schedule returns correct next fire time."""
         # Every day at 9:00 AM UTC
         base_time = _utc(2026, 3, 15, 8, 0, 0)
-        next_fire = get_next_fire_time('0 9 * * *', base_time=base_time)
+        next_fire = get_next_fire_time("0 9 * * *", base_time=base_time)
 
         assert next_fire == _utc(2026, 3, 15, 9, 0, 0)
 
@@ -49,7 +50,7 @@ class TestGetNextFireTime:
         # Every Friday at 9:00 AM (Friday = 5)
         # March 15, 2026 is a Sunday
         base_time = _utc(2026, 3, 15, 10, 0, 0)
-        next_fire = get_next_fire_time('0 9 * * 5', base_time=base_time)
+        next_fire = get_next_fire_time("0 9 * * 5", base_time=base_time)
 
         # Next Friday is March 20, 2026
         assert next_fire == _utc(2026, 3, 20, 9, 0, 0)
@@ -58,7 +59,7 @@ class TestGetNextFireTime:
         """Returns tomorrow if today's fire time has passed."""
         # Every day at 9:00 AM, but current time is 10:00 AM
         base_time = _utc(2026, 3, 15, 10, 0, 0)
-        next_fire = get_next_fire_time('0 9 * * *', base_time=base_time)
+        next_fire = get_next_fire_time("0 9 * * *", base_time=base_time)
 
         # Should be tomorrow at 9:00 AM
         assert next_fire == _utc(2026, 3, 16, 9, 0, 0)
@@ -66,7 +67,7 @@ class TestGetNextFireTime:
     def test_next_fire_time_every_minute(self):
         """Every minute schedule works correctly."""
         base_time = _utc(2026, 3, 15, 10, 30, 45)
-        next_fire = get_next_fire_time('* * * * *', base_time=base_time)
+        next_fire = get_next_fire_time("* * * * *", base_time=base_time)
 
         assert next_fire == _utc(2026, 3, 15, 10, 31, 0)
 
@@ -77,7 +78,7 @@ class TestGetNextFireTime:
         # March 15 is after DST starts (March 8, 2026), so EDT = UTC-4
         base_time = _utc(2026, 3, 15, 12, 0, 0)  # 12:00 UTC = 8:00 AM EDT
         next_fire = get_next_fire_time(
-            '0 9 * * *', timezone='America/New_York', base_time=base_time
+            "0 9 * * *", timezone="America/New_York", base_time=base_time
         )
 
         # Next fire should be 9:00 AM EDT = 13:00 UTC
@@ -91,7 +92,7 @@ class TestGetNextFireTime:
         # 8:00 UTC = 1:00 AM PDT, so next 2:00 AM PDT is same day
         base_time = _utc(2026, 3, 15, 8, 0, 0)  # 8:00 UTC = 1:00 AM PDT
         next_fire = get_next_fire_time(
-            '0 2 * * *', timezone='America/Los_Angeles', base_time=base_time
+            "0 2 * * *", timezone="America/Los_Angeles", base_time=base_time
         )
 
         # Next fire: 2:00 AM PDT = 9:00 UTC same day
@@ -105,7 +106,7 @@ class TestGetPrevFireTime:
         """Daily cron schedule returns correct previous fire time."""
         # Every day at 9:00 AM UTC
         base_time = _utc(2026, 3, 15, 10, 0, 0)  # 10:00 UTC
-        prev_fire = get_prev_fire_time('0 9 * * *', base_time=base_time)
+        prev_fire = get_prev_fire_time("0 9 * * *", base_time=base_time)
 
         # Previous fire was 9:00 UTC same day
         assert prev_fire == _utc(2026, 3, 15, 9, 0, 0)
@@ -117,7 +118,7 @@ class TestGetPrevFireTime:
         # March 15 is after DST, so EDT = UTC-4
         base_time = _utc(2026, 3, 15, 14, 0, 0)  # 14:00 UTC = 10:00 AM EDT
         prev_fire = get_prev_fire_time(
-            '0 9 * * *', timezone='America/New_York', base_time=base_time
+            "0 9 * * *", timezone="America/New_York", base_time=base_time
         )
 
         # Previous fire was 9:00 AM EDT = 13:00 UTC same day
@@ -132,10 +133,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '* * * * *'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "* * * * *"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=False,
         )
 
@@ -146,10 +147,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '* * * * *'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "* * * * *"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             deleted_at=utcnow(),
         )
@@ -161,10 +162,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'github', 'event': 'push'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "github", "event": "push"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
         )
 
@@ -177,10 +178,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '0,30 * * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "0,30 * * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=None,
             created_at=_utc(2026, 3, 15, 10, 25, 0),
@@ -197,10 +198,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '0,30 * * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "0,30 * * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=None,
             created_at=_utc(2026, 3, 15, 10, 35, 0),
@@ -216,10 +217,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '0,30 * * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "0,30 * * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=None,
             created_at=_utc(2026, 3, 15, 10, 35, 0),
@@ -234,10 +235,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=_utc(2026, 3, 15, 10, 30, 5),
         )
@@ -252,10 +253,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=_utc(2026, 3, 15, 10, 29, 5),
         )
@@ -270,10 +271,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '0 9 * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=_utc(2026, 3, 15, 9, 0, 5),
         )
@@ -288,10 +289,10 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
-            triggers={'type': 'cron', 'schedule': '0 9 * * *', 'timezone': 'UTC'},
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            name="Test",
+            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=_utc(2026, 3, 15, 9, 0, 5),
         )
@@ -307,14 +308,14 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
+            name="Test",
             triggers={
-                'type': 'cron',
-                'schedule': '0 9 * * *',
-                'timezone': 'America/New_York',
+                "type": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "America/New_York",
             },
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=None,
             created_at=_utc(2026, 3, 15, 12, 0, 0),  # 8:00 AM EDT
@@ -335,14 +336,14 @@ class TestIsAutomationDue:
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name='Test',
+            name="Test",
             triggers={
-                'type': 'cron',
-                'schedule': '0 9 * * *',
-                'timezone': 'America/Los_Angeles',
+                "type": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "America/Los_Angeles",
             },
-            tarball_path='s3://bucket/code.tar.gz',
-            entrypoint='uv run main.py',
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
             enabled=True,
             last_triggered_at=None,
             created_at=_utc(2026, 3, 15, 14, 0, 0),  # 7:00 AM PDT
@@ -366,10 +367,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Due Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Due Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_triggered_at=None,
                 created_at=utcnow() - timedelta(minutes=5),
@@ -390,10 +391,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Disabled Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Disabled Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=False,
             )
             session.add(automation)
@@ -409,10 +410,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Deleted Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Deleted Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 deleted_at=utcnow(),
             )
@@ -432,10 +433,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Recently Triggered',
-                triggers={'type': 'cron', 'schedule': '0 9 * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Recently Triggered",
+                triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_triggered_at=now,
             )
@@ -454,10 +455,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 created_at=utcnow() - timedelta(minutes=5),
@@ -486,10 +487,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Recently Polled',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Recently Polled",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=recent_poll_time,
             )
@@ -509,10 +510,10 @@ class TestPollAndSchedule:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Old Polled',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Old Polled",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=old_poll_time,
                 last_triggered_at=None,
@@ -536,14 +537,14 @@ class TestPollAndSchedule:
                 automation = Automation(
                     user_id=TEST_USER_ID,
                     org_id=TEST_ORG_ID,
-                    name=f'Automation {i}',
+                    name=f"Automation {i}",
                     triggers={
-                        'type': 'cron',
-                        'schedule': '* * * * *',
-                        'timezone': 'UTC',
+                        "type": "cron",
+                        "schedule": "* * * * *",
+                        "timezone": "UTC",
                     },
-                    tarball_path='s3://bucket/code.tar.gz',
-                    entrypoint='uv run main.py',
+                    tarball_path="s3://bucket/code.tar.gz",
+                    entrypoint="uv run main.py",
                     enabled=True,
                     last_polled_at=None,
                     last_triggered_at=None,
@@ -566,10 +567,10 @@ class TestPollAndSchedule:
             old_automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Old',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Old",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=now - timedelta(hours=2),
                 last_triggered_at=None,
@@ -578,10 +579,10 @@ class TestPollAndSchedule:
             newer_automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Newer',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Newer",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=now - timedelta(hours=1),
                 last_triggered_at=None,
@@ -590,10 +591,10 @@ class TestPollAndSchedule:
             never_polled = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Never Polled',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Never Polled",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=None,
@@ -622,10 +623,10 @@ class TestPollAndSchedule:
             automation_a = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Automation A',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Automation A",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=None,
@@ -634,10 +635,10 @@ class TestPollAndSchedule:
             automation_b = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Automation B',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Automation B",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=None,
@@ -679,10 +680,10 @@ class TestPollAndSchedule:
             not_due_automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Not Due Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Not Due Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=now,  # Just triggered, so not due again yet
@@ -720,10 +721,10 @@ class TestPollAndSchedule:
             not_due = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Not Due',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Not Due",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=now,  # Just triggered
@@ -733,10 +734,10 @@ class TestPollAndSchedule:
             due = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Due',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Due",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_polled_at=None,
                 last_triggered_at=None,
@@ -795,7 +796,7 @@ class TestSchedulerLoop:
             await asyncio.wait_for(task, timeout=2.0)
         except TimeoutError:
             task.cancel()
-            pytest.fail('Scheduler did not exit on shutdown signal')
+            pytest.fail("Scheduler did not exit on shutdown signal")
 
     async def test_scheduler_loop_polls_automations(
         self, async_session_factory, caplog
@@ -806,10 +807,10 @@ class TestSchedulerLoop:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Due Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Due Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_triggered_at=None,
                 created_at=utcnow() - timedelta(minutes=5),
@@ -823,7 +824,7 @@ class TestSchedulerLoop:
         # Run scheduler briefly with logging capture
         import logging
 
-        with caplog.at_level(logging.INFO, logger='automation.scheduler'):
+        with caplog.at_level(logging.INFO, logger="automation.scheduler"):
             task = asyncio.create_task(
                 scheduler_loop(
                     async_session_factory,
@@ -840,11 +841,11 @@ class TestSchedulerLoop:
             await asyncio.wait_for(task, timeout=2.0)
 
         # Check logs for the due automation
-        assert any('Test Due Automation' in record.message for record in caplog.records)
+        assert any("Test Due Automation" in record.message for record in caplog.records)
         assert any(
-            'Found 1 due automation' in record.message for record in caplog.records
+            "Found 1 due automation" in record.message for record in caplog.records
         )
-        assert any('Created pending run' in record.message for record in caplog.records)
+        assert any("Created pending run" in record.message for record in caplog.records)
 
         # Verify a pending run was created
         async with async_session_factory() as session:
@@ -867,10 +868,10 @@ class TestCreatePendingRun:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)
@@ -890,10 +891,10 @@ class TestCreatePendingRun:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
                 last_triggered_at=None,
             )
@@ -918,10 +919,10 @@ class TestCreatePendingRun:
             automation = Automation(
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
-                name='Test Automation',
-                triggers={'type': 'cron', 'schedule': '* * * * *', 'timezone': 'UTC'},
-                tarball_path='s3://bucket/code.tar.gz',
-                entrypoint='uv run main.py',
+                name="Test Automation",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
                 enabled=True,
             )
             session.add(automation)

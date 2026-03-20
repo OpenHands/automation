@@ -12,9 +12,10 @@ from automation.app import app
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
 
+
 # Test UUIDs
-TEST_USER_ID = uuid.UUID('12345678-1234-5678-1234-567812345678')
-TEST_ORG_ID = uuid.UUID('87654321-4321-8765-4321-876543218765')
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
 @pytest.fixture
@@ -41,16 +42,16 @@ class TestAuthentication:
 
     async def test_authenticate_valid_api_key(self, mock_request, mock_http_client):
         """Valid API key returns AuthenticatedUser with correct user_id and org_id."""
-        mock_request.headers.get.return_value = 'Bearer valid-api-key'
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
 
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            'id': 123,
-            'name': 'My API Key',
-            'org_id': str(TEST_ORG_ID),
-            'user_id': str(TEST_USER_ID),
-            'auth_type': 'bearer',
+            "id": 123,
+            "name": "My API Key",
+            "org_id": str(TEST_ORG_ID),
+            "user_id": str(TEST_USER_ID),
+            "auth_type": "bearer",
         }
         mock_http_client.get = AsyncMock(return_value=mock_response)
 
@@ -59,23 +60,23 @@ class TestAuthentication:
         assert isinstance(result, AuthenticatedUser)
         assert result.user_id == TEST_USER_ID
         assert result.org_id == TEST_ORG_ID
-        assert result.api_key == 'valid-api-key'
+        assert result.api_key == "valid-api-key"
 
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header raises 401."""
-        mock_request.headers.get.return_value = ''
+        mock_request.headers.get.return_value = ""
 
         with pytest.raises(HTTPException) as exc_info:
             await authenticate_request(mock_request, client=mock_http_client)
 
         assert exc_info.value.status_code == 401
-        assert 'Missing or invalid Authorization header' in exc_info.value.detail
+        assert "Missing or invalid Authorization header" in exc_info.value.detail
 
     async def test_authenticate_invalid_bearer_format(
         self, mock_request, mock_http_client
     ):
         """Invalid Bearer format raises 401."""
-        mock_request.headers.get.return_value = 'InvalidFormat token'
+        mock_request.headers.get.return_value = "InvalidFormat token"
 
         with pytest.raises(HTTPException) as exc_info:
             await authenticate_request(mock_request, client=mock_http_client)
@@ -84,7 +85,7 @@ class TestAuthentication:
 
     async def test_authenticate_invalid_key(self, mock_request, mock_http_client):
         """Invalid API key (401 from OpenHands) raises 401."""
-        mock_request.headers.get.return_value = 'Bearer invalid-key'
+        mock_request.headers.get.return_value = "Bearer invalid-key"
 
         mock_response = MagicMock()
         mock_response.status_code = 401
@@ -94,26 +95,26 @@ class TestAuthentication:
             await authenticate_request(mock_request, client=mock_http_client)
 
         assert exc_info.value.status_code == 401
-        assert 'Invalid or expired API key' in exc_info.value.detail
+        assert "Invalid or expired API key" in exc_info.value.detail
 
     async def test_authenticate_openhands_unavailable(
         self, mock_request, mock_http_client
     ):
         """Connection error to OpenHands API raises 502."""
-        mock_request.headers.get.return_value = 'Bearer valid-key'
+        mock_request.headers.get.return_value = "Bearer valid-key"
         mock_http_client.get = AsyncMock(
-            side_effect=httpx.RequestError('Connection failed')
+            side_effect=httpx.RequestError("Connection failed")
         )
 
         with pytest.raises(HTTPException) as exc_info:
             await authenticate_request(mock_request, client=mock_http_client)
 
         assert exc_info.value.status_code == 502
-        assert 'Failed to validate API key' in exc_info.value.detail
+        assert "Failed to validate API key" in exc_info.value.detail
 
     async def test_authenticate_unexpected_status(self, mock_request, mock_http_client):
         """Unexpected status code from OpenHands API raises 502."""
-        mock_request.headers.get.return_value = 'Bearer valid-key'
+        mock_request.headers.get.return_value = "Bearer valid-key"
 
         mock_response = MagicMock()
         mock_response.status_code = 500
@@ -134,15 +135,15 @@ class TestAuthIntegration:
     """
 
     async def test_valid_key_through_api(self, async_engine, async_session_factory):
-        """A valid API key flows through the real auth middleware to a protected endpoint."""
+        """Valid API key flows through real auth middleware to protected endpoint."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            'id': 1,
-            'name': 'Test Key',
-            'user_id': str(TEST_USER_ID),
-            'org_id': str(TEST_ORG_ID),
-            'auth_type': 'bearer',
+            "id": 1,
+            "name": "Test Key",
+            "user_id": str(TEST_USER_ID),
+            "org_id": str(TEST_ORG_ID),
+            "auth_type": "bearer",
         }
 
         async def override_get_session():
@@ -162,16 +163,16 @@ class TestAuthIntegration:
 
         try:
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url='http://test'
+                transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
                 response = await client.get(
-                    '/api/v1/automations',
-                    headers={'Authorization': 'Bearer real-key-123'},
+                    "/api/v1/automations",
+                    headers={"Authorization": "Bearer real-key-123"},
                 )
 
             assert response.status_code == 200
             data = response.json()
-            assert 'automations' in data
+            assert "automations" in data
         finally:
             app.dependency_overrides.clear()
 
@@ -195,16 +196,16 @@ class TestAuthIntegration:
 
         try:
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url='http://test'
+                transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
-                response = await client.get('/api/v1/automations')
+                response = await client.get("/api/v1/automations")
 
             assert response.status_code == 401
         finally:
             app.dependency_overrides.clear()
 
     async def test_invalid_key_through_api(self, async_engine, async_session_factory):
-        """An invalid API key is rejected after the real auth middleware calls OpenHands."""
+        """Invalid API key is rejected after real auth middleware calls OpenHands."""
         mock_response = MagicMock()
         mock_response.status_code = 401
 
@@ -224,14 +225,14 @@ class TestAuthIntegration:
 
         try:
             async with AsyncClient(
-                transport=ASGITransport(app=app), base_url='http://test'
+                transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
                 response = await client.get(
-                    '/api/v1/automations',
-                    headers={'Authorization': 'Bearer bad-key'},
+                    "/api/v1/automations",
+                    headers={"Authorization": "Bearer bad-key"},
                 )
 
             assert response.status_code == 401
-            assert 'Invalid or expired API key' in response.json()['detail']
+            assert "Invalid or expired API key" in response.json()["detail"]
         finally:
             app.dependency_overrides.clear()

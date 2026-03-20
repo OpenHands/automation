@@ -18,7 +18,8 @@ from automation.models import Automation, AutomationRun
 from automation.utils import is_automation_due, utcnow
 from automation.utils.run import create_pending_run
 
-logger = logging.getLogger('automation.scheduler')
+
+logger = logging.getLogger("automation.scheduler")
 
 # Default batch size for polling
 DEFAULT_BATCH_SIZE = 50
@@ -113,16 +114,16 @@ async def poll_and_schedule(
                 run = await create_pending_run(session, automation)
                 created_runs.append(run)
                 logger.info(
-                    'Created pending run: run_id=%s automation_id=%s '
-                    'name=%s schedule=%s',
+                    "Created pending run: run_id=%s automation_id=%s "
+                    "name=%s schedule=%s",
                     run.id,
                     automation.id,
                     automation.name,
-                    automation.triggers.get('schedule'),
+                    automation.triggers.get("schedule"),
                 )
             except Exception:
                 logger.exception(
-                    'Failed to create run for automation %s',
+                    "Failed to create run for automation %s",
                     automation.id,
                 )
 
@@ -151,14 +152,14 @@ async def scheduler_loop(
         batch_size: Maximum number of automations to poll per batch
     """
     logger.info(
-        'Scheduler started, polling every %d seconds (batch_size=%d)',
+        "Scheduler started, polling every %d seconds (batch_size=%d)",
         interval_seconds,
         batch_size,
     )
 
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
-            logger.info('Scheduler received shutdown signal, exiting')
+            logger.info("Scheduler received shutdown signal, exiting")
             break
 
         try:
@@ -168,14 +169,14 @@ async def scheduler_loop(
 
             if created_runs:
                 logger.info(
-                    'Found %d due automation(s) to schedule',
+                    "Found %d due automation(s) to schedule",
                     len(created_runs),
                 )
             else:
-                logger.debug('No automations due at this time')
+                logger.debug("No automations due at this time")
 
         except Exception:
-            logger.exception('Error in scheduler poll cycle')
+            logger.exception("Error in scheduler poll cycle")
 
         if shutdown_event is not None:
             try:
@@ -183,7 +184,7 @@ async def scheduler_loop(
                     shutdown_event.wait(),
                     timeout=interval_seconds,
                 )
-                logger.info('Scheduler received shutdown signal, exiting')
+                logger.info("Scheduler received shutdown signal, exiting")
                 break
             except TimeoutError:
                 pass

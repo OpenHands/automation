@@ -20,13 +20,14 @@ from automation.schemas import (
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
 
-router = APIRouter(prefix='/api/v1/automations', tags=['Automations'])
+
+router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 
 
 # --- CRUD ---
 
 
-@router.post('', status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_automation(
     body: CreateAutomationRequest,
     user: AuthenticatedUser = Depends(authenticate_request),
@@ -49,7 +50,7 @@ async def create_automation(
     return AutomationResponse.model_validate(auto)
 
 
-@router.get('')
+@router.get("")
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -79,7 +80,7 @@ async def list_automations(
     )
 
 
-@router.get('/{automation_id}')
+@router.get("/{automation_id}")
 async def get_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
@@ -90,7 +91,7 @@ async def get_automation(
     return AutomationResponse.model_validate(auto)
 
 
-@router.patch('/{automation_id}')
+@router.patch("/{automation_id}")
 async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
@@ -103,8 +104,8 @@ async def update_automation(
     update_data = body.model_dump(exclude_unset=True)
     # Handle trigger -> triggers field mapping (only if trigger has a real value)
     if body.trigger is not None:
-        update_data['triggers'] = body.trigger.model_dump()
-    update_data.pop('trigger', None)
+        update_data["triggers"] = body.trigger.model_dump()
+    update_data.pop("trigger", None)
 
     for field, value in update_data.items():
         setattr(auto, field, value)
@@ -115,7 +116,7 @@ async def update_automation(
     return AutomationResponse.model_validate(auto)
 
 
-@router.delete('/{automation_id}', status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
@@ -131,7 +132,7 @@ async def delete_automation(
 # --- Runs ---
 
 
-@router.post('/{automation_id}/dispatch', status_code=status.HTTP_201_CREATED)
+@router.post("/{automation_id}/dispatch", status_code=status.HTTP_201_CREATED)
 async def dispatch_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
@@ -149,7 +150,7 @@ async def dispatch_automation(
     return AutomationRunResponse.model_validate(run)
 
 
-@router.get('/{automation_id}/runs')
+@router.get("/{automation_id}/runs")
 async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
@@ -208,6 +209,6 @@ async def _get_user_automation(
     if auto is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail='Automation not found',
+            detail="Automation not found",
         )
     return auto

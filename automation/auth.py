@@ -14,7 +14,8 @@ from fastapi import Depends, HTTPException, Request, status
 
 from automation.config import get_settings
 
-logger = logging.getLogger('automation.auth')
+
+logger = logging.getLogger("automation.auth")
 
 # Default timeout for HTTP client
 HTTP_CLIENT_TIMEOUT = 10.0
@@ -31,11 +32,11 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
     The client is created during app startup and stored in app.state.http_client.
     This enables proper dependency injection and makes testing easier.
     """
-    client: httpx.AsyncClient | None = getattr(request.app.state, 'http_client', None)
+    client: httpx.AsyncClient | None = getattr(request.app.state, "http_client", None)
     if client is None or client.is_closed:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail='HTTP client not initialized',
+            detail="HTTP client not initialized",
         )
     return client
 
@@ -56,56 +57,56 @@ async def authenticate_request(
     Calls the OpenHands API /api/keys/current to verify the key and get
     user/org identity.
     """
-    auth_header = request.headers.get('Authorization', '')
-    if not auth_header.startswith('Bearer '):
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='Missing or invalid Authorization header. '
-            'Expected: Bearer <api_key>',
+            detail="Missing or invalid Authorization header. "
+            "Expected: Bearer <api_key>",
         )
 
-    api_key = auth_header.removeprefix('Bearer ').strip()
+    api_key = auth_header.removeprefix("Bearer ").strip()
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='Empty API key',
+            detail="Empty API key",
         )
 
     settings = get_settings()
     try:
         resp = await client.get(
-            f'{settings.openhands_api_base_url}/api/keys/current',
-            headers={'Authorization': f'Bearer {api_key}'},
+            f"{settings.openhands_api_base_url}/api/keys/current",
+            headers={"Authorization": f"Bearer {api_key}"},
         )
     except httpx.RequestError as e:
-        logger.error('Failed to reach OpenHands API for auth: %s', e)
+        logger.error("Failed to reach OpenHands API for auth: %s", e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail='Failed to validate API key against OpenHands',
+            detail="Failed to validate API key against OpenHands",
         )
 
     if resp.status_code == 401:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail='Invalid or expired API key',
+            detail="Invalid or expired API key",
         )
     if resp.status_code != 200:
         logger.error(
-            'Unexpected status from OpenHands /api/keys/current: %s',
+            "Unexpected status from OpenHands /api/keys/current: %s",
             resp.status_code,
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail='Unexpected response from OpenHands API',
+            detail="Unexpected response from OpenHands API",
         )
 
     data = resp.json()
-    user_id = data.get('user_id')
-    org_id = data.get('org_id')
+    user_id = data.get("user_id")
+    org_id = data.get("org_id")
     if not user_id or not org_id:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail='Could not determine user/org identity from OpenHands API',
+            detail="Could not determine user/org identity from OpenHands API",
         )
 
     try:
@@ -114,7 +115,7 @@ async def authenticate_request(
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail='Invalid user_id or org_id format from OpenHands API',
+            detail="Invalid user_id or org_id format from OpenHands API",
         )
 
     return AuthenticatedUser(user_id=user_uuid, org_id=org_uuid, api_key=api_key)

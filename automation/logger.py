@@ -16,21 +16,20 @@ from typing import TextIO
 
 from pythonjsonlogger.json import JsonFormatter
 
-LOG_JSON = os.getenv('LOG_JSON', '1') == '1'
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
-AUTOMATION_LOG_LEVEL = os.getenv('AUTOMATION_LOG_LEVEL', LOG_LEVEL).upper()
-DEBUG = os.getenv('DEBUG', 'False').lower() in ['true', '1', 'yes']
+
+LOG_JSON = os.getenv("LOG_JSON", "1") == "1"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+AUTOMATION_LOG_LEVEL = os.getenv("AUTOMATION_LOG_LEVEL", LOG_LEVEL).upper()
+DEBUG = os.getenv("DEBUG", "False").lower() in ["true", "1", "yes"]
 if DEBUG:
-    LOG_LEVEL = 'DEBUG'
-    AUTOMATION_LOG_LEVEL = 'DEBUG'
+    LOG_LEVEL = "DEBUG"
+    AUTOMATION_LOG_LEVEL = "DEBUG"
 
 FILE_PREFIX = 'File "'
-CWD_PREFIX = FILE_PREFIX + str(Path(os.getcwd()).parent) + '/'
-SITE_PACKAGES_PREFIX = (
-    CWD_PREFIX
-    + f'.venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/'
-)
-LOG_JSON_FOR_CONSOLE = int(os.getenv('LOG_JSON_FOR_CONSOLE', '0'))
+CWD_PREFIX = FILE_PREFIX + str(Path(os.getcwd()).parent) + "/"
+_PY_VER = f"{sys.version_info.major}.{sys.version_info.minor}"
+SITE_PACKAGES_PREFIX = CWD_PREFIX + f".venv/lib/python{_PY_VER}/site-packages/"
+LOG_JSON_FOR_CONSOLE = int(os.getenv("LOG_JSON_FOR_CONSOLE", "0"))
 
 
 def format_stack(stack: str) -> list[str]:
@@ -38,22 +37,22 @@ def format_stack(stack: str) -> list[str]:
         stack.replace(SITE_PACKAGES_PREFIX, FILE_PREFIX)
         .replace(CWD_PREFIX, FILE_PREFIX)
         .replace('"', "'")
-        .split('\n')
+        .split("\n")
     )
 
 
 def custom_json_serializer(obj, **kwargs):
     if LOG_JSON_FOR_CONSOLE:
-        kwargs['indent'] = 2
-        obj = {'ts': datetime.now().isoformat(), **obj}
+        kwargs["indent"] = 2
+        obj = {"ts": datetime.now().isoformat(), **obj}
 
         if isinstance(obj, dict):
-            exc_info = obj.get('exc_info')
+            exc_info = obj.get("exc_info")
             if isinstance(exc_info, str):
-                obj['exc_info'] = format_stack(exc_info)
-            stack_info = obj.get('stack_info')
+                obj["exc_info"] = format_stack(exc_info)
+            stack_info = obj.get("stack_info")
             if isinstance(stack_info, str):
-                obj['stack_info'] = format_stack(stack_info)
+                obj["stack_info"] = format_stack(stack_info)
 
     return json.dumps(obj, **kwargs)
 
@@ -72,9 +71,9 @@ def setup_json_logger(
     handler.setLevel(level)
 
     formatter = JsonFormatter(
-        '{message}{levelname}',
-        style='{',
-        rename_fields={'levelname': 'severity'},
+        "{message}{levelname}",
+        style="{",
+        rename_fields={"levelname": "severity"},
         json_serializer=custom_json_serializer,
     )
 
@@ -94,6 +93,6 @@ def setup_all_loggers() -> None:
             _logger.propagate = False
 
 
-automation_logger = logging.getLogger('automation')
+automation_logger = logging.getLogger("automation")
 setup_all_loggers()
 setup_json_logger(automation_logger, level=AUTOMATION_LOG_LEVEL)
