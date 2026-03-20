@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from automation.models import TarballUpload, UploadStatus
-from automation.tarball_validation import (
+from automation.utils.tarball_validation import (
     EXTERNAL_URL_SCHEMES,
     build_internal_url,
     get_internal_url_prefix,

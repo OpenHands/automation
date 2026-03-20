@@ -57,7 +57,7 @@ class UploadResponse(BaseModel):
     @classmethod
     def from_model(cls, upload: TarballUpload) -> "UploadResponse":
         """Create response from database model."""
-        from automation.tarball_validation import build_internal_url
+        from automation.utils.tarball_validation import build_internal_url
 
         # Only expose tarball_path when upload is completed
         # Use configurable internal URL scheme

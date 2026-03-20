@@ -17,9 +17,9 @@ from automation.schemas import (
     CreateAutomationRequest,
     UpdateAutomationRequest,
 )
-from automation.tarball_validation import validate_tarball_path
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
+from automation.utils.tarball_validation import validate_tarball_path
 
 
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])

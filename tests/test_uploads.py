@@ -39,7 +39,7 @@ class TestUploadResponse:
 
     def test_from_model_completed(self):
         """Create response from completed upload."""
-        from automation.tarball_validation import build_internal_url
+        from automation.utils.tarball_validation import build_internal_url
 
         upload = MagicMock(spec=TarballUpload)
         upload_id = uuid.uuid4()
