@@ -67,7 +67,7 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 
 def _return_last_response(retry_state) -> httpx.Response:
     """Return the last response when retries are exhausted."""
-    logger.error(
+    logger.warning(
         "Rate limit retries exhausted after %d attempts",
         retry_state.attempt_number,
     )
