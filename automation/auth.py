@@ -72,7 +72,8 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
         "Rate limit retries exhausted after %d attempts",
         retry_state.attempt_number,
     )
-    # outcome is guaranteed to be set when retry_error_callback is invoked
+    # Defensive check: outcome should be set by tenacity, but guard against
+    # potential library changes or edge cases for type safety
     if retry_state.outcome is None:
         raise RuntimeError("retry_error_callback invoked without outcome")
     return retry_state.outcome.result()
