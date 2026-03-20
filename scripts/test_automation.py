@@ -283,9 +283,12 @@ async def run_test(api_url: str, api_key: str) -> bool:
 
     tarball = build_tarball_from_dir(TEST_TARBALL_DIR)
 
-    # env vars the dispatcher would inject
+    # env vars the dispatcher would inject into the sandbox
     env_vars = {
-        "MY_SECRET": "hunter2",
+        # The script needs the API key to call get_llm() / get_secrets()
+        "OPENHANDS_API_KEY": api_key,
+        "OPENHANDS_CLOUD_API_URL": api_url,
+        # Automation service callback (the script's __exit__ POSTs here)
         "AUTOMATION_CALLBACK_URL": "https://example.com/callback",
         "AUTOMATION_RUN_ID": "test-run-001",
     }
@@ -295,7 +298,7 @@ async def run_test(api_url: str, api_key: str) -> bool:
         f"mkdir -p {WORK_DIR}"
         f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
         f" && cd {WORK_DIR}"
-        f" && ([ -f setup.sh ] && bash setup.sh || true)"
+        f" && bash setup.sh"
         f" && {exports}"
         f" && {entrypoint}"
     )
