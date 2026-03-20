@@ -114,6 +114,24 @@ class TestCreateAutomation:
             "tarball_path" in str(e.get("loc", [])) for e in response.json()["detail"]
         )
 
+    async def test_create_automation_internal_upload_scheme_accepted(
+        self, async_client
+    ):
+        """oh-internal:// scheme is accepted by schema validation."""
+        payload = {
+            "name": "Internal Upload Test",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "oh-internal://uploads/12345678-1234-1234-1234-123456789abc",
+            "entrypoint": "uv run main.py",
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        # Should pass schema validation (422 would mean schema rejected it)
+        # Will get 404 because the upload doesn't exist, but that's fine -
+        # we're testing schema validation, not upload validation
+        assert response.status_code == 404
+
     async def test_create_automation_entrypoint_shell_metachar(self, async_client):
         """entrypoint with shell metacharacters returns 422."""
         payload = {

@@ -10,8 +10,8 @@ from croniter import croniter
 from pydantic import BaseModel, Field, field_validator
 
 
-# Allowed URI schemes for tarball_path
-_TARBALL_SCHEME_RE = re.compile(r"^(s3|gs|https?)://")
+# Allowed URI schemes for tarball_path (includes internal upload scheme)
+_TARBALL_SCHEME_RE = re.compile(r"^(s3|gs|https?|oh-internal)://")
 
 # Shell metacharacters that should not appear in entrypoints or script paths
 _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
