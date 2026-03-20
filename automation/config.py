@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Admin API key for issuing per-user automation API keys via SaaS
     admin_api_key: str = ""
 
+    # Service key for authenticating requests from the OpenHands SaaS app
+    service_key: str = ""
+
     # Service
     host: str = "0.0.0.0"
     # Use "server_port" to avoid collision with Kubernetes service discovery

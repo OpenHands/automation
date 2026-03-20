@@ -82,6 +82,7 @@ force-single-line = false
 lines-after-imports = 2
 
 # Pytest configuration
+
 [tool.pytest.ini_options]
 testpaths = [
     "tests"
@@ -93,6 +94,7 @@ addopts = "-v --tb=short"
 asyncio_mode = "auto"
 
 # Pyright configuration
+
 [tool.pyright]
 include = [
     "automation",

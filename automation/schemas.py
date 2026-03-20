@@ -49,7 +49,8 @@ def _validate_command_string(
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
-    Ensures no path traversal or shell metacharacters.
+    Rejects traversal patterns and shell metacharacters.
+
     Used for both entrypoint and setup_script_path validation.
 
     Args:
@@ -171,11 +172,19 @@ class AutomationListResponse(BaseModel):
     total: int
 
 
-# Phase 1b: These schemas will be used when run-listing endpoints are added.
+# --- Run schemas ---
+
+
+class RunCompleteRequest(BaseModel):
+    """Payload sent by the SDK's OpenHandsCloudWorkspace on context manager exit."""
+
+    status: Literal["COMPLETED", "FAILED"]
+    run_id: str | None = None
+    error: str | None = None
 
 
 class AutomationRunResponse(BaseModel):
-    """Response for a single automation run (Phase 1b)."""
+    """Response for a single automation run."""
 
     id: uuid.UUID
     automation_id: uuid.UUID

@@ -51,6 +51,7 @@ async def mark_run_status(
     session: AsyncSession,
     run: AutomationRun,
     status: AutomationRunStatus,
+    error_detail: str | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -62,6 +63,7 @@ async def mark_run_status(
         session: Database session
         run: The run to update
         status: The new status to set
+        error_detail: Optional error message (only used for FAILED status)
     """
     now = utcnow()
 
@@ -72,6 +74,10 @@ async def mark_run_status(
     elif status in (AutomationRunStatus.COMPLETED, AutomationRunStatus.FAILED):
         values["completed_at"] = now
         run.completed_at = now
+
+    if error_detail and status == AutomationRunStatus.FAILED:
+        values["error_detail"] = error_detail
+        run.error_detail = error_detail
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)

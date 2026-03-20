@@ -1,5 +1,6 @@
 """FastAPI router for the automations CRUD API."""
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,18 +9,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
-from automation.models import Automation, AutomationRun
+from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
     CreateAutomationRequest,
+    RunCompleteRequest,
     UpdateAutomationRequest,
 )
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 
@@ -185,6 +189,52 @@ async def list_automation_runs(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
     )
+
+
+# --- Run completion callback ---
+
+
+@router.post("/runs/{run_id}/complete")
+async def complete_run(
+    run_id: uuid.UUID,
+    body: RunCompleteRequest,
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Receive completion callback from the SDK running inside a sandbox.
+
+    Called by ``OpenHandsCloudWorkspace.__exit__`` when the automation
+    entry-point finishes (success or failure).  Transitions the run from
+    RUNNING → COMPLETED or RUNNING → FAILED.
+
+    This endpoint is unauthenticated — it is only reachable from inside a
+    sandbox that already has the run ID.
+    """
+    result = await session.execute(
+        select(AutomationRun).where(AutomationRun.id == run_id)
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    if run.status != AutomationRunStatus.RUNNING:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected RUNNING",
+        )
+
+    now = utcnow()
+    if body.status == "COMPLETED":
+        run.status = AutomationRunStatus.COMPLETED
+        run.completed_at = now
+    else:
+        run.status = AutomationRunStatus.FAILED
+        run.error_detail = body.error
+        run.completed_at = now
+
+    await session.flush()
+    await session.refresh(run)
+    logger.info("Run %s → %s", run_id, run.status.value)
+    return AutomationRunResponse.model_validate(run)
 
 
 # --- Helpers ---
