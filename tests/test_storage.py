@@ -1,3 +1,12 @@
+"""Unit tests for storage abstraction.
+
+NOTE: These tests use mocks to verify the GoogleCloudFileStore calls the GCS
+client correctly. They do NOT test actual GCS behavior.
+
+For integration tests that verify real GCS behavior using fake-gcs-server,
+see test_storage_integration.py (requires Docker).
+"""
+
 import os
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +26,11 @@ class TestFileStoreAbstraction:
 
 
 class TestGoogleCloudFileStore:
-    """Test the GoogleCloudFileStore implementation."""
+    """Unit tests for GoogleCloudFileStore using mocks.
+
+    These tests verify the class calls the GCS client correctly but do not
+    test actual GCS behavior. See module docstring for integration testing.
+    """
 
     def test_init_with_bucket_name(self):
         """Initialize with explicit bucket name."""
@@ -161,9 +174,8 @@ class TestGoogleCloudFileStore:
                 mock_client.bucket.return_value = mock_bucket
                 mock_client.get_bucket.side_effect = Exception("Not found")
 
-                store = GoogleCloudFileStore(bucket_name="test-bucket")
-                # Access bucket property to trigger initialization
-                _ = store.bucket
+                # Bucket creation happens during __init__ when emulator is set
+                GoogleCloudFileStore(bucket_name="test-bucket")
 
                 mock_client.create_bucket.assert_called_once_with("test-bucket")
 

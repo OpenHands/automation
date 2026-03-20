@@ -1,4 +1,8 @@
-"""Tests for tarball upload functionality."""
+"""Unit tests for tarball upload functionality.
+
+NOTE: The TestWriteStream tests use mocks to verify streaming behavior.
+For true integration testing with GCS, see test_storage.py module docstring.
+"""
 
 import uuid
 from unittest.mock import MagicMock, patch

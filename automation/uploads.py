@@ -4,12 +4,14 @@ import uuid
 from enum import StrEnum
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from google.cloud.exceptions import NotFound
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
+from automation.logger import automation_logger
 from automation.models import TarballUpload, UploadStatus
 from automation.storage import FileSizeLimitExceeded, GoogleCloudFileStore
 from automation.utils import utcnow
@@ -19,6 +21,15 @@ router = APIRouter(prefix="/api/v1/uploads", tags=["Uploads"])
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
+
+# Allowed content types for tarball uploads
+ALLOWED_CONTENT_TYPES = frozenset({
+    "application/x-tar",
+    "application/x-gzip",
+    "application/gzip",
+    "application/x-compressed-tar",
+    "application/octet-stream",  # Generic binary, often used by clients
+})
 
 
 def get_file_store() -> GoogleCloudFileStore:
@@ -121,15 +132,32 @@ async def create_upload(
 
     The request body should be the raw tarball file content (not multipart).
 
+    Note: Metadata (name, description) is passed via query params rather than
+    multipart form to enable true streaming of the request body. This avoids
+    buffering the entire file before processing begins.
+
     Query parameters:
     - name: A readable name for the upload (required, max 255 chars)
     - description: Optional description (max 2000 chars)
 
     Headers:
-    - Content-Type: application/x-tar or application/gzip recommended
-    - Content-Length: Optional but recommended for early rejection
+    - Content-Type: Required. Must be a tarball type (application/x-tar,
+      application/gzip, etc.) or application/octet-stream
+    - Content-Length: Optional. If provided and exceeds limit, request is
+      rejected early. Note: actual size is always enforced during streaming
+      regardless of this header.
     """
-    # Early rejection based on Content-Length header if provided
+    # Validate Content-Type
+    content_type = request.headers.get("content-type", "").split(";")[0].strip()
+    if content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Content-Type must be one of: {', '.join(sorted(ALLOWED_CONTENT_TYPES))}",
+        )
+
+    # Early rejection based on Content-Length header if provided.
+    # Note: This is a convenience for well-behaved clients, not a security measure.
+    # Actual size is always enforced during streaming.
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > MAX_UPLOAD_SIZE:
         raise HTTPException(
@@ -244,12 +272,18 @@ async def delete_upload(
     """
     upload = await _get_user_upload(session, upload_id, user.user_id, user.org_id)
 
-    # Delete from storage (ignore errors if file doesn't exist)
+    # Delete from storage
     try:
         file_store.delete(upload.storage_path)
-    except Exception:
-        # File may not exist (e.g., failed upload with no data)
+    except NotFound:
+        # Expected for failed uploads that were cleaned up
         pass
+    except Exception as e:
+        # Log unexpected errors but still proceed with soft delete
+        automation_logger.error(
+            f"Failed to delete storage for upload {upload_id}: {e}",
+            exc_info=True,
+        )
 
     # Soft delete the record
     upload.deleted_at = utcnow()

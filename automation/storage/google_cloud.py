@@ -47,33 +47,21 @@ class GoogleCloudFileStore(FileStore):
                 "Bucket name must be provided or GCS_BUCKET_NAME env var must be set"
             )
 
-        self._client: storage.Client | None = None
-        self._bucket: storage.Bucket | None = None
+        # Initialize client and bucket eagerly
+        # When STORAGE_EMULATOR_HOST is set, the client automatically
+        # connects to the emulator (e.g., fake-gcs-server)
+        self.client = storage.Client()
+        self.bucket = self.client.bucket(self.bucket_name)
+
+        # For emulator: ensure bucket exists
+        if os.environ.get("STORAGE_EMULATOR_HOST"):
+            self._ensure_bucket_exists()
 
     def _prefixed_path(self, path: str) -> str:
         """Add the automation prefix to a path."""
         # Remove leading slash if present
         path = path.lstrip("/")
         return f"{BUCKET_PREFIX}/{path}"
-
-    @property
-    def client(self) -> storage.Client:
-        """Lazily initialize and return the GCS client."""
-        if self._client is None:
-            # When STORAGE_EMULATOR_HOST is set, the client automatically
-            # connects to the emulator (e.g., fake-gcs-server)
-            self._client = storage.Client()
-        return self._client
-
-    @property
-    def bucket(self) -> storage.Bucket:
-        """Lazily initialize and return the GCS bucket."""
-        if self._bucket is None:
-            self._bucket = self.client.bucket(self.bucket_name)
-            # For emulator: ensure bucket exists
-            if os.environ.get("STORAGE_EMULATOR_HOST"):
-                self._ensure_bucket_exists()
-        return self._bucket
 
     def _ensure_bucket_exists(self) -> None:
         """Create the bucket if it doesn't exist (for emulator only)."""

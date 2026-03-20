@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from automation.config import INTERNAL_URL_SCHEME
 from automation.models import TarballUpload, UploadStatus
 from automation.utils.tarball_validation import (
     EXTERNAL_URL_SCHEMES,
@@ -44,10 +45,7 @@ class TestParseInternalUploadId:
 
     def test_wrong_path_returns_none(self):
         """Wrong path structure returns None."""
-        from automation.config import get_settings
-
-        scheme = get_settings().internal_url_scheme
-        url = f"{scheme}://files/12345678-1234-1234-1234-123456789abc"
+        url = f"{INTERNAL_URL_SCHEME}://files/12345678-1234-1234-1234-123456789abc"
         assert parse_internal_upload_id(url) is None
 
     def test_external_url_returns_none(self):
@@ -62,11 +60,8 @@ class TestIsInternalUrl:
 
     def test_internal_url(self):
         """Recognizes internal URLs with configured scheme."""
-        from automation.config import get_settings
-
-        scheme = get_settings().internal_url_scheme
-        assert is_internal_url(f"{scheme}://uploads/123")
-        assert is_internal_url(f"{scheme}://anything")
+        assert is_internal_url(f"{INTERNAL_URL_SCHEME}://uploads/123")
+        assert is_internal_url(f"{INTERNAL_URL_SCHEME}://anything")
 
     def test_external_url(self):
         """External URLs return False."""
@@ -313,12 +308,9 @@ class TestValidateTarballPath:
         self, mock_session, user_id, org_id
     ):
         """Malformed internal URL raises 422."""
-        from automation.config import get_settings
-
-        scheme = get_settings().internal_url_scheme
         with pytest.raises(HTTPException) as exc_info:
             await validate_tarball_path(
-                f"{scheme}://invalid/path",
+                f"{INTERNAL_URL_SCHEME}://invalid/path",
                 user_id,
                 org_id,
                 mock_session,
