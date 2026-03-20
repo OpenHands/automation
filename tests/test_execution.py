@@ -18,8 +18,12 @@ class TestBuildTarball:
         with tarfile.open(fileobj=io.BytesIO(tb), mode="r:gz") as tar:
             names = sorted(tar.getnames())
             assert names == ["bin.dat", "hello.txt"]
-            assert tar.extractfile("hello.txt").read() == b"world"
-            assert tar.extractfile("bin.dat").read() == b"\x00\x01"
+            hello = tar.extractfile("hello.txt")
+            assert hello is not None
+            assert hello.read() == b"world"
+            bindat = tar.extractfile("bin.dat")
+            assert bindat is not None
+            assert bindat.read() == b"\x00\x01"
 
     def test_empty_files(self):
         tb = build_tarball({})
@@ -36,7 +40,9 @@ class TestBuildTarball:
         with tarfile.open(fileobj=io.BytesIO(tb), mode="r:gz") as tar:
             assert "setup.sh" in tar.getnames()
             assert "run.py" in tar.getnames()
-            setup = tar.extractfile("setup.sh").read().decode()
+            setup_file = tar.extractfile("setup.sh")
+            assert setup_file is not None
+            setup = setup_file.read().decode()
             assert "pip install" in setup
 
 
