@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""End-to-end test simulating the dispatcher lifecycle.
+"""End-to-end dispatcher lifecycle test with live stdout streaming.
 
-Mirrors the exact flow in automation/dispatcher.py:
-  1. Build tarball  (dispatcher downloads from tarball_path)
-  2. Call run_automation() with callback_url + run_id
-     (dispatcher calls this after minting a per-user API key)
-  3. Verify sandbox result
+Simulates exactly what dispatcher._execute_run() does:
+  1. Create sandbox  (dispatcher mints per-user API key first)
+  2. Upload tarball  (dispatcher downloads from tarball_path)
+  3. Start bash command (extract tar, run setup.sh, run entrypoint)
+  4. Stream stdout/stderr in real-time via search_bash_events
+  5. Delete sandbox
 
-Each test documents which dispatcher step it exercises.
+Uses start_bash_command + search_bash_events polling instead of
+the blocking execute_bash_command so output appears on your local
+terminal as it's produced inside the sandbox.
 
 Usage
 -----
     export OPENHANDS_API_KEY="sk-oh-..."
-
-    # Run a single lifecycle scenario
-    python scripts/test_automation.py --test dispatch-basic
-
-    # Run all scenarios
-    python scripts/test_automation.py --test all
-
-    # Override API URL (defaults to staging)
+    python scripts/test_automation.py
     python scripts/test_automation.py --api-url https://staging.all-hands.dev
 """
 
@@ -27,356 +23,335 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import logging
 import os
 import sys
+import tarfile
 import time
-import traceback
-import uuid
 
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from automation.execution import (  # noqa: E402
-    AutomationResult,
-    build_tarball,
-    run_automation,
-)
+import httpx
 
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    format="%(asctime)s %(levelname)-8s %(message)s",
 )
-logger = logging.getLogger("test_automation")
+log = logging.getLogger("test_automation")
 
 DEFAULT_API_URL = "https://staging.all-hands.dev"
+TARBALL_PATH = "/tmp/automation.tar.gz"
+WORK_DIR = "/workspace/automation"
+POLL_INTERVAL = 2.0
+SANDBOX_POLL_INTERVAL = 5.0
+SANDBOX_READY_TIMEOUT = 300.0
+DEFAULT_TIMEOUT = 600
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# -- helpers -------------------------------------------------------
 
 
-class TestResult:
-    def __init__(self, name: str):
-        self.name = name
-        self.passed = False
-        self.error: str | None = None
-        self.duration: float = 0.0
+def build_tarball(files: dict[str, str | bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, content in files.items():
+            data = content.encode() if isinstance(content, str) else content
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
-    def __repr__(self) -> str:
-        status = "✅ PASS" if self.passed else "❌ FAIL"
-        return f"{status} {self.name} ({self.duration:.1f}s)"
+
+def _headers(key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {key}"}
 
 
-def _log_result(r: AutomationResult) -> None:
-    """Print the full sandbox execution result for debugging."""
-    logger.info(
-        "sandbox=%s  success=%s  exit_code=%s  error=%s",
-        r.sandbox_id,
-        r.success,
-        r.exit_code,
-        r.error,
+def _agent_headers(session_key: str) -> dict[str, str]:
+    return {"X-Session-API-Key": session_key}
+
+
+# -- sandbox lifecycle ---------------------------------------------
+
+
+async def create_sandbox(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+) -> str:
+    """POST /api/v1/sandboxes -> sandbox_id."""
+    resp = await client.post(
+        f"{api_url}/api/v1/sandboxes",
+        headers=_headers(api_key),
     )
-    if r.stdout:
-        logger.info("--- stdout ---\n%s", r.stdout.rstrip())
-    if r.stderr:
-        logger.info("--- stderr ---\n%s", r.stderr.rstrip())
+    resp.raise_for_status()
+    sandbox_id = resp.json()["id"]
+    log.info("Created sandbox %s", sandbox_id)
+    return sandbox_id
 
 
-# ---------------------------------------------------------------------------
-# Test scenarios — each simulates a different dispatcher path
-# ---------------------------------------------------------------------------
-
-
-async def test_dispatch_basic(api_url: str, api_key: str) -> TestResult:
-    """Simplest dispatch: tarball with a single script, no setup.sh.
-
-    Simulates: dispatcher._execute_run() happy path where the
-    automation has no setup_script_path and a trivial entrypoint.
-    """
-    result = TestResult("dispatch-basic")
-    start = time.monotonic()
-    try:
-        # Step 1: build tarball (dispatcher downloads via _download_tarball)
-        tarball = build_tarball({"main.py": 'print("DISPATCH_OK")'})
-
-        # Step 2: run_automation (dispatcher calls this with per-user key)
-        r = await run_automation(api_url, api_key, tarball, entrypoint="python main.py")
-        _log_result(r)
-
-        # Step 3: verify
-        assert r.success, f"Expected success: {r.error}"
-        assert "DISPATCH_OK" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
-
-
-async def test_dispatch_with_setup(api_url: str, api_key: str) -> TestResult:
-    """Dispatch with setup.sh — installs a dep, entrypoint uses it.
-
-    Simulates: automation with setup_script_path="setup.sh".
-    execution.py runs ``setup.sh`` before the entrypoint.
-    """
-    result = TestResult("dispatch-with-setup")
-    start = time.monotonic()
-    try:
-        tarball = build_tarball(
-            {
-                "setup.sh": "#!/bin/bash\npip install -q httpx\n",
-                "main.py": (
-                    'import httpx\nprint(f"SETUP_OK httpx={httpx.__version__}")\n'
-                ),
-            }
+async def wait_for_sandbox(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+) -> tuple[str, str]:
+    """Poll until RUNNING. Returns (session_api_key, agent_url)."""
+    elapsed = 0.0
+    while elapsed < SANDBOX_READY_TIMEOUT:
+        resp = await client.get(
+            f"{api_url}/api/v1/sandboxes",
+            params={"id": sandbox_id},
+            headers=_headers(api_key),
         )
-        r = await run_automation(api_url, api_key, tarball, entrypoint="python main.py")
-        _log_result(r)
-        assert r.success, f"Setup+run failed: {r.error}"
-        assert "SETUP_OK" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
+        resp.raise_for_status()
+        items = resp.json()
+        if not items:
+            raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
+
+        sb = items[0]
+        status = sb.get("status", "UNKNOWN")
+        log.info("Sandbox %s status: %s (%.0fs)", sandbox_id, status, elapsed)
+
+        if status == "RUNNING":
+            for url_info in sb.get("exposed_urls") or []:
+                if url_info.get("name") == "AGENT_SERVER":
+                    agent_url = url_info["url"].rstrip("/")
+                    session_key = sb.get("session_api_key", "")
+                    log.info("Sandbox ready -> %s", agent_url)
+                    return session_key, agent_url
+            raise RuntimeError(f"No AGENT_SERVER URL for {sandbox_id}")
+
+        if status in ("ERROR", "MISSING"):
+            raise RuntimeError(f"Sandbox {sandbox_id} -> {status}")
+
+        await asyncio.sleep(SANDBOX_POLL_INTERVAL)
+        elapsed += SANDBOX_POLL_INTERVAL
+
+    raise TimeoutError(f"Sandbox {sandbox_id} not ready after {SANDBOX_READY_TIMEOUT}s")
 
 
-async def test_dispatch_env_injection(api_url: str, api_key: str) -> TestResult:
-    """Verify env_vars are exported before the entrypoint.
-
-    Simulates: dispatcher injecting AUTOMATION_EVENT_PAYLOAD and
-    any other env vars into the sandbox execution context.
-    """
-    result = TestResult("dispatch-env-injection")
-    start = time.monotonic()
-    try:
-        tarball = build_tarball({"main.sh": '#!/bin/bash\necho "SECRET=$MY_SECRET"'})
-        r = await run_automation(
-            api_url,
-            api_key,
-            tarball,
-            entrypoint="bash main.sh",
-            env_vars={"MY_SECRET": "hunter2"},
-        )
-        _log_result(r)
-        assert r.success, f"Env injection failed: {r.error}"
-        assert "SECRET=hunter2" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
-
-
-async def test_dispatch_callback_env(api_url: str, api_key: str) -> TestResult:
-    """Verify callback_url and run_id are injected as env vars.
-
-    Simulates: dispatcher._execute_run() constructing the callback
-    URL and passing it to run_automation(). The SDK reads these to
-    POST completion status back to the automation service.
-    """
-    result = TestResult("dispatch-callback-env")
-    start = time.monotonic()
-    fake_run_id = str(uuid.uuid4())
-    callback_url = (
-        f"https://automation.staging.all-hands.dev"
-        f"/api/v1/automations/runs/{fake_run_id}/complete"
+async def upload_tarball(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    data: bytes,
+) -> None:
+    resp = await client.post(
+        f"{agent_url}/api/file/upload/{TARBALL_PATH}",
+        files={"file": ("upload", data)},
+        headers=_agent_headers(session_key),
     )
-    try:
-        tarball = build_tarball(
-            {
-                "main.sh": (
-                    "#!/bin/bash\n"
-                    'echo "CB=$AUTOMATION_CALLBACK_URL"\n'
-                    'echo "RUN=$AUTOMATION_RUN_ID"\n'
-                ),
-            }
-        )
-        r = await run_automation(
-            api_url,
-            api_key,
-            tarball,
-            entrypoint="bash main.sh",
-            callback_url=callback_url,
-            run_id=fake_run_id,
-        )
-        _log_result(r)
-        assert r.success, f"Callback env test failed: {r.error}"
-        assert f"CB={callback_url}" in r.stdout
-        assert f"RUN={fake_run_id}" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
+    resp.raise_for_status()
+    log.info("Uploaded tarball (%d bytes)", len(data))
 
 
-async def test_dispatch_sdk_workspace(api_url: str, api_key: str) -> TestResult:
-    """Install SDK, verify OpenHandsCloudWorkspace is importable.
+async def start_command(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    command: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> str:
+    """POST /api/bash/start_bash_command -> command_id.
 
-    Simulates: the real-world scenario where the tarball contains
-    an SDK script that uses OpenHandsCloudWorkspace in local mode.
+    Non-blocking: returns immediately, command runs in background.
     """
-    result = TestResult("dispatch-sdk-workspace")
-    start = time.monotonic()
-    try:
-        tarball = build_tarball(
-            {
-                "setup.sh": ("#!/bin/bash\npip install -q openhands-workspace\n"),
-                "main.py": (
-                    "from openhands.workspace "
-                    "import OpenHandsCloudWorkspace\n"
-                    'print("SDK_OK")\n'
-                ),
-            }
-        )
-        r = await run_automation(api_url, api_key, tarball, entrypoint="python main.py")
-        _log_result(r)
-        assert r.success, f"SDK import failed: {r.error}"
-        assert "SDK_OK" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
-
-
-async def test_dispatch_failure(api_url: str, api_key: str) -> TestResult:
-    """Entrypoint exits non-zero — dispatcher should see failure.
-
-    Simulates: dispatcher handling a failed run.  The _execute_run()
-    path calls _mark_run_failed() when result.success is False.
-    """
-    result = TestResult("dispatch-failure")
-    start = time.monotonic()
-    try:
-        tarball = build_tarball({"main.sh": "#!/bin/bash\nexit 42\n"})
-        r = await run_automation(api_url, api_key, tarball, entrypoint="bash main.sh")
-        _log_result(r)
-        assert not r.success, "Expected failure, got success"
-        assert r.exit_code == 42, f"Expected exit 42, got {r.exit_code}"
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
-
-
-async def test_dispatch_full_lifecycle(api_url: str, api_key: str) -> TestResult:
-    """Full dispatcher lifecycle: setup → entrypoint → callback env → output.
-
-    Combines all dispatcher steps in a single run to simulate the
-    complete happy path: tarball with setup.sh, env vars, callback
-    env injection, and SDK availability — all verified in one shot.
-    """
-    result = TestResult("dispatch-full-lifecycle")
-    start = time.monotonic()
-    fake_run_id = str(uuid.uuid4())
-    callback_url = (
-        f"https://automation.staging.all-hands.dev"
-        f"/api/v1/automations/runs/{fake_run_id}/complete"
+    resp = await client.post(
+        f"{agent_url}/api/bash/start_bash_command",
+        json={"command": command, "timeout": timeout},
+        headers=_agent_headers(session_key),
     )
+    resp.raise_for_status()
+    body = resp.json()
+    cmd_id = body.get("id", "")
+    log.info("Started command %s", cmd_id)
+    return cmd_id
+
+
+async def stream_output(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> tuple[int | None, str, str]:
+    """Poll search_bash_events, print stdout live.
+
+    Returns (exit_code, full_stdout, full_stderr).
+    """
+    headers = _agent_headers(session_key)
+    last_order: int | None = None
+    all_stdout: list[str] = []
+    all_stderr: list[str] = []
+    exit_code: int | None = None
+    elapsed = 0.0
+
+    while elapsed < timeout:
+        params: dict[str, str] = {
+            "kind": "BashOutput",
+            "order_by": "TIMESTAMP",
+        }
+        if last_order is not None:
+            params["min_order"] = str(last_order + 1)
+
+        resp = await client.get(
+            f"{agent_url}/api/bash/bash_events/search",
+            params=params,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items", [])
+
+        for item in items:
+            order = item.get("order", 0)
+            if last_order is None or order > last_order:
+                last_order = order
+
+            stdout = item.get("stdout") or ""
+            stderr = item.get("stderr") or ""
+            if stdout:
+                sys.stdout.write(stdout)
+                sys.stdout.flush()
+                all_stdout.append(stdout)
+            if stderr:
+                sys.stderr.write(stderr)
+                sys.stderr.flush()
+                all_stderr.append(stderr)
+
+            ec = item.get("exit_code")
+            if ec is not None:
+                exit_code = ec
+
+        if exit_code is not None:
+            break
+
+        await asyncio.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
+
+    if exit_code is None and elapsed >= timeout:
+        log.warning("Timed out after %.0fs", timeout)
+
+    return exit_code, "".join(all_stdout), "".join(all_stderr)
+
+
+async def delete_sandbox(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+) -> None:
     try:
-        tarball = build_tarball(
-            {
-                "setup.sh": ("#!/bin/bash\npip install -q httpx\n"),
-                "main.py": "\n".join(
-                    [
-                        "import os, httpx",
-                        'print(f"HTTPX={httpx.__version__}")',
-                        "g = os.environ.get",
-                        "print(f\"SECRET={g('MY_SECRET', 'X')}\")",
-                        "print(f\"CB={g('AUTOMATION_CALLBACK_URL', 'X')}\")",
-                        "print(f\"RUN={g('AUTOMATION_RUN_ID', 'X')}\")",
-                        'print("LIFECYCLE_OK")',
-                        "",
-                    ]
-                ),
-            }
+        resp = await client.delete(
+            f"{api_url}/api/v1/sandboxes/{sandbox_id}",
+            params={"sandbox_id": sandbox_id},
+            headers=_headers(api_key),
         )
-        r = await run_automation(
-            api_url,
-            api_key,
-            tarball,
-            entrypoint="python main.py",
-            env_vars={"MY_SECRET": "s3cret"},
-            callback_url=callback_url,
-            run_id=fake_run_id,
-        )
-        _log_result(r)
-        assert r.success, f"Lifecycle test failed: {r.error}"
-        assert "LIFECYCLE_OK" in r.stdout
-        assert "SECRET=s3cret" in r.stdout
-        assert f"CB={callback_url}" in r.stdout
-        assert f"RUN={fake_run_id}" in r.stdout
-        # httpx was installed by setup.sh
-        assert "HTTPX=" in r.stdout
-        result.passed = True
-    except Exception as e:
-        result.error = f"{type(e).__name__}: {e}"
-        logger.error("FAILED: %s", result.error)
-        traceback.print_exc()
-    finally:
-        result.duration = time.monotonic() - start
-    return result
+        if resp.status_code < 300:
+            log.info("Deleted sandbox %s", sandbox_id)
+        else:
+            log.warning("Delete sandbox %s: %s", sandbox_id, resp.text)
+    except Exception:
+        log.exception("Error deleting sandbox %s", sandbox_id)
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-TEST_MAP: dict[str, object] = {
-    "dispatch-basic": test_dispatch_basic,
-    "dispatch-with-setup": test_dispatch_with_setup,
-    "dispatch-env-injection": test_dispatch_env_injection,
-    "dispatch-callback-env": test_dispatch_callback_env,
-    "dispatch-sdk-workspace": test_dispatch_sdk_workspace,
-    "dispatch-failure": test_dispatch_failure,
-    "dispatch-full-lifecycle": test_dispatch_full_lifecycle,
-}
+# -- the test ------------------------------------------------------
 
 
-async def run_tests(api_url: str, api_key: str, test_name: str) -> list[TestResult]:
-    if test_name == "all":
-        tests = list(TEST_MAP.values())
-    else:
-        tests = [TEST_MAP[test_name]]
+async def run_test(api_url: str, api_key: str) -> bool:
+    """Full dispatcher lifecycle with live streaming.
 
-    results: list[TestResult] = []
-    for test_fn in tests:
-        logger.info("=" * 60)
-        logger.info("Running: %s", test_fn.__name__)  # type: ignore[union-attr]
-        logger.info("=" * 60)
-        r = await test_fn(api_url, api_key)  # type: ignore[operator]
-        results.append(r)
-        logger.info("%s\n", r)
-    return results
+    Mirrors dispatcher._execute_run():
+      1. Create sandbox   (dispatcher uses per-user key)
+      2. Upload tarball    (dispatcher downloads from tarball_path)
+      3. Extract + setup.sh + entrypoint  (as one command)
+      4. Stream stdout     (search_bash_events polling)
+      5. Cleanup sandbox
+    """
+    api_url = api_url.rstrip("/")
+    sandbox_id: str | None = None
+
+    tarball = build_tarball(
+        {
+            "setup.sh": (
+                "#!/bin/bash\necho '[setup] installing httpx'\npip install -q httpx\n"
+            ),
+            "main.py": "\n".join(
+                [
+                    "import os, httpx",
+                    "",
+                    "print(f'HTTPX={httpx.__version__}')",
+                    "g = os.environ.get",
+                    'print(f\'CALLBACK={g("AUTOMATION_CALLBACK_URL", "MISSING")}\')',
+                    'print(f\'RUN_ID={g("AUTOMATION_RUN_ID", "MISSING")}\')',
+                    'print(f\'SECRET={g("MY_SECRET", "MISSING")}\')',
+                    "print('ALL_OK')",
+                    "",
+                ]
+            ),
+        }
+    )
+
+    # env vars the dispatcher would inject
+    env_vars = {
+        "MY_SECRET": "hunter2",
+        "AUTOMATION_CALLBACK_URL": "https://example.com/callback",
+        "AUTOMATION_RUN_ID": "test-run-001",
+    }
+    exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
+    entrypoint = "python main.py"
+    cmd = (
+        f"mkdir -p {WORK_DIR}"
+        f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
+        f" && cd {WORK_DIR}"
+        f" && ([ -f setup.sh ] && bash setup.sh || true)"
+        f" && {exports}"
+        f" && {entrypoint}"
+    )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            # 1. Create sandbox
+            sandbox_id = await create_sandbox(client, api_url, api_key)
+
+            # 2. Wait until running
+            session_key, agent_url = await wait_for_sandbox(
+                client, api_url, api_key, sandbox_id
+            )
+
+            # 3. Upload tarball
+            await upload_tarball(client, agent_url, session_key, tarball)
+
+            # 4. Start command (non-blocking)
+            print("\n--- sandbox stdout ---")
+            await start_command(client, agent_url, session_key, cmd)
+
+            # 5. Stream output
+            exit_code, stdout, stderr = await stream_output(
+                client, agent_url, session_key
+            )
+            print("--- end stdout ---\n")
+
+            # 6. Verify
+            ok = exit_code == 0 and "ALL_OK" in stdout
+            if ok:
+                log.info("PASS (exit_code=%s)", exit_code)
+            else:
+                log.error("FAIL (exit_code=%s)", exit_code)
+                if stderr:
+                    log.error("stderr: %s", stderr[:500])
+            return ok
+
+        except Exception:
+            log.exception("Test failed")
+            return False
+        finally:
+            if sandbox_id:
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="E2E test simulating dispatcher lifecycle"
+        description="E2E dispatcher lifecycle test with live stdout streaming",
     )
     parser.add_argument(
         "--api-url",
@@ -386,36 +361,18 @@ def main() -> None:
         "--api-key",
         default=os.environ.get("OPENHANDS_API_KEY", ""),
     )
-    parser.add_argument(
-        "--test",
-        default="dispatch-basic",
-        choices=list(TEST_MAP) + ["all"],
-    )
     args = parser.parse_args()
 
     if not args.api_key:
-        print(
-            "Set OPENHANDS_API_KEY or use --api-key",
-            file=sys.stderr,
-        )
+        print("Set OPENHANDS_API_KEY or use --api-key", file=sys.stderr)
         sys.exit(1)
 
-    logger.info("API URL: %s", args.api_url)
-    logger.info("Test:    %s\n", args.test)
-
-    results = asyncio.run(run_tests(args.api_url, args.api_key, args.test))
-
-    print("\n" + "=" * 60)
-    print("RESULTS")
-    print("=" * 60)
-    for r in results:
-        print(f"  {r}")
-        if r.error:
-            print(f"    Error: {r.error}")
-
-    passed = sum(1 for r in results if r.passed)
-    print(f"\n{passed}/{len(results)} passed")
-    sys.exit(0 if passed == len(results) else 1)
+    log.info("API URL: %s", args.api_url)
+    start = time.monotonic()
+    ok = asyncio.run(run_test(args.api_url, args.api_key))
+    elapsed = time.monotonic() - start
+    log.info("Total time: %.1fs", elapsed)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
