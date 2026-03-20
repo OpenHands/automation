@@ -12,11 +12,11 @@ from dataclasses import dataclass
 import httpx
 from fastapi import Depends, HTTPException, Request, status
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_result,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log,
 )
 
 from automation.config import get_settings
