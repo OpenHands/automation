@@ -21,7 +21,6 @@ dependencies = [
   "pydantic>=2",
   "pydantic-settings>=2",
   "python-json-logger>=3",
-  "python-multipart>=0.0.9",
   "sqlalchemy[asyncio]>=2",
   "uvicorn[standard]>=0.30",
 ]
