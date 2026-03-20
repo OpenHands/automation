@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import io
 import logging
 import os
 import sys
 import tarfile
 import time
+from pathlib import Path
 
 import httpx
 
@@ -47,19 +47,30 @@ SANDBOX_POLL_INTERVAL = 5.0
 SANDBOX_READY_TIMEOUT = 300.0
 DEFAULT_TIMEOUT = 600
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+TEST_TARBALL_DIR = SCRIPT_DIR / "test_tarball"
+
 
 # -- helpers -------------------------------------------------------
 
 
-def build_tarball(files: dict[str, str | bytes]) -> bytes:
+def build_tarball_from_dir(src: Path) -> bytes:
+    """Pack a directory into a .tar.gz in memory, returning the bytes."""
+    import io
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, content in files.items():
-            data = content.encode() if isinstance(content, str) else content
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
+        for path in sorted(src.rglob("*")):
+            if path.is_file():
+                tar.add(path, arcname=path.relative_to(src))
+    data = buf.getvalue()
+    log.info(
+        "Built tarball from %s (%d bytes, %d files)",
+        src,
+        len(data),
+        len(list(src.rglob("*"))),
+    )
+    return data
 
 
 def _headers(key: str) -> dict[str, str]:
@@ -270,26 +281,7 @@ async def run_test(api_url: str, api_key: str) -> bool:
     api_url = api_url.rstrip("/")
     sandbox_id: str | None = None
 
-    tarball = build_tarball(
-        {
-            "setup.sh": (
-                "#!/bin/bash\necho '[setup] installing httpx'\npip install -q httpx\n"
-            ),
-            "main.py": "\n".join(
-                [
-                    "import os, httpx",
-                    "",
-                    "print(f'HTTPX={httpx.__version__}')",
-                    "g = os.environ.get",
-                    'print(f\'CALLBACK={g("AUTOMATION_CALLBACK_URL", "MISSING")}\')',
-                    'print(f\'RUN_ID={g("AUTOMATION_RUN_ID", "MISSING")}\')',
-                    'print(f\'SECRET={g("MY_SECRET", "MISSING")}\')',
-                    "print('ALL_OK')",
-                    "",
-                ]
-            ),
-        }
-    )
+    tarball = build_tarball_from_dir(TEST_TARBALL_DIR)
 
     # env vars the dispatcher would inject
     env_vars = {

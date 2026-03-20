@@ -1,16 +1,17 @@
-2026-03-20 13:37:28,135 INFO     API URL: https://app.all-hands.dev
-2026-03-20 13:37:28,774 INFO     HTTP Request: POST https://app.all-hands.dev/api/v1/sandboxes "HTTP/1.1 200 OK"
-2026-03-20 13:37:28,775 INFO     Created sandbox 5EgAswtnqqwbhBGSy41dKO
-2026-03-20 13:37:29,005 INFO     HTTP Request: GET https://app.all-hands.dev/api/v1/sandboxes?id=5EgAswtnqqwbhBGSy41dKO "HTTP/1.1 200 OK"
-2026-03-20 13:37:29,006 INFO     Sandbox 5EgAswtnqqwbhBGSy41dKO status: RUNNING (0s)
-2026-03-20 13:37:29,006 INFO     Sandbox ready -> https://tafyxjrqpshyiein.prod-runtime.all-hands.dev
-2026-03-20 13:37:29,148 INFO     HTTP Request: POST https://tafyxjrqpshyiein.prod-runtime.all-hands.dev/api/file/upload//tmp/automation.tar.gz "HTTP/1.1 200 OK"
-2026-03-20 13:37:29,149 INFO     Uploaded tarball (319 bytes)
-2026-03-20 13:37:29,151 INFO     HTTP Request: POST https://tafyxjrqpshyiein.prod-runtime.all-hands.dev/api/bash/start_bash_command "HTTP/1.1 200 OK"
-2026-03-20 13:37:29,151 INFO     Started command 08a61c95e0b248ceb809b8718cbf4c3e
-2026-03-20 13:37:29,151 INFO     --- sandbox stdout ---
-2026-03-20 13:37:29,154 INFO     HTTP Request: GET https://tafyxjrqpshyiein.prod-runtime.all-hands.dev/api/bash/bash_events/search?kind=BashOutput&order_by=TIMESTAMP "HTTP/1.1 200 OK"
-2026-03-20 13:37:31,160 INFO     HTTP Request: GET https://tafyxjrqpshyiein.prod-runtime.all-hands.dev/api/bash/bash_events/search?kind=BashOutput&order_by=TIMESTAMP&min_order=1 "HTTP/1.1 200 OK"
+2026-03-20 13:43:37,333 INFO     API URL: https://app.all-hands.dev
+2026-03-20 13:43:37,335 INFO     Built tarball from /workspace/automation/scripts/test_tarball (429 bytes, 2 files)
+2026-03-20 13:43:38,173 INFO     HTTP Request: POST https://app.all-hands.dev/api/v1/sandboxes "HTTP/1.1 200 OK"
+2026-03-20 13:43:38,173 INFO     Created sandbox 6lg3GbCV4FYoiw7DuShlKF
+2026-03-20 13:43:38,404 INFO     HTTP Request: GET https://app.all-hands.dev/api/v1/sandboxes?id=6lg3GbCV4FYoiw7DuShlKF "HTTP/1.1 200 OK"
+2026-03-20 13:43:38,404 INFO     Sandbox 6lg3GbCV4FYoiw7DuShlKF status: RUNNING (0s)
+2026-03-20 13:43:38,404 INFO     Sandbox ready -> https://fnwfugougazfbhnv.prod-runtime.all-hands.dev
+2026-03-20 13:43:38,449 INFO     HTTP Request: POST https://fnwfugougazfbhnv.prod-runtime.all-hands.dev/api/file/upload//tmp/automation.tar.gz "HTTP/1.1 200 OK"
+2026-03-20 13:43:38,449 INFO     Uploaded tarball (429 bytes)
+2026-03-20 13:43:38,454 INFO     HTTP Request: POST https://fnwfugougazfbhnv.prod-runtime.all-hands.dev/api/bash/start_bash_command "HTTP/1.1 200 OK"
+2026-03-20 13:43:38,454 INFO     Started command cf7dc00a42a4408baed47170050220a9
+2026-03-20 13:43:38,454 INFO     --- sandbox stdout ---
+2026-03-20 13:43:38,458 INFO     HTTP Request: GET https://fnwfugougazfbhnv.prod-runtime.all-hands.dev/api/bash/bash_events/search?kind=BashOutput&order_by=TIMESTAMP "HTTP/1.1 200 OK"
+2026-03-20 13:43:40,464 INFO     HTTP Request: GET https://fnwfugougazfbhnv.prod-runtime.all-hands.dev/api/bash/bash_events/search?kind=BashOutput&order_by=TIMESTAMP&min_order=1 "HTTP/1.1 200 OK"
 [setup] installing httpx
 HTTPX=0.28.1
 CALLBACK=https://example.com/callback
@@ -19,8 +20,8 @@ SECRET=hunter2
 ALL_OK
   WARNING: The script httpx is installed in '/home/openhands/.local/bin' which is not on PATH.
   Consider adding this directory to PATH or, if you prefer to suppress this warning, use --no-warn-script-location.
-2026-03-20 13:37:31,160 INFO     --- end stdout (exit_code=0) ---
-2026-03-20 13:37:31,160 INFO     PASS
-2026-03-20 13:37:31,589 INFO     HTTP Request: DELETE https://app.all-hands.dev/api/v1/sandboxes/5EgAswtnqqwbhBGSy41dKO?sandbox_id=5EgAswtnqqwbhBGSy41dKO "HTTP/1.1 200 OK"
-2026-03-20 13:37:31,590 INFO     Deleted sandbox 5EgAswtnqqwbhBGSy41dKO
-2026-03-20 13:37:31,591 INFO     Total time: 3.5s
+2026-03-20 13:43:40,465 INFO     --- end stdout (exit_code=0) ---
+2026-03-20 13:43:40,465 INFO     PASS
+2026-03-20 13:43:41,033 INFO     HTTP Request: DELETE https://app.all-hands.dev/api/v1/sandboxes/6lg3GbCV4FYoiw7DuShlKF?sandbox_id=6lg3GbCV4FYoiw7DuShlKF "HTTP/1.1 200 OK"
+2026-03-20 13:43:41,034 INFO     Deleted sandbox 6lg3GbCV4FYoiw7DuShlKF
+2026-03-20 13:43:41,035 INFO     Total time: 3.7s
