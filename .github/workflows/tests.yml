@@ -33,8 +33,9 @@ jobs:
                   CI=true uv run python -m pytest -vvs \
                     --cov=automation \
                     --cov-report=term-missing \
+                    --cov-report=xml:coverage.xml \
                     --cov-fail-under=0 \
-                    tests/unit
+                    tests/
 
             - name: Pytest coverage PR comment
               if: always() && github.event_name == 'pull_request'

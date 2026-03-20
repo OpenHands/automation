@@ -1,0 +1,101 @@
+# Workflow that builds and pushes the automation docker image to ghcr.io
+name: Docker
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual trigger"
+        required: true
+        default: ""
+
+# If triggered by a PR, it will be in the same group. However, each commit on main will be in its own unique group
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.head_ref && github.ref) || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: openhands/automation
+  RELEVANT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  ghcr_build:
+    name: Build and Push Automation Image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get short SHA
+        id: short_sha
+        run: echo "SHORT_SHA=$(echo ${{ env.RELEVANT_SHA }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+          flavor: |
+            latest=auto
+            prefix=
+            suffix=
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: true
+
+      - name: Build and push Docker image
+        if: "!github.event.pull_request.head.repo.fork"
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: containers/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          provenance: true
+          sbom: true
+
+      # Forked repos can't push to GHCR, so we just build to verify the image builds
+      - name: Build Docker image (fork)
+        if: github.event.pull_request.head.repo.fork
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: containers/Dockerfile
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEVANT_SHA }}
+          platforms: linux/amd64
