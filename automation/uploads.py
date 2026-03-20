@@ -1,7 +1,6 @@
 """FastAPI router for tarball uploads."""
 
 import uuid
-from enum import StrEnum
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from google.cloud.exceptions import NotFound
@@ -42,14 +41,6 @@ def get_file_store() -> GoogleCloudFileStore:
 # --- Schemas ---
 
 
-class UploadStatusEnum(StrEnum):
-    """Upload status for API responses."""
-
-    UPLOADING = "UPLOADING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
 class UploadResponse(BaseModel):
     """Response for a single upload."""
 
@@ -58,7 +49,7 @@ class UploadResponse(BaseModel):
     org_id: uuid.UUID
     name: str
     description: str | None
-    status: UploadStatusEnum
+    status: UploadStatus
     error_message: str | None
     size_bytes: int | None
     tarball_path: str | None  # Only set when status is COMPLETED
@@ -84,7 +75,7 @@ class UploadResponse(BaseModel):
             org_id=upload.org_id,
             name=upload.name,
             description=upload.description,
-            status=UploadStatusEnum(upload.status.value),
+            status=upload.status,
             error_message=upload.error_message,
             size_bytes=upload.size_bytes,
             tarball_path=tarball_path,
@@ -204,6 +195,17 @@ async def create_upload(
         upload.error_message = f"File size exceeds limit of {MAX_UPLOAD_SIZE} bytes"
         upload.size_bytes = e.actual_size
 
+    except Exception as e:
+        # Handle any other errors (network failure, GCS down, permissions, etc.)
+        automation_logger.exception("Upload failed unexpectedly: %s", e)
+        upload.status = UploadStatus.FAILED
+        upload.error_message = f"Upload failed: {e!s}"
+        # Best-effort cleanup of partial file
+        try:
+            file_store.delete(storage_path)
+        except Exception:
+            pass
+
     await session.flush()
     await session.refresh(upload)
 
@@ -214,7 +216,7 @@ async def create_upload(
 async def list_uploads(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    status_filter: UploadStatusEnum | None = Query(default=None, alias="status"),
+    status_filter: UploadStatus | None = Query(default=None, alias="status"),
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> UploadListResponse:
@@ -229,9 +231,7 @@ async def list_uploads(
     )
 
     if status_filter is not None:
-        base_query = base_query.where(
-            TarballUpload.status == UploadStatus(status_filter.value)
-        )
+        base_query = base_query.where(TarballUpload.status == status_filter)
 
     # Count total
     count_result = await session.execute(

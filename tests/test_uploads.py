@@ -14,7 +14,6 @@ from automation.storage.google_cloud import FileSizeLimitExceeded
 from automation.uploads import (
     MAX_UPLOAD_SIZE,
     UploadResponse,
-    UploadStatusEnum,
     _build_storage_path,
 )
 
@@ -63,7 +62,7 @@ class TestUploadResponse:
 
         response = UploadResponse.from_model(upload)
 
-        assert response.status == UploadStatusEnum.COMPLETED
+        assert response.status == UploadStatus.COMPLETED
         # tarball_path uses configurable internal URL scheme
         assert response.tarball_path == build_internal_url(upload_id)
 
@@ -86,7 +85,7 @@ class TestUploadResponse:
 
         response = UploadResponse.from_model(upload)
 
-        assert response.status == UploadStatusEnum.FAILED
+        assert response.status == UploadStatus.FAILED
         assert response.tarball_path is None  # Not exposed for failed uploads
         assert response.error_message == "File too large"
 
