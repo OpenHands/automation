@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from cachetools import TTLCache
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
@@ -280,26 +281,38 @@ class TestAuthCache:
 
     async def test_cache_expires_after_ttl(self, mock_request, mock_http_client):
         """Cache entry expires after TTL and API is called again."""
-        mock_request.headers.get.return_value = "Bearer expiring-key"
+        import asyncio
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "user_id": str(TEST_USER_ID),
-            "org_id": str(TEST_ORG_ID),
-        }
-        mock_http_client.get = AsyncMock(return_value=mock_response)
+        import automation.auth as auth_module
 
-        # First call
-        await authenticate_request(mock_request, client=mock_http_client)
-        assert mock_http_client.get.call_count == 1
+        # Use a short TTL for testing (0.5 seconds)
+        test_ttl = 0.5
+        original_cache = auth_module._auth_cache
+        auth_module._auth_cache = TTLCache(maxsize=1024, ttl=test_ttl)
 
-        # Expire the cache entry by clearing it (simulates TTL expiry)
-        clear_auth_cache()
+        try:
+            mock_request.headers.get.return_value = "Bearer expiring-key"
 
-        # Second call after "expiry" - should hit API again
-        await authenticate_request(mock_request, client=mock_http_client)
-        assert mock_http_client.get.call_count == 2
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "user_id": str(TEST_USER_ID),
+                "org_id": str(TEST_ORG_ID),
+            }
+            mock_http_client.get = AsyncMock(return_value=mock_response)
+
+            # First call
+            await authenticate_request(mock_request, client=mock_http_client)
+            assert mock_http_client.get.call_count == 1
+
+            # Wait for TTL to expire (add buffer for timing)
+            await asyncio.sleep(test_ttl + 0.1)
+
+            # Second call after expiry - should hit API again
+            await authenticate_request(mock_request, client=mock_http_client)
+            assert mock_http_client.get.call_count == 2
+        finally:
+            auth_module._auth_cache = original_cache
 
     async def test_different_keys_cached_separately(
         self, mock_request, mock_http_client

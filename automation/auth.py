@@ -27,7 +27,7 @@ from automation.config import get_settings
 logger = logging.getLogger("automation.auth")
 
 # Cache TTL in seconds
-AUTH_CACHE_TTL_SECONDS = 20
+AUTH_CACHE_TTL_SECONDS = 20.0
 
 # In-memory cache for authenticated users with 20 second TTL
 _auth_cache: TTLCache[str, "AuthenticatedUser"] = TTLCache(
@@ -156,6 +156,8 @@ async def authenticate_request(
     if cached_user is not None:
         logger.debug("Auth cache hit for user %s", cached_user.user_id)
         return cached_user
+
+    logger.debug("Auth cache miss, validating with OpenHands API")
 
     settings = get_settings()
     try:
