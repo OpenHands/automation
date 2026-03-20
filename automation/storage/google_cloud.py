@@ -1,8 +1,20 @@
 import os
+from collections.abc import AsyncIterator
 
 from google.cloud import storage
 
 from automation.storage.file_store import FileStore
+
+
+class FileSizeLimitExceeded(Exception):
+    """Raised when upload exceeds the maximum allowed size."""
+
+    def __init__(self, max_size: int, actual_size: int):
+        self.max_size = max_size
+        self.actual_size = actual_size
+        super().__init__(
+            f"File size {actual_size} bytes exceeds limit of {max_size} bytes"
+        )
 
 
 # All files are stored under this prefix in the bucket
@@ -136,3 +148,52 @@ class GoogleCloudFileStore(FileStore):
         full_path = self._prefixed_path(path)
         blob = self.bucket.blob(full_path)
         blob.delete()
+
+    async def write_stream(
+        self,
+        path: str,
+        stream: AsyncIterator[bytes],
+        max_size: int | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        """
+        Stream content to a file, enforcing an optional size limit.
+
+        Streams data chunk by chunk to GCS. If max_size is specified and
+        the total size exceeds it, raises FileSizeLimitExceeded. Note that
+        some data may have already been written to GCS when this happens.
+
+        Args:
+            path: The path/key in the bucket to write to (will be prefixed
+                  with "automation/").
+            stream: An async iterator yielding bytes chunks.
+            max_size: Maximum allowed file size in bytes. If None, no limit.
+            content_type: MIME type for the uploaded file.
+
+        Returns:
+            The total number of bytes written.
+
+        Raises:
+            FileSizeLimitExceeded: If the stream exceeds max_size bytes.
+        """
+        full_path = self._prefixed_path(path)
+        blob = self.bucket.blob(full_path)
+
+        # Collect chunks while enforcing size limit
+        # For files up to a few MB, buffering is acceptable
+        chunks: list[bytes] = []
+        total_size = 0
+
+        async for chunk in stream:
+            total_size += len(chunk)
+            if max_size is not None and total_size > max_size:
+                # Write what we have so far (partial upload)
+                if chunks:
+                    blob.upload_from_string(b"".join(chunks), content_type=content_type)
+                raise FileSizeLimitExceeded(max_size=max_size, actual_size=total_size)
+            chunks.append(chunk)
+
+        # Upload complete content
+        content = b"".join(chunks)
+        blob.upload_from_string(content, content_type=content_type)
+        return total_size

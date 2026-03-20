@@ -21,6 +21,7 @@ dependencies = [
   "pydantic>=2",
   "pydantic-settings>=2",
   "python-json-logger>=3",
+  "python-multipart>=0.0.9",
   "sqlalchemy[asyncio]>=2",
   "uvicorn[standard]>=0.30",
 ]
@@ -74,6 +75,8 @@ extend-select = ["B006", "B008", "B039", "RUF012"]
 extend-immutable-calls = [
     "fastapi.Depends",
     "fastapi.params.Depends",
+    "fastapi.Query",
+    "fastapi.params.Query",
 ]
 
 [tool.ruff.lint.isort]
