@@ -184,7 +184,9 @@ class GoogleCloudFileStore(FileStore):
         total_size = 0
 
         # Stream directly to GCS using blob.open() for true streaming
-        with blob.open("wb") as f:
+        # Type ignore: blob.open("wb") returns BlobWriter which accepts bytes,
+        # but pyright incorrectly infers it as a text writer
+        with blob.open("wb") as f:  # type: ignore[arg-type]
             async for chunk in stream:
                 total_size += len(chunk)
                 if max_size is not None and total_size > max_size:
@@ -193,6 +195,6 @@ class GoogleCloudFileStore(FileStore):
                     raise FileSizeLimitExceeded(
                         max_size=max_size, actual_size=total_size
                     )
-                f.write(chunk)
+                f.write(chunk)  # type: ignore[arg-type]
 
         return total_size
