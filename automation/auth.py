@@ -30,7 +30,9 @@ logger = logging.getLogger("automation.auth")
 AUTH_CACHE_TTL_SECONDS = 20
 
 # In-memory cache for authenticated users with 20 second TTL
-_auth_cache: TTLCache[str, "AuthenticatedUser"] = TTLCache(maxsize=1024, ttl=AUTH_CACHE_TTL_SECONDS)
+_auth_cache: TTLCache[str, "AuthenticatedUser"] = TTLCache(
+    maxsize=1024, ttl=AUTH_CACHE_TTL_SECONDS
+)
 
 # Default timeout for HTTP client
 HTTP_CLIENT_TIMEOUT = 10.0

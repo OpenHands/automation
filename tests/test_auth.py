@@ -301,7 +301,9 @@ class TestAuthCache:
         await authenticate_request(mock_request, client=mock_http_client)
         assert mock_http_client.get.call_count == 2
 
-    async def test_different_keys_cached_separately(self, mock_request, mock_http_client):
+    async def test_different_keys_cached_separately(
+        self, mock_request, mock_http_client
+    ):
         """Different API keys are cached independently."""
         user2_id = uuid.UUID("22222222-2222-2222-2222-222222222222")
         org2_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
