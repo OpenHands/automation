@@ -13,7 +13,7 @@ UNDERLINE := \033[4m
 # Required uv version
 REQUIRED_UV_VERSION := 0.8.13
 
-.PHONY: build format lint clean help check-uv-version
+.PHONY: build format lint clean help check-uv-version docker-build docker-run
 
 # Default target
 .DEFAULT_GOAL := help
@@ -68,6 +68,16 @@ clean:
 	@$(ECHO) "$(GREEN)Cache files cleaned.$(RESET)"
 
 
+docker-build:
+	@$(ECHO) "$(YELLOW)Building Docker image...$(RESET)"
+	@docker build -t ghcr.io/openhands/automation:local -f containers/Dockerfile .
+	@$(ECHO) "$(GREEN)Docker image built successfully.$(RESET)"
+
+docker-run:
+	@$(ECHO) "$(YELLOW)Running Docker container...$(RESET)"
+	@docker run -p 8000:8000 ghcr.io/openhands/automation:local
+	@$(ECHO) "$(GREEN)Docker container running.$(RESET)"
+
 # Show help
 help:
 	@$(ECHO) "$(CYAN)OpenHands Automation Makefile$(RESET)"
@@ -80,5 +90,7 @@ help:
 	@$(ECHO) "  $(GREEN)lint$(RESET)                 Lint code with ruff"
 	@$(ECHO) "  $(GREEN)pre-commit$(RESET)           Run the pre-commit"
 	@$(ECHO) "  $(GREEN)test$(RESET)                 Run tests"
+	@$(ECHO) "  $(GREEN)docker-build$(RESET)         Build Docker image"
+	@$(ECHO) "  $(GREEN)docker-run$(RESET)           Run Docker container"
 	@$(ECHO) "  $(GREEN)clean$(RESET)                Clean up cache files"
 	@$(ECHO) "  $(GREEN)help$(RESET)                 Show this help message"

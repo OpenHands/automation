@@ -1,9 +1,10 @@
 ---
 repos:
     - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
-      rev: 0.2.1 # or other specific tag
+      rev: 0.2.1
       hooks:
           - id: yamlfmt
+            exclude: ^(migrations/|alembic\.ini)
     - repo: local
       hooks:
           - id: ruff-format
