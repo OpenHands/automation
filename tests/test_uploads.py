@@ -128,7 +128,7 @@ class TestWriteStream:
 
     @pytest.mark.asyncio
     async def test_write_stream_exceeds_limit(self):
-        """Stream upload fails when size limit exceeded."""
+        """Stream upload fails when size limit exceeded and partial upload is deleted."""
         with patch("automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
@@ -161,6 +161,8 @@ class TestWriteStream:
             assert exc_info.value.actual_size == 1500
             # First two chunks should have been written before failure
             assert mock_file.write.call_count == 2
+            # Partial upload should be deleted
+            mock_blob.delete.assert_called_once()
 
 
 class TestFileSizeLimitExceeded:

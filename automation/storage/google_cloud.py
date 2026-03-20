@@ -160,9 +160,8 @@ class GoogleCloudFileStore(FileStore):
         Stream content to a file, enforcing an optional size limit.
 
         Streams data chunk by chunk directly to GCS. If max_size is specified
-        and the total size exceeds it, raises FileSizeLimitExceeded. Note that
-        some data may have already been written to GCS when this happens
-        (partial upload).
+        and the total size exceeds it, the partial upload is deleted and
+        FileSizeLimitExceeded is raised.
 
         Args:
             path: The path/key in the bucket to write to (will be prefixed
@@ -182,6 +181,8 @@ class GoogleCloudFileStore(FileStore):
         blob.content_type = content_type
 
         total_size = 0
+        size_exceeded = False
+        exceeded_size = 0
 
         # Stream directly to GCS using blob.open() for true streaming
         # Type ignore: blob.open("wb") returns BlobWriter which accepts bytes,
@@ -190,11 +191,18 @@ class GoogleCloudFileStore(FileStore):
             async for chunk in stream:
                 total_size += len(chunk)
                 if max_size is not None and total_size > max_size:
-                    # Close the file (partial upload written)
-                    # and raise the exception
-                    raise FileSizeLimitExceeded(
-                        max_size=max_size, actual_size=total_size
-                    )
+                    size_exceeded = True
+                    exceeded_size = total_size
+                    break
                 f.write(chunk)  # type: ignore[arg-type]
+
+        # If size limit was exceeded, delete the partial upload and raise
+        if size_exceeded:
+            try:
+                blob.delete()
+            except Exception:
+                # Best effort cleanup - blob may not exist if upload failed early
+                pass
+            raise FileSizeLimitExceeded(max_size=max_size, actual_size=exceeded_size)
 
         return total_size

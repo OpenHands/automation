@@ -116,8 +116,8 @@ async def create_upload(
     """Upload a tarball for use in automations.
 
     Streams the file directly to GCS with a 1MB size limit. If the upload
-    exceeds the limit, streaming stops immediately and the upload is marked
-    as FAILED. The partial upload remains in storage until explicitly deleted.
+    exceeds the limit, streaming stops immediately, the partial upload is
+    deleted from storage, and the upload is marked as FAILED.
 
     The request body should be the raw tarball file content (not multipart).
 
@@ -168,7 +168,7 @@ async def create_upload(
         upload.size_bytes = size_bytes
 
     except FileSizeLimitExceeded as e:
-        # Mark as failed but don't delete from storage
+        # Partial upload already deleted by write_stream, just update DB record
         upload.status = UploadStatus.FAILED
         upload.error_message = f"File size exceeds limit of {MAX_UPLOAD_SIZE} bytes"
         upload.size_bytes = e.actual_size
