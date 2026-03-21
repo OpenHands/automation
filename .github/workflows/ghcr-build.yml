@@ -33,6 +33,8 @@ jobs:
         permissions:
             contents: read
             packages: write
+        outputs:
+            image_pushed: ${{ steps.build-push.outcome == 'success' }}
         steps:
             - name: Checkout
               uses: actions/checkout@v4
@@ -76,6 +78,7 @@ jobs:
                   DOCKER_METADATA_PR_HEAD_SHA: true
 
             - name: Build and push Docker image
+              id: build-push
               if: '!github.event.pull_request.head.repo.fork'
               uses: docker/build-push-action@v5
               with:
@@ -100,3 +103,21 @@ jobs:
                   push: false
                   tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEVANT_SHA }}
                   platforms: linux/amd64
+
+    trigger-deploy-preview:
+        name: Trigger Deploy Preview
+        needs: ghcr_build
+        # Only trigger for PRs from non-fork repos after successful image push
+        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Trigger deploy preview workflow
+              env:
+                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+              run: |
+                  gh workflow run trigger-deploy-preview.yml \
+                    --repo ${{ github.repository }} \
+                    --ref main \
+                    -f pr_number=${{ github.event.pull_request.number }} \
+                    -f head_sha=${{ env.RELEVANT_SHA }} \
+                    -f pr_title="${{ github.event.pull_request.title }}"
