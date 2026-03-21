@@ -66,8 +66,9 @@ jobs:
                   git checkout -B "$BRANCH_NAME" "origin/$BASE_BRANCH"
 
                   # Update AUTOMATION_SHA in deploy.yaml
-                  echo "Updating AUTOMATION_SHA to ${{ inputs.head_sha }}"
-                  yq e -i '.env.AUTOMATION_SHA = "${{ inputs.head_sha }}"' .github/workflows/deploy.yaml
+                  HEAD_SHA="${{ inputs.head_sha }}"
+                  echo "Updating AUTOMATION_SHA to $HEAD_SHA"
+                  yq e -i ".env.AUTOMATION_SHA = \"${HEAD_SHA}\"" .github/workflows/deploy.yaml
 
                   # Check if there are changes to commit
                   if git diff --quiet; then
@@ -76,14 +77,15 @@ jobs:
                   else
                     echo "Changes detected, committing"
                     git add .github/workflows/deploy.yaml
-                    git commit -m "Update AUTOMATION_SHA to ${{ inputs.head_sha }}
+                    git commit -m "Update AUTOMATION_SHA to $HEAD_SHA
 
                   Automation PR: https://github.com/${{ github.repository }}/pull/${{ inputs.pr_number }}
-                  Commit: ${{ inputs.head_sha }}"
-
-                    git push --force-with-lease origin "$BRANCH_NAME"
+                  Commit: $HEAD_SHA"
                     echo "has_changes=true" >> $GITHUB_OUTPUT
                   fi
+
+                  # Always push the branch so it exists remotely for PR creation
+                  git push --force origin "$BRANCH_NAME"
 
                   echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
