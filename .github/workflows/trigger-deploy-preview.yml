@@ -22,6 +22,10 @@ on:
             ALLHANDS_BOT_GITHUB_PAT:
                 required: true
 
+concurrency:
+    group: deploy-preview-${{ inputs.pr_number }}
+    cancel-in-progress: false
+
 env:
     DEPLOY_REPO: OpenHands/deploy
     BASE_BRANCH: automations-project
@@ -65,10 +69,19 @@ jobs:
                   git fetch origin "$BASE_BRANCH"
                   git checkout -B "$BRANCH_NAME" "origin/$BASE_BRANCH"
 
+                  # Verify deploy.yaml exists
+                  if [ ! -f .github/workflows/deploy.yaml ]; then
+                    echo "Error: .github/workflows/deploy.yaml not found" >&2
+                    exit 1
+                  fi
+
                   # Update AUTOMATION_SHA in deploy.yaml
                   HEAD_SHA="${{ inputs.head_sha }}"
                   echo "Updating AUTOMATION_SHA to $HEAD_SHA"
-                  yq e -i ".env.AUTOMATION_SHA = \"${HEAD_SHA}\"" .github/workflows/deploy.yaml
+                  if ! yq e -i ".env.AUTOMATION_SHA = \"${HEAD_SHA}\"" .github/workflows/deploy.yaml; then
+                    echo "Error: Failed to update deploy.yaml with yq" >&2
+                    exit 1
+                  fi
 
                   # Check if there are changes to commit
                   if git diff --quiet; then
@@ -94,21 +107,24 @@ jobs:
               env:
                   GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
                   BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
+                  PR_TITLE: ${{ inputs.pr_title }}
               run: |
                   cd deploy-repo
 
                   # Check if PR already exists for this branch
-                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --base "${{ env.BASE_BRANCH }}" --json number,url --jq '.[0]')
+                  if ! EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --base "${{ env.BASE_BRANCH }}" --json number,url --jq '.[0]'); then
+                    echo "Error: Failed to query existing PRs" >&2
+                    exit 1
+                  fi
 
                   if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
                     PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
                     echo "PR already exists: $PR_URL"
                     echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
                   else
-                    # Create new PR against automations-project branch
-                    PR_URL=$(gh pr create \
-                      --title "Preview: Automation PR #${{ inputs.pr_number }}" \
-                      --body "**Preview branch for Automation PR #${{ inputs.pr_number }}**
+                    # Create PR body using heredoc to avoid shell injection from PR title
+                    PR_BODY=$(cat <<EOF
+                  **Preview branch for Automation PR #${{ inputs.pr_number }}**
 
                   This PR was automatically created to test automation changes.
 
@@ -116,9 +132,19 @@ jobs:
                   - \`AUTOMATION_SHA\` → \`${{ inputs.head_sha }}\`
 
                   **Source PR:** https://github.com/${{ github.repository }}/pull/${{ inputs.pr_number }}
-                  **Source PR Title:** ${{ inputs.pr_title }}" \
+                  **Source PR Title:** ${PR_TITLE}
+                  EOF
+                  )
+
+                    # Create new PR against automations-project branch
+                    if ! PR_URL=$(gh pr create \
+                      --title "Preview: Automation PR #${{ inputs.pr_number }}" \
+                      --body "$PR_BODY" \
                       --base "${{ env.BASE_BRANCH }}" \
-                      --head "$BRANCH_NAME")
+                      --head "$BRANCH_NAME"); then
+                      echo "Error: Failed to create PR" >&2
+                      exit 1
+                    fi
 
                     echo "Created new PR: $PR_URL"
                     echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
