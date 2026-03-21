@@ -49,7 +49,11 @@ jobs:
 
             - name: Install yq
               run: |
-                  sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+                  YQ_VERSION="v4.52.4"
+                  YQ_CHECKSUM="0c4d965ea944b64b8fddaf7f27779ee3034e5693263786506ccd1c120f184e8c"
+                  wget -qO /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+                  echo "${YQ_CHECKSUM}  /tmp/yq" | sha256sum -c -
+                  sudo mv /tmp/yq /usr/local/bin/yq
                   sudo chmod +x /usr/local/bin/yq
 
             - name: Update AUTOMATION_SHA and push
