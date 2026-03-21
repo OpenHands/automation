@@ -1,0 +1,242 @@
+---
+# Workflow that creates/updates a deploy repo PR for automation PRs
+# Triggers after the Docker build completes successfully
+name: Trigger Deploy Preview
+
+on:
+    workflow_run:
+        workflows: [Docker]
+        types: [completed]
+
+env:
+    DEPLOY_REPO: OpenHands/deploy
+
+jobs:
+    trigger-deploy:
+        name: Create Deploy Preview PR
+        runs-on: ubuntu-24.04
+        # Only run on successful PR builds (not forks)
+        if: >
+            github.event.workflow_run.conclusion == 'success' &&
+            github.event.workflow_run.event == 'pull_request' &&
+            !github.event.workflow_run.head_repository.fork
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - name: Get PR information
+              id: pr-info
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      // Get the PR associated with this workflow run
+                      const runId = context.payload.workflow_run.id;
+                      const headSha = context.payload.workflow_run.head_sha;
+                      const headBranch = context.payload.workflow_run.head_branch;
+
+                      // Find the PR for this branch
+                      const { data: pullRequests } = await github.rest.pulls.list({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        state: 'open',
+                        head: `${context.repo.owner}:${headBranch}`
+                      });
+
+                      if (pullRequests.length === 0) {
+                        core.setFailed('No open PR found for branch ' + headBranch);
+                        return;
+                      }
+
+                      const pr = pullRequests[0];
+                      core.setOutput('pr_number', pr.number);
+                      core.setOutput('head_sha', headSha);
+                      core.setOutput('head_branch', headBranch);
+                      core.setOutput('pr_title', pr.title);
+
+                      console.log(`Found PR #${pr.number} with SHA ${headSha}`);
+
+            - name: Checkout deploy repo
+              uses: actions/checkout@v4
+              with:
+                  repository: ${{ env.DEPLOY_REPO }}
+                  token: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  fetch-depth: 0
+                  path: deploy-repo
+
+            - name: Check for existing branch and create/update PR
+              id: deploy-pr
+              env:
+                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
+                  PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
+              run: |
+                  cd deploy-repo
+                  BRANCH_NAME="au-pr-${PR_NUMBER}"
+
+                  # Configure git
+                  git config user.name "all-hands-bot"
+                  git config user.email "all-hands-bot@all-hands.dev"
+
+                  # Check if branch exists on remote
+                  if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+                    echo "Branch $BRANCH_NAME exists, checking it out"
+                    git fetch origin "$BRANCH_NAME"
+                    git checkout "$BRANCH_NAME"
+                    git pull origin "$BRANCH_NAME"
+                  else
+                    echo "Creating new branch $BRANCH_NAME"
+                    git checkout -b "$BRANCH_NAME"
+                  fi
+
+                  # Update AUTOMATION_SHA in deploy.yaml using yq
+                  echo "Updating AUTOMATION_SHA to $HEAD_SHA"
+                  if command -v yq &> /dev/null; then
+                    yq e -i ".env.AUTOMATION_SHA = \"$HEAD_SHA\"" .github/workflows/deploy.yaml
+                  else
+                    # Fallback to sed if yq is not available
+                    if grep -q "AUTOMATION_SHA:" .github/workflows/deploy.yaml; then
+                      sed -i "s/AUTOMATION_SHA: \"[a-f0-9]*\"/AUTOMATION_SHA: \"$HEAD_SHA\"/" .github/workflows/deploy.yaml
+                    else
+                      echo "Warning: AUTOMATION_SHA not found in deploy.yaml"
+                      exit 1
+                    fi
+                  fi
+
+                  # Check if there are changes
+                  if git diff --quiet; then
+                    echo "No changes to commit"
+                    echo "has_changes=false" >> $GITHUB_OUTPUT
+                  else
+                    echo "Changes detected, committing"
+                    git add .github/workflows/deploy.yaml
+                    git commit -m "Update AUTOMATION_SHA to ${HEAD_SHA}
+
+                  Automation PR: https://github.com/${{ github.repository }}/pull/${PR_NUMBER}
+                  Commit: ${HEAD_SHA}"
+
+                    git push origin "$BRANCH_NAME"
+                    echo "has_changes=true" >> $GITHUB_OUTPUT
+                  fi
+
+                  echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+            - name: Create or update deploy PR
+              if: steps.deploy-pr.outputs.has_changes == 'true'
+              id: create-pr
+              env:
+                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
+                  PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
+                  BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
+              run: |
+                  cd deploy-repo
+
+                  # Check if PR already exists for this branch
+                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json number,url --jq '.[0]')
+
+                  if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+                    PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
+                    echo "PR already exists: $PR_URL"
+                    echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
+                  else
+                    # Create new PR
+                    PR_URL=$(gh pr create \
+                      --title "Preview: Automation PR #${PR_NUMBER}" \
+                      --body "**Preview branch for Automation PR #${PR_NUMBER}**
+
+                  This PR was automatically created to test automation changes.
+
+                  **Changes:**
+                  - \`AUTOMATION_SHA\` → \`${HEAD_SHA}\`
+
+                  **Source PR:** https://github.com/${{ github.repository }}/pull/${PR_NUMBER}
+                  **Source PR Title:** ${PR_TITLE}" \
+                      --base main \
+                      --head "$BRANCH_NAME")
+
+                    echo "Created new PR: $PR_URL"
+                    echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Get deploy PR URL for existing PR
+              if: steps.deploy-pr.outputs.has_changes != 'true'
+              id: get-existing-pr
+              env:
+                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
+              run: |
+                  cd deploy-repo
+                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json url --jq '.[0].url')
+                  if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+                    echo "deploy_pr_url=$EXISTING_PR" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Comment on automation PR
+              uses: actions/github-script@v7
+              env:
+                  DEPLOY_PR_URL: ${{ steps.create-pr.outputs.deploy_pr_url || steps.get-existing-pr.outputs.deploy_pr_url }}
+                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
+                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
+              with:
+                  script: |
+                      const prNumber = parseInt(process.env.PR_NUMBER);
+                      const deployPrUrl = process.env.DEPLOY_PR_URL;
+                      const headSha = process.env.HEAD_SHA;
+
+                      if (!deployPrUrl) {
+                        console.log('No deploy PR URL available, skipping comment');
+                        return;
+                      }
+
+                      const etTime = new Intl.DateTimeFormat('en-US', {
+                        timeZone: 'America/New_York',
+                        year: 'numeric',
+                        month: 'short',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: true
+                      }).format(new Date());
+
+                      const commentBody = `🚀 **Deploy Preview PR Created/Updated**
+
+                      A deploy preview has been created/updated for this PR.
+
+                      **Deploy PR:** ${deployPrUrl}
+                      **Automation SHA:** \`${headSha}\`
+                      **Last updated:** ${etTime} ET
+
+                      Once the deploy PR's CI passes, the automation service will be deployed to the feature environment.`;
+
+                      // Find existing bot comment
+                      const { data: comments } = await github.rest.issues.listComments({
+                        issue_number: prNumber,
+                        owner: context.repo.owner,
+                        repo: context.repo.repo
+                      });
+
+                      const botComment = comments.find(comment =>
+                        comment.user.login === 'github-actions[bot]' &&
+                        comment.body.includes('Deploy Preview PR Created/Updated')
+                      );
+
+                      if (botComment) {
+                        await github.rest.issues.updateComment({
+                          comment_id: botComment.id,
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          body: commentBody
+                        });
+                        console.log('Updated existing comment');
+                      } else {
+                        await github.rest.issues.createComment({
+                          issue_number: prNumber,
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          body: commentBody
+                        });
+                        console.log('Created new comment');
+                      }
