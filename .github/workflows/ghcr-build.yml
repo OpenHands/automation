@@ -76,7 +76,6 @@ jobs:
                   DOCKER_METADATA_PR_HEAD_SHA: true
 
             - name: Build and push Docker image
-              id: build-push
               if: '!github.event.pull_request.head.repo.fork'
               uses: docker/build-push-action@v5
               with:

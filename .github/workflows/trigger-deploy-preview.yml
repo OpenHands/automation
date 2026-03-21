@@ -58,8 +58,6 @@ jobs:
 
             - name: Update AUTOMATION_SHA and push
               id: deploy-pr
-              env:
-                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
               run: |
                   cd deploy-repo
                   BRANCH_NAME="au-pr-${{ inputs.pr_number }}"
@@ -165,11 +163,6 @@ jobs:
                       const deployPrUrl = process.env.DEPLOY_PR_URL;
                       const headSha = '${{ inputs.head_sha }}';
                       const hasChanges = process.env.HAS_CHANGES === 'true';
-
-                      if (!deployPrUrl) {
-                        console.log('No deploy PR URL available, skipping comment');
-                        return;
-                      }
 
                       const etTime = new Intl.DateTimeFormat('en-US', {
                         timeZone: 'America/New_York',
