@@ -9,7 +9,7 @@ on:
             pr_number:
                 description: The automation PR number
                 required: true
-                type: string
+                type: number
             head_sha:
                 description: The commit SHA to deploy
                 required: true
@@ -34,13 +34,6 @@ jobs:
             contents: read
             pull-requests: write
         steps:
-            - name: Set PR info from inputs
-              id: pr-info
-              run: |
-                  echo "pr_number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
-                  echo "head_sha=${{ inputs.head_sha }}" >> $GITHUB_OUTPUT
-                  echo "pr_title=${{ inputs.pr_title }}" >> $GITHUB_OUTPUT
-
             - name: Checkout deploy repo
               uses: actions/checkout@v4
               with:
@@ -50,75 +43,54 @@ jobs:
                   fetch-depth: 0
                   path: deploy-repo
 
-            - name: Check for existing branch and create/update PR
+            - name: Install yq
+              run: |
+                  sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+                  sudo chmod +x /usr/local/bin/yq
+
+            - name: Update AUTOMATION_SHA and push
               id: deploy-pr
               env:
                   GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
-                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
-                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
-                  PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
               run: |
                   cd deploy-repo
-                  BRANCH_NAME="au-pr-${PR_NUMBER}"
+                  BRANCH_NAME="au-pr-${{ inputs.pr_number }}"
                   BASE_BRANCH="${{ env.BASE_BRANCH }}"
 
                   # Configure git
                   git config user.name "all-hands-bot"
                   git config user.email "all-hands-bot@all-hands.dev"
 
-                  # Check if branch exists on remote
-                  if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
-                    echo "Branch $BRANCH_NAME exists, checking it out"
-                    git fetch origin "$BRANCH_NAME"
-                    git checkout "$BRANCH_NAME"
-                    # Rebase on top of base branch to get latest changes
-                    git fetch origin "$BASE_BRANCH"
-                    git rebase "origin/$BASE_BRANCH" || git rebase --abort
-                  else
-                    echo "Creating new branch $BRANCH_NAME from $BASE_BRANCH"
-                    git checkout -b "$BRANCH_NAME"
-                  fi
+                  # Always create/reset branch from base - simple, one code path
+                  git fetch origin "$BASE_BRANCH"
+                  git checkout -B "$BRANCH_NAME" "origin/$BASE_BRANCH"
 
-                  # Update AUTOMATION_SHA in deploy.yaml using yq
-                  echo "Updating AUTOMATION_SHA to $HEAD_SHA"
-                  if command -v yq &> /dev/null; then
-                    yq e -i ".env.AUTOMATION_SHA = \"$HEAD_SHA\"" .github/workflows/deploy.yaml
-                  else
-                    # Fallback to sed if yq is not available
-                    if grep -q "AUTOMATION_SHA:" .github/workflows/deploy.yaml; then
-                      sed -i "s/AUTOMATION_SHA: \"[a-f0-9]*\"/AUTOMATION_SHA: \"$HEAD_SHA\"/" .github/workflows/deploy.yaml
-                    else
-                      echo "Warning: AUTOMATION_SHA not found in deploy.yaml"
-                      exit 1
-                    fi
-                  fi
+                  # Update AUTOMATION_SHA in deploy.yaml
+                  echo "Updating AUTOMATION_SHA to ${{ inputs.head_sha }}"
+                  yq e -i '.env.AUTOMATION_SHA = "${{ inputs.head_sha }}"' .github/workflows/deploy.yaml
 
-                  # Check if there are changes
+                  # Check if there are changes to commit
                   if git diff --quiet; then
-                    echo "No changes to commit"
+                    echo "No changes to commit - SHA already up to date"
                     echo "has_changes=false" >> $GITHUB_OUTPUT
                   else
                     echo "Changes detected, committing"
                     git add .github/workflows/deploy.yaml
-                    git commit -m "Update AUTOMATION_SHA to ${HEAD_SHA}
+                    git commit -m "Update AUTOMATION_SHA to ${{ inputs.head_sha }}
 
-                  Automation PR: https://github.com/${{ github.repository }}/pull/${PR_NUMBER}
-                  Commit: ${HEAD_SHA}"
+                  Automation PR: https://github.com/${{ github.repository }}/pull/${{ inputs.pr_number }}
+                  Commit: ${{ inputs.head_sha }}"
 
-                    git push origin "$BRANCH_NAME"
+                    git push --force-with-lease origin "$BRANCH_NAME"
                     echo "has_changes=true" >> $GITHUB_OUTPUT
                   fi
 
                   echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
-            - name: Create or update deploy PR
-              if: steps.deploy-pr.outputs.has_changes == 'true'
-              id: create-pr
+            - name: Create or get deploy PR
+              id: manage-pr
               env:
                   GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
-                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
-                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
-                  PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
                   BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
               run: |
                   cd deploy-repo
@@ -133,16 +105,16 @@ jobs:
                   else
                     # Create new PR against automations-project branch
                     PR_URL=$(gh pr create \
-                      --title "Preview: Automation PR #${PR_NUMBER}" \
-                      --body "**Preview branch for Automation PR #${PR_NUMBER}**
+                      --title "Preview: Automation PR #${{ inputs.pr_number }}" \
+                      --body "**Preview branch for Automation PR #${{ inputs.pr_number }}**
 
                   This PR was automatically created to test automation changes.
 
                   **Changes:**
-                  - \`AUTOMATION_SHA\` → \`${HEAD_SHA}\`
+                  - \`AUTOMATION_SHA\` → \`${{ inputs.head_sha }}\`
 
-                  **Source PR:** https://github.com/${{ github.repository }}/pull/${PR_NUMBER}
-                  **Source PR Title:** ${PR_TITLE}" \
+                  **Source PR:** https://github.com/${{ github.repository }}/pull/${{ inputs.pr_number }}
+                  **Source PR Title:** ${{ inputs.pr_title }}" \
                       --base "${{ env.BASE_BRANCH }}" \
                       --head "$BRANCH_NAME")
 
@@ -150,30 +122,17 @@ jobs:
                     echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
                   fi
 
-            - name: Get deploy PR URL for existing PR
-              if: steps.deploy-pr.outputs.has_changes != 'true'
-              id: get-existing-pr
-              env:
-                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
-                  BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
-              run: |
-                  cd deploy-repo
-                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --base "${{ env.BASE_BRANCH }}" --json url --jq '.[0].url')
-                  if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-                    echo "deploy_pr_url=$EXISTING_PR" >> $GITHUB_OUTPUT
-                  fi
-
             - name: Comment on automation PR
               uses: actions/github-script@v7
               env:
-                  DEPLOY_PR_URL: ${{ steps.create-pr.outputs.deploy_pr_url || steps.get-existing-pr.outputs.deploy_pr_url }}
-                  PR_NUMBER: ${{ steps.pr-info.outputs.pr_number }}
-                  HEAD_SHA: ${{ steps.pr-info.outputs.head_sha }}
+                  DEPLOY_PR_URL: ${{ steps.manage-pr.outputs.deploy_pr_url }}
+                  HAS_CHANGES: ${{ steps.deploy-pr.outputs.has_changes }}
               with:
                   script: |
-                      const prNumber = parseInt(process.env.PR_NUMBER);
+                      const prNumber = ${{ inputs.pr_number }};
                       const deployPrUrl = process.env.DEPLOY_PR_URL;
-                      const headSha = process.env.HEAD_SHA;
+                      const headSha = '${{ inputs.head_sha }}';
+                      const hasChanges = process.env.HAS_CHANGES === 'true';
 
                       if (!deployPrUrl) {
                         console.log('No deploy PR URL available, skipping comment');
@@ -191,9 +150,13 @@ jobs:
                         hour12: true
                       }).format(new Date());
 
+                      const statusMessage = hasChanges 
+                        ? 'A deploy preview has been created/updated for this PR.'
+                        : 'No changes needed - deploy preview is already up to date.';
+
                       const commentBody = `🚀 **Deploy Preview PR Created/Updated**
 
-                      A deploy preview has been created/updated for this PR.
+                      ${statusMessage}
 
                       **Deploy PR:** ${deployPrUrl}
                       **Automation SHA:** \`${headSha}\`
