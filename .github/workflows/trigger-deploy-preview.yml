@@ -7,15 +7,15 @@ on:
     workflow_call:
         inputs:
             pr_number:
-                description: 'The automation PR number'
+                description: The automation PR number
                 required: true
                 type: string
             head_sha:
-                description: 'The commit SHA to deploy'
+                description: The commit SHA to deploy
                 required: true
                 type: string
             pr_title:
-                description: 'The PR title'
+                description: The PR title
                 required: true
                 type: string
         secrets:
