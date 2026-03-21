@@ -109,15 +109,10 @@ jobs:
         needs: ghcr_build
         # Only trigger for PRs from non-fork repos after successful image push
         if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
-        runs-on: ubuntu-24.04
-        steps:
-            - name: Trigger deploy preview workflow
-              env:
-                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
-              run: |
-                  gh workflow run trigger-deploy-preview.yml \
-                    --repo ${{ github.repository }} \
-                    --ref main \
-                    -f pr_number=${{ github.event.pull_request.number }} \
-                    -f head_sha=${{ env.RELEVANT_SHA }} \
-                    -f pr_title="${{ github.event.pull_request.title }}"
+        uses: ./.github/workflows/trigger-deploy-preview.yml
+        with:
+            pr_number: ${{ github.event.pull_request.number }}
+            head_sha: ${{ github.event.pull_request.head.sha }}
+            pr_title: ${{ github.event.pull_request.title }}
+        secrets:
+            ALLHANDS_BOT_GITHUB_PAT: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
