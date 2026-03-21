@@ -24,6 +24,7 @@ on:
 
 env:
     DEPLOY_REPO: OpenHands/deploy
+    BASE_BRANCH: automations-project
 
 jobs:
     trigger-deploy:
@@ -44,6 +45,7 @@ jobs:
               uses: actions/checkout@v4
               with:
                   repository: ${{ env.DEPLOY_REPO }}
+                  ref: ${{ env.BASE_BRANCH }}
                   token: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
                   fetch-depth: 0
                   path: deploy-repo
@@ -58,6 +60,7 @@ jobs:
               run: |
                   cd deploy-repo
                   BRANCH_NAME="au-pr-${PR_NUMBER}"
+                  BASE_BRANCH="${{ env.BASE_BRANCH }}"
 
                   # Configure git
                   git config user.name "all-hands-bot"
@@ -68,9 +71,11 @@ jobs:
                     echo "Branch $BRANCH_NAME exists, checking it out"
                     git fetch origin "$BRANCH_NAME"
                     git checkout "$BRANCH_NAME"
-                    git pull origin "$BRANCH_NAME"
+                    # Rebase on top of base branch to get latest changes
+                    git fetch origin "$BASE_BRANCH"
+                    git rebase "origin/$BASE_BRANCH" || git rebase --abort
                   else
-                    echo "Creating new branch $BRANCH_NAME"
+                    echo "Creating new branch $BRANCH_NAME from $BASE_BRANCH"
                     git checkout -b "$BRANCH_NAME"
                   fi
 
@@ -119,14 +124,14 @@ jobs:
                   cd deploy-repo
 
                   # Check if PR already exists for this branch
-                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json number,url --jq '.[0]')
+                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --base "${{ env.BASE_BRANCH }}" --json number,url --jq '.[0]')
 
                   if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
                     PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
                     echo "PR already exists: $PR_URL"
                     echo "deploy_pr_url=$PR_URL" >> $GITHUB_OUTPUT
                   else
-                    # Create new PR
+                    # Create new PR against automations-project branch
                     PR_URL=$(gh pr create \
                       --title "Preview: Automation PR #${PR_NUMBER}" \
                       --body "**Preview branch for Automation PR #${PR_NUMBER}**
@@ -138,7 +143,7 @@ jobs:
 
                   **Source PR:** https://github.com/${{ github.repository }}/pull/${PR_NUMBER}
                   **Source PR Title:** ${PR_TITLE}" \
-                      --base main \
+                      --base "${{ env.BASE_BRANCH }}" \
                       --head "$BRANCH_NAME")
 
                     echo "Created new PR: $PR_URL"
@@ -153,7 +158,7 @@ jobs:
                   BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
               run: |
                   cd deploy-repo
-                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json url --jq '.[0].url')
+                  EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --base "${{ env.BASE_BRANCH }}" --json url --jq '.[0].url')
                   if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
                     echo "deploy_pr_url=$EXISTING_PR" >> $GITHUB_OUTPUT
                   fi
