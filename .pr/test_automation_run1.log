@@ -1,0 +1,48 @@
+2026-03-23 14:36:04,473 INFO     API URL:      https://dispatch-phase1b.staging.all-hands.dev
+2026-03-23 14:36:04,473 INFO     Tarball dir:  /workspace/automation/scripts/test_tarball
+2026-03-23 14:36:04,473 INFO     Entrypoint:   python main.py
+2026-03-23 14:36:04,475 INFO     Built tarball from /workspace/automation/scripts/test_tarball (1585 bytes, 2 files: ['main.py', 'setup.sh'])
+2026-03-23 14:36:05,325 INFO     HTTP Request: POST https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes "HTTP/1.1 200 OK"
+2026-03-23 14:36:05,326 INFO     Created sandbox 5PXEIb3hOHVMI8tuqLQc01
+2026-03-23 14:36:05,514 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:10,850 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:16,110 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:21,399 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:26,643 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:31,981 INFO     HTTP Request: GET https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes?id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:36:31,981 INFO     Sandbox 5PXEIb3hOHVMI8tuqLQc01 ready at https://cbsdpnbcuepquutr.staging-runtime.all-hands.dev
+2026-03-23 14:36:32,016 INFO     HTTP Request: POST https://cbsdpnbcuepquutr.staging-runtime.all-hands.dev/api/file/upload//tmp/automation.tar.gz "HTTP/1.1 200 OK"
+2026-03-23 14:37:21,176 INFO     HTTP Request: POST https://cbsdpnbcuepquutr.staging-runtime.all-hands.dev/api/bash/execute_bash_command "HTTP/1.1 200 OK"
+2026-03-23 14:37:21,824 INFO     HTTP Request: DELETE https://dispatch-phase1b.staging.all-hands.dev/api/v1/sandboxes/5PXEIb3hOHVMI8tuqLQc01?sandbox_id=5PXEIb3hOHVMI8tuqLQc01 "HTTP/1.1 200 OK"
+2026-03-23 14:37:21,824 INFO     Deleted sandbox 5PXEIb3hOHVMI8tuqLQc01
+2026-03-23 14:37:21,825 INFO     === RESULT ===
+2026-03-23 14:37:21,825 INFO       success:    True
+2026-03-23 14:37:21,825 INFO       sandbox_id: 5PXEIb3hOHVMI8tuqLQc01
+2026-03-23 14:37:21,825 INFO       exit_code:  0
+2026-03-23 14:37:21,825 INFO     --- stdout ---
+2026-03-23 14:37:21,825 INFO       [setup] installing openhands SDK (feat/saas-runtime-mode)
+2026-03-23 14:37:21,825 INFO       [setup] done
+2026-03-23 14:37:21,825 INFO       === ENV VARS ===
+2026-03-23 14:37:21,825 INFO         OPENHANDS_API_KEY: OK
+2026-03-23 14:37:21,825 INFO         OPENHANDS_CLOUD_API_URL: OK
+2026-03-23 14:37:21,825 INFO         SANDBOX_ID: OK
+2026-03-23 14:37:21,825 INFO         SESSION_API_KEY: OK
+2026-03-23 14:37:21,825 INFO         AUTOMATION_CALLBACK_URL: https://example.com/callback
+2026-03-23 14:37:21,825 INFO         AUTOMATION_RUN_ID: test-run-001
+2026-03-23 14:37:21,825 INFO       
+2026-03-23 14:37:21,825 INFO       === SDK WORKSPACE ===
+2026-03-23 14:37:21,825 INFO       
+2026-03-23 14:37:21,825 INFO       === GET_LLM ===
+2026-03-23 14:37:21,825 INFO         model: litellm_proxy/minimax-m2.5
+2026-03-23 14:37:21,825 INFO         api_key present: True
+2026-03-23 14:37:21,825 INFO       
+2026-03-23 14:37:21,825 INFO       === GET_SECRETS ===
+2026-03-23 14:37:21,825 INFO         available: ['github_token']
+2026-03-23 14:37:21,825 INFO       
+2026-03-23 14:37:21,825 INFO       === RESULT ===
+2026-03-23 14:37:21,825 INFO       ALL_OK
+2026-03-23 14:37:21,825 INFO     --- stderr (last 500 chars) ---
+2026-03-23 14:37:21,825 INFO       : "INFO", "name": "openhands.workspace.cloud.workspace", "filename": "workspace.py", "lineno": 216, "message": "SaaS runtime mode: connecting to local agent-server at http://localhost:60000"}
+2026-03-23 14:37:21,825 INFO       {"asctime": "2026-03-23 14:37:20,564", "levelname": "WARNING", "name": "openhands.workspace.cloud.workspace", "filename": "workspace.py", "lineno": 699, "message": "Completion callback failed: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)"}
+2026-03-23 14:37:21,825 INFO     PASS
+2026-03-23 14:37:21,826 INFO     Total time: 77.4s
