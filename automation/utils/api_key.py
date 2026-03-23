@@ -65,7 +65,7 @@ async def get_api_key_for_automation_run(run: "AutomationRun") -> str:
             response.raise_for_status()
 
             data = response.json()
-            api_key = data.get("api_key") or data.get("key")
+            api_key = data.get("key")
 
             if not api_key:
                 raise APIKeyError(f"API key not found in response: {list(data.keys())}")
