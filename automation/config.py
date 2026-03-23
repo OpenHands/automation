@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "AUTOMATION_"}
 
 
+# Hardcoded internal URL scheme for uploaded tarballs.
+# This is not configurable - changing it would require a database migration
+# to update all existing tarball_path references.
+INTERNAL_URL_SCHEME = "oh-internal"
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
