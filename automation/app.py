@@ -16,6 +16,7 @@ from automation.dispatcher import dispatcher_loop
 from automation.logger import setup_all_loggers
 from automation.router import router
 from automation.scheduler import scheduler_loop
+from automation.uploads import router as uploads_router
 
 
 logger = logging.getLogger("automation.app")
@@ -121,6 +122,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(uploads_router)
 
 
 @app.get("/health")
