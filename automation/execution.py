@@ -47,6 +47,14 @@ def build_tarball(files: dict[str, str | bytes]) -> bytes:
 # -- Sandbox helpers (private) ------------------------------------------------
 
 
+def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
+    """Return ``(agent_url, session_key)`` if an AGENT_SERVER URL exists."""
+    for url_info in sandbox.get("exposed_urls") or []:
+        if url_info.get("name") == "AGENT_SERVER":
+            return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
+    return None
+
+
 async def _create_and_wait(
     client: httpx.AsyncClient,
     api_url: str,
@@ -81,13 +89,12 @@ async def _create_and_wait(
         status = sb.get("status", "UNKNOWN")
 
         if status == "RUNNING":
-            for url_info in sb.get("exposed_urls") or []:
-                if url_info.get("name") == "AGENT_SERVER":
-                    agent_url = url_info["url"].rstrip("/")
-                    session_key = sb.get("session_api_key", "")
-                    logger.info("Sandbox %s ready at %s", sandbox_id, agent_url)
-                    return sandbox_id, session_key, agent_url
-            raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
+            result = _find_agent_server_url(sb)
+            if result is None:
+                raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
+            agent_url, session_key = result
+            logger.info("Sandbox %s ready at %s", sandbox_id, agent_url)
+            return sandbox_id, session_key, agent_url
 
         if status in ("ERROR", "MISSING"):
             raise RuntimeError(f"Sandbox {sandbox_id} failed with status {status}")
