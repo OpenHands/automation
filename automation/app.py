@@ -17,6 +17,7 @@ from automation.logger import setup_all_loggers
 from automation.router import router
 from automation.scheduler import scheduler_loop
 from automation.uploads import router as uploads_router
+from automation.watchdog import watchdog_loop
 
 
 logger = logging.getLogger("automation.app")
@@ -76,16 +77,27 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
+    # Watchdog: marks stale RUNNING runs as FAILED
+    watchdog_task = asyncio.create_task(
+        watchdog_loop(
+            app.state.session_factory,
+            shutdown_event=shutdown_event,
+        )
+    )
+    app.state.watchdog_task = watchdog_task
+    logger.info("Background watchdog started")
+
     yield
 
     # Shutdown
     logger.info("Shutting down background tasks...")
     shutdown_event.set()
 
-    # Wait for both tasks to exit gracefully
+    # Wait for all tasks to exit gracefully
     for task_name, task in [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
+        ("watchdog", watchdog_task),
     ]:
         try:
             await asyncio.wait_for(task, timeout=5.0)

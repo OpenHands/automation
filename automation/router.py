@@ -239,6 +239,8 @@ async def complete_run(
     if body.status == "COMPLETED":
         run.status = AutomationRunStatus.COMPLETED
         run.completed_at = now
+        if body.conversation_id:
+            run.conversation_id = body.conversation_id
     else:
         run.status = AutomationRunStatus.FAILED
         run.error_detail = body.error

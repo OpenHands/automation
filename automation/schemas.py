@@ -180,6 +180,7 @@ class RunCompleteRequest(BaseModel):
 
     status: Literal["COMPLETED", "FAILED"]
     run_id: str | None = None
+    conversation_id: str | None = None
     error: str | None = None
 
 
@@ -190,6 +191,8 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    conversation_id: str | None
+    timeout_at: datetime | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

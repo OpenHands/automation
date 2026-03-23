@@ -126,6 +126,15 @@ class AutomationRun(Base):
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Conversation created by the SDK script (set by completion callback)
+    conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Pre-computed deadline: started_at + max_duration. Set when transitioning
+    # to RUNNING, used by the staleness watchdog for efficient indexed queries.
+    timeout_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

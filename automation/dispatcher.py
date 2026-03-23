@@ -10,7 +10,9 @@ exits, so the dispatcher does **not** block waiting for results.
 """
 
 import asyncio
+import json
 import logging
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -19,9 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.execution import run_automation
-from automation.models import AutomationRun, AutomationRunStatus
+from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
 from automation.utils.run import mark_run_status
+from automation.utils.tarball_validation import parse_internal_upload_id
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -38,12 +41,21 @@ class DispatchConfig:
     automation_service_url: str
 
 
-async def _download_tarball(tarball_path: str) -> bytes:
+async def _download_tarball(
+    tarball_path: str,
+    session: AsyncSession | None = None,
+) -> bytes:
     """Download the tarball from ``tarball_path``.
 
-    Supports ``http://`` and ``https://`` URLs.  Cloud storage schemes
-    (``gs://``, ``s3://``) will be added in a future iteration.
+    Supports:
+    - ``oh-internal://uploads/{uuid}`` — looks up the GCS storage_path from
+      the TarballUpload record, then downloads from GCS.
+    - ``http://`` / ``https://`` — direct HTTP download.
     """
+    upload_id = parse_internal_upload_id(tarball_path)
+    if upload_id is not None:
+        return await _download_internal_tarball(upload_id, session)
+
     if tarball_path.startswith(("http://", "https://")):
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.get(tarball_path)
@@ -52,8 +64,29 @@ async def _download_tarball(tarball_path: str) -> bytes:
 
     raise ValueError(
         f"Unsupported tarball_path scheme: {tarball_path!r}. "
-        "Only http:// and https:// are supported for now."
+        "Expected oh-internal://, http://, or https://."
     )
+
+
+async def _download_internal_tarball(
+    upload_id: uuid.UUID,
+    session: AsyncSession | None,
+) -> bytes:
+    """Download a tarball from GCS using the TarballUpload record."""
+    if session is None:
+        raise ValueError("Database session required to resolve oh-internal:// URLs")
+
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    upload = result.scalars().first()
+    if upload is None:
+        raise FileNotFoundError(f"TarballUpload {upload_id} not found")
+
+    from automation.storage import GoogleCloudFileStore
+
+    store = GoogleCloudFileStore()
+    return store.read(upload.storage_path)
 
 
 async def _poll_pending_runs(
@@ -103,15 +136,31 @@ async def _execute_run(
         # 1. Get a per-user API key
         api_key = await get_api_key_for_automation_run(run)
 
-        # 2. Download the tarball
-        tarball = await _download_tarball(automation.tarball_path)
+        # 2. Download the tarball (needs a session for oh-internal:// lookups)
+        async with session_factory() as session:
+            tarball = await _download_tarball(automation.tarball_path, session)
 
-        # 3. Launch the sandbox
+        # 3. Build env vars for the sandbox
+        env_vars = {
+            "OPENHANDS_API_KEY": api_key,
+            "OPENHANDS_CLOUD_API_URL": config.saas_api_url,
+        }
+
+        # Trigger context so the SDK script knows *why* it was invoked
+        event_payload = {
+            "trigger": automation.triggers,
+            "automation_id": str(automation.id),
+            "automation_name": automation.name,
+        }
+        env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(event_payload)
+
+        # 4. Launch the sandbox
         result = await run_automation(
             api_url=config.saas_api_url,
             api_key=api_key,
             tarball=tarball,
             entrypoint=automation.entrypoint,
+            env_vars=env_vars,
             callback_url=callback_url,
             run_id=run_id,
         )

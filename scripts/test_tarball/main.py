@@ -3,16 +3,11 @@
 Mirrors the pattern proposed in the automations ADR (architecture PR #11)
 and the SDK example (10_cloud_workspace_share_credentials.py):
 
-  1. Open OpenHandsCloudWorkspace with the user's API key
-     (creates an inner sandbox for the agent to work in)
+  1. Open OpenHandsCloudWorkspace with saas_runtime_mode=True
+     (connects to the local agent-server already in this sandbox)
   2. Fetch LLM config + secrets from the user's SaaS account
   3. Build an agent, start a conversation, run a task
-  4. On context manager exit, cleanup the inner sandbox
-
-Once SDK PR #2490 (saas_runtime_mode) merges, this script will switch to:
-    OpenHandsCloudWorkspace(saas_runtime_mode=True, ...)
-which skips creating an inner sandbox and uses the local agent-server
-directly — the automation service's sandbox IS the workspace.
+  4. On context manager exit, the workspace sends a completion callback
 
 Env vars injected by the dispatcher:
   OPENHANDS_API_KEY          - per-user automation API key
@@ -46,8 +41,11 @@ print(f"CALLBACK={callback_url or 'NONE'}")
 print(f"RUN_ID={run_id or 'NONE'}")
 
 with OpenHandsCloudWorkspace(
+    saas_runtime_mode=True,
     cloud_api_url=api_url,
     cloud_api_key=api_key,
+    automation_callback_url=callback_url,
+    automation_run_id=run_id,
 ) as workspace:
     # Fetch LLM config from the user's SaaS account settings
     llm = workspace.get_llm()
