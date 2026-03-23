@@ -190,10 +190,15 @@ async def create_upload(
         upload.size_bytes = size_bytes
 
     except FileSizeLimitExceeded as e:
-        # Partial upload already deleted by write_stream, just update DB record
         upload.status = UploadStatus.FAILED
         upload.error_message = f"File size exceeds limit of {MAX_UPLOAD_SIZE} bytes"
         upload.size_bytes = e.actual_size
+        # write_stream attempts cleanup internally, but if that fails the
+        # partial file could remain.  Do a defensive best-effort delete here.
+        try:
+            file_store.delete(storage_path)
+        except Exception:
+            pass
 
     except Exception as e:
         # Handle any other errors (network failure, GCS down, permissions, etc.)
