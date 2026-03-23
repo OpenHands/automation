@@ -13,13 +13,13 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from automation.config import Settings
 from automation.execution import run_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
@@ -31,14 +31,6 @@ logger = logging.getLogger("automation.dispatcher")
 
 DEFAULT_BATCH_SIZE = 10
 POLL_INTERVAL_SECONDS = 30
-
-
-@dataclass
-class DispatchConfig:
-    """Runtime configuration for the dispatcher."""
-
-    saas_api_url: str
-    base_url: str
 
 
 async def _download_tarball(
@@ -112,7 +104,7 @@ async def _poll_pending_runs(
 
 async def _execute_run(
     run: AutomationRun,
-    config: DispatchConfig,
+    settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Execute a single run in a background task.
@@ -129,7 +121,7 @@ async def _execute_run(
     automation = run.automation
 
     callback_url = (
-        f"{config.base_url.rstrip('/')}"
+        f"{settings.resolved_base_url.rstrip('/')}"
         f"/api/v1/automations/runs/{run_id}/complete"
     )
 
@@ -144,7 +136,7 @@ async def _execute_run(
         # 3. Build env vars for the sandbox
         env_vars = {
             "OPENHANDS_API_KEY": api_key,
-            "OPENHANDS_CLOUD_API_URL": config.saas_api_url,
+            "OPENHANDS_CLOUD_API_URL": settings.openhands_api_base_url,
         }
 
         # Trigger context so the SDK script knows *why* it was invoked
@@ -157,7 +149,7 @@ async def _execute_run(
 
         # 4. Launch the sandbox
         result = await run_automation(
-            api_url=config.saas_api_url,
+            api_url=settings.openhands_api_base_url,
             api_key=api_key,
             tarball=tarball,
             entrypoint=automation.entrypoint,
@@ -204,7 +196,7 @@ async def _mark_run_failed(
 
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
-    config: DispatchConfig | None = None,
+    settings: Settings | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
@@ -226,10 +218,10 @@ async def dispatch_pending_runs(
 
         await session.commit()
 
-        if config:
+        if settings:
             for run in dispatched_runs:
                 asyncio.create_task(
-                    _execute_run_safe(run, config, session_factory),
+                    _execute_run_safe(run, settings, session_factory),
                     name=f"execute-run-{run.id}",
                 )
 
@@ -238,7 +230,7 @@ async def dispatch_pending_runs(
 
 async def _execute_run_safe(
     run: AutomationRun,
-    config: DispatchConfig,
+    settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Wrapper around ``_execute_run`` that never lets exceptions escape.
@@ -248,7 +240,7 @@ async def _execute_run_safe(
     marked FAILED.
     """
     try:
-        await _execute_run(run, config, session_factory)
+        await _execute_run(run, settings, session_factory)
     except Exception:
         logger.exception("Background execution failed for run %s", run.id)
         await _mark_run_failed(session_factory, run, "Internal dispatcher error")
@@ -256,7 +248,7 @@ async def _execute_run_safe(
 
 async def dispatcher_loop(
     session_factory: async_sessionmaker[AsyncSession],
-    config: DispatchConfig | None = None,
+    settings: Settings | None = None,
     interval_seconds: int = POLL_INTERVAL_SECONDS,
     shutdown_event: asyncio.Event | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -275,7 +267,7 @@ async def dispatcher_loop(
 
         try:
             dispatched = await dispatch_pending_runs(
-                session_factory, config=config, batch_size=batch_size
+                session_factory, settings=settings, batch_size=batch_size
             )
             if dispatched:
                 logger.info("Dispatched %d run(s)", len(dispatched))

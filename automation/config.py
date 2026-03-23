@@ -52,6 +52,11 @@ class Settings(BaseSettings):
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
+    @property
+    def resolved_base_url(self) -> str:
+        """Public base URL with localhost fallback for dev."""
+        return self.base_url or f"http://localhost:{self.server_port}"
+
 
 # Hardcoded internal URL scheme for uploaded tarballs.
 # This is not configurable - changing it would require a database migration

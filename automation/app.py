@@ -12,7 +12,7 @@ from sqlalchemy import text
 from automation.auth import create_http_client
 from automation.config import get_settings
 from automation.db import create_engine, create_session_factory
-from automation.dispatcher import DispatchConfig, dispatcher_loop
+from automation.dispatcher import dispatcher_loop
 from automation.logger import setup_all_loggers
 from automation.router import router
 from automation.scheduler import scheduler_loop
@@ -62,11 +62,6 @@ async def lifespan(app: FastAPI):
     logger.info("Background scheduler started")
 
     # Dispatcher: picks up PENDING runs and dispatches them
-    base_url = settings.base_url or f"http://localhost:{settings.server_port}"
-    dispatch_config = DispatchConfig(
-        saas_api_url=settings.openhands_api_base_url,
-        base_url=base_url,
-    )
     if not settings.base_url:
         logger.warning(
             "AUTOMATION_BASE_URL not set — using localhost. "
@@ -75,7 +70,7 @@ async def lifespan(app: FastAPI):
     dispatcher_task = asyncio.create_task(
         dispatcher_loop(
             app.state.session_factory,
-            config=dispatch_config,
+            settings=settings,
             interval_seconds=settings.dispatcher_interval_seconds,
             shutdown_event=shutdown_event,
         )
