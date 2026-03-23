@@ -1,6 +1,6 @@
 #!/bin/bash
-# Install the OpenHands SDK packages from PR #2490 (saas_runtime_mode).
-# Once merged, switch to a release version or @main.
+# Install the OpenHands SDK from the saas-runtime-mode feature branch.
+# Once merged, switch to a released version or @main.
 set -e
 
 SDK_REF="feat/saas-runtime-mode"

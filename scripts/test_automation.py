@@ -81,6 +81,11 @@ def _agent_headers(session_key: str) -> dict[str, str]:
     return {"X-Session-API-Key": session_key}
 
 
+def _shell_quote(s: str) -> str:
+    """Single-quote a string for safe shell interpolation."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
 # -- sandbox lifecycle ---------------------------------------------
 
 
@@ -283,25 +288,14 @@ async def run_test(api_url: str, api_key: str) -> bool:
 
     tarball = build_tarball_from_dir(TEST_TARBALL_DIR)
 
-    # env vars the dispatcher would inject into the sandbox
-    env_vars = {
-        # The script needs the API key to call get_llm() / get_secrets()
+    # Placeholder — will be set after sandbox is created
+    env_vars: dict[str, str] = {
         "OPENHANDS_API_KEY": api_key,
         "OPENHANDS_CLOUD_API_URL": api_url,
-        # Automation service callback (the script's __exit__ POSTs here)
         "AUTOMATION_CALLBACK_URL": "https://example.com/callback",
         "AUTOMATION_RUN_ID": "test-run-001",
     }
-    exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
     entrypoint = "python main.py"
-    cmd = (
-        f"mkdir -p {WORK_DIR}"
-        f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
-        f" && cd {WORK_DIR}"
-        f" && bash setup.sh"
-        f" && {exports}"
-        f" && {entrypoint}"
-    )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
@@ -311,6 +305,23 @@ async def run_test(api_url: str, api_key: str) -> bool:
             # 2. Wait until running
             session_key, agent_url = await wait_for_sandbox(
                 client, api_url, api_key, sandbox_id
+            )
+
+            # Inject sandbox-specific env vars now that we have them
+            env_vars["SANDBOX_ID"] = sandbox_id
+            env_vars["SESSION_API_KEY"] = session_key
+
+            # Build the full command
+            exports = " && ".join(
+                f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()
+            )
+            cmd = (
+                f"mkdir -p {WORK_DIR}"
+                f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
+                f" && cd {WORK_DIR}"
+                f" && bash setup.sh"
+                f" && {exports}"
+                f" && {entrypoint}"
             )
 
             # 3. Upload tarball
