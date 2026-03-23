@@ -171,7 +171,7 @@ async def _execute_run(
             await _mark_run_failed(session_factory, run, result.error)
 
     except (APIKeyError, ValueError, httpx.HTTPError) as exc:
-        logger.error("Run %s dispatch error: %s", run_id, exc)
+        logger.error("Run %s dispatch error: %s", run_id, exc, exc_info=True)
         await _mark_run_failed(session_factory, run, str(exc))
     except Exception:
         logger.exception("Background execution failed for run %s", run_id)

@@ -84,6 +84,7 @@ async def get_api_key_for_automation_run(run: "AutomationRun") -> str:
             run.id,
             e.response.status_code,
             e.response.text,
+            exc_info=True,
         )
         raise APIKeyError(f"HTTP {e.response.status_code}: {e.response.text}") from e
 
@@ -92,5 +93,6 @@ async def get_api_key_for_automation_run(run: "AutomationRun") -> str:
             "Failed to create API key for run %s: %s",
             run.id,
             str(e),
+            exc_info=True,
         )
         raise APIKeyError(f"Request failed: {str(e)}") from e

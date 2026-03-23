@@ -164,7 +164,7 @@ async def readiness():
             await conn.execute(text("SELECT 1"))
         return {"status": "ready"}
     except Exception as e:
-        logger.error("Readiness check failed: %s", e)
+        logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},
