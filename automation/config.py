@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # Public URL for the automation service (used for sandbox callbacks).
     # In production, this is the ingress URL (e.g., https://automation.all-hands.dev).
     # If empty, falls back to http://localhost:{server_port} (dev only).
-    callback_base_url: str = ""
+    base_url: str = ""
 
     # Service
     host: str = "0.0.0.0"

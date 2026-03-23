@@ -62,16 +62,14 @@ async def lifespan(app: FastAPI):
     logger.info("Background scheduler started")
 
     # Dispatcher: picks up PENDING runs and dispatches them
-    callback_base_url = (
-        settings.callback_base_url or f"http://localhost:{settings.server_port}"
-    )
+    base_url = settings.base_url or f"http://localhost:{settings.server_port}"
     dispatch_config = DispatchConfig(
         saas_api_url=settings.openhands_api_base_url,
-        callback_base_url=callback_base_url,
+        base_url=base_url,
     )
-    if not settings.callback_base_url:
+    if not settings.base_url:
         logger.warning(
-            "AUTOMATION_CALLBACK_BASE_URL not set — using localhost. "
+            "AUTOMATION_BASE_URL not set — using localhost. "
             "Sandboxes in the cloud won't be able to reach this URL."
         )
     dispatcher_task = asyncio.create_task(

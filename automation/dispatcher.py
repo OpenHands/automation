@@ -38,7 +38,7 @@ class DispatchConfig:
     """Runtime configuration for the dispatcher."""
 
     saas_api_url: str
-    callback_base_url: str
+    base_url: str
 
 
 async def _download_tarball(
@@ -129,7 +129,7 @@ async def _execute_run(
     automation = run.automation
 
     callback_url = (
-        f"{config.callback_base_url.rstrip('/')}"
+        f"{config.base_url.rstrip('/')}"
         f"/api/v1/automations/runs/{run_id}/complete"
     )
 
