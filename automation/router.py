@@ -19,6 +19,7 @@ from automation.schemas import (
 )
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
+from automation.utils.tarball_validation import validate_tarball_path
 
 
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
@@ -33,7 +34,19 @@ async def create_automation(
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
-    """Create a new automation."""
+    """Create a new automation.
+
+    The tarball_path can be either:
+    - Internal upload: oh-internal://uploads/{uuid} (from /api/v1/uploads)
+    - External public URL: https://, s3://, or gs:// URLs
+    """
+    # Validate tarball_path (checks ownership for internal uploads)
+    await validate_tarball_path(
+        tarball_path=body.tarball_path,
+        user_id=user.user_id,
+        org_id=user.org_id,
+        session=session,
+    )
 
     auto = Automation(
         user_id=user.user_id,
