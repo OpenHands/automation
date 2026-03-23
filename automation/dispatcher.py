@@ -12,7 +12,6 @@ exits, so the dispatcher does **not** block waiting for results.
 import asyncio
 import json
 import logging
-import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -96,8 +95,8 @@ async def _poll_pending_runs(
 ) -> list[AutomationRun]:
     """Poll pending runs using FOR UPDATE SKIP LOCKED.
 
-    Eagerly loads the ``automation`` relationship so that ``user_id``
-    and ``org_id`` are available for API-key minting.
+    Eagerly loads the ``automation`` relationship so that ``user_id``,
+    ``org_id``, and tarball config are available for dispatch.
     """
     select_query = (
         select(AutomationRun)
@@ -118,7 +117,7 @@ async def _execute_run(
 ) -> None:
     """Execute a single run in a background task.
 
-    1. Mint a per-user API key via the service endpoint.
+    1. Fetch a per-user API key from the SaaS service (on demand, never stored).
     2. Download the tarball from ``automation.tarball_path``.
     3. Call ``run_automation()`` to spin up a sandbox, upload, and execute.
     4. If the sandbox itself fails to start, mark the run FAILED.
@@ -129,22 +128,13 @@ async def _execute_run(
     run_id = str(run.id)
     automation = run.automation
 
-    # Mint a one-time callback token and persist it on the run
-    callback_token = secrets.token_urlsafe(32)
-    async with session_factory() as session:
-        db_run = await session.get(AutomationRun, run.id)
-        if db_run:
-            db_run.callback_token = callback_token
-            await session.commit()
-
     callback_url = (
         f"{config.callback_base_url.rstrip('/')}"
         f"/api/v1/automations/runs/{run_id}/complete"
-        f"?token={callback_token}"
     )
 
     try:
-        # 1. Get a per-user API key
+        # 1. Fetch a per-user API key from the SaaS service
         api_key = await get_api_key_for_automation_run(run)
 
         # 2. Download the tarball (needs a session for oh-internal:// lookups)

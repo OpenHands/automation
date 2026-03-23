@@ -1,6 +1,5 @@
 """FastAPI router for the automations CRUD API."""
 
-import hmac
 import logging
 import uuid
 
@@ -8,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
@@ -213,7 +213,7 @@ async def list_automation_runs(
 async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
-    token: str = Query(..., description="One-time callback token"),
+    user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
@@ -222,20 +222,24 @@ async def complete_run(
     entry-point finishes (success or failure).  Transitions the run from
     RUNNING → COMPLETED or RUNNING → FAILED.
 
-    Authenticated via a one-time callback token generated at dispatch
-    time and passed as a query parameter.
+    Authenticated via the same ``OPENHANDS_API_KEY`` that was passed into
+    the sandbox.  The key is validated against ``/api/keys/current`` (by
+    ``authenticate_request``) and the resulting user must own the run's
+    parent automation.
     """
-    # Fetch the run to validate the token
     result = await session.execute(
-        select(AutomationRun).where(AutomationRun.id == run_id)
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
     )
     run = result.scalars().first()
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    # Constant-time comparison to prevent timing attacks
-    if not run.callback_token or not hmac.compare_digest(run.callback_token, token):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Invalid callback token")
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
 
     # Optimistic locking: only update if the run is still RUNNING.
     # This prevents races between the watchdog and the callback.
@@ -248,7 +252,6 @@ async def complete_run(
     values: dict = {
         "status": new_status,
         "completed_at": now,
-        "callback_token": None,  # Invalidate the token after use
     }
     if body.status == "COMPLETED" and body.conversation_id:
         values["conversation_id"] = body.conversation_id

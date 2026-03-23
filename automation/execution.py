@@ -167,15 +167,18 @@ async def run_automation(
     timeout: int = DEFAULT_TIMEOUT,
     callback_url: str | None = None,
     run_id: str | None = None,
+    keep_sandbox: bool = False,
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox.
 
     1. Create sandbox and wait until RUNNING.
     2. Upload *tarball* to the sandbox.
     3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
-    4. Delete the sandbox.
+    4. Delete the sandbox (unless *keep_sandbox* is True).
 
-    *env_vars* are exported before the entrypoint runs.
+    *env_vars* are exported before the entrypoint runs.  The sandbox
+    identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
+    **always** injected so the SDK's ``saas_runtime_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -202,6 +205,11 @@ async def run_automation(
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
         try:
+            # Always inject sandbox identity so the SDK can call
+            # get_llm() / get_secrets() inside the sandbox.
+            env_vars.setdefault("SANDBOX_ID", sandbox_id)
+            env_vars.setdefault("SESSION_API_KEY", session_key)
+
             await _upload(client, agent_url, session_key, tarball, TARBALL_PATH)
 
             exports = ""
@@ -235,7 +243,8 @@ async def run_automation(
             logger.exception("Automation execution failed")
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
         finally:
-            await _delete_sandbox(client, api_url, api_key, sandbox_id)
+            if not keep_sandbox:
+                await _delete_sandbox(client, api_url, api_key, sandbox_id)
 
 
 def _shell_quote(s: str) -> str:

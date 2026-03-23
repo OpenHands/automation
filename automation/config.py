@@ -31,10 +31,8 @@ class Settings(BaseSettings):
     # Dispatcher (polls automation_runs table for pending jobs)
     dispatcher_interval_seconds: int = 10
 
-    # Admin API key for issuing per-user automation API keys via SaaS
-    admin_api_key: str = ""
-
-    # Service key for authenticating requests from the OpenHands SaaS app
+    # Service key for authenticating with the SaaS API to fetch per-user
+    # API keys (called by the dispatcher before each automation run).
     service_key: str = ""
 
     # Public URL for the automation service (used for sandbox callbacks).
