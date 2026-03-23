@@ -1,6 +1,5 @@
-"""Add callback_token, conversation_id, timeout_at to automation_runs.
+"""Add conversation_id and timeout_at to automation_runs.
 
-callback_token: One-time token for authenticating the completion callback.
 timeout_at: Pre-computed deadline for the staleness watchdog.
 conversation_id: Set by the completion callback when SDK creates a conversation.
 
@@ -24,10 +23,6 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column(
         "automation_runs",
-        sa.Column("callback_token", sa.String(64), nullable=True),
-    )
-    op.add_column(
-        "automation_runs",
         sa.Column("conversation_id", sa.String(255), nullable=True),
     )
     op.add_column(
@@ -49,4 +44,3 @@ def downgrade() -> None:
     op.drop_index("ix_automation_runs_timeout_at", table_name="automation_runs")
     op.drop_column("automation_runs", "timeout_at")
     op.drop_column("automation_runs", "conversation_id")
-    op.drop_column("automation_runs", "callback_token")
