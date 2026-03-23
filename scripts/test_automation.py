@@ -49,7 +49,13 @@ def build_tarball_from_dir(src: Path) -> bytes:
                 tar.add(path, arcname=path.relative_to(src))
     data = buf.getvalue()
     files = [str(p.relative_to(src)) for p in sorted(src.rglob("*")) if p.is_file()]
-    log.info("Built tarball from %s (%d bytes, %d files: %s)", src, len(data), len(files), files)
+    log.info(
+        "Built tarball from %s (%d bytes, %d files: %s)",
+        src,
+        len(data),
+        len(files),
+        files,
+    )
     return data
 
 
@@ -142,7 +148,9 @@ def main() -> None:
     log.info("Entrypoint:   %s", args.entrypoint)
 
     start = time.monotonic()
-    ok = asyncio.run(run_test(args.api_url, args.api_key, args.tarball_dir, args.entrypoint))
+    ok = asyncio.run(
+        run_test(args.api_url, args.api_key, args.tarball_dir, args.entrypoint)
+    )
     elapsed = time.monotonic() - start
     log.info("Total time: %.1fs", elapsed)
     sys.exit(0 if ok else 1)

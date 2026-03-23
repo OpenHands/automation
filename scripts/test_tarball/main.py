@@ -22,6 +22,7 @@ import os
 import sys
 import time
 
+
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
@@ -49,6 +50,7 @@ print(f"  AUTOMATION_RUN_ID: {run_id or 'NONE'}")
 from openhands.sdk import Conversation, RemoteConversation  # noqa: E402
 from openhands.tools.preset.default import get_default_agent  # noqa: E402
 from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
+
 
 print("\n=== SDK WORKSPACE ===")
 with OpenHandsCloudWorkspace(
