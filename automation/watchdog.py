@@ -12,11 +12,11 @@ dispatcher transitions a run to RUNNING (see ``mark_run_status``).
 import asyncio
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from automation.models import AutomationRun, AutomationRunStatus
-from automation.utils.run import mark_run_status
 from automation.utils.time import utcnow
 
 
@@ -32,6 +32,8 @@ async def mark_stale_runs(
     """Find and mark stale RUNNING runs as FAILED.
 
     A run is stale if ``timeout_at < now()`` (pre-computed at dispatch time).
+    Uses optimistic locking (``WHERE status = RUNNING``) so a concurrent
+    completion callback wins without conflict.
 
     Returns the number of runs marked as stale.
     """
@@ -40,28 +42,39 @@ async def mark_stale_runs(
 
     async with session_factory() as session:
         result = await session.execute(
-            select(AutomationRun).where(
+            select(AutomationRun.id, AutomationRun.timeout_at).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
                 AutomationRun.timeout_at.isnot(None),
                 AutomationRun.timeout_at < now,
             )
         )
-        stale_runs = result.scalars().all()
+        stale_rows = result.all()
 
-        for run in stale_runs:
-            logger.warning(
-                "Run %s is stale (timeout_at=%s, now=%s), marking FAILED",
-                run.id,
-                run.timeout_at,
-                now,
+        for run_id, timeout_at in stale_rows:
+            # Optimistic locking: only update if still RUNNING
+            stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status=AutomationRunStatus.FAILED,
+                    completed_at=now,
+                    error_detail="Timed out: no completion callback received",
+                )
             )
-            await mark_run_status(
-                session,
-                run,
-                AutomationRunStatus.FAILED,
-                error_detail="Timed out: no completion callback received",
-            )
-            marked += 1
+            db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+            if db_result.rowcount > 0:
+                logger.warning(
+                    "Run %s is stale (timeout_at=%s, now=%s), marked FAILED",
+                    run_id,
+                    timeout_at,
+                    now,
+                )
+                marked += 1
+            else:
+                logger.info("Run %s already completed, skipping watchdog", run_id)
 
         if marked:
             await session.commit()
@@ -94,9 +107,7 @@ async def watchdog_loop(
 
         if shutdown_event is not None:
             try:
-                await asyncio.wait_for(
-                    shutdown_event.wait(), timeout=interval_seconds
-                )
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
                 logger.info("Watchdog received shutdown signal, exiting")
                 break
             except TimeoutError:

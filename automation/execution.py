@@ -193,7 +193,15 @@ async def run_automation(
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key
             )
+        except Exception as e:
+            # If sandbox creation started but failed to reach RUNNING,
+            # still attempt cleanup.
+            logger.exception("Sandbox creation failed")
+            if sandbox_id:
+                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+            return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
+        try:
             await _upload(client, agent_url, session_key, tarball, TARBALL_PATH)
 
             exports = ""
@@ -227,8 +235,7 @@ async def run_automation(
             logger.exception("Automation execution failed")
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
         finally:
-            if sandbox_id:
-                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+            await _delete_sandbox(client, api_url, api_key, sandbox_id)
 
 
 def _shell_quote(s: str) -> str:

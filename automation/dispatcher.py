@@ -12,6 +12,7 @@ exits, so the dispatcher does **not** block waiting for results.
 import asyncio
 import json
 import logging
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -38,7 +39,7 @@ class DispatchConfig:
     """Runtime configuration for the dispatcher."""
 
     saas_api_url: str
-    automation_service_url: str
+    callback_base_url: str
 
 
 async def _download_tarball(
@@ -127,9 +128,19 @@ async def _execute_run(
     """
     run_id = str(run.id)
     automation = run.automation
+
+    # Mint a one-time callback token and persist it on the run
+    callback_token = secrets.token_urlsafe(32)
+    async with session_factory() as session:
+        db_run = await session.get(AutomationRun, run.id)
+        if db_run:
+            db_run.callback_token = callback_token
+            await session.commit()
+
     callback_url = (
-        f"{config.automation_service_url.rstrip('/')}"
+        f"{config.callback_base_url.rstrip('/')}"
         f"/api/v1/automations/runs/{run_id}/complete"
+        f"?token={callback_token}"
     )
 
     try:
@@ -227,9 +238,30 @@ async def dispatch_pending_runs(
 
         if config:
             for run in dispatched_runs:
-                asyncio.create_task(_execute_run(run, config, session_factory))
+                asyncio.create_task(
+                    _execute_run_safe(run, config, session_factory),
+                    name=f"execute-run-{run.id}",
+                )
 
         return dispatched_runs
+
+
+async def _execute_run_safe(
+    run: AutomationRun,
+    config: DispatchConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Wrapper around ``_execute_run`` that never lets exceptions escape.
+
+    ``asyncio.create_task`` silently swallows exceptions from background
+    tasks, so this wrapper ensures every failure is logged and the run is
+    marked FAILED.
+    """
+    try:
+        await _execute_run(run, config, session_factory)
+    except Exception:
+        logger.exception("Background execution failed for run %s", run.id)
+        await _mark_run_failed(session_factory, run, "Internal dispatcher error")
 
 
 async def dispatcher_loop(

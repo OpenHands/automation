@@ -1,10 +1,12 @@
 """FastAPI router for the automations CRUD API."""
 
+import hmac
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -211,6 +213,7 @@ async def list_automation_runs(
 async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
+    token: str = Query(..., description="One-time callback token"),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
@@ -219,9 +222,10 @@ async def complete_run(
     entry-point finishes (success or failure).  Transitions the run from
     RUNNING → COMPLETED or RUNNING → FAILED.
 
-    This endpoint is unauthenticated — it is only reachable from inside a
-    sandbox that already has the run ID.
+    Authenticated via a one-time callback token generated at dispatch
+    time and passed as a query parameter.
     """
+    # Fetch the run to validate the token
     result = await session.execute(
         select(AutomationRun).where(AutomationRun.id == run_id)
     )
@@ -229,26 +233,46 @@ async def complete_run(
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    if run.status != AutomationRunStatus.RUNNING:
+    # Constant-time comparison to prevent timing attacks
+    if not run.callback_token or not hmac.compare_digest(run.callback_token, token):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Invalid callback token")
+
+    # Optimistic locking: only update if the run is still RUNNING.
+    # This prevents races between the watchdog and the callback.
+    now = utcnow()
+    new_status = (
+        AutomationRunStatus.COMPLETED
+        if body.status == "COMPLETED"
+        else AutomationRunStatus.FAILED
+    )
+    values: dict = {
+        "status": new_status,
+        "completed_at": now,
+        "callback_token": None,  # Invalidate the token after use
+    }
+    if body.status == "COMPLETED" and body.conversation_id:
+        values["conversation_id"] = body.conversation_id
+    if body.status == "FAILED" and body.error:
+        values["error_detail"] = body.error
+
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status == AutomationRunStatus.RUNNING,
+        )
+        .values(**values)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+
+    if db_result.rowcount == 0:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=f"Run is {run.status.value}, expected RUNNING",
         )
 
-    now = utcnow()
-    if body.status == "COMPLETED":
-        run.status = AutomationRunStatus.COMPLETED
-        run.completed_at = now
-        if body.conversation_id:
-            run.conversation_id = body.conversation_id
-    else:
-        run.status = AutomationRunStatus.FAILED
-        run.error_detail = body.error
-        run.completed_at = now
-
-    await session.flush()
     await session.refresh(run)
-    logger.info("Run %s → %s", run_id, run.status.value)
+    logger.info("Run %s → %s", run_id, new_status.value)
     return AutomationRunResponse.model_validate(run)
 
 

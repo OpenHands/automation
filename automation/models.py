@@ -126,6 +126,9 @@ class AutomationRun(Base):
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # One-time token for authenticating the completion callback
+    callback_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 

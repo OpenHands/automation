@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Service key for authenticating requests from the OpenHands SaaS app
     service_key: str = ""
 
+    # Public URL for the automation service (used for sandbox callbacks).
+    # In production, this is the ingress URL (e.g., https://automation.all-hands.dev).
+    # If empty, falls back to http://localhost:{server_port} (dev only).
+    callback_base_url: str = ""
+
     # Service
     host: str = "0.0.0.0"
     # Use "server_port" to avoid collision with Kubernetes service discovery
