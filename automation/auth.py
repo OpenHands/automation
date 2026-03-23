@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
+from cachetools import TTLCache
 from fastapi import Depends, HTTPException, Request, status
 from tenacity import (
     RetryCallState,
@@ -24,6 +25,14 @@ from automation.config import get_settings
 
 
 logger = logging.getLogger("automation.auth")
+
+# Cache TTL in seconds
+AUTH_CACHE_TTL_SECONDS = 20.0
+
+# In-memory cache for authenticated users with 20 second TTL
+_auth_cache: TTLCache[str, "AuthenticatedUser"] = TTLCache(
+    maxsize=1024, ttl=AUTH_CACHE_TTL_SECONDS
+)
 
 # Default timeout for HTTP client
 HTTP_CLIENT_TIMEOUT = 10.0
@@ -59,6 +68,11 @@ class AuthenticatedUser:
     user_id: uuid.UUID
     org_id: uuid.UUID
     api_key: str  # The raw API key (needed for downstream API calls)
+
+
+def clear_auth_cache() -> None:
+    """Clear all cached authentication data. Useful for testing."""
+    _auth_cache.clear()
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
@@ -120,6 +134,7 @@ async def authenticate_request(
 
     Calls the OpenHands API /api/keys/current to verify the key and get
     user/org identity. Implements retry with exponential backoff for rate limiting.
+    Results are cached in-memory for 20 seconds to reduce API calls.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -135,6 +150,14 @@ async def authenticate_request(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Empty API key",
         )
+
+    # Check cache first
+    cached_user = _auth_cache.get(api_key)
+    if cached_user is not None:
+        logger.debug("Auth cache hit for user %s", cached_user.user_id)
+        return cached_user
+
+    logger.debug("Auth cache miss, validating with OpenHands API")
 
     settings = get_settings()
     try:
@@ -188,4 +211,6 @@ async def authenticate_request(
             detail="Invalid user_id or org_id format from OpenHands API",
         )
 
-    return AuthenticatedUser(user_id=user_uuid, org_id=org_uuid, api_key=api_key)
+    user = AuthenticatedUser(user_id=user_uuid, org_id=org_uuid, api_key=api_key)
+    _auth_cache[api_key] = user
+    return user
