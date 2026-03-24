@@ -305,7 +305,7 @@ async def run_automation(
                 exit_code=exit_code,
                 stdout=stdout,
                 stderr=stderr,
-                error=None if success else f"exit_code={exit_code}: {stderr[:500]}",
+                error=None if success else f"exit_code={exit_code}: {stderr[-1000:]}",
             )
 
         except Exception as e:
