@@ -174,8 +174,16 @@ async def _execute_run(
             run_id=run_id,
         )
 
-        if not result.success:
-            sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
+        sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
+        if result.success:
+            # Mark the run as COMPLETED now that the entrypoint finished successfully.
+            # Note: The SDK callback may also try to mark it COMPLETED, but we use
+            # optimistic locking so the first one wins.
+            logger.info("Marking run as COMPLETED", extra=sandbox_extra)
+            await _mark_run_terminal(
+                session_factory, run, AutomationRunStatus.COMPLETED
+            )
+        else:
             logger.warning(
                 "Sandbox execution failed: %s",
                 result.error,
@@ -188,22 +196,29 @@ async def _execute_run(
                 result.stderr[-2000:] if result.stderr else "(empty)",
                 extra=sandbox_extra,
             )
-            await _mark_run_failed(session_factory, run, result.error)
+            await _mark_run_terminal(
+                session_factory, run, AutomationRunStatus.FAILED, result.error
+            )
 
     except (APIKeyError, ValueError) as exc:
         logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
-        await _mark_run_failed(session_factory, run, str(exc))
+        await _mark_run_terminal(
+            session_factory, run, AutomationRunStatus.FAILED, str(exc)
+        )
     except Exception:
         logger.exception("Background execution failed", extra=log_extra())
-        await _mark_run_failed(session_factory, run, "Internal dispatcher error")
+        await _mark_run_terminal(
+            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+        )
 
 
-async def _mark_run_failed(
+async def _mark_run_terminal(
     session_factory: async_sessionmaker[AsyncSession],
     run: AutomationRun,
-    error: str | None,
+    status: AutomationRunStatus,
+    error: str | None = None,
 ) -> None:
-    """Mark a run as FAILED if it's still RUNNING."""
+    """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING."""
     run_id = str(run.id)
     automation_id = str(run.automation_id) if run.automation_id else None
     extra = _run_extra(run_id=run_id, automation_id=automation_id)
@@ -217,12 +232,20 @@ async def _mark_run_failed(
                 await mark_run_status(
                     session,
                     db_run,
-                    AutomationRunStatus.FAILED,
+                    status,
                     error_detail=error,
                 )
                 await session.commit()
+                logger.info("Run marked as %s", status.value, extra=extra)
+            else:
+                logger.info(
+                    "Run not marked %s (current status: %s)",
+                    status.value,
+                    db_run.status.value if db_run else "not found",
+                    extra=extra,
+                )
     except Exception:
-        logger.exception("Failed to mark run as FAILED", extra=extra)
+        logger.exception("Failed to mark run as %s", status.value, extra=extra)
 
 
 async def dispatch_pending_runs(
@@ -280,7 +303,9 @@ async def _execute_run_safe(
         await _execute_run(run, settings, session_factory)
     except Exception:
         logger.exception("Background execution failed", extra=extra)
-        await _mark_run_failed(session_factory, run, "Internal dispatcher error")
+        await _mark_run_terminal(
+            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+        )
 
 
 async def dispatcher_loop(
