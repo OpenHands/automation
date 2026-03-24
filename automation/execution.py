@@ -290,7 +290,7 @@ async def run_automation(
                 f"mkdir -p {WORK_DIR}"
                 f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
                 f" && cd {WORK_DIR}"
-                f" && ([ -f setup.sh ] && bash setup.sh || true)"
+                f" && ([ ! -f setup.sh ] || bash setup.sh)"
                 f" && {exports}{entrypoint}"
             )
 
@@ -299,13 +299,23 @@ async def run_automation(
             )
 
             success = exit_code == 0
+            error_msg = None
+            if not success:
+                # Include both stderr and stdout tail - some errors go to stdout
+                error_parts = [f"exit_code={exit_code}"]
+                if stderr:
+                    error_parts.append(f"stderr: {stderr[-1000:]}")
+                if stdout:
+                    error_parts.append(f"stdout: {stdout[-500:]}")
+                error_msg = "\n".join(error_parts)
+
             return AutomationResult(
                 success=success,
                 sandbox_id=sandbox_id,
                 exit_code=exit_code,
                 stdout=stdout,
                 stderr=stderr,
-                error=None if success else f"exit_code={exit_code}: {stderr[-1000:]}",
+                error=error_msg,
             )
 
         except Exception as e:
