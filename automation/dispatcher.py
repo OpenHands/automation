@@ -149,6 +149,13 @@ async def _execute_run(
 
         if not result.success:
             logger.warning("Run %s sandbox execution failed: %s", run_id, result.error)
+            logger.warning(
+                "Run %s full output:\n--- STDOUT (last 2000 chars) ---\n%s\n"
+                "--- STDERR (last 2000 chars) ---\n%s",
+                run_id,
+                result.stdout[-2000:] if result.stdout else "(empty)",
+                result.stderr[-2000:] if result.stderr else "(empty)",
+            )
             await _mark_run_failed(session_factory, run, result.error)
 
     except (APIKeyError, ValueError) as exc:
