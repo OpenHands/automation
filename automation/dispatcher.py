@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,6 +28,23 @@ from automation.utils.tarball_validation import is_http_url, parse_internal_uplo
 
 
 logger = logging.getLogger("automation.dispatcher")
+
+
+def _run_extra(
+    run_id: str | None = None,
+    automation_id: str | None = None,
+    sandbox_id: str | None = None,
+) -> dict[str, Any]:
+    """Build extra dict for structured logging with run/automation/sandbox IDs."""
+    extra: dict[str, Any] = {}
+    if run_id:
+        extra["run_id"] = run_id
+    if automation_id:
+        extra["automation_id"] = automation_id
+    if sandbox_id:
+        extra["sandbox_id"] = sandbox_id
+    return extra
+
 
 DEFAULT_BATCH_SIZE = 10
 POLL_INTERVAL_SECONDS = 30
@@ -93,7 +111,14 @@ async def _execute_run(
     """
     run_id = str(run.id)
     automation = run.automation
+    automation_id = str(automation.id)
     tarball_path = automation.tarball_path
+
+    # Helper for consistent structured logging
+    def log_extra(sandbox_id: str | None = None) -> dict[str, Any]:
+        return _run_extra(
+            run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
+        )
 
     callback_url = (
         f"{settings.resolved_base_url.rstrip('/')}"
@@ -109,7 +134,7 @@ async def _execute_run(
         if is_http_url(tarball_path):
             # HTTP(S) URL: download directly inside sandbox (untrusted/large)
             tarball_source = tarball_path
-            logger.info("Run %s: HTTP URL, will download in sandbox", run_id)
+            logger.info("HTTP URL tarball, will download in sandbox", extra=log_extra())
         else:
             # Internal (oh-internal://): download from GCS, upload to sandbox
             upload_id = parse_internal_upload_id(tarball_path)
@@ -119,7 +144,9 @@ async def _execute_run(
             async with session_factory() as session:
                 tarball_source = await _download_internal_tarball(upload_id, session)
             logger.info(
-                "Run %s: internal tarball (%d bytes)", run_id, len(tarball_source)
+                "Internal tarball downloaded (%d bytes)",
+                len(tarball_source),
+                extra=log_extra(),
             )
 
         # 3. Build env vars for the sandbox
@@ -148,21 +175,26 @@ async def _execute_run(
         )
 
         if not result.success:
-            logger.warning("Run %s sandbox execution failed: %s", run_id, result.error)
+            sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
             logger.warning(
-                "Run %s full output:\n--- STDOUT (last 2000 chars) ---\n%s\n"
+                "Sandbox execution failed: %s",
+                result.error,
+                extra=sandbox_extra,
+            )
+            logger.warning(
+                "Full output:\n--- STDOUT (last 2000 chars) ---\n%s\n"
                 "--- STDERR (last 2000 chars) ---\n%s",
-                run_id,
                 result.stdout[-2000:] if result.stdout else "(empty)",
                 result.stderr[-2000:] if result.stderr else "(empty)",
+                extra=sandbox_extra,
             )
             await _mark_run_failed(session_factory, run, result.error)
 
     except (APIKeyError, ValueError) as exc:
-        logger.error("Run %s dispatch error: %s", run_id, exc, exc_info=True)
+        logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
         await _mark_run_failed(session_factory, run, str(exc))
     except Exception:
-        logger.exception("Background execution failed for run %s", run_id)
+        logger.exception("Background execution failed", extra=log_extra())
         await _mark_run_failed(session_factory, run, "Internal dispatcher error")
 
 
@@ -172,6 +204,9 @@ async def _mark_run_failed(
     error: str | None,
 ) -> None:
     """Mark a run as FAILED if it's still RUNNING."""
+    run_id = str(run.id)
+    automation_id = str(run.automation_id) if run.automation_id else None
+    extra = _run_extra(run_id=run_id, automation_id=automation_id)
     try:
         async with session_factory() as session:
             db_result = await session.execute(
@@ -187,7 +222,7 @@ async def _mark_run_failed(
                 )
                 await session.commit()
     except Exception:
-        logger.exception("Failed to mark run %s as FAILED", run.id)
+        logger.exception("Failed to mark run as FAILED", extra=extra)
 
 
 async def dispatch_pending_runs(
@@ -205,12 +240,15 @@ async def dispatch_pending_runs(
 
         dispatched_runs = []
         for run in pending_runs:
+            run_id = str(run.id)
+            automation_id = str(run.automation_id) if run.automation_id else None
+            extra = _run_extra(run_id=run_id, automation_id=automation_id)
             try:
-                logger.info("Dispatching automation run %s", run.id)
+                logger.info("Dispatching automation run", extra=extra)
                 await mark_run_status(session, run, AutomationRunStatus.RUNNING)
                 dispatched_runs.append(run)
             except Exception:
-                logger.exception("Failed to dispatch run %s", run.id)
+                logger.exception("Failed to dispatch run", extra=extra)
 
         await session.commit()
 
@@ -235,10 +273,13 @@ async def _execute_run_safe(
     tasks, so this wrapper ensures every failure is logged and the run is
     marked FAILED.
     """
+    run_id = str(run.id)
+    automation_id = str(run.automation_id) if run.automation_id else None
+    extra = _run_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory)
     except Exception:
-        logger.exception("Background execution failed for run %s", run.id)
+        logger.exception("Background execution failed", extra=extra)
         await _mark_run_failed(session_factory, run, "Internal dispatcher error")
 
 

@@ -9,11 +9,25 @@ import io
 import logging
 import tarfile
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 
 logger = logging.getLogger(__name__)
+
+
+def _log_extra(
+    run_id: str | None = None, sandbox_id: str | None = None
+) -> dict[str, Any]:
+    """Build extra dict for structured logging with run/sandbox IDs."""
+    extra: dict[str, Any] = {}
+    if run_id:
+        extra["run_id"] = run_id
+    if sandbox_id:
+        extra["sandbox_id"] = sandbox_id
+    return extra
+
 
 SANDBOX_POLL_INTERVAL = 5
 SANDBOX_READY_TIMEOUT = 300
@@ -75,7 +89,6 @@ async def _create_and_wait(
     resp.raise_for_status()
     data = resp.json()
     sandbox_id = data["id"]
-    logger.info("Created sandbox %s", sandbox_id)
 
     elapsed = 0.0
     while elapsed < ready_timeout:
@@ -97,7 +110,6 @@ async def _create_and_wait(
             if result is None:
                 raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
             agent_url, session_key = result
-            logger.info("Sandbox %s ready at %s", sandbox_id, agent_url)
             return sandbox_id, session_key, agent_url
 
         if status in ("ERROR", "MISSING"):
@@ -119,10 +131,8 @@ async def _delete_sandbox(
             params={"sandbox_id": sandbox_id},
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        if resp.status_code < 300:
-            logger.info("Deleted sandbox %s", sandbox_id)
-        else:
-            logger.warning("Delete sandbox %s: %s", sandbox_id, resp.text)
+        if resp.status_code >= 300:
+            logger.warning("Delete sandbox %s failed: %s", sandbox_id, resp.text)
     except Exception:
         logger.exception("Error deleting sandbox %s", sandbox_id)
 
@@ -209,8 +219,6 @@ async def _download_in_sandbox(
             )
         raise RuntimeError(f"Failed to download tarball (exit={exit_code}): {stderr}")
 
-    logger.info("Downloaded tarball from URL to %s in sandbox", dest)
-
 
 # -- Public API ---------------------------------------------------------------
 
@@ -252,15 +260,24 @@ async def run_automation(
     api_url = api_url.rstrip("/")
     sandbox_id: str | None = None
 
+    # Helper for consistent structured logging with run_id/sandbox_id
+    def log_extra() -> dict[str, Any]:
+        return _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+
+    logger.info("Starting automation execution", extra=log_extra())
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key
             )
+            logger.info(
+                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=log_extra()
+            )
         except Exception as e:
             # If sandbox creation started but failed to reach RUNNING,
             # still attempt cleanup.
-            logger.exception("Sandbox creation failed")
+            logger.exception("Sandbox creation failed", extra=log_extra())
             if sandbox_id:
                 await _delete_sandbox(client, api_url, api_key, sandbox_id)
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
@@ -273,10 +290,14 @@ async def run_automation(
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
+                logger.info("Uploading tarball to sandbox", extra=log_extra())
                 await _upload(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
+                logger.info(
+                    "Downloading tarball in sandbox from URL", extra=log_extra()
+                )
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
@@ -294,6 +315,7 @@ async def run_automation(
                 f" && {exports}{entrypoint}"
             )
 
+            logger.info("Executing entrypoint: %s", entrypoint, extra=log_extra())
             exit_code, stdout, stderr = await _bash(
                 client, agent_url, session_key, cmd, timeout=timeout
             )
@@ -308,6 +330,11 @@ async def run_automation(
                 if stdout:
                     error_parts.append(f"stdout: {stdout[-500:]}")
                 error_msg = "\n".join(error_parts)
+                logger.warning(
+                    "Entrypoint failed with exit_code=%s", exit_code, extra=log_extra()
+                )
+            else:
+                logger.info("Entrypoint completed successfully", extra=log_extra())
 
             return AutomationResult(
                 success=success,
@@ -319,10 +346,11 @@ async def run_automation(
             )
 
         except Exception as e:
-            logger.exception("Automation execution failed")
+            logger.exception("Automation execution failed", extra=log_extra())
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
         finally:
             if not keep_sandbox:
+                logger.info("Deleting sandbox", extra=log_extra())
                 await _delete_sandbox(client, api_url, api_key, sandbox_id)
 
 
