@@ -12,9 +12,23 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Check if exception is a 429 rate limit error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return False
 
 
 def _log_extra(
@@ -38,6 +52,20 @@ TARBALL_PATH = "/tmp/automation.tar.gz"
 # Limits for external tarball downloads (in sandbox)
 EXTERNAL_DOWNLOAD_TIMEOUT = 120  # seconds
 EXTERNAL_MAX_FILESIZE = 100 * 1024 * 1024  # 100 MB
+
+# Rate limit retry settings
+RATE_LIMIT_MIN_WAIT = 10  # initial wait after a 429
+RATE_LIMIT_MAX_WAIT = 60  # max wait between retries
+RATE_LIMIT_MAX_RETRIES = 5
+
+# Tenacity retry decorator for rate limit handling
+_retry_on_rate_limit = retry(
+    retry=retry_if_exception(_is_rate_limit_error),
+    stop=stop_after_attempt(RATE_LIMIT_MAX_RETRIES),
+    wait=wait_exponential(min=RATE_LIMIT_MIN_WAIT, max=RATE_LIMIT_MAX_WAIT),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +101,33 @@ def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
     return None
 
 
+@_retry_on_rate_limit
+async def _create_sandbox(
+    client: httpx.AsyncClient, api_url: str, headers: dict[str, str]
+) -> str:
+    """Create a sandbox and return its ID. Retries on rate limit."""
+    resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
+    resp.raise_for_status()
+    return resp.json()["id"]
+
+
+@_retry_on_rate_limit
+async def _poll_sandbox(
+    client: httpx.AsyncClient, api_url: str, sandbox_id: str, headers: dict[str, str]
+) -> dict[str, Any]:
+    """Poll sandbox status. Retries on rate limit."""
+    resp = await client.get(
+        f"{api_url}/api/v1/sandboxes",
+        params={"id": sandbox_id},
+        headers=headers,
+    )
+    resp.raise_for_status()
+    items = resp.json()
+    if not items:
+        raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
+    return items[0]
+
+
 async def _create_and_wait(
     client: httpx.AsyncClient,
     api_url: str,
@@ -82,27 +137,15 @@ async def _create_and_wait(
     """Create a sandbox and poll until RUNNING.
 
     Returns ``(sandbox_id, session_api_key, agent_server_url)``.
+    Handles 429 rate limits via tenacity retry.
     """
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
-    resp.raise_for_status()
-    data = resp.json()
-    sandbox_id = data["id"]
+    sandbox_id = await _create_sandbox(client, api_url, headers)
 
     elapsed = 0.0
     while elapsed < ready_timeout:
-        resp = await client.get(
-            f"{api_url}/api/v1/sandboxes",
-            params={"id": sandbox_id},
-            headers=headers,
-        )
-        resp.raise_for_status()
-        items = resp.json()
-        if not items:
-            raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
-
-        sb = items[0]
+        sb = await _poll_sandbox(client, api_url, sandbox_id, headers)
         status = sb.get("status", "UNKNOWN")
 
         if status == "RUNNING":
