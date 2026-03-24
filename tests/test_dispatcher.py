@@ -17,11 +17,39 @@ from automation.dispatcher import (
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils import utcnow
 from automation.utils.run import mark_run_status
+from automation.utils.tarball_validation import is_http_url
 
 
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+class TestIsHttpUrl:
+    """Tests for is_http_url helper function."""
+
+    def test_https_url_is_http(self):
+        """HTTPS URLs are HTTP URLs (downloadable with curl in sandbox)."""
+        assert is_http_url("https://example.com/file.tar.gz") is True
+        github_url = "https://github.com/user/repo/archive/main.tar.gz"
+        assert is_http_url(github_url) is True
+
+    def test_http_url_is_http(self):
+        """HTTP URLs are HTTP URLs (downloadable with curl in sandbox)."""
+        assert is_http_url("http://example.com/file.tar.gz") is True
+
+    def test_internal_url_is_not_http(self):
+        """Internal URLs (oh-internal://) are not HTTP URLs."""
+        internal_url = "oh-internal://uploads/12345678-1234-5678-1234-567812345678"
+        assert is_http_url(internal_url) is False
+
+    def test_s3_url_is_not_http(self):
+        """S3 URLs are not HTTP URLs (need special handling, not curl)."""
+        assert is_http_url("s3://bucket/key.tar.gz") is False
+
+    def test_gs_url_is_not_http(self):
+        """GCS URLs are not HTTP URLs (need special handling, not curl)."""
+        assert is_http_url("gs://bucket/key.tar.gz") is False
 
 
 class TestMarkRunStatus:

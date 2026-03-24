@@ -14,7 +14,6 @@ import json
 import logging
 import uuid
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -24,40 +23,13 @@ from automation.execution import run_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
 from automation.utils.run import mark_run_status
-from automation.utils.tarball_validation import parse_internal_upload_id
+from automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
 
 
 logger = logging.getLogger("automation.dispatcher")
 
 DEFAULT_BATCH_SIZE = 10
 POLL_INTERVAL_SECONDS = 30
-
-
-async def _download_tarball(
-    tarball_path: str,
-    session: AsyncSession | None = None,
-) -> bytes:
-    """Download the tarball from ``tarball_path``.
-
-    Supports:
-    - ``oh-internal://uploads/{uuid}`` — looks up the GCS storage_path from
-      the TarballUpload record, then downloads from GCS.
-    - ``http://`` / ``https://`` — direct HTTP download.
-    """
-    upload_id = parse_internal_upload_id(tarball_path)
-    if upload_id is not None:
-        return await _download_internal_tarball(upload_id, session)
-
-    if tarball_path.startswith(("http://", "https://")):
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.get(tarball_path)
-            resp.raise_for_status()
-            return resp.content
-
-    raise ValueError(
-        f"Unsupported tarball_path scheme: {tarball_path!r}. "
-        "Expected oh-internal://, http://, or https://."
-    )
 
 
 async def _download_internal_tarball(
@@ -110,8 +82,10 @@ async def _execute_run(
     """Execute a single run in a background task.
 
     1. Fetch a per-user API key from the SaaS service (on demand, never stored).
-    2. Download the tarball from ``automation.tarball_path``.
-    3. Call ``run_automation()`` to spin up a sandbox, upload, and execute.
+    2. Determine tarball source:
+       - Internal (oh-internal://): Download from GCS and upload to sandbox.
+       - External (http/https): Pass URL for direct download inside sandbox.
+    3. Call ``run_automation()`` to spin up a sandbox and execute.
     4. If the sandbox itself fails to start, mark the run FAILED.
 
     The SDK inside the sandbox fires the completion callback on exit,
@@ -119,6 +93,7 @@ async def _execute_run(
     """
     run_id = str(run.id)
     automation = run.automation
+    tarball_path = automation.tarball_path
 
     callback_url = (
         f"{settings.resolved_base_url.rstrip('/')}"
@@ -129,9 +104,23 @@ async def _execute_run(
         # 1. Fetch a per-user API key from the SaaS service
         api_key = await get_api_key_for_automation_run(run)
 
-        # 2. Download the tarball (needs a session for oh-internal:// lookups)
-        async with session_factory() as session:
-            tarball = await _download_tarball(automation.tarball_path, session)
+        # 2. Determine tarball source
+        tarball_source: bytes | str
+        if is_http_url(tarball_path):
+            # HTTP(S) URL: download directly inside sandbox (untrusted/large)
+            tarball_source = tarball_path
+            logger.info("Run %s: HTTP URL, will download in sandbox", run_id)
+        else:
+            # Internal (oh-internal://): download from GCS, upload to sandbox
+            upload_id = parse_internal_upload_id(tarball_path)
+            if upload_id is None:
+                raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
+
+            async with session_factory() as session:
+                tarball_source = await _download_internal_tarball(upload_id, session)
+            logger.info(
+                "Run %s: internal tarball (%d bytes)", run_id, len(tarball_source)
+            )
 
         # 3. Build env vars for the sandbox
         env_vars = {
@@ -151,8 +140,8 @@ async def _execute_run(
         result = await run_automation(
             api_url=settings.openhands_api_base_url,
             api_key=api_key,
-            tarball=tarball,
             entrypoint=automation.entrypoint,
+            tarball_source=tarball_source,
             env_vars=env_vars,
             callback_url=callback_url,
             run_id=run_id,
@@ -162,7 +151,7 @@ async def _execute_run(
             logger.warning("Run %s sandbox execution failed: %s", run_id, result.error)
             await _mark_run_failed(session_factory, run, result.error)
 
-    except (APIKeyError, ValueError, httpx.HTTPError) as exc:
+    except (APIKeyError, ValueError) as exc:
         logger.error("Run %s dispatch error: %s", run_id, exc, exc_info=True)
         await _mark_run_failed(session_factory, run, str(exc))
     except Exception:

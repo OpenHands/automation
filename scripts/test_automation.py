@@ -100,8 +100,8 @@ async def run_test(
     result = await run_automation(
         api_url=api_url,
         api_key=api_key,
-        tarball=tarball,
         entrypoint=entrypoint,
+        tarball_source=tarball,
         env_vars=env_vars,
         callback_url="https://example.com/callback",
         run_id="test-run-001",

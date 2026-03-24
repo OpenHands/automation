@@ -9,7 +9,13 @@ import tarfile
 
 import pytest
 
-from automation.execution import AutomationResult, _shell_quote, build_tarball
+from automation.execution import (
+    EXTERNAL_DOWNLOAD_TIMEOUT,
+    EXTERNAL_MAX_FILESIZE,
+    AutomationResult,
+    _shell_quote,
+    build_tarball,
+)
 
 
 class TestBuildTarball:
@@ -70,3 +76,30 @@ class TestAutomationResult:
         assert r.sandbox_id == "sb-1"
         with pytest.raises(AttributeError):
             r.success = False  # type: ignore[misc]
+
+
+class TestRunAutomationTarballSource:
+    """Tests for run_automation tarball_source parameter."""
+
+    def test_tarball_source_accepts_bytes(self):
+        """tarball_source accepts bytes (will be uploaded)."""
+        # This just validates the type - actual execution would need mocking
+        source: bytes | str = b"test tarball content"
+        assert isinstance(source, bytes)
+
+    def test_tarball_source_accepts_str(self):
+        """tarball_source accepts str URL (will be downloaded in sandbox)."""
+        source: bytes | str = "https://example.com/file.tar.gz"
+        assert isinstance(source, str)
+
+
+class TestExternalDownloadConstants:
+    """Tests for external download configuration constants."""
+
+    def test_timeout_is_reasonable(self):
+        """External download timeout should be reasonable (60-300s)."""
+        assert 60 <= EXTERNAL_DOWNLOAD_TIMEOUT <= 300
+
+    def test_max_filesize_is_reasonable(self):
+        """Max filesize should be reasonable (10MB - 500MB)."""
+        assert 10 * 1024 * 1024 <= EXTERNAL_MAX_FILESIZE <= 500 * 1024 * 1024

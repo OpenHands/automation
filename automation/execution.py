@@ -21,6 +21,10 @@ DEFAULT_TIMEOUT = 600
 WORK_DIR = "/workspace/automation"
 TARBALL_PATH = "/tmp/automation.tar.gz"
 
+# Limits for external tarball downloads (in sandbox)
+EXTERNAL_DOWNLOAD_TIMEOUT = 120  # seconds
+EXTERNAL_MAX_FILESIZE = 100 * 1024 * 1024  # 100 MB
+
 
 @dataclass(frozen=True)
 class AutomationResult:
@@ -162,14 +166,60 @@ async def _bash(
     return body.get("exit_code"), body.get("stdout") or "", body.get("stderr") or ""
 
 
+async def _download_in_sandbox(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    tarball_url: str,
+    dest: str,
+    timeout: int = EXTERNAL_DOWNLOAD_TIMEOUT,
+    max_filesize: int = EXTERNAL_MAX_FILESIZE,
+) -> None:
+    """Download a tarball directly inside the sandbox using curl.
+
+    This is used for external URLs (https://) to avoid downloading
+    untrusted, potentially large files on the automation service.
+
+    Raises RuntimeError if the download fails.
+    """
+    # Use curl with safety limits:
+    # -f: fail silently on HTTP errors (returns exit code 22)
+    # -s: silent mode (no progress)
+    # -S: show errors even in silent mode
+    # -L: follow redirects
+    # --max-filesize: limit download size
+    # --max-time: limit total time
+    cmd = (
+        f"curl -fsSL "
+        f"--max-filesize {max_filesize} "
+        f"--max-time {timeout} "
+        f"-o {dest} "
+        f"{_shell_quote(tarball_url)}"
+    )
+
+    exit_code, stdout, stderr = await _bash(
+        client, agent_url, session_key, cmd, timeout=timeout + 30
+    )
+
+    if exit_code != 0:
+        # curl exit codes: 22 = HTTP error, 63 = max filesize exceeded
+        if exit_code == 63:
+            raise RuntimeError(
+                f"Tarball exceeds size limit ({max_filesize // 1024 // 1024} MB)"
+            )
+        raise RuntimeError(f"Failed to download tarball (exit={exit_code}): {stderr}")
+
+    logger.info("Downloaded tarball from URL to %s in sandbox", dest)
+
+
 # -- Public API ---------------------------------------------------------------
 
 
 async def run_automation(
     api_url: str,
     api_key: str,
-    tarball: bytes,
     entrypoint: str,
+    tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     callback_url: str | None = None,
@@ -179,9 +229,13 @@ async def run_automation(
     """Execute an automation end-to-end in a fresh sandbox.
 
     1. Create sandbox and wait until RUNNING.
-    2. Upload *tarball* to the sandbox.
+    2. Get tarball into sandbox (upload bytes OR download from URL).
     3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
     4. Delete the sandbox (unless *keep_sandbox* is True).
+
+    *tarball_source*: Either raw bytes (uploaded to sandbox) or a URL string
+    (downloaded directly inside sandbox via curl). URLs avoid downloading
+    untrusted/large files on the automation service.
 
     *env_vars* are exported before the entrypoint runs.  The sandbox
     identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
@@ -217,7 +271,15 @@ async def run_automation(
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
 
-            await _upload(client, agent_url, session_key, tarball, TARBALL_PATH)
+            # Get tarball into sandbox: upload bytes or download from URL
+            if isinstance(tarball_source, bytes):
+                await _upload(
+                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                )
+            else:
+                await _download_in_sandbox(
+                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                )
 
             exports = ""
             if env_vars:
