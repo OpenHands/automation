@@ -122,10 +122,7 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    callback_url = (
-        f"{settings.resolved_base_url.rstrip('/')}"
-        f"/v1/runs/{run_id}/complete"
-    )
+    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
 
     try:
         # 1. Fetch a per-user API key from the SaaS service

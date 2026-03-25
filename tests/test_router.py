@@ -708,9 +708,7 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(
-            f"/v1/{automation.id}/dispatch"
-        )
+        response = await async_client.post(f"/v1/{automation.id}/dispatch")
 
         assert response.status_code == 201
         data = response.json()
@@ -745,9 +743,7 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(
-            f"/v1/{automation.id}/dispatch"
-        )
+        response = await async_client.post(f"/v1/{automation.id}/dispatch")
 
         assert response.status_code == 404
 
@@ -764,9 +760,7 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(
-            f"/v1/{automation.id}/dispatch"
-        )
+        response = await async_client.post(f"/v1/{automation.id}/dispatch")
 
         assert response.status_code == 404
 
@@ -814,9 +808,7 @@ class TestDispatchAutomation:
 
         assert automation.last_triggered_at is None
 
-        response = await async_client.post(
-            f"/v1/{automation.id}/dispatch"
-        )
+        response = await async_client.post(f"/v1/{automation.id}/dispatch")
 
         assert response.status_code == 201
 
@@ -862,9 +854,7 @@ class TestListAutomationRuns:
         await async_session.commit()
 
         # Dispatch a run
-        dispatch_resp = await async_client.post(
-            f"/v1/{automation.id}/dispatch"
-        )
+        dispatch_resp = await async_client.post(f"/v1/{automation.id}/dispatch")
         assert dispatch_resp.status_code == 201
         run_id = dispatch_resp.json()["id"]
 
@@ -935,9 +925,7 @@ class TestListAutomationRuns:
 
         # Dispatch 5 runs
         for _ in range(5):
-            resp = await async_client.post(
-                f"/v1/{automation.id}/dispatch"
-            )
+            resp = await async_client.post(f"/v1/{automation.id}/dispatch")
             assert resp.status_code == 201
 
         # Get first page
