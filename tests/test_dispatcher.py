@@ -462,3 +462,78 @@ class TestDispatcherLoop:
             )
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
+
+
+class TestEffectiveTimeout:
+    """Tests for effective timeout calculation in dispatcher."""
+
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_uses_automation_timeout_when_set(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
+        """Dispatcher uses automation's timeout when set."""
+
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="With Timeout",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=120,  # Custom timeout
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+
+        await dispatch_pending_runs(async_session_factory, mock_settings)
+
+        # Verify _execute_run_safe was called
+        mock_execute.assert_called_once()
+        # The automation passed should have timeout=120
+        call_args = mock_execute.call_args
+        run_arg = call_args[0][0]
+        assert run_arg.automation.timeout == 120
+
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_uses_default_timeout_when_not_set(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
+        """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="No Timeout",
+                triggers={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=None,  # No custom timeout
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+
+        await dispatch_pending_runs(async_session_factory, mock_settings)
+
+        # Verify _execute_run_safe was called
+        mock_execute.assert_called_once()
+        # The automation passed should have timeout=None
+        call_args = mock_execute.call_args
+        run_arg = call_args[0][0]
+        assert run_arg.automation.timeout is None

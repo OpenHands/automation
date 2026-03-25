@@ -215,6 +215,95 @@ class TestCreateAutomation:
         assert response.status_code == 201
         assert response.json()["setup_script_path"] == "scripts/setup.sh"
 
+    async def test_create_automation_with_timeout(self, async_client):
+        """Automation can be created with a valid timeout."""
+        payload = {
+            "name": "With Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "timeout": 300,
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["timeout"] == 300
+
+    async def test_create_automation_without_timeout(self, async_client):
+        """Automation can be created without timeout (uses system default)."""
+        payload = {
+            "name": "No Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["timeout"] is None
+
+    async def test_create_automation_timeout_zero_rejected(self, async_client):
+        """Timeout of zero is rejected."""
+        payload = {
+            "name": "Zero Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "timeout": 0,
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_automation_timeout_negative_rejected(self, async_client):
+        """Negative timeout is rejected."""
+        payload = {
+            "name": "Negative Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "timeout": -100,
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_automation_timeout_exceeds_max_rejected(self, async_client):
+        """Timeout exceeding system maximum is rejected."""
+        payload = {
+            "name": "Too Long Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "timeout": 601,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_automation_timeout_at_max_allowed(self, async_client):
+        """Timeout at exactly system maximum is allowed."""
+        payload = {
+            "name": "Max Timeout",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "timeout": 600,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+        }
+
+        response = await async_client.post("/api/v1/automations", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["timeout"] == 600
+
 
 class TestListAutomations:
     """Tests for GET /api/v1/automations endpoint."""
@@ -537,6 +626,70 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 404
+
+    async def test_update_automation_timeout(self, async_client, async_session):
+        """Can update automation timeout."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Update Timeout",
+            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            timeout=300,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/v1/automations/{automation.id}",
+            json={"timeout": 120},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["timeout"] == 120
+
+    async def test_update_automation_timeout_invalid(self, async_client, async_session):
+        """Cannot update timeout to invalid value."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Invalid Timeout Update",
+            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/v1/automations/{automation.id}",
+            json={"timeout": -10},
+        )
+
+        assert response.status_code == 422
+
+    async def test_update_automation_timeout_exceeds_max(
+        self, async_client, async_session
+    ):
+        """Cannot update timeout to exceed system maximum."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Max Timeout Update",
+            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/v1/automations/{automation.id}",
+            json={"timeout": 700},  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+        )
+
+        assert response.status_code == 422
 
 
 class TestDispatchAutomation:

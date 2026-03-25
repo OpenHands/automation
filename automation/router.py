@@ -64,6 +64,7 @@ async def create_automation(
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
+        timeout=body.timeout,
     )
     session.add(auto)
     await session.flush()

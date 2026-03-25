@@ -20,6 +20,18 @@ from tenacity import (
     wait_exponential,
 )
 
+from automation.constants import (
+    EXTERNAL_DOWNLOAD_TIMEOUT,
+    EXTERNAL_MAX_FILESIZE,
+    MAX_RUN_DURATION_SECONDS,
+    RATE_LIMIT_MAX_RETRIES,
+    RATE_LIMIT_MAX_WAIT,
+    RATE_LIMIT_MIN_WAIT,
+    SANDBOX_POLL_INTERVAL,
+    SANDBOX_READY_TIMEOUT,
+    TARBALL_PATH,
+    WORK_DIR,
+)
 from automation.utils.sandbox import delete_sandbox
 
 
@@ -44,21 +56,6 @@ def _log_extra(
         extra["sandbox_id"] = sandbox_id
     return extra
 
-
-SANDBOX_POLL_INTERVAL = 5
-SANDBOX_READY_TIMEOUT = 300
-DEFAULT_TIMEOUT = 600
-WORK_DIR = "/workspace/automation"
-TARBALL_PATH = "/tmp/automation.tar.gz"
-
-# Limits for external tarball downloads (in sandbox)
-EXTERNAL_DOWNLOAD_TIMEOUT = 120  # seconds
-EXTERNAL_MAX_FILESIZE = 100 * 1024 * 1024  # 100 MB
-
-# Rate limit retry settings
-RATE_LIMIT_MIN_WAIT = 10  # initial wait after a 429
-RATE_LIMIT_MAX_WAIT = 60  # max wait between retries
-RATE_LIMIT_MAX_RETRIES = 5
 
 # Tenacity retry decorator for rate limit handling
 _retry_on_rate_limit = retry(
@@ -189,7 +186,7 @@ async def _bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int = MAX_RUN_DURATION_SECONDS,
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     resp = await client.post(
@@ -208,7 +205,7 @@ async def _start_bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int = MAX_RUN_DURATION_SECONDS,
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     resp = await client.post(
@@ -284,7 +281,7 @@ async def dispatch_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int = MAX_RUN_DURATION_SECONDS,
     callback_url: str | None = None,
     run_id: str | None = None,
 ) -> DispatchResult:
@@ -410,7 +407,7 @@ async def run_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int = MAX_RUN_DURATION_SECONDS,
     callback_url: str | None = None,
     run_id: str | None = None,
     keep_sandbox: bool = False,

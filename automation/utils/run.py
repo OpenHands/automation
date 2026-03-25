@@ -7,14 +7,12 @@ from datetime import timedelta
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from automation.constants import MAX_RUN_DURATION
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils.time import utcnow
 
 
 logger = logging.getLogger(__name__)
-
-# Default maximum run duration before the watchdog marks it as stale
-DEFAULT_MAX_RUN_DURATION = timedelta(hours=1)
 
 
 async def create_pending_run(
@@ -60,7 +58,7 @@ async def mark_run_status(
     run: AutomationRun,
     status: AutomationRunStatus,
     error_detail: str | None = None,
-    max_duration: timedelta = DEFAULT_MAX_RUN_DURATION,
+    max_duration: timedelta = MAX_RUN_DURATION,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 

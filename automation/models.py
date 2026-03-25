@@ -64,6 +64,9 @@ class Automation(Base):
     # Command to execute the automation (e.g., "uv run script.py")
     entrypoint: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Maximum execution time in seconds (None = use system default)
+    timeout: Mapped[int | None] = mapped_column(nullable=True)
+
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 

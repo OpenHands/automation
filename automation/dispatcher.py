@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
+from automation.constants import MAX_RUN_DURATION_SECONDS
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
@@ -164,13 +165,21 @@ async def _execute_run(
         }
         env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(event_payload)
 
-        # 4. Dispatch to sandbox (fire-and-forget)
+        # 4. Calculate effective timeout: use automation's timeout if set,
+        # capped at system maximum; otherwise use system default
+        if automation.timeout is not None:
+            effective_timeout = min(automation.timeout, MAX_RUN_DURATION_SECONDS)
+        else:
+            effective_timeout = MAX_RUN_DURATION_SECONDS
+
+        # 5. Dispatch to sandbox (fire-and-forget)
         result = await dispatch_automation(
             api_url=settings.openhands_api_base_url,
             api_key=api_key,
             entrypoint=automation.entrypoint,
             tarball_source=tarball_source,
             env_vars=env_vars,
+            timeout=effective_timeout,
             callback_url=callback_url,
             run_id=run_id,
         )
