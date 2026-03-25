@@ -33,7 +33,12 @@ async def lifespan(app: FastAPI):
     setup_all_loggers()
 
     # Silence noisy third-party loggers
-    for noisy_logger in ("ddtrace", "httpx", "httpcore"):
+    for noisy_logger in (
+        "ddtrace",
+        "httpx",
+        "httpcore",
+        "sqlalchemy.engine",  # Suppress SQL statement logging
+    ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     logger.info("Starting OpenHands Automations Service")

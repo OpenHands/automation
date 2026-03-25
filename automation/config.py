@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Dispatcher (polls automation_runs table for pending jobs)
     dispatcher_interval_seconds: int = 10
 
+    # Watchdog (scans for stale RUNNING runs past their timeout)
+    watchdog_interval_seconds: int = 60
+
     # Service key for authenticating with the SaaS API to fetch per-user
     # API keys (called by the dispatcher before each automation run).
     service_key: str = ""

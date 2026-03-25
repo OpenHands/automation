@@ -26,9 +26,6 @@ from automation.utils.time import utcnow
 
 logger = logging.getLogger("automation.watchdog")
 
-# Default scan interval
-WATCHDOG_INTERVAL_SECONDS = 120
-
 
 def _run_extra(
     run_id: str | None = None,
@@ -173,6 +170,18 @@ async def _verify_and_mark_run(
         )
 
     error_msg = verification.error or "no completion callback received"
+
+    # Log that we're killing the run due to timeout
+    logger.warning(
+        "Killing run due to timeout: run_id=%s, sandbox_id=%s, "
+        "timeout_at=%s, reason=%s",
+        run_id,
+        sandbox_id,
+        run.timeout_at,
+        error_msg,
+        extra=extra,
+    )
+
     stmt = (
         update(AutomationRun)
         .where(
@@ -245,10 +254,21 @@ async def mark_stale_runs(
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
-    interval_seconds: int = WATCHDOG_INTERVAL_SECONDS,
+    interval_seconds: int | None = None,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Main watchdog loop — scans for stale runs periodically."""
+    """Main watchdog loop — scans for stale runs periodically.
+
+    Args:
+        session_factory: Async session maker for database access.
+        settings: Application settings.
+        interval_seconds: Override for scan interval. If None, uses
+            settings.watchdog_interval_seconds (default: 60s).
+        shutdown_event: Event to signal graceful shutdown.
+    """
+    if interval_seconds is None:
+        interval_seconds = settings.watchdog_interval_seconds
+
     logger.info(
         "Watchdog started, scanning every %ds",
         interval_seconds,
