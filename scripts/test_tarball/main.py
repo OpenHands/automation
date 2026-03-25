@@ -41,7 +41,9 @@ for name, val in [
         print(f"FAIL: {name} not set", file=sys.stderr)
         sys.exit(1)
 
-print(f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}")
+print(
+    f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
+)
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # 2. Test SDK workspace in local_agent_server_mode

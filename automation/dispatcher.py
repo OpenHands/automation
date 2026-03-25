@@ -159,7 +159,7 @@ async def _execute_run(
 
         # Trigger context so the SDK script knows *why* it was invoked
         event_payload = {
-            "trigger": automation.triggers,
+            "trigger": automation.trigger,
             "automation_id": str(automation.id),
             "automation_name": automation.name,
         }
