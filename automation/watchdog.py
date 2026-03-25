@@ -282,7 +282,6 @@ async def mark_stale_runs(
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
-    interval_seconds: int | None = None,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
     """Main watchdog loop — scans for stale runs periodically.
@@ -290,16 +289,13 @@ async def watchdog_loop(
     Args:
         session_factory: Async session maker for database access.
         settings: Application settings.
-        interval_seconds: Override for scan interval. If None, uses
-            settings.watchdog_interval_seconds (default: 60s).
         shutdown_event: Event to signal graceful shutdown.
     """
-    if interval_seconds is None:
-        interval_seconds = settings.watchdog_interval_seconds
+    interval = settings.watchdog_interval_seconds
 
     logger.info(
         "Watchdog started, scanning every %ds",
-        interval_seconds,
+        interval,
     )
 
     while True:
@@ -316,10 +312,10 @@ async def watchdog_loop(
 
         if shutdown_event is not None:
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
                 logger.info("Watchdog received shutdown signal, exiting")
                 break
             except TimeoutError:
                 pass
         else:
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(interval)

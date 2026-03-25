@@ -9,7 +9,6 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
 
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils import utcnow
@@ -71,20 +70,21 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -100,7 +100,7 @@ class TestVerifyAndMarkRunExitCodes:
     async def test_exit_code_minus_1_marks_timed_out(
         self, async_session_factory, automation_with_run, mock_settings
     ):
-        """Exit code -1 means command was killed/timed out - mark as FAILED with timeout."""
+        """Exit code -1 means command was killed/timed out."""
         run_id = automation_with_run["run_id"]
 
         verification = VerificationResult(
@@ -111,20 +111,21 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Command timed out after 60 seconds",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -152,20 +153,21 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -181,7 +183,7 @@ class TestVerifyAndMarkRunExitCodes:
     async def test_nonzero_exit_code_marks_failed_without_timeout(
         self, async_session_factory, automation_with_run, mock_settings
     ):
-        """Non-zero exit code (not -1) means command failed - mark as FAILED without timeout."""
+        """Non-zero exit code (not -1) means command failed."""
         run_id = automation_with_run["run_id"]
 
         verification = VerificationResult(
@@ -192,20 +194,21 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Error: something went wrong",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -234,20 +237,21 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="bash: command not found",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -275,23 +279,25 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
-        ), patch(
-            "automation.watchdog.cleanup_sandbox",
-            new_callable=AsyncMock,
-        ) as mock_cleanup:
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
+            patch(
+                "automation.watchdog.cleanup_sandbox",
+                new_callable=AsyncMock,
+            ) as mock_cleanup,
+        ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
@@ -341,23 +347,25 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        with patch(
-            "automation.watchdog.verify_run_status",
-            new_callable=AsyncMock,
-            return_value=verification,
-        ), patch(
-            "automation.watchdog.get_api_key_for_run",
-            new_callable=AsyncMock,
-            return_value="test-api-key",
-        ), patch(
-            "automation.watchdog.cleanup_sandbox",
-            new_callable=AsyncMock,
-        ) as mock_cleanup:
+        with (
+            patch(
+                "automation.watchdog.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=verification,
+            ),
+            patch(
+                "automation.watchdog.get_api_key_for_run",
+                new_callable=AsyncMock,
+                return_value="test-api-key",
+            ),
+            patch(
+                "automation.watchdog.cleanup_sandbox",
+                new_callable=AsyncMock,
+            ) as mock_cleanup,
+        ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
-                result = await _verify_and_mark_run(
-                    session, run, mock_settings, utcnow()
-                )
+                result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
         assert result is True
