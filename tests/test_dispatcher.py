@@ -6,6 +6,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 import asyncio
 import uuid
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -201,7 +202,10 @@ class TestMarkRunStatus:
 class TestDispatchPendingRuns:
     """Tests for dispatch_pending_runs function."""
 
-    async def test_dispatches_pending_runs(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatches_pending_runs(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Pending runs are dispatched and marked as RUNNING."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -224,7 +228,7 @@ class TestDispatchPendingRuns:
             await session.commit()
             run_id = run.id
 
-        dispatched = await dispatch_pending_runs(async_session_factory)
+        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
 
         assert len(dispatched) == 1
         assert dispatched[0].id == run_id
@@ -237,7 +241,10 @@ class TestDispatchPendingRuns:
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
 
-    async def test_ignores_running_runs(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_ignores_running_runs(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Runs already in RUNNING status are not dispatched."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -260,11 +267,14 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory)
+        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
 
         assert len(dispatched) == 0
 
-    async def test_ignores_completed_runs(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_ignores_completed_runs(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Completed runs are not dispatched."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -288,11 +298,14 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory)
+        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
 
         assert len(dispatched) == 0
 
-    async def test_respects_batch_size(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_respects_batch_size(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Only batch_size runs are dispatched at once."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -316,11 +329,16 @@ class TestDispatchPendingRuns:
                 session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory, batch_size=2)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, batch_size=2
+        )
 
         assert len(dispatched) == 2
 
-    async def test_orders_by_created_at(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_orders_by_created_at(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Oldest pending runs are dispatched first."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -350,7 +368,9 @@ class TestDispatchPendingRuns:
             await session.commit()
             old_run_id = old_run.id
 
-        dispatched = await dispatch_pending_runs(async_session_factory, batch_size=1)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, batch_size=1
+        )
 
         assert len(dispatched) == 1
         assert dispatched[0].id == old_run_id  # Old run should be first
@@ -359,13 +379,17 @@ class TestDispatchPendingRuns:
 class TestDispatcherLoop:
     """Tests for dispatcher_loop function."""
 
-    async def test_dispatcher_loop_exits_on_shutdown(self, async_session_factory):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatcher_loop_exits_on_shutdown(
+        self, mock_execute, async_session_factory, mock_settings
+    ):
         """Dispatcher exits gracefully when shutdown event is set."""
         shutdown_event = asyncio.Event()
 
         task = asyncio.create_task(
             dispatcher_loop(
                 async_session_factory,
+                mock_settings,
                 interval_seconds=1,
                 shutdown_event=shutdown_event,
             )
@@ -380,7 +404,10 @@ class TestDispatcherLoop:
             task.cancel()
             pytest.fail("Dispatcher did not exit on shutdown signal")
 
-    async def test_dispatcher_loop_dispatches_runs(self, async_session_factory, caplog):
+    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatcher_loop_dispatches_runs(
+        self, mock_execute, async_session_factory, mock_settings, caplog
+    ):
         """Dispatcher polls and dispatches pending runs."""
         async with async_session_factory() as session:
             automation = Automation(
@@ -411,6 +438,7 @@ class TestDispatcherLoop:
             task = asyncio.create_task(
                 dispatcher_loop(
                     async_session_factory,
+                    mock_settings,
                     interval_seconds=60,
                     shutdown_event=shutdown_event,
                 )

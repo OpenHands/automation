@@ -250,7 +250,7 @@ async def _mark_run_terminal(
 
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings | None = None,
+    settings: Settings,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
@@ -275,12 +275,11 @@ async def dispatch_pending_runs(
 
         await session.commit()
 
-        if settings:
-            for run in dispatched_runs:
-                asyncio.create_task(
-                    _execute_run_safe(run, settings, session_factory),
-                    name=f"execute-run-{run.id}",
-                )
+        for run in dispatched_runs:
+            asyncio.create_task(
+                _execute_run_safe(run, settings, session_factory),
+                name=f"execute-run-{run.id}",
+            )
 
         return dispatched_runs
 
@@ -310,7 +309,7 @@ async def _execute_run_safe(
 
 async def dispatcher_loop(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings | None = None,
+    settings: Settings,
     interval_seconds: int = POLL_INTERVAL_SECONDS,
     shutdown_event: asyncio.Event | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
