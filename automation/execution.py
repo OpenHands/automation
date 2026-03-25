@@ -146,7 +146,15 @@ async def _create_and_wait(
             return sandbox_id, session_key, agent_url
 
         if status in ("ERROR", "MISSING"):
-            raise RuntimeError(f"Sandbox {sandbox_id} failed with status {status}")
+            # Extract error details from sandbox response
+            error_code = sb.get("error_code", "")
+            error_message = sb.get("error_message", "")
+            error_detail = f"status={status}"
+            if error_code:
+                error_detail += f", error_code={error_code}"
+            if error_message:
+                error_detail += f", error_message={error_message}"
+            raise RuntimeError(f"Sandbox {sandbox_id} failed: {error_detail}")
 
         await asyncio.sleep(SANDBOX_POLL_INTERVAL)
         elapsed += SANDBOX_POLL_INTERVAL
