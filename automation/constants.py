@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+
 # Maximum allowed timeout for automation runs (10 minutes)
 # Used for:
 # - Validation in API requests (timeout field)
