@@ -633,7 +633,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Update Timeout",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
             timeout=300,
@@ -655,7 +655,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Invalid Timeout Update",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -677,7 +677,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Max Timeout Update",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
