@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
-from automation.constants import MAX_RUN_DURATION_SECONDS
+from automation.constants import MAX_RUN_DURATION, MAX_RUN_DURATION_SECONDS
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
@@ -233,7 +234,15 @@ async def dispatch_pending_runs(
             extra = _run_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
-                await mark_run_status(session, run, AutomationRunStatus.RUNNING)
+                # Use automation's custom timeout if set, otherwise use default
+                max_duration = (
+                    timedelta(seconds=run.automation.timeout)
+                    if run.automation and run.automation.timeout
+                    else MAX_RUN_DURATION
+                )
+                await mark_run_status(
+                    session, run, AutomationRunStatus.RUNNING, max_duration=max_duration
+                )
                 dispatched_runs.append(run)
             except Exception:
                 logger.exception("Failed to dispatch run", extra=extra)
