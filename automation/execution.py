@@ -20,6 +20,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from automation.utils.sandbox import delete_sandbox
+
 
 logger = logging.getLogger(__name__)
 
@@ -160,22 +162,6 @@ async def _create_and_wait(
         elapsed += SANDBOX_POLL_INTERVAL
 
     raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
-
-
-async def _delete_sandbox(
-    client: httpx.AsyncClient, api_url: str, api_key: str, sandbox_id: str
-) -> None:
-    """Best-effort sandbox deletion."""
-    try:
-        resp = await client.delete(
-            f"{api_url}/api/v1/sandboxes/{sandbox_id}",
-            params={"sandbox_id": sandbox_id},
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        if resp.status_code >= 300:
-            logger.warning("Delete sandbox %s failed: %s", sandbox_id, resp.text)
-    except Exception:
-        logger.exception("Error deleting sandbox %s", sandbox_id)
 
 
 async def _upload(
@@ -350,7 +336,7 @@ async def dispatch_automation(
             # still attempt cleanup.
             logger.exception("Sandbox creation failed", extra=log_extra())
             if sandbox_id:
-                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
             return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
         try:
@@ -402,7 +388,7 @@ async def dispatch_automation(
             logger.exception("Automation dispatch failed", extra=log_extra())
             # Delete sandbox on dispatch failure to avoid orphaned sandboxes
             if sandbox_id:
-                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
             return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
 
@@ -478,7 +464,7 @@ async def run_automation(
             # still attempt cleanup.
             logger.exception("Sandbox creation failed", extra=log_extra())
             if sandbox_id:
-                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
         try:
@@ -550,7 +536,7 @@ async def run_automation(
         finally:
             if not keep_sandbox:
                 logger.info("Deleting sandbox", extra=log_extra())
-                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
 
 
 def _shell_quote(s: str) -> str:

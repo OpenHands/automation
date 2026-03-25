@@ -122,7 +122,7 @@ async def get_last_bash_command_result(
         return BashCommandResult(found=False, error=str(e))
 
 
-async def _delete_sandbox_impl(
+async def delete_sandbox(
     client: httpx.AsyncClient,
     api_url: str,
     api_key: str,
@@ -169,7 +169,7 @@ async def cleanup_sandbox(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            deleted = await _delete_sandbox_impl(client, api_url, api_key, sandbox_id)
+            deleted = await delete_sandbox(client, api_url, api_key, sandbox_id)
             if deleted:
                 logger.info("Sandbox deleted", extra=extra)
             else:
@@ -241,7 +241,7 @@ async def verify_run_status(
             )
             # Still try to clean up if needed
             if not keep_alive:
-                await _delete_sandbox_impl(client, api_url, api_key, sandbox_id)
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
             return VerificationResult(
                 verified=False,
                 error=bash_result.error,
@@ -265,7 +265,7 @@ async def verify_run_status(
         # Clean up sandbox if not keeping alive
         if not keep_alive:
             logger.info("Deleting sandbox", extra=extra)
-            await _delete_sandbox_impl(client, api_url, api_key, sandbox_id)
+            await delete_sandbox(client, api_url, api_key, sandbox_id)
 
         return VerificationResult(
             verified=True,
