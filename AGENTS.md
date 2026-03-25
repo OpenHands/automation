@@ -6,25 +6,47 @@ Self-contained microservice that schedules and dispatches automation runs inside
 
 ```
 automation/
-├── automation/          # Main application package
-│   ├── app.py          # FastAPI app, lifespan, background tasks
-│   ├── config.py       # Pydantic settings (AutomationSettings)
-│   ├── dispatcher.py   # Polls PENDING runs, dispatches to sandbox
-│   ├── execution.py    # SandboxExecutor — sandbox lifecycle (create/upload/execute/delete)
-│   ├── models.py       # SQLAlchemy models (Automation, AutomationRun)
-│   ├── router.py       # API routes (CRUD, trigger, callback, runs list)
-│   ├── scheduler.py    # Cron scheduler — polls automations, creates PENDING runs
-│   ├── schemas.py      # Pydantic request/response schemas
-│   └── watchdog.py     # Staleness watchdog — marks hung runs as FAILED
-├── migrations/          # Alembic migrations
+├── automation/              # Main application package
+│   ├── app.py              # FastAPI app, lifespan, background tasks
+│   ├── auth.py             # API key auth via OpenHands /api/keys/current
+│   ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
+│   ├── constants.py        # Timeouts, polling intervals, sandbox constants
+│   ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
+│   ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│   ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│   ├── logger.py           # JSON structured logging configuration
+│   ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
+│   ├── router.py           # API routes (CRUD, trigger, callback, runs list)
+│   ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
+│   ├── schemas.py          # Pydantic request/response schemas
+│   ├── uploads.py          # Tarball upload router
+│   ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│   ├── storage/            # File storage abstraction
+│   │   ├── file_store.py   # Abstract base class for file storage
+│   │   └── google_cloud.py # GCS implementation
+│   └── utils/              # Utility modules
+│       ├── api_key.py      # Per-user API key minting via service key
+│       ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│       ├── run.py          # Run status transitions (create, mark, update)
+│       ├── sandbox.py      # Sandbox verification and cleanup
+│       ├── tarball_validation.py  # Tarball path validation (internal/external)
+│       └── time.py         # UTC time helpers
+├── containers/
+│   └── Dockerfile          # Container image definition
+├── migrations/              # Alembic migrations
 ├── scripts/
-│   ├── test_automation.py       # E2E test (sandbox lifecycle with live streaming)
-│   └── test_tarball/            # Tarball contents uploaded to sandbox during test
-│       ├── main.py              # Test script run inside sandbox (SDK workspace test)
-│       └── setup.sh             # Installs SDK inside sandbox
-├── tests/
-│   ├── unit/                    # Unit tests (no external deps)
-│   └── integration/             # Integration tests (require OPENHANDS_API_KEY)
+│   ├── test_automation.py  # E2E test (sandbox lifecycle with live streaming)
+│   └── test_tarball/       # Tarball contents uploaded to sandbox during test
+│       ├── main.py         # Test script run inside sandbox (SDK workspace test)
+│       └── setup.sh        # Installs SDK inside sandbox
+├── tests/                   # Unit tests (flat structure, no external deps)
+│   ├── integration/        # Integration tests (require OPENHANDS_API_KEY)
+│   ├── test_auth.py
+│   ├── test_dispatcher.py
+│   ├── test_execution.py
+│   ├── test_router.py
+│   ├── test_scheduler.py
+│   └── ...
 └── pyproject.toml
 ```
 
@@ -48,7 +70,7 @@ After pushing to the automation repo, update both files in the deploy repo.
 
 ```bash
 # Pre-commit (run from repo root)
-pre-commit run --files automation/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure --config ./dev_config/.pre-commit-config.yaml
+pre-commit run --files automation/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
 
 # Unit tests (no external deps, skips Docker-dependent tests)
 uv run pytest tests/ -v --ignore=tests/integration
@@ -62,22 +84,27 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 ## Dispatch Pipeline
 
-The dispatcher executes this sequence for each PENDING run:
+The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 
-1. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
-2. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
-3. **Upload tarball** — `POST /api/file/upload/<path>` (agent-server, X-Session-API-Key auth)
-4. **Execute command** — `POST /api/bash/start_bash_command` (agent-server)
-   - Extracts tarball, runs setup.sh, exports env vars, runs entrypoint
-5. **Stream output** — Poll `GET /api/bash/bash_events/search` (agent-server)
-6. **Cleanup sandbox** — `DELETE /api/v1/sandboxes/<id>` (Cloud API)
+1. **Fetch per-user API key** — `get_api_key_for_automation_run()` mints a key via the service key
+2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox
+3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
+4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
+5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
+6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
+   - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
+7. **Return immediately** — Dispatcher does not wait for completion
+
+Completion is handled asynchronously:
+- **Happy path**: SDK inside sandbox POSTs to `POST /api/v1/automations/runs/{id}/complete`
+- **Fallback**: Watchdog scans for runs past their `timeout_at` deadline, verifies status via sandbox bash history, and marks as COMPLETED or FAILED
 
 ### Env Vars Injected Into Sandbox
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `OPENHANDS_API_KEY` | Per-user key issued via admin key | SDK auth for get_llm()/get_secrets() |
-| `OPENHANDS_CLOUD_API_URL` | Config | Cloud API base URL |
+| `OPENHANDS_API_KEY` | Per-user key issued via service key | SDK auth for get_llm()/get_secrets() |
+| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`) | Cloud API base URL |
 | `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
@@ -88,11 +115,12 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Callback & Race Condition Handling
 
-- **Callback auth**: One-time `callback_token` (secrets.token_urlsafe(32)) minted at dispatch, validated with `hmac.compare_digest`, invalidated after use.
+- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses standard API key auth — the per-user `OPENHANDS_API_KEY` passed into the sandbox is validated via `authenticate_request`, and ownership is verified against the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
+- **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`). On dispatch failure, the dispatcher deletes the sandbox immediately.
 
 ## Database
 
-- **Engine**: SQLAlchemy async with PostgreSQL (via `DATABASE_URL` env var)
+- **Engine**: SQLAlchemy async with asyncpg; supports direct PostgreSQL (`AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc.) or GCP Cloud SQL connector (`AUTOMATION_GCP_DB_INSTANCE`)
 - **Migrations**: Alembic in `migrations/` directory
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher polling, optimistic `UPDATE WHERE status=X` for callback/watchdog
