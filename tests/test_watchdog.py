@@ -77,7 +77,7 @@ class TestVerifyAndMarkRunExitCodes:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -118,7 +118,7 @@ class TestVerifyAndMarkRunExitCodes:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -160,7 +160,7 @@ class TestVerifyAndMarkRunExitCodes:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -201,7 +201,7 @@ class TestVerifyAndMarkRunExitCodes:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -244,7 +244,7 @@ class TestVerifyAndMarkRunExitCodes:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -286,7 +286,7 @@ class TestVerifyAndMarkRunVerificationFailed:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
@@ -354,7 +354,7 @@ class TestVerifyAndMarkRunVerificationFailed:
                 return_value=verification,
             ),
             patch(
-                "automation.watchdog.get_api_key_for_run",
+                "automation.watchdog.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="test-api-key",
             ),
