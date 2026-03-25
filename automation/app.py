@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
+            settings=settings,
             shutdown_event=shutdown_event,
         )
     )

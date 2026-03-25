@@ -135,6 +135,12 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
 
+    # If True, sandbox is not deleted after run completes (for debugging)
+    keep_alive: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # The sandbox ID used for execution (for status verification)
+    sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

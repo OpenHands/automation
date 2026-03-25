@@ -1,7 +1,8 @@
-"""Tests for the execution module — build_tarball and _shell_quote.
+"""Tests for the execution module — build_tarball, _shell_quote, and result types.
 
 Only tests pure logic that can run without a network.  The e2e flow
-(run_automation against a real sandbox) lives in scripts/test_automation.py.
+(run_automation/dispatch_automation against a real sandbox) lives in
+scripts/test_automation.py.
 """
 
 import io
@@ -13,6 +14,7 @@ from automation.execution import (
     EXTERNAL_DOWNLOAD_TIMEOUT,
     EXTERNAL_MAX_FILESIZE,
     AutomationResult,
+    DispatchResult,
     _shell_quote,
     build_tarball,
 )
@@ -70,16 +72,49 @@ class TestShellQuote:
 
 
 class TestAutomationResult:
+    """Tests for AutomationResult (blocking execution result)."""
+
     def test_frozen_dataclass(self):
         r = AutomationResult(success=True, sandbox_id="sb-1", exit_code=0, stdout="ok")
+        assert r.success is True
+        assert r.sandbox_id == "sb-1"
+        assert r.exit_code == 0
+        assert r.stdout == "ok"
+        with pytest.raises(AttributeError):
+            r.success = False  # type: ignore[misc]
+
+    def test_with_error(self):
+        r = AutomationResult(
+            success=False,
+            sandbox_id="sb-1",
+            exit_code=1,
+            stderr="error",
+            error="Failed",
+        )
+        assert r.success is False
+        assert r.exit_code == 1
+        assert r.stderr == "error"
+        assert r.error == "Failed"
+
+
+class TestDispatchResult:
+    """Tests for DispatchResult (fire-and-forget execution result)."""
+
+    def test_frozen_dataclass(self):
+        r = DispatchResult(success=True, sandbox_id="sb-1")
         assert r.success is True
         assert r.sandbox_id == "sb-1"
         with pytest.raises(AttributeError):
             r.success = False  # type: ignore[misc]
 
+    def test_with_error(self):
+        r = DispatchResult(success=False, sandbox_id="sb-1", error="Failed to start")
+        assert r.success is False
+        assert r.error == "Failed to start"
 
-class TestRunAutomationTarballSource:
-    """Tests for run_automation tarball_source parameter."""
+
+class TestAutomationTarballSource:
+    """Tests for tarball_source parameter."""
 
     def test_tarball_source_accepts_bytes(self):
         """tarball_source accepts bytes (will be uploaded)."""

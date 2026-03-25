@@ -1,5 +1,6 @@
 """FastAPI router for the automations CRUD API."""
 
+import asyncio
 import logging
 import uuid
 
@@ -23,6 +24,7 @@ from automation.schemas import (
 )
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
+from automation.utils.sandbox import cleanup_sandbox
 from automation.utils.tarball_validation import validate_tarball_path
 
 
@@ -226,6 +228,8 @@ async def complete_run(
     the sandbox.  The key is validated against ``/api/keys/current`` (by
     ``authenticate_request``) and the resulting user must own the run's
     parent automation.
+
+    If keep_alive is False, deletes the sandbox after updating the run status.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -276,6 +280,22 @@ async def complete_run(
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+
+    # Clean up sandbox if not keeping alive
+    if not run.keep_alive and run.sandbox_id:
+        # Fire-and-forget sandbox deletion in background
+        from automation.config import get_settings
+
+        settings = get_settings()
+        asyncio.create_task(
+            cleanup_sandbox(
+                api_url=settings.openhands_api_base_url,
+                api_key=user.api_key,
+                sandbox_id=run.sandbox_id,
+                run_id=str(run_id),
+            )
+        )
+
     return AutomationRunResponse.model_validate(run)
 
 

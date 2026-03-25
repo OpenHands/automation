@@ -1,14 +1,17 @@
 """Automation run utilities."""
 
+import logging
 import uuid
 from datetime import timedelta
 
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils.time import utcnow
 
+
+logger = logging.getLogger(__name__)
 
 # Default maximum run duration before the watchdog marks it as stale
 DEFAULT_MAX_RUN_DURATION = timedelta(hours=1)
@@ -93,3 +96,27 @@ async def mark_run_status(
     )
 
     run.status = status
+
+
+async def update_sandbox_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    sandbox_id: str,
+) -> None:
+    """Store the sandbox ID on the automation run for later verification.
+
+    Args:
+        session_factory: Async session factory
+        run_id: The run ID to update
+        sandbox_id: The sandbox ID to store
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(sandbox_id=sandbox_id)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update sandbox_id for run %s", run_id)

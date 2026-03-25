@@ -68,16 +68,6 @@ _retry_on_rate_limit = retry(
 )
 
 
-@dataclass(frozen=True)
-class AutomationResult:
-    success: bool
-    sandbox_id: str | None = None
-    exit_code: int | None = None
-    stdout: str = ""
-    stderr: str = ""
-    error: str | None = None
-
-
 def build_tarball(files: dict[str, str | bytes]) -> bytes:
     """Build a .tar.gz in memory from ``{relative_path: content}``."""
     buf = io.BytesIO()
@@ -219,6 +209,25 @@ async def _bash(
     return body.get("exit_code"), body.get("stdout") or "", body.get("stderr") or ""
 
 
+async def _start_bash(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    command: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> str:
+    """Start a bash command in the background. Returns the command ID."""
+    resp = await client.post(
+        f"{agent_url}/api/bash/start_bash_command",
+        json={"command": command, "timeout": timeout},
+        headers={"X-Session-API-Key": session_key},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    return body.get("id")
+
+
 async def _download_in_sandbox(
     client: httpx.AsyncClient,
     agent_url: str,
@@ -266,6 +275,139 @@ async def _download_in_sandbox(
 # -- Public API ---------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class DispatchResult:
+    """Result of dispatching an automation to a sandbox (fire-and-forget)."""
+
+    success: bool
+    sandbox_id: str | None = None
+    error: str | None = None
+
+
+async def dispatch_automation(
+    api_url: str,
+    api_key: str,
+    entrypoint: str,
+    tarball_source: bytes | str,
+    env_vars: dict[str, str] | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    callback_url: str | None = None,
+    run_id: str | None = None,
+) -> DispatchResult:
+    """Dispatch an automation to a sandbox (fire-and-forget).
+
+    1. Create sandbox and wait until RUNNING.
+    2. Get tarball into sandbox (upload bytes OR download from URL).
+    3. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+    4. Return immediately without waiting for the entrypoint to complete.
+
+    The SDK inside the sandbox will POST to callback_url when finished.
+    The caller should store sandbox_id to verify status later if needed.
+
+    *tarball_source*: Either raw bytes (uploaded to sandbox) or a URL string
+    (downloaded directly inside sandbox via curl). URLs avoid downloading
+    untrusted/large files on the automation service.
+
+    *env_vars* are exported before the entrypoint runs.  The sandbox
+    identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
+    **always** injected so the SDK's ``saas_runtime_mode`` works.
+    If *callback_url* / *run_id* are set they are injected as
+    ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
+    ``OpenHandsCloudWorkspace`` can POST completion status on exit.
+    """
+    env_vars = dict(env_vars) if env_vars else {}
+    if callback_url:
+        env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    if run_id:
+        env_vars["AUTOMATION_RUN_ID"] = run_id
+    api_url = api_url.rstrip("/")
+    sandbox_id: str | None = None
+
+    # Helper for consistent structured logging with run_id/sandbox_id
+    def log_extra() -> dict[str, Any]:
+        return _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+
+    logger.info("Dispatching automation to sandbox", extra=log_extra())
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            sandbox_id, session_key, agent_url = await _create_and_wait(
+                client, api_url, api_key
+            )
+            logger.info(
+                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=log_extra()
+            )
+        except Exception as e:
+            # If sandbox creation started but failed to reach RUNNING,
+            # still attempt cleanup.
+            logger.exception("Sandbox creation failed", extra=log_extra())
+            if sandbox_id:
+                await _delete_sandbox(client, api_url, api_key, sandbox_id)
+            return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+
+        try:
+            # Always inject sandbox identity so the SDK can call
+            # get_llm() / get_secrets() inside the sandbox.
+            env_vars.setdefault("SANDBOX_ID", sandbox_id)
+            env_vars.setdefault("SESSION_API_KEY", session_key)
+
+            # Get tarball into sandbox: upload bytes or download from URL
+            if isinstance(tarball_source, bytes):
+                logger.info("Uploading tarball to sandbox", extra=log_extra())
+                await _upload(
+                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                )
+            else:
+                logger.info(
+                    "Downloading tarball in sandbox from URL", extra=log_extra()
+                )
+                await _download_in_sandbox(
+                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                )
+
+            exports = ""
+            if env_vars:
+                parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
+                exports = " && ".join(parts) + " && "
+
+            cmd = (
+                f"mkdir -p {WORK_DIR}"
+                f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
+                f" && cd {WORK_DIR}"
+                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {exports}{entrypoint}"
+            )
+
+            logger.info("Starting entrypoint: %s", entrypoint, extra=log_extra())
+            command_id = await _start_bash(
+                client, agent_url, session_key, cmd, timeout=timeout
+            )
+            logger.info(
+                "Entrypoint started (command_id=%s), disconnecting",
+                command_id,
+                extra=log_extra(),
+            )
+
+            return DispatchResult(success=True, sandbox_id=sandbox_id)
+
+        except Exception as e:
+            logger.exception("Automation dispatch failed", extra=log_extra())
+            # Don't delete sandbox on dispatch failure - let watchdog handle it
+            return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+
+
+@dataclass(frozen=True)
+class AutomationResult:
+    """Result of running an automation (blocking mode)."""
+
+    success: bool
+    sandbox_id: str | None = None
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+
+
 async def run_automation(
     api_url: str,
     api_key: str,
@@ -277,12 +419,16 @@ async def run_automation(
     run_id: str | None = None,
     keep_sandbox: bool = False,
 ) -> AutomationResult:
-    """Execute an automation end-to-end in a fresh sandbox.
+    """Execute an automation end-to-end in a fresh sandbox (blocking).
+
+    Use this for testing or when you need to wait for the result immediately.
+    For production async execution, use dispatch_automation() instead.
 
     1. Create sandbox and wait until RUNNING.
     2. Get tarball into sandbox (upload bytes OR download from URL).
     3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
-    4. Delete the sandbox (unless *keep_sandbox* is True).
+    4. Wait for completion and return the result.
+    5. Delete the sandbox (unless *keep_sandbox* is True).
 
     *tarball_source*: Either raw bytes (uploaded to sandbox) or a URL string
     (downloaded directly inside sandbox via curl). URLs avoid downloading

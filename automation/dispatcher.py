@@ -20,10 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
-from automation.execution import run_automation
+from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
-from automation.utils.run import mark_run_status
+from automation.utils.run import mark_run_status, update_sandbox_id
 from automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
 
 
@@ -97,17 +97,18 @@ async def _execute_run(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Execute a single run in a background task.
+    """Execute a single run in a background task (fire-and-forget).
 
     1. Fetch a per-user API key from the SaaS service (on demand, never stored).
     2. Determine tarball source:
        - Internal (oh-internal://): Download from GCS and upload to sandbox.
        - External (http/https): Pass URL for direct download inside sandbox.
-    3. Call ``run_automation()`` to spin up a sandbox and execute.
-    4. If the sandbox itself fails to start, mark the run FAILED.
+    3. Call ``dispatch_automation()`` to spin up a sandbox and start the entrypoint.
+    4. Store sandbox_id on the run for later verification.
+    5. If the sandbox fails to start, mark the run FAILED.
 
-    The SDK inside the sandbox fires the completion callback on exit,
-    so we don't need to inspect the result for the happy path.
+    The SDK inside the sandbox fires the completion callback on exit.
+    The watchdog will verify status via sandbox if the callback is missed.
     """
     run_id = str(run.id)
     automation = run.automation
@@ -163,8 +164,8 @@ async def _execute_run(
         }
         env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(event_payload)
 
-        # 4. Launch the sandbox
-        result = await run_automation(
+        # 4. Dispatch to sandbox (fire-and-forget)
+        result = await dispatch_automation(
             api_url=settings.openhands_api_base_url,
             api_key=api_key,
             entrypoint=automation.entrypoint,
@@ -176,24 +177,18 @@ async def _execute_run(
 
         sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
         if result.success:
-            # Mark the run as COMPLETED now that the entrypoint finished successfully.
-            # Note: The SDK callback may also try to mark it COMPLETED, but we use
-            # optimistic locking so the first one wins.
-            logger.info("Marking run as COMPLETED", extra=sandbox_extra)
-            await _mark_run_terminal(
-                session_factory, run, AutomationRunStatus.COMPLETED
-            )
-        else:
-            logger.warning(
-                "Sandbox execution failed: %s",
-                result.error,
+            # Store sandbox_id for later verification by the watchdog
+            if result.sandbox_id:
+                await update_sandbox_id(session_factory, run.id, result.sandbox_id)
+            logger.info(
+                "Automation dispatched successfully, waiting for callback",
                 extra=sandbox_extra,
             )
+            # Don't mark as COMPLETED here - wait for the callback
+        else:
             logger.warning(
-                "Full output:\n--- STDOUT (last 2000 chars) ---\n%s\n"
-                "--- STDERR (last 2000 chars) ---\n%s",
-                result.stdout[-2000:] if result.stdout else "(empty)",
-                result.stderr[-2000:] if result.stderr else "(empty)",
+                "Sandbox dispatch failed: %s",
+                result.error,
                 extra=sandbox_extra,
             )
             await _mark_run_terminal(

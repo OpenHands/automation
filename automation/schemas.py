@@ -193,6 +193,8 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     conversation_id: str | None
     timeout_at: datetime | None
+    keep_alive: bool
+    sandbox_id: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

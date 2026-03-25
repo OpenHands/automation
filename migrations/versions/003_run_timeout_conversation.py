@@ -1,7 +1,9 @@
-"""Add conversation_id and timeout_at to automation_runs.
+"""Add conversation_id, timeout_at, keep_alive, sandbox_id to automation_runs.
 
 timeout_at: Pre-computed deadline for the staleness watchdog.
 conversation_id: Set by the completion callback when SDK creates a conversation.
+keep_alive: If True, sandbox is not deleted after run completes (for debugging).
+sandbox_id: The sandbox ID used for execution (for status verification).
 
 Revision ID: 003
 Revises: 002
@@ -33,6 +35,14 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
+    op.add_column(
+        "automation_runs",
+        sa.Column("keep_alive", sa.Boolean(), nullable=False, server_default="false"),
+    )
+    op.add_column(
+        "automation_runs",
+        sa.Column("sandbox_id", sa.String(255), nullable=True),
+    )
     op.create_index(
         "ix_automation_runs_timeout_at",
         "automation_runs",
@@ -42,5 +52,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_automation_runs_timeout_at", table_name="automation_runs")
+    op.drop_column("automation_runs", "sandbox_id")
+    op.drop_column("automation_runs", "keep_alive")
     op.drop_column("automation_runs", "timeout_at")
     op.drop_column("automation_runs", "conversation_id")
