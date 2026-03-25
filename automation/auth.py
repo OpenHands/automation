@@ -7,11 +7,11 @@ the user and organization identity.
 
 import logging
 import uuid
-from dataclasses import dataclass
 
 import httpx
 from cachetools import TTLCache
 from fastapi import Depends, HTTPException, Request, status
+from pydantic.dataclasses import dataclass
 from tenacity import (
     RetryCallState,
     before_sleep_log,

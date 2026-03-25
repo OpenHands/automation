@@ -27,8 +27,8 @@ if DEBUG:
 
 FILE_PREFIX = 'File "'
 CWD_PREFIX = FILE_PREFIX + str(Path(os.getcwd()).parent) + "/"
-_PY_VER = f"{sys.version_info.major}.{sys.version_info.minor}"
-SITE_PACKAGES_PREFIX = CWD_PREFIX + f".venv/lib/python{_PY_VER}/site-packages/"
+_pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+SITE_PACKAGES_PREFIX = CWD_PREFIX + f".venv/lib/python{_pyver}/site-packages/"
 LOG_JSON_FOR_CONSOLE = int(os.getenv("LOG_JSON_FOR_CONSOLE", "0"))
 
 

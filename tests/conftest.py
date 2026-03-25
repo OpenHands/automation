@@ -21,6 +21,7 @@ from automation.auth import (  # noqa: E402
     authenticate_request,
     create_http_client,
 )
+from automation.config import Settings  # noqa: E402
 from automation.db import get_session  # noqa: E402
 from automation.models import Base  # noqa: E402
 
@@ -142,3 +143,13 @@ def sync_client(async_engine, async_session_factory):
     yield TestClient(app)
     # Cleanup http_client to prevent resource leak
     asyncio.get_event_loop().run_until_complete(http_client.aclose())
+
+
+@pytest.fixture
+def mock_settings():
+    """Return a mock Settings instance for dispatcher tests."""
+    return Settings(
+        openhands_api_base_url="https://test.example.com",
+        service_key="test-service-key",
+        base_url="http://localhost:8000",
+    )

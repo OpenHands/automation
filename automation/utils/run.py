@@ -1,12 +1,18 @@
 """Automation run utilities."""
 
+import logging
 import uuid
+from datetime import timedelta
 
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from automation.constants import MAX_RUN_DURATION
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils.time import utcnow
+
+
+logger = logging.getLogger(__name__)
 
 
 async def create_pending_run(
@@ -51,30 +57,118 @@ async def mark_run_status(
     session: AsyncSession,
     run: AutomationRun,
     status: AutomationRunStatus,
+    error_detail: str | None = None,
+    max_duration: timedelta = MAX_RUN_DURATION,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
-    Sets started_at when transitioning to RUNNING, or completed_at when
-    transitioning to COMPLETED or FAILED. Caller is responsible for
-    committing the transaction.
+    Sets started_at + timeout_at when transitioning to RUNNING, or
+    completed_at when transitioning to COMPLETED or FAILED. Caller is
+    responsible for committing the transaction.
 
     Args:
         session: Database session
         run: The run to update
         status: The new status to set
+        error_detail: Optional error message (only used for FAILED status)
+        max_duration: Maximum run duration for computing timeout_at
     """
     now = utcnow()
 
     values: dict = {"status": status}
     if status == AutomationRunStatus.RUNNING:
         values["started_at"] = now
+        values["timeout_at"] = now + max_duration
         run.started_at = now
+        run.timeout_at = now + max_duration
     elif status in (AutomationRunStatus.COMPLETED, AutomationRunStatus.FAILED):
         values["completed_at"] = now
         run.completed_at = now
+
+    if error_detail and status == AutomationRunStatus.FAILED:
+        values["error_detail"] = error_detail
+        run.error_detail = error_detail
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
     )
 
     run.status = status
+
+
+async def update_sandbox_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    sandbox_id: str,
+) -> None:
+    """Store the sandbox ID on the automation run for later verification.
+
+    Args:
+        session_factory: Async session factory
+        run_id: The run ID to update
+        sandbox_id: The sandbox ID to store
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(sandbox_id=sandbox_id)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update sandbox_id for run %s", run_id)
+
+
+async def mark_run_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    run: AutomationRun,
+    status: AutomationRunStatus,
+    error: str | None = None,
+) -> None:
+    """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING.
+
+    This is a safe wrapper around mark_run_status that:
+    1. Opens a new session
+    2. Re-fetches the run to check current status
+    3. Only updates if the run is still RUNNING (avoids race conditions)
+    4. Commits and handles errors gracefully
+
+    Args:
+        session_factory: Async session factory
+        run: The run to update (used to get the ID)
+        status: The terminal status to set (COMPLETED or FAILED)
+        error: Optional error message (only used for FAILED status)
+    """
+    from sqlalchemy import select
+
+    run_id = str(run.id)
+    automation_id = str(run.automation_id) if run.automation_id else None
+    extra = {"run_id": run_id}
+    if automation_id:
+        extra["automation_id"] = automation_id
+
+    try:
+        async with session_factory() as session:
+            db_result = await session.execute(
+                select(AutomationRun).where(AutomationRun.id == run.id)
+            )
+            db_run = db_result.scalars().first()
+            if db_run and db_run.status == AutomationRunStatus.RUNNING:
+                await mark_run_status(
+                    session,
+                    db_run,
+                    status,
+                    error_detail=error,
+                )
+                await session.commit()
+                logger.info("Run marked as %s", status.value, extra=extra)
+            else:
+                logger.info(
+                    "Run not marked %s (current status: %s)",
+                    status.value,
+                    db_run.status.value if db_run else "not found",
+                    extra=extra,
+                )
+    except Exception:
+        logger.exception("Failed to mark run as %s", status.value, extra=extra)

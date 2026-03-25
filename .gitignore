@@ -173,6 +173,9 @@ yarn-error.log*
 
 logs
 
+# PR artifacts / logs
+.pr/*.log
+
 # agent
 .envrc
 cache

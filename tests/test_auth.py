@@ -150,7 +150,7 @@ class TestAuthIntegration:
     """
 
     async def test_valid_key_through_api(self, async_engine, async_session_factory):
-        """Valid API key flows through real auth middleware to protected endpoint."""
+        """Valid API key flows through auth middleware to endpoint."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -220,7 +220,7 @@ class TestAuthIntegration:
             app.dependency_overrides.clear()
 
     async def test_invalid_key_through_api(self, async_engine, async_session_factory):
-        """Invalid API key is rejected after real auth middleware calls OpenHands."""
+        """Invalid API key is rejected by auth middleware."""
         mock_response = MagicMock()
         mock_response.status_code = 401
 

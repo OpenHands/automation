@@ -9,6 +9,8 @@ from typing import Literal
 from croniter import croniter
 from pydantic import BaseModel, Field, field_validator
 
+from automation.constants import MAX_RUN_DURATION_SECONDS
+
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
 _TARBALL_SCHEME_RE = re.compile(r"^(s3|gs|https?|oh-internal)://")
@@ -49,7 +51,8 @@ def _validate_command_string(
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
-    Ensures no path traversal or shell metacharacters.
+    Rejects traversal patterns and shell metacharacters.
+
     Used for both entrypoint and setup_script_path validation.
 
     Args:
@@ -93,6 +96,10 @@ class CreateAutomationRequest(BaseModel):
     entrypoint: str = Field(
         ..., description='Command to execute the automation (e.g., "uv run script.py")'
     )
+    timeout: int | None = Field(
+        default=None,
+        description="Maximum execution time in seconds (default: system maximum)",
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -115,6 +122,19 @@ class CreateAutomationRequest(BaseModel):
         assert result is not None  # satisfy type checker
         return result
 
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if v <= 0:
+            raise ValueError("timeout must be a positive number")
+        if v > MAX_RUN_DURATION_SECONDS:
+            raise ValueError(
+                f"timeout must not exceed {MAX_RUN_DURATION_SECONDS} seconds"
+            )
+        return v
+
 
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
@@ -124,6 +144,7 @@ class UpdateAutomationRequest(BaseModel):
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
+    timeout: int | None = Field(default=None)
     enabled: bool | None = None
 
     @field_validator("tarball_path")
@@ -145,6 +166,19 @@ class UpdateAutomationRequest(BaseModel):
     def validate_entrypoint(cls, v: str | None) -> str | None:
         return _validate_command_string(v, "entrypoint")
 
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if v <= 0:
+            raise ValueError("timeout must be a positive number")
+        if v > MAX_RUN_DURATION_SECONDS:
+            raise ValueError(
+                f"timeout must not exceed {MAX_RUN_DURATION_SECONDS} seconds"
+            )
+        return v
+
 
 # --- Responses ---
 
@@ -158,6 +192,7 @@ class AutomationResponse(BaseModel):
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
+    timeout: int | None
     enabled: bool
     last_triggered_at: datetime | None
     created_at: datetime
@@ -171,16 +206,29 @@ class AutomationListResponse(BaseModel):
     total: int
 
 
-# Phase 1b: These schemas will be used when run-listing endpoints are added.
+# --- Run schemas ---
+
+
+class RunCompleteRequest(BaseModel):
+    """Payload sent by the SDK's OpenHandsCloudWorkspace on context manager exit."""
+
+    status: Literal["COMPLETED", "FAILED"]
+    run_id: str | None = None
+    conversation_id: str | None = None
+    error: str | None = None
 
 
 class AutomationRunResponse(BaseModel):
-    """Response for a single automation run (Phase 1b)."""
+    """Response for a single automation run."""
 
     id: uuid.UUID
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    conversation_id: str | None
+    timeout_at: datetime | None
+    keep_alive: bool
+    sandbox_id: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

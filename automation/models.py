@@ -64,6 +64,9 @@ class Automation(Base):
     # Command to execute the automation (e.g., "uv run script.py")
     entrypoint: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Maximum execution time in seconds (None = use system default)
+    timeout: Mapped[int | None] = mapped_column(nullable=True)
+
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
@@ -125,6 +128,21 @@ class AutomationRun(Base):
 
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Conversation created by the SDK script (set by completion callback)
+    conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Pre-computed deadline: started_at + max_duration. Set when transitioning
+    # to RUNNING, used by the staleness watchdog for efficient indexed queries.
+    timeout_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
+    # If True, sandbox is not deleted after run completes (for debugging)
+    keep_alive: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # The sandbox ID used for execution (for status verification)
+    sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

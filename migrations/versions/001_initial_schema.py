@@ -33,6 +33,7 @@ def upgrade() -> None:
         sa.Column("tarball_path", sa.Text, nullable=False),
         sa.Column("setup_script_path", sa.Text, nullable=True),
         sa.Column("entrypoint", sa.Text, nullable=False),
+        sa.Column("timeout", sa.Integer, nullable=True),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_triggered_at", sa.DateTime(timezone=True), nullable=True),

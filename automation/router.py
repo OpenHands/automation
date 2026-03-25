@@ -1,26 +1,34 @@
 """FastAPI router for the automations CRUD API."""
 
+import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
-from automation.models import Automation, AutomationRun
+from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
     CreateAutomationRequest,
+    RunCompleteRequest,
     UpdateAutomationRequest,
 )
 from automation.utils import utcnow
 from automation.utils.run import create_pending_run
+from automation.utils.sandbox import cleanup_sandbox
 from automation.utils.tarball_validation import validate_tarball_path
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
 
@@ -56,6 +64,7 @@ async def create_automation(
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
+        timeout=body.timeout,
     )
     session.add(auto)
     await session.flush()
@@ -197,6 +206,97 @@ async def list_automation_runs(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
     )
+
+
+# --- Run completion callback ---
+
+
+@router.post("/runs/{run_id}/complete")
+async def complete_run(
+    run_id: uuid.UUID,
+    body: RunCompleteRequest,
+    user: AuthenticatedUser = Depends(authenticate_request),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Receive completion callback from the SDK running inside a sandbox.
+
+    Called by ``OpenHandsCloudWorkspace.__exit__`` when the automation
+    entry-point finishes (success or failure).  Transitions the run from
+    RUNNING → COMPLETED or RUNNING → FAILED.
+
+    Authenticated via the same ``OPENHANDS_API_KEY`` that was passed into
+    the sandbox.  The key is validated against ``/api/keys/current`` (by
+    ``authenticate_request``) and the resulting user must own the run's
+    parent automation.
+
+    If keep_alive is False, deletes the sandbox after updating the run status.
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    # Optimistic locking: only update if the run is still RUNNING.
+    # This prevents races between the watchdog and the callback.
+    now = utcnow()
+    new_status = (
+        AutomationRunStatus.COMPLETED
+        if body.status == "COMPLETED"
+        else AutomationRunStatus.FAILED
+    )
+    values: dict = {
+        "status": new_status,
+        "completed_at": now,
+    }
+    if body.status == "COMPLETED" and body.conversation_id:
+        values["conversation_id"] = body.conversation_id
+    if body.status == "FAILED" and body.error:
+        values["error_detail"] = body.error
+
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status == AutomationRunStatus.RUNNING,
+        )
+        .values(**values)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+
+    if db_result.rowcount == 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected RUNNING",
+        )
+
+    await session.refresh(run)
+    logger.info("Run %s → %s", run_id, new_status.value)
+
+    # Clean up sandbox if not keeping alive
+    if not run.keep_alive and run.sandbox_id:
+        # Fire-and-forget sandbox deletion in background
+        from automation.config import get_settings
+
+        settings = get_settings()
+        asyncio.create_task(
+            cleanup_sandbox(
+                api_url=settings.openhands_api_base_url,
+                api_key=user.api_key,
+                sandbox_id=run.sandbox_id,
+                run_id=str(run_id),
+            )
+        )
+
+    return AutomationRunResponse.model_validate(run)
 
 
 # --- Helpers ---

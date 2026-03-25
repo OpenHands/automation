@@ -17,6 +17,7 @@ from automation.logger import setup_all_loggers
 from automation.router import router
 from automation.scheduler import scheduler_loop
 from automation.uploads import router as uploads_router
+from automation.watchdog import watchdog_loop
 
 
 logger = logging.getLogger("automation.app")
@@ -61,9 +62,15 @@ async def lifespan(app: FastAPI):
     logger.info("Background scheduler started")
 
     # Dispatcher: picks up PENDING runs and dispatches them
+    if not settings.base_url:
+        logger.warning(
+            "AUTOMATION_BASE_URL not set — using localhost. "
+            "Sandboxes in the cloud won't be able to reach this URL."
+        )
     dispatcher_task = asyncio.create_task(
         dispatcher_loop(
             app.state.session_factory,
+            settings=settings,
             interval_seconds=settings.dispatcher_interval_seconds,
             shutdown_event=shutdown_event,
         )
@@ -71,16 +78,28 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
+    # Watchdog: marks stale RUNNING runs as FAILED
+    watchdog_task = asyncio.create_task(
+        watchdog_loop(
+            app.state.session_factory,
+            settings=settings,
+            shutdown_event=shutdown_event,
+        )
+    )
+    app.state.watchdog_task = watchdog_task
+    logger.info("Background watchdog started")
+
     yield
 
     # Shutdown
     logger.info("Shutting down background tasks...")
     shutdown_event.set()
 
-    # Wait for both tasks to exit gracefully
+    # Wait for all tasks to exit gracefully
     for task_name, task in [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
+        ("watchdog", watchdog_task),
     ]:
         try:
             await asyncio.wait_for(task, timeout=5.0)
@@ -141,7 +160,7 @@ async def readiness():
             await conn.execute(text("SELECT 1"))
         return {"status": "ready"}
     except Exception as e:
-        logger.error("Readiness check failed: %s", e)
+        logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},

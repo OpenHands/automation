@@ -2,6 +2,7 @@ import os
 from collections.abc import AsyncIterator
 
 from google.cloud import storage
+from google.cloud.exceptions import NotFound
 
 from automation.storage.file_store import FileStore
 
@@ -86,6 +87,25 @@ class GoogleCloudFileStore(FileStore):
             blob.upload_from_string(contents, content_type="text/plain")
         else:
             blob.upload_from_string(contents, content_type="application/octet-stream")
+
+    def read(self, path: str) -> bytes:
+        """Read file contents from GCS.
+
+        Args:
+            path: The path/key in the bucket (will be prefixed with "automation/").
+
+        Returns:
+            The file contents as bytes.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+        """
+        full_path = self._prefixed_path(path)
+        blob = self.bucket.blob(full_path)
+        try:
+            return blob.download_as_bytes()
+        except NotFound:
+            raise FileNotFoundError(f"File not found: {full_path}")
 
     def list(self, path: str) -> list[str]:
         """

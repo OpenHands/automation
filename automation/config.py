@@ -31,8 +31,14 @@ class Settings(BaseSettings):
     # Dispatcher (polls automation_runs table for pending jobs)
     dispatcher_interval_seconds: int = 10
 
-    # Admin API key for issuing per-user automation API keys via SaaS
-    admin_api_key: str = ""
+    # Service key for authenticating with the SaaS API to fetch per-user
+    # API keys (called by the dispatcher before each automation run).
+    service_key: str = ""
+
+    # Public URL for the automation service (used for sandbox callbacks).
+    # In production, this is the ingress URL (e.g., https://automation.all-hands.dev).
+    # If empty, falls back to http://localhost:{server_port} (dev only).
+    base_url: str = ""
 
     # Service
     host: str = "0.0.0.0"
@@ -45,6 +51,11 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def resolved_base_url(self) -> str:
+        """Public base URL with localhost fallback for dev."""
+        return self.base_url or f"http://localhost:{self.server_port}"
 
 
 # Hardcoded internal URL scheme for uploaded tarballs.

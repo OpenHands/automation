@@ -19,6 +19,9 @@ from automation.models import TarballUpload, UploadStatus
 # Valid external URL schemes (must be publicly accessible)
 EXTERNAL_URL_SCHEMES = ("https://", "s3://", "gs://")
 
+# HTTP(S) URL schemes that can be downloaded with curl inside a sandbox
+HTTP_URL_SCHEMES = ("http://", "https://")
+
 # Internal URL prefix for uploaded tarballs
 INTERNAL_URL_PREFIX = f"{INTERNAL_URL_SCHEME}://uploads/"
 
@@ -61,6 +64,11 @@ def is_internal_url(tarball_path: str) -> bool:
 def is_valid_external_url(tarball_path: str) -> bool:
     """Check if the tarball_path has a valid external URL scheme."""
     return tarball_path.startswith(EXTERNAL_URL_SCHEMES)
+
+
+def is_http_url(tarball_path: str) -> bool:
+    """Check if the tarball_path is an HTTP(S) URL downloadable with curl."""
+    return tarball_path.startswith(HTTP_URL_SCHEMES)
 
 
 async def validate_tarball_path(
