@@ -400,7 +400,9 @@ async def dispatch_automation(
 
         except Exception as e:
             logger.exception("Automation dispatch failed", extra=log_extra())
-            # Don't delete sandbox on dispatch failure - let watchdog handle it
+            # Delete sandbox on dispatch failure to avoid orphaned sandboxes
+            if sandbox_id:
+                await _delete_sandbox(client, api_url, api_key, sandbox_id)
             return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
 
