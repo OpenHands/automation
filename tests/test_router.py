@@ -14,7 +14,7 @@ OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 
 class TestCreateAutomation:
-    """Tests for POST /api endpoint."""
+    """Tests for POST /v1 endpoint."""
 
     async def test_create_automation_success(self, async_client, async_session):
         """Valid request creates automation and returns 201."""
@@ -306,7 +306,7 @@ class TestCreateAutomation:
 
 
 class TestListAutomations:
-    """Tests for GET /api endpoint."""
+    """Tests for GET /v1 endpoint."""
 
     async def test_list_automations_empty(self, async_client):
         """No automations returns empty list."""
@@ -406,7 +406,7 @@ class TestListAutomations:
 
 
 class TestGetAutomation:
-    """Tests for GET /api/{id} endpoint."""
+    """Tests for GET /v1/{id} endpoint."""
 
     async def test_get_automation_success(self, async_client, async_session):
         """Valid ID returns automation."""
@@ -474,7 +474,7 @@ class TestGetAutomation:
 
 
 class TestDeleteAutomation:
-    """Tests for DELETE /api/{id} endpoint."""
+    """Tests for DELETE /v1/{id} endpoint."""
 
     async def test_delete_automation_soft_deletes(self, async_client, async_session):
         """DELETE sets enabled=False and deleted_at."""
@@ -528,7 +528,7 @@ class TestDeleteAutomation:
 
 
 class TestUpdateAutomation:
-    """Tests for PATCH /api/{id} endpoint."""
+    """Tests for PATCH /v1/{id} endpoint."""
 
     async def test_update_automation_name(self, async_client, async_session):
         """PATCH updates the automation name."""
@@ -693,7 +693,7 @@ class TestUpdateAutomation:
 
 
 class TestDispatchAutomation:
-    """Tests for POST /api/{id}/dispatch endpoint."""
+    """Tests for POST /v1/{id}/dispatch endpoint."""
 
     async def test_dispatch_automation_success(self, async_client, async_session):
         """Dispatching an automation creates a PENDING run."""
@@ -818,7 +818,7 @@ class TestDispatchAutomation:
 
 
 class TestListAutomationRuns:
-    """Tests for GET /api/{id}/runs endpoint."""
+    """Tests for GET /v1/{id}/runs endpoint."""
 
     async def test_list_runs_empty(self, async_client, async_session):
         """Listing runs for automation with no runs returns empty list."""
