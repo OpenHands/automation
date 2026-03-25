@@ -60,7 +60,7 @@ async def create_automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
-        triggers=body.trigger.model_dump(),
+        trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -124,10 +124,9 @@ async def update_automation(
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
     update_data = body.model_dump(exclude_unset=True)
-    # Handle trigger -> triggers field mapping (only if trigger has a real value)
+    # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
-        update_data["triggers"] = body.trigger.model_dump()
-    update_data.pop("trigger", None)
+        update_data["trigger"] = body.trigger.model_dump()
 
     for field, value in update_data.items():
         setattr(auto, field, value)

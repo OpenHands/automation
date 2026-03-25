@@ -119,7 +119,7 @@ async def poll_and_schedule(
                     run.id,
                     automation.id,
                     automation.name,
-                    automation.triggers.get("schedule"),
+                    automation.trigger.get("schedule"),
                 )
             except Exception:
                 logger.exception(

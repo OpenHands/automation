@@ -114,15 +114,15 @@ def is_automation_due(
     if not automation.enabled or automation.deleted_at is not None:
         return False
 
-    triggers = automation.triggers
-    if triggers.get("type") != "cron":
+    trigger = automation.trigger
+    if trigger.get("type") != "cron":
         return False
 
-    schedule = triggers.get("schedule")
+    schedule = trigger.get("schedule")
     if not schedule:
         return False
 
-    timezone = triggers.get("timezone", "UTC")
+    timezone = trigger.get("timezone", "UTC")
 
     # Calculate the previous fire time (most recent time the cron should have fired)
     # in the user's configured timezone, converted back to UTC

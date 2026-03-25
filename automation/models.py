@@ -53,7 +53,7 @@ class Automation(Base):
     name: Mapped[str] = mapped_column(String(500), nullable=False)
 
     # Trigger config — for MVP, only cron is supported.
-    triggers: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    trigger: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)

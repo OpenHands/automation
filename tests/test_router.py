@@ -31,7 +31,7 @@ class TestCreateAutomation:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Test Automation"
-        assert data["triggers"] == {
+        assert data["trigger"] == {
             "type": "cron",
             "schedule": "0 9 * * 5",
             "timezone": "UTC",
@@ -324,7 +324,7 @@ class TestListAutomations:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -346,7 +346,7 @@ class TestListAutomations:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Deleted Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
             deleted_at=utcnow(),
@@ -368,7 +368,7 @@ class TestListAutomations:
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
             name="Other User Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -390,7 +390,7 @@ class TestListAutomations:
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
                 name=f"Automation {i}",
-                triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+                trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
                 tarball_path="s3://bucket/path/to/code.tar.gz",
                 entrypoint="uv run script.py",
             )
@@ -414,7 +414,7 @@ class TestGetAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -443,7 +443,7 @@ class TestGetAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Deleted Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
             deleted_at=utcnow(),
@@ -461,7 +461,7 @@ class TestGetAutomation:
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
             name="Other User Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -482,7 +482,7 @@ class TestDeleteAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="To Delete",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
             enabled=True,
@@ -514,7 +514,7 @@ class TestDeleteAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Already Deleted",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
             deleted_at=utcnow(),
@@ -536,7 +536,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Original Name",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -559,7 +559,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -572,7 +572,7 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 200
-        assert response.json()["triggers"]["schedule"] == "*/5 * * * *"
+        assert response.json()["trigger"]["schedule"] == "*/5 * * * *"
 
     async def test_update_automation_disable(self, async_client, async_session):
         """PATCH can disable an automation."""
@@ -580,7 +580,7 @@ class TestUpdateAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
             enabled=True,
@@ -613,7 +613,7 @@ class TestUpdateAutomation:
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
             name="Other User",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -701,7 +701,7 @@ class TestDispatchAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Dispatch",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -737,7 +737,7 @@ class TestDispatchAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Deleted Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
             deleted_at=utcnow(),
@@ -757,7 +757,7 @@ class TestDispatchAutomation:
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
             name="Other User Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -776,7 +776,7 @@ class TestDispatchAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Multiple Runs",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -805,7 +805,7 @@ class TestDispatchAutomation:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Trigger Update",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -834,7 +834,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -854,7 +854,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -888,7 +888,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -926,7 +926,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -977,7 +977,7 @@ class TestListAutomationRuns:
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
             name="Other User Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -994,7 +994,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Deleted Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
             deleted_at=utcnow(),
@@ -1012,7 +1012,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
@@ -1034,7 +1034,7 @@ class TestListAutomationRuns:
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test Automation",
-            triggers={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
         )
