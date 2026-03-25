@@ -24,7 +24,7 @@ from automation.constants import MAX_RUN_DURATION_SECONDS
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
-from automation.utils.run import mark_run_status, update_sandbox_id
+from automation.utils.run import mark_run_status, mark_run_terminal, update_sandbox_id
 from automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
 
 
@@ -200,56 +200,20 @@ async def _execute_run(
                 result.error,
                 extra=sandbox_extra,
             )
-            await _mark_run_terminal(
+            await mark_run_terminal(
                 session_factory, run, AutomationRunStatus.FAILED, result.error
             )
 
     except (APIKeyError, ValueError) as exc:
         logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
-        await _mark_run_terminal(
+        await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, str(exc)
         )
     except Exception:
         logger.exception("Background execution failed", extra=log_extra())
-        await _mark_run_terminal(
+        await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, "Internal error"
         )
-
-
-async def _mark_run_terminal(
-    session_factory: async_sessionmaker[AsyncSession],
-    run: AutomationRun,
-    status: AutomationRunStatus,
-    error: str | None = None,
-) -> None:
-    """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING."""
-    run_id = str(run.id)
-    automation_id = str(run.automation_id) if run.automation_id else None
-    extra = _run_extra(run_id=run_id, automation_id=automation_id)
-    try:
-        async with session_factory() as session:
-            db_result = await session.execute(
-                select(AutomationRun).where(AutomationRun.id == run.id)
-            )
-            db_run = db_result.scalars().first()
-            if db_run and db_run.status == AutomationRunStatus.RUNNING:
-                await mark_run_status(
-                    session,
-                    db_run,
-                    status,
-                    error_detail=error,
-                )
-                await session.commit()
-                logger.info("Run marked as %s", status.value, extra=extra)
-            else:
-                logger.info(
-                    "Run not marked %s (current status: %s)",
-                    status.value,
-                    db_run.status.value if db_run else "not found",
-                    extra=extra,
-                )
-    except Exception:
-        logger.exception("Failed to mark run as %s", status.value, extra=extra)
 
 
 async def dispatch_pending_runs(
@@ -306,7 +270,7 @@ async def _execute_run_safe(
         await _execute_run(run, settings, session_factory)
     except Exception:
         logger.exception("Background execution failed", extra=extra)
-        await _mark_run_terminal(
+        await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, "Internal error"
         )
 

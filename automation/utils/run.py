@@ -118,3 +118,57 @@ async def update_sandbox_id(
             await session.commit()
     except Exception:
         logger.exception("Failed to update sandbox_id for run %s", run_id)
+
+
+async def mark_run_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    run: AutomationRun,
+    status: AutomationRunStatus,
+    error: str | None = None,
+) -> None:
+    """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING.
+
+    This is a safe wrapper around mark_run_status that:
+    1. Opens a new session
+    2. Re-fetches the run to check current status
+    3. Only updates if the run is still RUNNING (avoids race conditions)
+    4. Commits and handles errors gracefully
+
+    Args:
+        session_factory: Async session factory
+        run: The run to update (used to get the ID)
+        status: The terminal status to set (COMPLETED or FAILED)
+        error: Optional error message (only used for FAILED status)
+    """
+    from sqlalchemy import select
+
+    run_id = str(run.id)
+    automation_id = str(run.automation_id) if run.automation_id else None
+    extra = {"run_id": run_id}
+    if automation_id:
+        extra["automation_id"] = automation_id
+
+    try:
+        async with session_factory() as session:
+            db_result = await session.execute(
+                select(AutomationRun).where(AutomationRun.id == run.id)
+            )
+            db_run = db_result.scalars().first()
+            if db_run and db_run.status == AutomationRunStatus.RUNNING:
+                await mark_run_status(
+                    session,
+                    db_run,
+                    status,
+                    error_detail=error,
+                )
+                await session.commit()
+                logger.info("Run marked as %s", status.value, extra=extra)
+            else:
+                logger.info(
+                    "Run not marked %s (current status: %s)",
+                    status.value,
+                    db_run.status.value if db_run else "not found",
+                    extra=extra,
+                )
+    except Exception:
+        logger.exception("Failed to mark run as %s", status.value, extra=extra)
