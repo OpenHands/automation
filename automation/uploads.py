@@ -16,7 +16,7 @@ from automation.storage import FileSizeLimitExceeded, GoogleCloudFileStore
 from automation.utils import utcnow
 
 
-router = APIRouter(prefix="/api/v1/uploads", tags=["Uploads"])
+router = APIRouter(prefix="/v1/uploads", tags=["Uploads"])
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024

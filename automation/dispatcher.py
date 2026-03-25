@@ -5,7 +5,7 @@ to sandboxes via the SaaS API.  Uses FOR UPDATE SKIP LOCKED for
 multi-worker safety.
 
 Completion is handled asynchronously: the SDK running inside the sandbox
-POSTs to ``/api/v1/automations/runs/{id}/complete`` when the entry-point
+POSTs to ``/v1/runs/{id}/complete`` when the entry-point
 exits, so the dispatcher does **not** block waiting for results.
 """
 
@@ -124,7 +124,7 @@ async def _execute_run(
 
     callback_url = (
         f"{settings.resolved_base_url.rstrip('/')}"
-        f"/api/v1/automations/runs/{run_id}/complete"
+        f"/v1/runs/{run_id}/complete"
     )
 
     try:
