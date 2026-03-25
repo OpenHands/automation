@@ -2,7 +2,7 @@
 
 Tests the full dispatch pipeline using the SDK:
   1. Verify env vars injected by the dispatcher
-  2. Open OpenHandsCloudWorkspace with saas_runtime_mode=True
+  2. Open OpenHandsCloudWorkspace with local_agent_server_mode=True
   3. Fetch LLM config via workspace.get_llm()
   4. Fetch secrets via workspace.get_secrets()
   5. Create a Conversation using the LLM and secrets
@@ -27,8 +27,6 @@ api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
-callback_url = os.environ.get("AUTOMATION_CALLBACK_URL")
-run_id = os.environ.get("AUTOMATION_RUN_ID")
 
 # 1. Verify dispatcher-injected env vars
 print("=== ENV VARS ===")
@@ -43,10 +41,10 @@ for name, val in [
         print(f"FAIL: {name} not set", file=sys.stderr)
         sys.exit(1)
 
-print(f"  AUTOMATION_CALLBACK_URL: {callback_url or 'NONE'}")
-print(f"  AUTOMATION_RUN_ID: {run_id or 'NONE'}")
+print(f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}")
+print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
-# 2. Test SDK workspace in saas_runtime_mode
+# 2. Test SDK workspace in local_agent_server_mode
 from openhands.sdk import Conversation, RemoteConversation  # noqa: E402
 from openhands.tools.preset.default import get_default_agent  # noqa: E402
 from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
@@ -54,11 +52,9 @@ from openhands.workspace import OpenHandsCloudWorkspace  # noqa: E402
 
 print("\n=== SDK WORKSPACE ===")
 with OpenHandsCloudWorkspace(
-    saas_runtime_mode=True,
+    local_agent_server_mode=True,
     cloud_api_url=api_url,
     cloud_api_key=api_key,
-    automation_callback_url=callback_url,
-    automation_run_id=run_id,
 ) as workspace:
     # get_llm() — fetches LLM config from the user's SaaS account
     print("\n=== GET_LLM ===")

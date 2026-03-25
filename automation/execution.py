@@ -301,7 +301,7 @@ async def dispatch_automation(
 
     *env_vars* are exported before the entrypoint runs.  The sandbox
     identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``saas_runtime_mode`` works.
+    **always** injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -429,7 +429,7 @@ async def run_automation(
 
     *env_vars* are exported before the entrypoint runs.  The sandbox
     identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``saas_runtime_mode`` works.
+    **always** injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
