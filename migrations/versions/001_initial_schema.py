@@ -82,6 +82,10 @@ def upgrade() -> None:
         ),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("conversation_id", sa.String(255), nullable=True),
+        sa.Column("timeout_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("keep_alive", sa.Boolean(), nullable=False, server_default="false"),
+        sa.Column("sandbox_id", sa.String(255), nullable=True),
     )
     op.create_index(
         "ix_automation_runs_automation_id", "automation_runs", ["automation_id"]
@@ -94,6 +98,7 @@ def upgrade() -> None:
         ["created_at"],
         postgresql_where=sa.text("status = 'PENDING'"),
     )
+    op.create_index("ix_automation_runs_timeout_at", "automation_runs", ["timeout_at"])
 
 
 def downgrade() -> None:
