@@ -106,11 +106,14 @@ async def _verify_and_mark_run(
     )
 
     if verification.verified:
-        # We got an actual result from the sandbox
-        if verification.success:
+        exit_code = verification.exit_code
+
+        # exit_code == 0: Command completed successfully, we just missed the callback
+        if exit_code == 0:
             logger.info(
-                "Verified run completed successfully (exit_code=%s)",
-                verification.exit_code,
+                "Verified run completed successfully (exit_code=%s), "
+                "callback was missed",
+                exit_code,
                 extra=extra,
             )
             stmt = (
@@ -124,8 +127,34 @@ async def _verify_and_mark_run(
                     completed_at=now,
                 )
             )
+
+        # exit_code == -1 or None: Command was killed/timed out by bash service
+        elif exit_code is None or exit_code == -1:
+            error_msg = "command timed out or was killed"
+            if verification.stderr:
+                error_msg += f"\nstderr: {verification.stderr[-1000:]}"
+
+            logger.warning(
+                "Run timed out (exit_code=%s)",
+                exit_code,
+                extra=extra,
+            )
+            stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run.id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status=AutomationRunStatus.FAILED,
+                    completed_at=now,
+                    error_detail=f"Timed out: {error_msg}",
+                )
+            )
+
+        # Any other exit code: Command failed with an actual error
         else:
-            error_parts = [f"exit_code={verification.exit_code}"]
+            error_parts = [f"exit_code={exit_code}"]
             if verification.stderr:
                 error_parts.append(f"stderr: {verification.stderr[-1000:]}")
             if verification.stdout:
@@ -134,7 +163,7 @@ async def _verify_and_mark_run(
 
             logger.warning(
                 "Verified run failed (exit_code=%s)",
-                verification.exit_code,
+                exit_code,
                 extra=extra,
             )
             stmt = (
@@ -149,13 +178,14 @@ async def _verify_and_mark_run(
                     error_detail=error_detail,
                 )
             )
+
         result = await session.execute(stmt)  # type: ignore[assignment]
         return result.rowcount > 0
 
     # Verification failed - sandbox not available or command still running
     # This likely means the sandbox crashed or was cleaned up
     logger.warning(
-        "Could not verify run status: %s, marking FAILED",
+        "Could not verify run status: %s, marking as timed out",
         verification.error,
         extra=extra,
     )
@@ -171,10 +201,8 @@ async def _verify_and_mark_run(
 
     error_msg = verification.error or "no completion callback received"
 
-    # Log that we're killing the run due to timeout
     logger.warning(
-        "Killing run due to timeout: run_id=%s, sandbox_id=%s, "
-        "timeout_at=%s, reason=%s",
+        "Marking run as timed out: run_id=%s, sandbox_id=%s, timeout_at=%s, reason=%s",
         run_id,
         sandbox_id,
         run.timeout_at,
