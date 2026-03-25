@@ -8,10 +8,10 @@ import asyncio
 import io
 import logging
 import tarfile
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic.dataclasses import dataclass
 from tenacity import (
     before_sleep_log,
     retry,

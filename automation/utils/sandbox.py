@@ -5,10 +5,10 @@ bash command history, and to clean up sandboxes after runs complete.
 """
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic.dataclasses import dataclass
 
 
 logger = logging.getLogger(__name__)
