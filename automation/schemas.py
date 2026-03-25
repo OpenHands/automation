@@ -154,7 +154,7 @@ class AutomationResponse(BaseModel):
     user_id: uuid.UUID
     org_id: uuid.UUID
     name: str
-    triggers: dict
+    trigger: dict
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str

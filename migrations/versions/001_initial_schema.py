@@ -29,7 +29,7 @@ def upgrade() -> None:
         sa.Column("user_id", UUID(as_uuid=True), nullable=False),
         sa.Column("org_id", UUID(as_uuid=True), nullable=False),
         sa.Column("name", sa.String(500), nullable=False),
-        sa.Column("triggers", JSONB, nullable=False),
+        sa.Column("trigger", JSONB, nullable=False),
         sa.Column("tarball_path", sa.Text, nullable=False),
         sa.Column("setup_script_path", sa.Text, nullable=True),
         sa.Column("entrypoint", sa.Text, nullable=False),
