@@ -33,7 +33,12 @@ async def lifespan(app: FastAPI):
     setup_all_loggers()
 
     # Silence noisy third-party loggers
-    for noisy_logger in ("ddtrace", "httpx", "httpcore"):
+    for noisy_logger in (
+        "ddtrace",
+        "httpx",
+        "httpcore",
+        "sqlalchemy.engine",  # Suppress SQL statement logging
+    ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     logger.info("Starting OpenHands Automations Service")
@@ -140,8 +145,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router)
+# Include uploads_router BEFORE router to avoid route conflict.
+# The main router has /v1/{automation_id} which would match /v1/uploads
+# and fail UUID validation if included first.
 app.include_router(uploads_router)
+app.include_router(router)
 
 
 @app.get("/health")

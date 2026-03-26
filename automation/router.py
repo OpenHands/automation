@@ -30,7 +30,7 @@ from automation.utils.tarball_validation import validate_tarball_path
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/automations", tags=["Automations"])
+router = APIRouter(prefix="/v1", tags=["Automations"])
 
 
 # --- CRUD ---
@@ -45,7 +45,7 @@ async def create_automation(
     """Create a new automation.
 
     The tarball_path can be either:
-    - Internal upload: oh-internal://uploads/{uuid} (from /api/v1/uploads)
+    - Internal upload: oh-internal://uploads/{uuid} (from /v1/uploads)
     - External public URL: https://, s3://, or gs:// URLs
     """
     # Validate tarball_path (checks ownership for internal uploads)
