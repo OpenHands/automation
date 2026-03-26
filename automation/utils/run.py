@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from automation.constants import MAX_RUN_DURATION
@@ -13,6 +13,61 @@ from automation.utils.time import utcnow
 
 
 logger = logging.getLogger(__name__)
+
+
+async def disable_automation(
+    session_factory: async_sessionmaker[AsyncSession],
+    automation_id: uuid.UUID,
+    reason: str,
+) -> bool:
+    """Disable an automation due to a permanent configuration error.
+
+    This function sets enabled=False on the automation when we detect
+    an unrecoverable error condition (e.g., tarball URL doesn't exist).
+    The automation can be re-enabled manually after fixing the configuration.
+
+    Args:
+        session_factory: Async session factory
+        automation_id: The automation ID to disable
+        reason: Human-readable reason for disabling (logged)
+
+    Returns:
+        True if the automation was disabled, False if not found or already disabled
+    """
+    extra = {"automation_id": str(automation_id)}
+
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(Automation).where(Automation.id == automation_id)
+            )
+            automation = result.scalars().first()
+
+            if automation is None:
+                logger.warning("Cannot disable automation: not found", extra=extra)
+                return False
+
+            if not automation.enabled:
+                logger.info("Automation already disabled", extra=extra)
+                return False
+
+            await session.execute(
+                update(Automation)
+                .where(Automation.id == automation_id)
+                .values(enabled=False)
+            )
+            await session.commit()
+
+            logger.warning(
+                "Automation disabled due to permanent error: %s",
+                reason,
+                extra=extra,
+            )
+            return True
+
+    except Exception:
+        logger.exception("Failed to disable automation", extra=extra)
+        return False
 
 
 async def create_pending_run(
