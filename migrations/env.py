@@ -4,6 +4,7 @@ Follows the same patterns as the OpenHands enterprise migrations:
 - Reads DB connection from environment variables
 - Supports GCP Cloud SQL connector for production
 - Supports local PostgreSQL for development
+- Uses PostgreSQL advisory locks for safe concurrent execution
 
 Note: Uses pg8000 (sync driver) while the application uses asyncpg (async driver).
 This is intentional - Alembic runs synchronously, and both drivers produce
@@ -14,12 +15,16 @@ method pairs naturally with pg8000.
 import os
 
 from alembic import context
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from automation.models import Base
 
 
 target_metadata = Base.metadata
+
+# Advisory lock ID for migrations (arbitrary unique integer)
+# Using a hash of "automation_migrations" to avoid collisions
+MIGRATION_LOCK_ID = 849320147
 
 DB_USER = os.getenv("AUTOMATION_DB_USER", os.getenv("DB_USER", "postgres"))
 DB_PASS = os.getenv("AUTOMATION_DB_PASS", os.getenv("DB_PASS", "postgres"))
@@ -70,11 +75,24 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
+    """Run migrations with advisory lock for safe concurrent execution.
+
+    Uses PostgreSQL advisory locks to ensure only one migration process
+    runs at a time, even when multiple pods/containers attempt migrations
+    concurrently. Other processes will wait for the lock to be released.
+    """
     engine = get_engine()
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+        # Acquire advisory lock - blocks until lock is available
+        # This ensures only one migration runs at a time across all pods
+        connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
+        try:
+            context.configure(connection=connection, target_metadata=target_metadata)
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            # Release the lock so other waiting processes can proceed
+            connection.execute(text(f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})"))
 
 
 if context.is_offline_mode():

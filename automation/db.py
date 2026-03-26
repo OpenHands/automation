@@ -7,6 +7,8 @@ Follows the same patterns as OpenHands enterprise:
 
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
+from typing import Any
 
 from fastapi import Request
 from sqlalchemy.engine import URL
@@ -23,8 +25,26 @@ from automation.config import Settings, get_settings
 logger = logging.getLogger("automation.db")
 
 
-async def create_engine(settings: Settings | None = None) -> AsyncEngine:
-    """Create a new PostgreSQL database engine based on settings."""
+@dataclass
+class EngineResult:
+    """Result of create_engine containing the engine and optional connector."""
+
+    engine: AsyncEngine
+    connector: Any = None  # google.cloud.sql.connector.Connector when using GCP
+
+    async def dispose(self) -> None:
+        """Dispose the engine and close the connector if present."""
+        await self.engine.dispose()
+        if self.connector is not None:
+            await self.connector.close_async()
+
+
+async def create_engine(settings: Settings | None = None) -> EngineResult:
+    """Create a new PostgreSQL database engine based on settings.
+
+    Returns an EngineResult containing the engine and optional GCP connector.
+    Call result.dispose() on shutdown to properly clean up resources.
+    """
     if settings is None:
         settings = get_settings()
 
@@ -39,31 +59,32 @@ async def create_engine(settings: Settings | None = None) -> AsyncEngine:
         port=settings.db_port,
         database=settings.db_name,
     )
-    return create_async_engine(
+    engine = create_async_engine(
         url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_recycle=1800,
         pool_pre_ping=True,
     )
+    return EngineResult(engine=engine)
 
 
-async def _create_gcp_engine(settings: Settings) -> AsyncEngine:
-    """Create engine using GCP Cloud SQL connector (async)."""
-    import asyncpg
-    from google.cloud.sql.connector import Connector
-    from sqlalchemy.dialects.postgresql.asyncpg import (
-        AsyncAdapt_asyncpg_connection,
-        AsyncAdapt_asyncpg_dbapi,
-    )
-    from sqlalchemy.util import await_only
+async def _create_gcp_engine(settings: Settings) -> EngineResult:
+    """Create engine using GCP Cloud SQL connector (async).
 
-    connector = Connector()
+    Uses create_async_connector() which auto-detects the current running
+    event loop, avoiding ConnectorLoopError when connections are created
+    from background tasks (scheduler, dispatcher, watchdog).
+    """
+    from google.cloud.sql.connector import create_async_connector
+
+    # create_async_connector() auto-detects and binds to the current event loop
+    connector = await create_async_connector()
     instance = (
         f"{settings.gcp_project}:{settings.gcp_region}:{settings.gcp_db_instance}"
     )
 
-    async def _connect():
+    async def getconn():
         return await connector.connect_async(
             instance,
             "asyncpg",
@@ -72,23 +93,15 @@ async def _create_gcp_engine(settings: Settings) -> AsyncEngine:
             db=settings.db_name,
         )
 
-    dbapi = AsyncAdapt_asyncpg_dbapi(asyncpg)
-
-    def adapted_creator():
-        return AsyncAdapt_asyncpg_connection(
-            dbapi,
-            await_only(_connect()),
-            prepared_statement_cache_size=100,
-        )
-
-    return create_async_engine(
+    engine = create_async_engine(
         "postgresql+asyncpg://",
-        creator=adapted_creator,
+        async_creator=getconn,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_pre_ping=True,
         pool_recycle=1800,
     )
+    return EngineResult(engine=engine, connector=connector)
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
