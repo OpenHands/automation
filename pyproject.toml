@@ -48,7 +48,7 @@ dev = [
     "pytest-asyncio>=1.1.0",
     "pytest-xdist>=3.6.0",
     "pytest-timeout>=2.4.0",
-    "testcontainers[postgres]>=4.10.0",
+    "testcontainers[postgres,minio]>=4.10.0",
 ]
 
 # Ruff configuration

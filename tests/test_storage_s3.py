@@ -172,9 +172,14 @@ class TestS3FileStore:
             with pytest.raises(FileNotFoundError, match="File not found"):
                 store.delete("test/nonexistent.txt")
 
-    def test_endpoint_creates_bucket(self):
-        """When using custom endpoint, bucket is created if it doesn't exist."""
-        with patch.dict(os.environ, {"AWS_S3_ENDPOINT": "http://localhost:9000"}):
+    def test_endpoint_creates_bucket_when_auto_create_enabled(self):
+        """Bucket is created when AWS_S3_AUTO_CREATE_BUCKET=true."""
+        env = {
+            "AWS_S3_ENDPOINT": "http://localhost:9000",
+            "AWS_S3_SECURE": "false",
+            "AWS_S3_AUTO_CREATE_BUCKET": "true",
+        }
+        with patch.dict(os.environ, env):
             with patch("automation.storage.s3.boto3") as mock_boto3:
                 mock_client = MagicMock()
                 error_response = {"Error": {"Code": "404"}}
@@ -187,37 +192,66 @@ class TestS3FileStore:
 
                 mock_client.create_bucket.assert_called_once_with(Bucket="test-bucket")
 
-    def test_ensure_url_scheme_secure(self):
-        """URL scheme is enforced to https when secure=True."""
-        with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
-            assert (
-                store._ensure_url_scheme(True, "example.com") == "https://example.com"
-            )
-            assert (
-                store._ensure_url_scheme(True, "http://example.com")
-                == "https://example.com"
-            )
-            assert (
-                store._ensure_url_scheme(True, "https://example.com")
-                == "https://example.com"
-            )
+    def test_endpoint_no_bucket_creation_by_default(self):
+        """Bucket is NOT created when AWS_S3_AUTO_CREATE_BUCKET is not set."""
+        env = {
+            "AWS_S3_ENDPOINT": "http://localhost:9000",
+            "AWS_S3_SECURE": "false",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            # Ensure auto-create is not set
+            os.environ.pop("AWS_S3_AUTO_CREATE_BUCKET", None)
+            with patch("automation.storage.s3.boto3") as mock_boto3:
+                mock_client = MagicMock()
+                mock_boto3.client.return_value = mock_client
 
-    def test_ensure_url_scheme_insecure(self):
-        """URL scheme is enforced to http when secure=False."""
+                S3FileStore(bucket_name="test-bucket")
+
+                # head_bucket and create_bucket should NOT be called
+                mock_client.head_bucket.assert_not_called()
+                mock_client.create_bucket.assert_not_called()
+
+    def test_validate_endpoint_scheme_adds_https(self):
+        """URL without scheme gets https:// added when secure=True."""
         with patch("automation.storage.s3.boto3"):
             store = S3FileStore(bucket_name="test-bucket")
-            assert (
-                store._ensure_url_scheme(False, "example.com") == "http://example.com"
-            )
-            assert (
-                store._ensure_url_scheme(False, "https://example.com")
-                == "http://example.com"
-            )
-            assert (
-                store._ensure_url_scheme(False, "http://example.com")
-                == "http://example.com"
-            )
+            result = store._validate_endpoint_scheme(True, "example.com")
+            assert result == "https://example.com"
+
+    def test_validate_endpoint_scheme_adds_http(self):
+        """URL without scheme gets http:// added when secure=False."""
+        with patch("automation.storage.s3.boto3"):
+            store = S3FileStore(bucket_name="test-bucket")
+            result = store._validate_endpoint_scheme(False, "example.com")
+            assert result == "http://example.com"
+
+    def test_validate_endpoint_scheme_accepts_matching_https(self):
+        """HTTPS URL is accepted when secure=True."""
+        with patch("automation.storage.s3.boto3"):
+            store = S3FileStore(bucket_name="test-bucket")
+            result = store._validate_endpoint_scheme(True, "https://example.com")
+            assert result == "https://example.com"
+
+    def test_validate_endpoint_scheme_accepts_matching_http(self):
+        """HTTP URL is accepted when secure=False."""
+        with patch("automation.storage.s3.boto3"):
+            store = S3FileStore(bucket_name="test-bucket")
+            result = store._validate_endpoint_scheme(False, "http://example.com")
+            assert result == "http://example.com"
+
+    def test_validate_endpoint_scheme_rejects_http_when_secure(self):
+        """HTTP URL raises error when secure=True."""
+        with patch("automation.storage.s3.boto3"):
+            store = S3FileStore(bucket_name="test-bucket")
+            with pytest.raises(ValueError, match="conflicts with AWS_S3_SECURE=true"):
+                store._validate_endpoint_scheme(True, "http://example.com")
+
+    def test_validate_endpoint_scheme_rejects_https_when_insecure(self):
+        """HTTPS URL raises error when secure=False."""
+        with patch("automation.storage.s3.boto3"):
+            store = S3FileStore(bucket_name="test-bucket")
+            with pytest.raises(ValueError, match="conflicts with AWS_S3_SECURE=false"):
+                store._validate_endpoint_scheme(False, "https://example.com")
 
     def test_bucket_prefix_matches_gcs(self):
         """Verify the bucket prefix matches the GCS implementation."""
@@ -283,8 +317,8 @@ class TestS3FileStoreWriteStream:
             mock_client.put_object.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_write_stream_no_limit(self):
-        """Stream upload without size limit."""
+    async def test_write_stream_default_limit(self):
+        """Stream upload uses default 100MB limit when max_size=None."""
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
@@ -295,11 +329,44 @@ class TestS3FileStoreWriteStream:
                 for i in range(10):
                     yield f"chunk{i}_".encode()
 
+            # max_size=None uses default 100MB limit (small data works)
             size = await store.write_stream(
-                path="test/unlimited.tar",
+                path="test/default_limit.tar",
                 stream=mock_stream(),
                 max_size=None,
             )
 
             assert size > 0
             mock_client.put_object.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_write_stream_default_limit_exceeded(self):
+        """Stream upload enforces default 100MB limit."""
+
+        with patch("automation.storage.s3.boto3") as mock_boto3:
+            mock_client = MagicMock()
+            mock_boto3.client.return_value = mock_client
+
+            store = S3FileStore(bucket_name="test-bucket")
+
+            # Temporarily lower the default for testing
+            import automation.storage.s3 as s3_module
+
+            original_default = s3_module.DEFAULT_MAX_STREAM_SIZE
+            s3_module.DEFAULT_MAX_STREAM_SIZE = 100  # 100 bytes
+
+            try:
+
+                async def large_stream():
+                    yield b"x" * 150  # Exceeds 100 byte limit
+
+                with pytest.raises(FileSizeLimitExceeded) as exc_info:
+                    await store.write_stream(
+                        path="test/over_default.tar",
+                        stream=large_stream(),
+                        max_size=None,  # Uses default
+                    )
+
+                assert exc_info.value.max_size == 100
+            finally:
+                s3_module.DEFAULT_MAX_STREAM_SIZE = original_default
