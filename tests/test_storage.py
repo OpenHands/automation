@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from automation.storage import FileStore, GoogleCloudFileStore
+from automation.storage import FileStore, GoogleCloudFileStore, S3FileStore, get_file_store
 from automation.storage.google_cloud import BUCKET_PREFIX
 
 
@@ -23,6 +23,47 @@ class TestFileStoreAbstraction:
         """FileStore cannot be instantiated directly."""
         with pytest.raises(TypeError):
             FileStore()  # type: ignore
+
+
+class TestGetFileStoreFactory:
+    """Test the get_file_store factory function."""
+
+    def test_default_returns_gcs(self):
+        """Default FILE_STORE returns GoogleCloudFileStore."""
+        with patch.dict(os.environ, {"GCS_BUCKET_NAME": "test-bucket"}, clear=False):
+            os.environ.pop("FILE_STORE", None)
+            with patch("automation.storage.google_cloud.storage"):
+                store = get_file_store()
+                assert isinstance(store, GoogleCloudFileStore)
+
+    def test_gcs_explicit(self):
+        """FILE_STORE=gcs returns GoogleCloudFileStore."""
+        with patch.dict(
+            os.environ, {"FILE_STORE": "gcs", "GCS_BUCKET_NAME": "test-bucket"}
+        ):
+            with patch("automation.storage.google_cloud.storage"):
+                store = get_file_store()
+                assert isinstance(store, GoogleCloudFileStore)
+
+    def test_s3_returns_s3filestore(self):
+        """FILE_STORE=s3 returns S3FileStore."""
+        with patch.dict(os.environ, {"FILE_STORE": "s3", "AWS_S3_BUCKET": "test-bucket"}):
+            with patch("automation.storage.s3.boto3"):
+                store = get_file_store()
+                assert isinstance(store, S3FileStore)
+
+    def test_case_insensitive(self):
+        """FILE_STORE is case insensitive."""
+        with patch.dict(os.environ, {"FILE_STORE": "S3", "AWS_S3_BUCKET": "test-bucket"}):
+            with patch("automation.storage.s3.boto3"):
+                store = get_file_store()
+                assert isinstance(store, S3FileStore)
+
+    def test_unsupported_raises_error(self):
+        """Unsupported FILE_STORE raises ValueError."""
+        with patch.dict(os.environ, {"FILE_STORE": "unsupported"}):
+            with pytest.raises(ValueError, match="Unsupported FILE_STORE type"):
+                get_file_store()
 
 
 class TestGoogleCloudFileStore:

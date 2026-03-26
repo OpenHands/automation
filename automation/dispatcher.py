@@ -56,7 +56,7 @@ async def _download_internal_tarball(
     upload_id: uuid.UUID,
     session: AsyncSession | None,
 ) -> bytes:
-    """Download a tarball from GCS using the TarballUpload record."""
+    """Download a tarball from storage using the TarballUpload record."""
     if session is None:
         raise ValueError("Database session required to resolve oh-internal:// URLs")
 
@@ -67,9 +67,9 @@ async def _download_internal_tarball(
     if upload is None:
         raise FileNotFoundError(f"TarballUpload {upload_id} not found")
 
-    from automation.storage import GoogleCloudFileStore
+    from automation.storage import get_file_store
 
-    store = GoogleCloudFileStore()
+    store = get_file_store()
     return store.read(upload.storage_path)
 
 

@@ -133,11 +133,14 @@ class GoogleCloudFileStore(FileStore):
                   with "automation/").
 
         Raises:
-            google.cloud.exceptions.NotFound: If the file doesn't exist.
+            FileNotFoundError: If the file doesn't exist.
         """
         full_path = self._prefixed_path(path)
         blob = self.bucket.blob(full_path)
-        blob.delete()
+        try:
+            blob.delete()
+        except NotFound:
+            raise FileNotFoundError(f"File not found: {full_path}")
 
     async def write_stream(
         self,
