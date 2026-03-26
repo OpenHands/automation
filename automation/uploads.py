@@ -11,7 +11,7 @@ from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
 from automation.logger import automation_logger
 from automation.models import TarballUpload, UploadStatus
-from automation.storage import FileStore, FileSizeLimitExceeded, get_file_store
+from automation.storage import FileSizeLimitExceeded, FileStore, get_file_store
 from automation.utils import utcnow
 
 

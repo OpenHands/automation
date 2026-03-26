@@ -12,7 +12,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from automation.storage import FileStore, GoogleCloudFileStore, S3FileStore, get_file_store
+from automation.storage import (
+    FileStore,
+    GoogleCloudFileStore,
+    S3FileStore,
+    get_file_store,
+)
 from automation.storage.google_cloud import BUCKET_PREFIX
 
 
@@ -47,14 +52,18 @@ class TestGetFileStoreFactory:
 
     def test_s3_returns_s3filestore(self):
         """FILE_STORE=s3 returns S3FileStore."""
-        with patch.dict(os.environ, {"FILE_STORE": "s3", "AWS_S3_BUCKET": "test-bucket"}):
+        with patch.dict(
+            os.environ, {"FILE_STORE": "s3", "AWS_S3_BUCKET": "test-bucket"}
+        ):
             with patch("automation.storage.s3.boto3"):
                 store = get_file_store()
                 assert isinstance(store, S3FileStore)
 
     def test_case_insensitive(self):
         """FILE_STORE is case insensitive."""
-        with patch.dict(os.environ, {"FILE_STORE": "S3", "AWS_S3_BUCKET": "test-bucket"}):
+        with patch.dict(
+            os.environ, {"FILE_STORE": "S3", "AWS_S3_BUCKET": "test-bucket"}
+        ):
             with patch("automation.storage.s3.boto3"):
                 store = get_file_store()
                 assert isinstance(store, S3FileStore)

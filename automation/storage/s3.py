@@ -111,15 +111,11 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "AccessDenied":
-                raise FileNotFoundError(
-                    f"Access denied to bucket '{self.bucket_name}'"
-                )
+                raise FileNotFoundError(f"Access denied to bucket '{self.bucket_name}'")
             elif error_code == "NoSuchBucket":
-                raise FileNotFoundError(
-                    f"Bucket '{self.bucket_name}' does not exist"
-                )
+                raise FileNotFoundError(f"Bucket '{self.bucket_name}' does not exist")
             raise FileNotFoundError(
-                f"Failed to write to bucket '{self.bucket_name}' at path {full_path}: {e}"
+                f"Failed to write to '{self.bucket_name}/{full_path}': {e}"
             )
 
     def read(self, path: str) -> bytes:
@@ -142,13 +138,11 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "NoSuchBucket":
-                raise FileNotFoundError(
-                    f"Bucket '{self.bucket_name}' does not exist"
-                )
+                raise FileNotFoundError(f"Bucket '{self.bucket_name}' does not exist")
             elif error_code == "NoSuchKey":
                 raise FileNotFoundError(f"File not found: {full_path}")
             raise FileNotFoundError(
-                f"Failed to read from bucket '{self.bucket_name}' at path {full_path}: {e}"
+                f"Failed to read from '{self.bucket_name}/{full_path}': {e}"
             )
 
     def list(self, path: str) -> list[str]:
@@ -175,9 +169,7 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "NoSuchBucket":
-                raise FileNotFoundError(
-                    f"Bucket '{self.bucket_name}' does not exist"
-                )
+                raise FileNotFoundError(f"Bucket '{self.bucket_name}' does not exist")
             raise FileNotFoundError(
                 f"Failed to list bucket '{self.bucket_name}' at path {full_path}: {e}"
             )
@@ -201,17 +193,13 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "NoSuchBucket":
-                raise FileNotFoundError(
-                    f"Bucket '{self.bucket_name}' does not exist"
-                )
+                raise FileNotFoundError(f"Bucket '{self.bucket_name}' does not exist")
             elif error_code in ("404", "NoSuchKey"):
                 raise FileNotFoundError(f"File not found: {full_path}")
             elif error_code == "AccessDenied":
-                raise FileNotFoundError(
-                    f"Access denied to bucket '{self.bucket_name}'"
-                )
+                raise FileNotFoundError(f"Access denied to bucket '{self.bucket_name}'")
             raise FileNotFoundError(
-                f"Failed to delete from bucket '{self.bucket_name}' at path {full_path}: {e}"
+                f"Failed to delete '{self.bucket_name}/{full_path}': {e}"
             )
 
     async def write_stream(

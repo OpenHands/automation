@@ -191,7 +191,9 @@ class TestS3FileStore:
         """URL scheme is enforced to https when secure=True."""
         with patch("automation.storage.s3.boto3"):
             store = S3FileStore(bucket_name="test-bucket")
-            assert store._ensure_url_scheme(True, "example.com") == "https://example.com"
+            assert (
+                store._ensure_url_scheme(True, "example.com") == "https://example.com"
+            )
             assert (
                 store._ensure_url_scheme(True, "http://example.com")
                 == "https://example.com"
@@ -205,7 +207,9 @@ class TestS3FileStore:
         """URL scheme is enforced to http when secure=False."""
         with patch("automation.storage.s3.boto3"):
             store = S3FileStore(bucket_name="test-bucket")
-            assert store._ensure_url_scheme(False, "example.com") == "http://example.com"
+            assert (
+                store._ensure_url_scheme(False, "example.com") == "http://example.com"
+            )
             assert (
                 store._ensure_url_scheme(False, "https://example.com")
                 == "http://example.com"
