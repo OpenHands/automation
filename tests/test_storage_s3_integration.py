@@ -11,8 +11,8 @@ Run with: pytest tests/test_storage_s3_integration.py -v
 """
 
 import os
-import pytest
 
+import pytest
 from testcontainers.minio import MinioContainer
 
 from automation.storage import S3FileStore
