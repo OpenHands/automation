@@ -3,7 +3,6 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from google.cloud.exceptions import NotFound
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +11,7 @@ from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
 from automation.logger import automation_logger
 from automation.models import TarballUpload, UploadStatus
-from automation.storage import FileSizeLimitExceeded, GoogleCloudFileStore
+from automation.storage import FileSizeLimitExceeded, FileStore, get_file_store
 from automation.utils import utcnow
 
 
@@ -31,11 +30,6 @@ ALLOWED_CONTENT_TYPES = frozenset(
         "application/octet-stream",  # Generic binary, often used by clients
     }
 )
-
-
-def get_file_store() -> GoogleCloudFileStore:
-    """Dependency to get the file store instance."""
-    return GoogleCloudFileStore()
 
 
 # --- Schemas ---
@@ -100,7 +94,7 @@ def _build_storage_path(
     """Build the storage path for an upload.
 
     Path format: uploads/{org_id}/{user_id}/{upload_id}.tar
-    Note: The 'automation/' prefix is added by GoogleCloudFileStore.
+    Note: The 'automation/' prefix is added by the FileStore implementation.
     """
     return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
 
@@ -115,7 +109,7 @@ async def create_upload(
     description: str | None = Query(default=None, max_length=2000),
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
-    file_store: GoogleCloudFileStore = Depends(get_file_store),
+    file_store: FileStore = Depends(get_file_store),
 ) -> UploadResponse:
     """Upload a tarball for use in automations.
 
@@ -272,7 +266,7 @@ async def delete_upload(
     upload_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
-    file_store: GoogleCloudFileStore = Depends(get_file_store),
+    file_store: FileStore = Depends(get_file_store),
 ) -> None:
     """Delete an upload.
 
@@ -283,7 +277,7 @@ async def delete_upload(
     # Delete from storage
     try:
         file_store.delete(upload.storage_path)
-    except NotFound:
+    except FileNotFoundError:
         # Expected for failed uploads that were cleaned up
         pass
     except Exception as e:
