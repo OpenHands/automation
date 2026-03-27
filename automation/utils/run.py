@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from automation.constants import MAX_RUN_DURATION
@@ -26,6 +26,9 @@ async def disable_automation(
     an unrecoverable error condition (e.g., tarball URL doesn't exist).
     The automation can be re-enabled manually after fixing the configuration.
 
+    Uses optimistic locking (UPDATE WHERE enabled=True) to handle race
+    conditions when multiple runs fail simultaneously.
+
     Args:
         session_factory: Async session factory
         automation_id: The automation ID to disable
@@ -38,24 +41,27 @@ async def disable_automation(
 
     try:
         async with session_factory() as session:
-            result = await session.execute(
-                select(Automation).where(Automation.id == automation_id)
-            )
-            automation = result.scalars().first()
-
-            if automation is None:
-                logger.warning("Cannot disable automation: not found", extra=extra)
-                return False
-
-            if not automation.enabled:
-                logger.info("Automation already disabled", extra=extra)
-                return False
-
-            await session.execute(
+            # Use optimistic locking: only update if currently enabled
+            result: CursorResult = await session.execute(  # type: ignore[assignment]
                 update(Automation)
-                .where(Automation.id == automation_id)
+                .where(
+                    Automation.id == automation_id,
+                    Automation.enabled == True,  # noqa: E712
+                )
                 .values(enabled=False)
             )
+
+            if result.rowcount == 0:
+                # Either not found or already disabled - check which
+                check = await session.execute(
+                    select(Automation).where(Automation.id == automation_id)
+                )
+                if check.scalars().first() is None:
+                    logger.warning("Cannot disable automation: not found", extra=extra)
+                else:
+                    logger.info("Automation already disabled", extra=extra)
+                return False
+
             await session.commit()
 
             logger.warning(

@@ -415,7 +415,10 @@ async def dispatch_automation(
         except PermanentDispatchError:
             # Clean up sandbox before re-raising so dispatcher can disable automation
             if sandbox_id:
-                await delete_sandbox(client, api_url, api_key, sandbox_id)
+                try:
+                    await delete_sandbox(client, api_url, api_key, sandbox_id)
+                except Exception:
+                    logger.exception("Failed to delete sandbox during error cleanup")
             raise
         except Exception as e:
             logger.exception("Automation dispatch failed", extra=log_extra())

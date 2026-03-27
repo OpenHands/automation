@@ -276,3 +276,45 @@ class TestDispatchAutomationPermanentErrors:
 
         assert "permanently failed" in str(exc_info.value)
         mock_delete_sandbox.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("automation.execution._create_and_wait")
+    @patch("automation.execution.delete_sandbox")
+    @patch("automation.execution._download_in_sandbox")
+    async def test_permanent_error_not_masked_by_cleanup_failure(
+        self,
+        mock_download_in_sandbox,
+        mock_delete_sandbox,
+        mock_create_and_wait,
+    ):
+        """PermanentDispatchError is re-raised even if sandbox cleanup fails.
+
+        This tests the fix for review comment about exception masking:
+        if delete_sandbox() raises, we should still re-raise the original
+        PermanentDispatchError so the dispatcher can disable the automation.
+        """
+        sandbox_id = "test-sandbox-cleanup-fail"
+        mock_create_and_wait.return_value = (
+            sandbox_id,
+            "session-key",
+            "https://agent.example.com",
+        )
+        mock_download_in_sandbox.side_effect = TarballNotFoundError(
+            "External tarball URL is not accessible: 404"
+        )
+        # Simulate cleanup failure
+        mock_delete_sandbox.side_effect = RuntimeError("Failed to delete sandbox")
+
+        # Should still raise TarballNotFoundError, not RuntimeError
+        with pytest.raises(TarballNotFoundError) as exc_info:
+            await dispatch_automation(
+                api_url="https://api.example.com",
+                api_key="test-key",
+                entrypoint="python main.py",
+                tarball_source="https://example.com/missing.tar.gz",
+            )
+
+        # Verify we got the original error, not the cleanup error
+        assert "404" in str(exc_info.value)
+        # Cleanup was still attempted
+        mock_delete_sandbox.assert_called_once()
