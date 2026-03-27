@@ -7,6 +7,7 @@ extract it, run setup, run the entrypoint, tear down.
 import asyncio
 import io
 import logging
+import re
 import tarfile
 from typing import Any
 
@@ -32,6 +33,7 @@ from automation.constants import (
     TARBALL_PATH,
     WORK_DIR,
 )
+from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.utils.sandbox import delete_sandbox
 
 
@@ -219,6 +221,24 @@ async def _start_bash(
     return body.get("id")
 
 
+def _is_permanent_http_error(stderr: str) -> bool:
+    """Check if curl stderr indicates a permanent HTTP error (4xx client errors).
+
+    We only treat 4xx errors as permanent because they indicate the URL is wrong
+    or inaccessible (404 Not Found, 403 Forbidden, 401 Unauthorized, etc.).
+    5xx errors are transient server issues that may resolve on retry.
+
+    Returns True if the error is permanent and the automation should be disabled.
+    """
+    # curl error format: "The requested URL returned error: 404"
+    # We look for 4xx status codes
+    match = re.search(r"returned error:\s*(\d{3})", stderr)
+    if match:
+        status_code = int(match.group(1))
+        return 400 <= status_code < 500
+    return False
+
+
 async def _download_in_sandbox(
     client: httpx.AsyncClient,
     agent_url: str,
@@ -233,7 +253,10 @@ async def _download_in_sandbox(
     This is used for external URLs (https://) to avoid downloading
     untrusted, potentially large files on the automation service.
 
-    Raises RuntimeError if the download fails.
+    Raises:
+        TarballNotFoundError: If the URL returns a 4xx HTTP error (permanent).
+            This indicates the URL is wrong or inaccessible.
+        RuntimeError: For other download failures (transient).
     """
     # Use curl with safety limits:
     # -f: fail silently on HTTP errors (returns exit code 22)
@@ -260,6 +283,14 @@ async def _download_in_sandbox(
             raise RuntimeError(
                 f"Tarball exceeds size limit ({max_filesize // 1024 // 1024} MB)"
             )
+
+        # Check if this is a permanent HTTP error (4xx)
+        if exit_code == 22 and _is_permanent_http_error(stderr):
+            raise TarballNotFoundError(
+                f"External tarball URL is not accessible: {tarball_url}. "
+                f"HTTP error: {stderr.strip()}"
+            )
+
         raise RuntimeError(f"Failed to download tarball (exit={exit_code}): {stderr}")
 
 
@@ -381,6 +412,14 @@ async def dispatch_automation(
 
             return DispatchResult(success=True, sandbox_id=sandbox_id)
 
+        except PermanentDispatchError:
+            # Clean up sandbox before re-raising so dispatcher can disable automation
+            if sandbox_id:
+                try:
+                    await delete_sandbox(client, api_url, api_key, sandbox_id)
+                except Exception:
+                    logger.exception("Failed to delete sandbox during error cleanup")
+            raise
         except Exception as e:
             logger.exception("Automation dispatch failed", extra=log_extra())
             # Delete sandbox on dispatch failure to avoid orphaned sandboxes

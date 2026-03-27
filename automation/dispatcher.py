@@ -22,10 +22,16 @@ from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
 from automation.constants import MAX_RUN_DURATION, MAX_RUN_DURATION_SECONDS
+from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
-from automation.utils.run import mark_run_status, mark_run_terminal, update_sandbox_id
+from automation.utils.run import (
+    disable_automation,
+    mark_run_status,
+    mark_run_terminal,
+    update_sandbox_id,
+)
 from automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
 
 
@@ -56,7 +62,13 @@ async def _download_internal_tarball(
     upload_id: uuid.UUID,
     session: AsyncSession | None,
 ) -> bytes:
-    """Download a tarball from storage using the TarballUpload record."""
+    """Download a tarball from storage using the TarballUpload record.
+
+    Raises:
+        TarballNotFoundError: If the tarball upload record doesn't exist.
+            This is a permanent error that should disable the automation.
+        ValueError: If no database session is provided.
+    """
     if session is None:
         raise ValueError("Database session required to resolve oh-internal:// URLs")
 
@@ -65,7 +77,10 @@ async def _download_internal_tarball(
     )
     upload = result.scalars().first()
     if upload is None:
-        raise FileNotFoundError(f"TarballUpload {upload_id} not found")
+        raise TarballNotFoundError(
+            f"Internal tarball upload not found: {upload_id}. "
+            "The tarball may have been deleted."
+        )
 
     from automation.storage import get_file_store
 
@@ -201,6 +216,19 @@ async def _execute_run(
             await mark_run_terminal(
                 session_factory, run, AutomationRunStatus.FAILED, result.error
             )
+
+    except PermanentDispatchError as exc:
+        # Permanent configuration error - disable the automation
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
+            extra=log_extra(),
+        )
+        await mark_run_terminal(
+            session_factory, run, AutomationRunStatus.FAILED, str(exc)
+        )
+        await disable_automation(session_factory, automation.id, str(exc))
 
     except (APIKeyError, ValueError) as exc:
         logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
