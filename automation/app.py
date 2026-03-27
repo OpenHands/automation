@@ -47,9 +47,10 @@ async def lifespan(app: FastAPI):
     app.state.http_client = create_http_client()
 
     # Create engine and session factory, store in app.state
-    engine = await create_engine(settings)
-    app.state.engine = engine
-    app.state.session_factory = create_session_factory(engine)
+    engine_result = await create_engine(settings)
+    app.state.engine_result = engine_result
+    app.state.engine = engine_result.engine
+    app.state.session_factory = create_session_factory(engine_result.engine)
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
@@ -117,7 +118,7 @@ async def lifespan(app: FastAPI):
                 pass
 
     await app.state.http_client.aclose()
-    await app.state.engine.dispose()
+    await app.state.engine_result.dispose()
     logger.info("Automations service shut down")
 
 

@@ -28,7 +28,7 @@ concurrency:
 
 env:
     DEPLOY_REPO: OpenHands/deploy
-    BASE_BRANCH: automations-project
+    BASE_BRANCH: main
 
 jobs:
     trigger-deploy:
