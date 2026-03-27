@@ -82,7 +82,8 @@ def run_migrations_online():
     concurrently. Other processes will wait for the lock to be released.
     """
     engine = get_engine()
-    with engine.connect() as connection:
+    # Use engine.begin() for auto-commit behavior (required in SQLAlchemy 2.0)
+    with engine.begin() as connection:
         # Acquire advisory lock - blocks until lock is available
         # This ensures only one migration runs at a time across all pods
         connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
