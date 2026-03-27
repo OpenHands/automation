@@ -33,7 +33,7 @@ from automation.constants import (
     TARBALL_PATH,
     WORK_DIR,
 )
-from automation.exceptions import TarballNotFoundError
+from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.utils.sandbox import delete_sandbox
 
 
@@ -412,6 +412,11 @@ async def dispatch_automation(
 
             return DispatchResult(success=True, sandbox_id=sandbox_id)
 
+        except PermanentDispatchError:
+            # Clean up sandbox before re-raising so dispatcher can disable automation
+            if sandbox_id:
+                await delete_sandbox(client, api_url, api_key, sandbox_id)
+            raise
         except Exception as e:
             logger.exception("Automation dispatch failed", extra=log_extra())
             # Delete sandbox on dispatch failure to avoid orphaned sandboxes
