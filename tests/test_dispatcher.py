@@ -567,7 +567,11 @@ class TestCallbackUrl:
         automation.user_id = TEST_USER_ID
         automation.org_id = TEST_ORG_ID
         automation.name = "Callback URL Test"
-        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.trigger = {
+            "type": "cron",
+            "schedule": "* * * * *",
+            "timezone": "UTC",
+        }
         automation.tarball_path = "https://example.com/code.tar.gz"
         automation.entrypoint = "uv run main.py"
         automation.timeout = None
@@ -594,9 +598,7 @@ class TestCallbackUrl:
         callback_url = call_kwargs["callback_url"]
 
         # The callback URL should include /api/automation prefix
-        expected_url = (
-            f"http://localhost:8000/api/automation/v1/runs/{run_id}/complete"
-        )
+        expected_url = f"http://localhost:8000/api/automation/v1/runs/{run_id}/complete"
         assert callback_url == expected_url
 
     @patch("automation.dispatcher.dispatch_automation")
@@ -619,7 +621,11 @@ class TestCallbackUrl:
         automation.user_id = TEST_USER_ID
         automation.org_id = TEST_ORG_ID
         automation.name = "Custom Base URL Test"
-        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.trigger = {
+            "type": "cron",
+            "schedule": "* * * * *",
+            "timezone": "UTC",
+        }
         automation.tarball_path = "https://example.com/code.tar.gz"
         automation.entrypoint = "uv run main.py"
         automation.timeout = None
@@ -669,7 +675,11 @@ class TestCallbackUrl:
         automation.user_id = TEST_USER_ID
         automation.org_id = TEST_ORG_ID
         automation.name = "Trailing Slash Test"
-        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.trigger = {
+            "type": "cron",
+            "schedule": "* * * * *",
+            "timezone": "UTC",
+        }
         automation.tarball_path = "https://example.com/code.tar.gz"
         automation.entrypoint = "uv run main.py"
         automation.timeout = None
