@@ -5,7 +5,7 @@ to sandboxes via the SaaS API.  Uses FOR UPDATE SKIP LOCKED for
 multi-worker safety.
 
 Completion is handled asynchronously: the SDK running inside the sandbox
-POSTs to ``/v1/runs/{id}/complete`` when the entry-point
+POSTs to ``/api/automation/v1/runs/{id}/complete`` when the entry-point
 exits, so the dispatcher does **not** block waiting for results.
 """
 
@@ -21,7 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
-from automation.constants import MAX_RUN_DURATION, MAX_RUN_DURATION_SECONDS
+from automation.constants import (
+    API_PATH_PREFIX,
+    MAX_RUN_DURATION,
+    MAX_RUN_DURATION_SECONDS,
+)
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
@@ -138,7 +142,10 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
+    callback_url = (
+        f"{settings.resolved_base_url.rstrip('/')}"
+        f"{API_PATH_PREFIX}/v1/runs/{run_id}/complete"
+    )
 
     try:
         # 1. Fetch a per-user API key from the SaaS service

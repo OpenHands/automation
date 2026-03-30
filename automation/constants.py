@@ -3,6 +3,12 @@
 from datetime import timedelta
 
 
+# API path prefix (added by middleware in production)
+# When the automation service runs as a sidecar, nginx routes requests through
+# /api/automation/* and strips the prefix. However, for callback URLs, the
+# sandbox SDK needs the full path including this prefix.
+API_PATH_PREFIX = "/api/automation"
+
 # Maximum allowed timeout for automation runs (10 minutes)
 # Used for:
 # - Validation in API requests (timeout field)

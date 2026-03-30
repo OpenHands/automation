@@ -537,3 +537,166 @@ class TestEffectiveTimeout:
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout is None
+
+
+class TestCallbackUrl:
+    """Tests for callback URL construction in dispatcher.
+
+    These tests don't require Docker since they mock all I/O and use
+    mock objects for the automation and run models.
+    """
+
+    @patch("automation.dispatcher.dispatch_automation")
+    @patch("automation.dispatcher.get_api_key_for_automation_run")
+    async def test_callback_url_includes_api_automation_prefix(
+        self, mock_get_api_key, mock_dispatch
+    ):
+        """Callback URL includes /api/automation prefix for middleware routing."""
+        from unittest.mock import MagicMock
+
+        from automation.config import Settings
+        from automation.dispatcher import _execute_run
+
+        mock_get_api_key.return_value = "test-api-key"
+        mock_dispatch.return_value = AsyncMock(success=True, sandbox_id="sb-123")
+
+        # Create mock automation and run without database
+        run_id = uuid.uuid4()
+        automation = MagicMock()
+        automation.id = uuid.uuid4()
+        automation.user_id = TEST_USER_ID
+        automation.org_id = TEST_ORG_ID
+        automation.name = "Callback URL Test"
+        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.tarball_path = "https://example.com/code.tar.gz"
+        automation.entrypoint = "uv run main.py"
+        automation.timeout = None
+
+        run = MagicMock()
+        run.id = run_id
+        run.automation = automation
+        run.automation_id = automation.id
+
+        settings = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-service-key",
+            base_url="http://localhost:8000",
+        )
+
+        # Mock session factory (not actually used with HTTP tarball)
+        mock_session_factory = MagicMock()
+
+        await _execute_run(run, settings, mock_session_factory)
+
+        # Verify dispatch_automation was called with correct callback_url
+        mock_dispatch.assert_called_once()
+        call_kwargs = mock_dispatch.call_args.kwargs
+        callback_url = call_kwargs["callback_url"]
+
+        # The callback URL should include /api/automation prefix
+        expected_url = (
+            f"http://localhost:8000/api/automation/v1/runs/{run_id}/complete"
+        )
+        assert callback_url == expected_url
+
+    @patch("automation.dispatcher.dispatch_automation")
+    @patch("automation.dispatcher.get_api_key_for_automation_run")
+    async def test_callback_url_with_custom_base_url(
+        self, mock_get_api_key, mock_dispatch
+    ):
+        """Callback URL uses custom base_url when configured."""
+        from unittest.mock import MagicMock
+
+        from automation.config import Settings
+        from automation.dispatcher import _execute_run
+
+        mock_get_api_key.return_value = "test-api-key"
+        mock_dispatch.return_value = AsyncMock(success=True, sandbox_id="sb-456")
+
+        run_id = uuid.uuid4()
+        automation = MagicMock()
+        automation.id = uuid.uuid4()
+        automation.user_id = TEST_USER_ID
+        automation.org_id = TEST_ORG_ID
+        automation.name = "Custom Base URL Test"
+        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.tarball_path = "https://example.com/code.tar.gz"
+        automation.entrypoint = "uv run main.py"
+        automation.timeout = None
+
+        run = MagicMock()
+        run.id = run_id
+        run.automation = automation
+        run.automation_id = automation.id
+
+        custom_settings = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-service-key",
+            base_url="https://automation.all-hands.dev",
+        )
+
+        mock_session_factory = MagicMock()
+
+        await _execute_run(run, custom_settings, mock_session_factory)
+
+        # Verify callback URL uses the custom base_url
+        mock_dispatch.assert_called_once()
+        call_kwargs = mock_dispatch.call_args.kwargs
+        callback_url = call_kwargs["callback_url"]
+
+        expected_url = (
+            f"https://automation.all-hands.dev/api/automation/v1/runs/{run_id}/complete"
+        )
+        assert callback_url == expected_url
+
+    @patch("automation.dispatcher.dispatch_automation")
+    @patch("automation.dispatcher.get_api_key_for_automation_run")
+    async def test_callback_url_strips_trailing_slash(
+        self, mock_get_api_key, mock_dispatch
+    ):
+        """Callback URL strips trailing slash from base_url."""
+        from unittest.mock import MagicMock
+
+        from automation.config import Settings
+        from automation.dispatcher import _execute_run
+
+        mock_get_api_key.return_value = "test-api-key"
+        mock_dispatch.return_value = AsyncMock(success=True, sandbox_id="sb-789")
+
+        run_id = uuid.uuid4()
+        automation = MagicMock()
+        automation.id = uuid.uuid4()
+        automation.user_id = TEST_USER_ID
+        automation.org_id = TEST_ORG_ID
+        automation.name = "Trailing Slash Test"
+        automation.trigger = {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"}
+        automation.tarball_path = "https://example.com/code.tar.gz"
+        automation.entrypoint = "uv run main.py"
+        automation.timeout = None
+
+        run = MagicMock()
+        run.id = run_id
+        run.automation = automation
+        run.automation_id = automation.id
+
+        # Settings with trailing slash in base_url
+        settings_with_slash = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-service-key",
+            base_url="https://automation.all-hands.dev/",  # trailing slash
+        )
+
+        mock_session_factory = MagicMock()
+
+        await _execute_run(run, settings_with_slash, mock_session_factory)
+
+        mock_dispatch.assert_called_once()
+        call_kwargs = mock_dispatch.call_args.kwargs
+        callback_url = call_kwargs["callback_url"]
+
+        # Should NOT have double slashes
+        assert "//" not in callback_url.replace("https://", "")
+        expected_url = (
+            f"https://automation.all-hands.dev/api/automation/v1/runs/{run_id}/complete"
+        )
+        assert callback_url == expected_url
