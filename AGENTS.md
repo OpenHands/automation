@@ -124,3 +124,40 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 - **Engine**: SQLAlchemy async with asyncpg; supports direct PostgreSQL (`AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc.) or GCP Cloud SQL connector (`AUTOMATION_GCP_DB_INSTANCE`)
 - **Migrations**: Alembic in `migrations/` directory
 - **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher polling, optimistic `UPDATE WHERE status=X` for callback/watchdog
+
+## Prompt-Based Automation Creation
+
+The `/v1/from-prompt` endpoint allows creating automations by simply providing a prompt, without manually creating and uploading a tarball.
+
+### How It Works
+
+1. User sends `POST /v1/from-prompt` with `name`, `prompt`, and `trigger`
+2. Service generates SDK boilerplate code with the user's prompt
+3. Creates a tarball containing:
+   - `main.py` - SDK boilerplate that loads and executes the prompt
+   - `prompt.txt` - The user's prompt text
+   - `setup.sh` - SDK installation script
+4. Uploads the tarball to storage (creates `TarballUpload` record)
+5. Creates the `Automation` record referencing the internal upload
+
+### Files
+
+- `automation/prompt_router.py` - Endpoint and tarball generation logic
+- `automation/templates/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
+- `automation/templates/setup.sh` - SDK installation script (installs from PyPI)
+
+### Request Schema
+
+```json
+{
+  "name": "My Automation",
+  "prompt": "Create a file called hello.txt with 'Hello World' inside",
+  "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+  "timeout": 300  // optional
+}
+```
+
+### Notes
+
+- The `templates/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
+- The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
