@@ -149,7 +149,10 @@ async def create_automation_from_prompt(
         upload.status = UploadStatus.FAILED
         upload.error_message = f"Upload failed: {e!s}"
         await session.flush()
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload tarball: {e!s}",
+        )
 
     await session.flush()
 
