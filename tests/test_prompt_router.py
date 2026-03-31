@@ -98,8 +98,28 @@ class TestCreateAutomationFromPrompt:
     @pytest.fixture
     def mock_file_store(self):
         """Create a mock file store."""
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
         store = MagicMock()
-        store.write = MagicMock()
+        # Store captured content for test assertions
+        store._captured_content = None
+
+        # Mock write_stream to capture and return size
+        async def mock_write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            content = b""
+            async for chunk in stream:
+                content += chunk
+            store._captured_content = content
+            return len(content)
+
+        store.write_stream = AsyncMock(side_effect=mock_write_stream)
+        store.delete = MagicMock()
         return store
 
     @pytest.fixture(autouse=True)
@@ -116,9 +136,10 @@ class TestCreateAutomationFromPrompt:
         self, async_client, async_session, mock_file_store
     ):
         """Valid request creates automation and upload, returns 201."""
+        test_prompt = "Create a file called hello.txt with 'Hello World' inside"
         payload = {
             "name": "My Prompt Automation",
-            "prompt": "Create a file called hello.txt with 'Hello World' inside",
+            "prompt": test_prompt,
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -136,8 +157,23 @@ class TestCreateAutomationFromPrompt:
         assert "id" in data
         assert data["user_id"] == str(TEST_USER_ID)
 
-        # Verify file store was called
-        mock_file_store.write.assert_called_once()
+        # Verify file store was called and tarball content is correct
+        mock_file_store.write_stream.assert_called_once()
+        call_args = mock_file_store.write_stream.call_args
+        assert call_args.kwargs["path"].startswith("uploads/")
+
+        # Verify tarball content from captured bytes
+        tarball_bytes = mock_file_store._captured_content
+        assert tarball_bytes is not None
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            assert "main.py" in tar.getnames()
+            assert "prompt.txt" in tar.getnames()
+            assert "setup.sh" in tar.getnames()
+
+            # Verify prompt content matches what was sent
+            prompt_file = tar.extractfile("prompt.txt")
+            assert prompt_file is not None
+            assert prompt_file.read().decode() == test_prompt
 
     async def test_create_from_prompt_creates_upload_record(
         self, async_client, async_session, mock_file_store
@@ -309,8 +345,12 @@ class TestCreateAutomationFromPrompt:
         self, async_client, async_session, mock_file_store
     ):
         """Storage failure returns 500."""
-        # Configure the mock to fail on write
-        mock_file_store.write.side_effect = Exception("Storage unavailable")
+        from unittest.mock import AsyncMock
+
+        # Configure the mock to fail on write_stream
+        mock_file_store.write_stream = AsyncMock(
+            side_effect=Exception("Storage unavailable")
+        )
 
         payload = {
             "name": "Storage Fail Test",

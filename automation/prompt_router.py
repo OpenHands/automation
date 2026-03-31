@@ -9,6 +9,7 @@ import io
 import logging
 import tarfile
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -30,6 +31,34 @@ router = APIRouter(prefix="/v1", tags=["Automations"])
 # Template files directory
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+# Template cache to avoid I/O on every request
+_TEMPLATE_CACHE: dict[str, str] | None = None
+
+
+def _load_templates() -> dict[str, str]:
+    """Load and cache template files from disk.
+
+    Templates are cached at module level to avoid I/O on every request.
+    """
+    global _TEMPLATE_CACHE
+    if _TEMPLATE_CACHE is None:
+        _TEMPLATE_CACHE = {
+            "main.py": (TEMPLATES_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (TEMPLATES_DIR / "setup.sh").read_text(),
+        }
+    return _TEMPLATE_CACHE
+
+
+def _safe_truncate(text: str, max_bytes: int) -> str:
+    """Safely truncate a string to max_bytes without breaking UTF-8 characters."""
+    encoded = text.encode("utf-8")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+async def _bytes_to_async_iter(data: bytes) -> AsyncIterator[bytes]:
+    """Convert bytes to an async iterator yielding a single chunk."""
+    yield data
+
 
 class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
@@ -48,6 +77,17 @@ class CreatePromptAutomationRequest(BaseModel):
     )
 
 
+def _add_file_to_tar(
+    tar: tarfile.TarFile, name: str, content: str, mode: int = 0o644
+) -> None:
+    """Add a file with the given content to the tarball."""
+    content_bytes = content.encode("utf-8")
+    info = tarfile.TarInfo(name=name)
+    info.size = len(content_bytes)
+    info.mode = mode
+    tar.addfile(info, io.BytesIO(content_bytes))
+
+
 def _generate_tarball(prompt: str) -> bytes:
     """Generate a tarball containing SDK code and the user's prompt.
 
@@ -59,31 +99,13 @@ def _generate_tarball(prompt: str) -> bytes:
     Returns:
         bytes: The tarball content as bytes
     """
+    templates = _load_templates()
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
-        # Add main.py from template
-        main_py_path = TEMPLATES_DIR / "sdk_main.py"
-        main_py_content = main_py_path.read_text()
-        main_py_bytes = main_py_content.encode("utf-8")
-        main_py_info = tarfile.TarInfo(name="main.py")
-        main_py_info.size = len(main_py_bytes)
-        tar.addfile(main_py_info, io.BytesIO(main_py_bytes))
-
-        # Add prompt.txt with the user's prompt
-        prompt_bytes = prompt.encode("utf-8")
-        prompt_info = tarfile.TarInfo(name="prompt.txt")
-        prompt_info.size = len(prompt_bytes)
-        tar.addfile(prompt_info, io.BytesIO(prompt_bytes))
-
-        # Add setup.sh from template
-        setup_sh_path = TEMPLATES_DIR / "setup.sh"
-        setup_sh_content = setup_sh_path.read_text()
-        setup_sh_bytes = setup_sh_content.encode("utf-8")
-        setup_sh_info = tarfile.TarInfo(name="setup.sh")
-        setup_sh_info.size = len(setup_sh_bytes)
-        setup_sh_info.mode = 0o755  # Make executable
-        tar.addfile(setup_sh_info, io.BytesIO(setup_sh_bytes))
+        _add_file_to_tar(tar, "main.py", templates["main.py"])
+        _add_file_to_tar(tar, "prompt.txt", prompt)
+        _add_file_to_tar(tar, "setup.sh", templates["setup.sh"], mode=0o755)
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -126,24 +148,29 @@ async def create_automation_from_prompt(
     upload_id = uuid.uuid4()
     storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
-    # Create upload record
+    # Create upload record with safe UTF-8 truncation
+    truncated_prompt = _safe_truncate(body.prompt, 100)
     upload = TarballUpload(
         id=upload_id,
         user_id=user.user_id,
         org_id=user.org_id,
-        name=f"prompt-automation-{body.name[:50]}",
-        description=f"Auto-generated from prompt: {body.prompt[:100]}...",
+        name=f"prompt-automation-{_safe_truncate(body.name, 50)}",
+        description=f"Auto-generated from prompt: {truncated_prompt}...",
         status=UploadStatus.UPLOADING,
         storage_path=storage_path,
     )
     session.add(upload)
     await session.flush()
 
-    # Upload to storage (synchronous operation)
+    # Upload to storage using async write_stream
     try:
-        file_store.write(path=storage_path, contents=tarball_content)
+        size_bytes = await file_store.write_stream(
+            path=storage_path,
+            stream=_bytes_to_async_iter(tarball_content),
+            content_type="application/x-tar",
+        )
         upload.status = UploadStatus.COMPLETED
-        upload.size_bytes = len(tarball_content)
+        upload.size_bytes = size_bytes
     except Exception as e:
         logger.exception("Failed to upload generated tarball: %s", e)
         upload.status = UploadStatus.FAILED
@@ -159,19 +186,30 @@ async def create_automation_from_prompt(
     # 3. Create the automation referencing the internal upload
     tarball_path = build_internal_url(upload_id)
 
-    automation = Automation(
-        user_id=user.user_id,
-        org_id=user.org_id,
-        name=body.name,
-        trigger=body.trigger.model_dump(),
-        tarball_path=tarball_path,
-        setup_script_path="setup.sh",
-        entrypoint="python main.py",
-        timeout=body.timeout,
-    )
-    session.add(automation)
-    await session.flush()
-    await session.refresh(automation)
+    try:
+        automation = Automation(
+            user_id=user.user_id,
+            org_id=user.org_id,
+            name=body.name,
+            trigger=body.trigger.model_dump(),
+            tarball_path=tarball_path,
+            setup_script_path="setup.sh",
+            entrypoint="python main.py",
+            timeout=body.timeout,
+        )
+        session.add(automation)
+        await session.flush()
+        await session.refresh(automation)
+    except Exception as e:
+        # Clean up orphaned upload on automation creation failure
+        try:
+            file_store.delete(storage_path)
+        except Exception:
+            logger.exception("Failed to clean up orphaned upload at %s", storage_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create automation: {e!s}",
+        )
 
     logger.info(
         "Created automation from prompt",
