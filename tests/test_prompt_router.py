@@ -305,16 +305,12 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 201
 
-    async def test_create_from_prompt_storage_failure(self, async_client, async_session):
+    async def test_create_from_prompt_storage_failure(
+        self, async_client, async_session, mock_file_store
+    ):
         """Storage failure returns 500."""
-        from automation.app import app
-        from automation.storage import get_file_store
-
-        failing_store = MagicMock()
-        failing_store.write = MagicMock(side_effect=Exception("Storage unavailable"))
-
-        # Override the file_store with a failing one
-        app.dependency_overrides[get_file_store] = lambda: failing_store
+        # Configure the mock to fail on write
+        mock_file_store.write.side_effect = Exception("Storage unavailable")
 
         payload = {
             "name": "Storage Fail Test",
