@@ -32,6 +32,7 @@ from automation.utils.run import (
     mark_run_terminal,
     update_sandbox_id,
 )
+from automation.utils.sandbox_metadata import set_sandbox_automation_metadata
 from automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
 
 
@@ -202,6 +203,20 @@ async def _execute_run(
             # Store sandbox_id for later verification by the watchdog
             if result.sandbox_id:
                 await update_sandbox_id(session_factory, run.id, result.sandbox_id)
+
+                # Set automation metadata on the sandbox so conversations inherit it
+                await set_sandbox_automation_metadata(
+                    api_url=settings.openhands_api_base_url,
+                    service_key=settings.service_key,
+                    sandbox_id=result.sandbox_id,
+                    automation_id=str(automation.id),
+                    automation_name=automation.name,
+                    trigger_type=json.dumps(automation.trigger)
+                    if automation.trigger
+                    else None,
+                    run_id=run_id,
+                )
+
             logger.info(
                 "Automation dispatched successfully, waiting for callback",
                 extra=sandbox_extra,
