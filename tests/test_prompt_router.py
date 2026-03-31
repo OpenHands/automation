@@ -102,15 +102,20 @@ class TestCreateAutomationFromPrompt:
         store.write = MagicMock()
         return store
 
-    async def test_create_from_prompt_success(
-        self, async_client, async_session, mock_file_store
-    ):
-        """Valid request creates automation and upload, returns 201."""
+    @pytest.fixture(autouse=True)
+    def setup_file_store_override(self, mock_file_store):
+        """Override file_store for all tests in this class."""
         from automation.app import app
         from automation.storage import get_file_store
 
         app.dependency_overrides[get_file_store] = lambda: mock_file_store
+        yield
+        app.dependency_overrides.pop(get_file_store, None)
 
+    async def test_create_from_prompt_success(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Valid request creates automation and upload, returns 201."""
         payload = {
             "name": "My Prompt Automation",
             "prompt": "Create a file called hello.txt with 'Hello World' inside",
@@ -134,18 +139,10 @@ class TestCreateAutomationFromPrompt:
         # Verify file store was called
         mock_file_store.write.assert_called_once()
 
-        # Clean up override
-        app.dependency_overrides.pop(get_file_store, None)
-
     async def test_create_from_prompt_creates_upload_record(
         self, async_client, async_session, mock_file_store
     ):
         """Endpoint creates a TarballUpload record."""
-        from automation.app import app
-        from automation.storage import get_file_store
-
-        app.dependency_overrides[get_file_store] = lambda: mock_file_store
-
         payload = {
             "name": "Upload Test",
             "prompt": "Do something",
@@ -174,17 +171,10 @@ class TestCreateAutomationFromPrompt:
         assert upload.user_id == TEST_USER_ID
         assert upload.org_id == TEST_ORG_ID
 
-        app.dependency_overrides.pop(get_file_store, None)
-
     async def test_create_from_prompt_creates_automation_record(
         self, async_client, async_session, mock_file_store
     ):
         """Endpoint creates an Automation record."""
-        from automation.app import app
-        from automation.storage import get_file_store
-
-        app.dependency_overrides[get_file_store] = lambda: mock_file_store
-
         payload = {
             "name": "Automation Record Test",
             "prompt": "Print hello",
@@ -212,8 +202,6 @@ class TestCreateAutomationFromPrompt:
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
         assert automation.org_id == TEST_ORG_ID
-
-        app.dependency_overrides.pop(get_file_store, None)
 
     async def test_create_from_prompt_missing_name(self, async_client):
         """Missing name returns 422."""
@@ -276,11 +264,6 @@ class TestCreateAutomationFromPrompt:
         self, async_client, async_session, mock_file_store
     ):
         """Timeout value is properly set on automation."""
-        from automation.app import app
-        from automation.storage import get_file_store
-
-        app.dependency_overrides[get_file_store] = lambda: mock_file_store
-
         payload = {
             "name": "Timeout Test",
             "prompt": "Long running task",
@@ -294,11 +277,7 @@ class TestCreateAutomationFromPrompt:
         data = response.json()
         assert data["timeout"] == 120
 
-        app.dependency_overrides.pop(get_file_store, None)
-
-    async def test_create_from_prompt_name_max_length(
-        self, async_client, mock_file_store
-    ):
+    async def test_create_from_prompt_name_max_length(self, async_client):
         """Name exceeding max length returns 422."""
         payload = {
             "name": "x" * 501,  # Max is 500
@@ -314,11 +293,6 @@ class TestCreateAutomationFromPrompt:
         self, async_client, async_session, mock_file_store
     ):
         """Long prompt (within limits) is accepted."""
-        from automation.app import app
-        from automation.storage import get_file_store
-
-        app.dependency_overrides[get_file_store] = lambda: mock_file_store
-
         long_prompt = "x" * 10000  # Well within 50000 limit
 
         payload = {
@@ -331,11 +305,7 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 201
 
-        app.dependency_overrides.pop(get_file_store, None)
-
-    async def test_create_from_prompt_storage_failure(
-        self, async_client, async_session
-    ):
+    async def test_create_from_prompt_storage_failure(self, async_client, async_session):
         """Storage failure returns 500."""
         from automation.app import app
         from automation.storage import get_file_store
@@ -343,6 +313,7 @@ class TestCreateAutomationFromPrompt:
         failing_store = MagicMock()
         failing_store.write = MagicMock(side_effect=Exception("Storage unavailable"))
 
+        # Override the file_store with a failing one
         app.dependency_overrides[get_file_store] = lambda: failing_store
 
         payload = {
@@ -354,5 +325,3 @@ class TestCreateAutomationFromPrompt:
         response = await async_client.post("/v1/from-prompt", json=payload)
 
         assert response.status_code == 500
-
-        app.dependency_overrides.pop(get_file_store, None)
