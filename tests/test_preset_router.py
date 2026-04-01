@@ -427,11 +427,13 @@ class TestCreatePluginAutomationRequestValidation:
         """Single PluginSource is normalized to a list."""
         from automation.preset_router import CreatePluginAutomationRequest
 
-        request = CreatePluginAutomationRequest(
-            name="Test",
-            plugins={"source": "github:owner/repo", "ref": "main"},
-            prompt="Test prompt",
-            trigger={"type": "cron", "schedule": "0 0 * * *"},
+        request = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "Test",
+                "plugins": {"source": "github:owner/repo", "ref": "main"},
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
         )
 
         # Should be normalized to a list
@@ -444,14 +446,16 @@ class TestCreatePluginAutomationRequestValidation:
         """List of plugins is preserved as-is."""
         from automation.preset_router import CreatePluginAutomationRequest
 
-        request = CreatePluginAutomationRequest(
-            name="Test",
-            plugins=[
-                {"source": "github:owner/repo1"},
-                {"source": "github:owner/repo2", "ref": "v1.0"},
-            ],
-            prompt="Test prompt",
-            trigger={"type": "cron", "schedule": "0 0 * * *"},
+        request = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "Test",
+                "plugins": [
+                    {"source": "github:owner/repo1"},
+                    {"source": "github:owner/repo2", "ref": "v1.0"},
+                ],
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
         )
 
         assert isinstance(request.plugins, list)
@@ -465,11 +469,13 @@ class TestCreatePluginAutomationRequestValidation:
         from automation.preset_router import CreatePluginAutomationRequest
 
         with pytest.raises(ValueError, match="At least one plugin is required"):
-            CreatePluginAutomationRequest(
-                name="Test",
-                plugins=[],
-                prompt="Test prompt",
-                trigger={"type": "cron", "schedule": "0 0 * * *"},
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "plugins": [],
+                    "prompt": "Test prompt",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
             )
 
 

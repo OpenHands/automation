@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -252,7 +252,7 @@ class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
     name: str = Field(..., min_length=1, max_length=500)
-    plugins: PluginSource | list[PluginSource] = Field(
+    plugins: list[PluginSource] = Field(
         ...,
         description="Plugin(s) to load. Can be a single plugin or a list of plugins. "
         "Each plugin specifies a source (github:owner/repo, git URL, or local path), "
@@ -273,17 +273,18 @@ class CreatePluginAutomationRequest(BaseModel):
         description="Maximum execution time in seconds (default: system maximum)",
     )
 
-    @field_validator("plugins", mode="after")
+    @model_validator(mode="before")
     @classmethod
-    def ensure_plugins_list(
-        cls, v: PluginSource | list[PluginSource]
-    ) -> list[PluginSource]:
+    def normalize_plugins(cls, data: dict) -> dict:  # type: ignore[type-arg]
         """Normalize plugins to always be a list."""
-        if isinstance(v, PluginSource):
-            return [v]
-        if len(v) == 0:
-            raise ValueError("At least one plugin is required")
-        return v
+        if isinstance(data, dict) and "plugins" in data:
+            plugins = data["plugins"]
+            if isinstance(plugins, dict):
+                # Single plugin object -> wrap in list
+                data["plugins"] = [plugins]
+            elif isinstance(plugins, list) and len(plugins) == 0:
+                raise ValueError("At least one plugin is required")
+        return data
 
 
 def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
