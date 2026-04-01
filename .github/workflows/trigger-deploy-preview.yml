@@ -67,9 +67,24 @@ jobs:
                   git config user.name "all-hands-bot"
                   git config user.email "all-hands-bot@all-hands.dev"
 
-                  # Always create/reset branch from base - simple, one code path
+                  # Fetch all branches
                   git fetch origin "$BASE_BRANCH"
-                  git checkout -B "$BRANCH_NAME" "origin/$BASE_BRANCH"
+                  git fetch origin "$BRANCH_NAME" 2>/dev/null || true
+
+                  # Check if branch already exists remotely
+                  if git rev-parse --verify "origin/$BRANCH_NAME" >/dev/null 2>&1; then
+                    echo "Branch $BRANCH_NAME exists remotely, checking out and rebasing"
+                    git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+                    # Rebase onto latest base branch to pick up any upstream changes
+                    git rebase "origin/$BASE_BRANCH" || {
+                      echo "Rebase failed, aborting and resetting to base"
+                      git rebase --abort
+                      git reset --hard "origin/$BASE_BRANCH"
+                    }
+                  else
+                    echo "Branch $BRANCH_NAME does not exist, creating from $BASE_BRANCH"
+                    git checkout -B "$BRANCH_NAME" "origin/$BASE_BRANCH"
+                  fi
 
                   # Verify deploy.yaml exists
                   if [ ! -f .github/workflows/deploy.yaml ]; then
@@ -99,8 +114,8 @@ jobs:
                     echo "has_changes=true" >> $GITHUB_OUTPUT
                   fi
 
-                  # Always push the branch so it exists remotely for PR creation
-                  git push --force origin "$BRANCH_NAME"
+                  # Push the branch (force-with-lease is safer than force for rebased branches)
+                  git push --force-with-lease origin "$BRANCH_NAME"
 
                   echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
