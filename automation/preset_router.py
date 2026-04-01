@@ -32,24 +32,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directory for prompt-based automations
-PRESETS_DIR = Path(__file__).parent / "presets" / "prompt"
+PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
 
 # Preset file cache to avoid I/O on every request
-_PRESET_CACHE: dict[str, str] | None = None
+_PROMPT_PRESET_CACHE: dict[str, str] | None = None
 
 
-def _load_preset_files() -> dict[str, str]:
-    """Load and cache preset files from disk.
+def _load_prompt_preset_files() -> dict[str, str]:
+    """Load and cache prompt preset files from disk.
 
     Preset files are cached at module level to avoid I/O on every request.
     """
-    global _PRESET_CACHE
-    if _PRESET_CACHE is None:
-        _PRESET_CACHE = {
-            "main.py": (PRESETS_DIR / "sdk_main.py").read_text(),
-            "setup.sh": (PRESETS_DIR / "setup.sh").read_text(),
+    global _PROMPT_PRESET_CACHE
+    if _PROMPT_PRESET_CACHE is None:
+        _PROMPT_PRESET_CACHE = {
+            "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
         }
-    return _PRESET_CACHE
+    return _PROMPT_PRESET_CACHE
 
 
 def _safe_truncate(text: str, max_bytes: int) -> str:
@@ -102,7 +102,7 @@ def _generate_tarball(prompt: str) -> bytes:
     Returns:
         bytes: The tarball content as bytes
     """
-    preset_files = _load_preset_files()
+    preset_files = _load_prompt_preset_files()
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
