@@ -15,7 +15,7 @@ repos:
             types: [python]
             pass_filenames: true
             always_run: false
-            exclude: ^automation/templates/
+            exclude: ^automation/presets/
           - id: ruff-check
             name: Ruff lint
             entry: uv
@@ -24,7 +24,7 @@ repos:
             types: [python]
             pass_filenames: true
             always_run: false
-            exclude: ^automation/templates/
+            exclude: ^automation/presets/
           - id: pycodestyle
             name: PEP8 style check (pycodestyle)
             entry: uv
@@ -33,7 +33,7 @@ repos:
             types: [python]
             pass_filenames: true
             always_run: false
-            exclude: ^automation/templates/
+            exclude: ^automation/presets/
           - id: pyright
             name: Type check with pyright
             entry: uv
@@ -42,4 +42,4 @@ repos:
             types: [python]
             pass_filenames: true
             always_run: false
-            exclude: ^automation/templates/
+            exclude: ^automation/presets/
