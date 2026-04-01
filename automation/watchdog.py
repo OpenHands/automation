@@ -6,10 +6,16 @@ actual run status by querying the sandbox's bash command history.
 
 The ``timeout_at`` column is set to ``started_at + max_duration`` when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``).
+
+Also handles delayed sandbox cleanup. When runs complete (via callback or
+verification), a ``cleanup_at`` timestamp is set based on the configured
+``sandbox_cleanup_delay_mins``. The cleanup scanner processes runs past
+their cleanup deadline.
 """
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select, update
@@ -40,6 +46,20 @@ def _run_extra(
     return extra
 
 
+def _compute_cleanup_at(settings: Settings, now=None):
+    """Compute cleanup_at timestamp based on settings.
+
+    Returns None if delay is 0 (immediate cleanup), otherwise returns
+    now + delay.
+    """
+    if now is None:
+        now = utcnow()
+    delay_mins = settings.sandbox_cleanup_delay_mins
+    if delay_mins <= 0:
+        return None
+    return now + timedelta(minutes=delay_mins)
+
+
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
@@ -51,6 +71,10 @@ async def _verify_and_mark_run(
     If verification succeeds, marks the run based on the actual result.
     If verification fails (sandbox unavailable), marks as FAILED with timeout error.
 
+    Sandbox cleanup is handled via the cleanup_at timestamp. If
+    sandbox_cleanup_delay_mins > 0, cleanup is delayed. If 0, immediate
+    cleanup is performed.
+
     Returns True if the run was marked with a terminal status.
     """
     run_id = str(run.id)
@@ -58,7 +82,7 @@ async def _verify_and_mark_run(
     extra = _run_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
 
-    # If no sandbox_id, we can't verify - mark as failed
+    # If no sandbox_id, we can't verify - mark as failed (no cleanup needed)
     if not sandbox_id:
         logger.warning("No sandbox_id for stale run, marking FAILED", extra=extra)
         stmt = (
@@ -81,32 +105,58 @@ async def _verify_and_mark_run(
         api_key = await get_api_key_for_automation_run(run)
     except Exception as e:
         logger.warning("Failed to get API key for verification: %s", e, extra=extra)
+        # Schedule cleanup if delay is configured, otherwise immediate
+        cleanup_at = _compute_cleanup_at(settings, now)
+        values: dict = {
+            "status": AutomationRunStatus.FAILED,
+            "completed_at": now,
+            "error_detail": f"Timed out: could not get API key for verification: {e}",
+        }
+        if cleanup_at and not run.keep_alive:
+            values["cleanup_at"] = cleanup_at
         stmt = (
             update(AutomationRun)
             .where(
                 AutomationRun.id == run.id,
                 AutomationRun.status == AutomationRunStatus.RUNNING,
             )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail=f"Timed out: could not get API key for verification: {e}",
-            )
+            .values(**values)
         )
         result = await session.execute(stmt)  # type: ignore[assignment]
+
+        # Immediate cleanup if delay is 0
+        if not cleanup_at and not run.keep_alive:
+            await cleanup_sandbox(
+                api_url=settings.openhands_api_base_url,
+                api_key=api_key,
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+            )
+
         return result.rowcount > 0
 
-    # Try to verify via sandbox
+    # Try to verify via sandbox - pass keep_alive=True to prevent deletion
+    # (cleanup is handled by the cleanup scanner)
     verification = await verify_run_status(
         api_url=settings.openhands_api_base_url,
         api_key=api_key,
         sandbox_id=sandbox_id,
-        keep_alive=run.keep_alive,
+        keep_alive=True,  # Always prevent immediate deletion, use cleanup_at instead
         run_id=run_id,
     )
 
+    # Compute cleanup_at for terminal states
+    cleanup_at = _compute_cleanup_at(settings, now)
+
     if verification.verified:
         exit_code = verification.exit_code
+
+        # Build base values for update
+        base_values: dict = {
+            "completed_at": now,
+        }
+        if cleanup_at and not run.keep_alive:
+            base_values["cleanup_at"] = cleanup_at
 
         # exit_code == 0: Command completed successfully, we just missed the callback
         if exit_code == 0:
@@ -124,7 +174,7 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.COMPLETED,
-                    completed_at=now,
+                    **base_values,
                 )
             )
 
@@ -147,8 +197,8 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.FAILED,
-                    completed_at=now,
                     error_detail=f"Timed out: {error_msg}",
+                    **base_values,
                 )
             )
 
@@ -174,12 +224,22 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.FAILED,
-                    completed_at=now,
                     error_detail=error_detail,
+                    **base_values,
                 )
             )
 
         result = await session.execute(stmt)  # type: ignore[assignment]
+
+        # Immediate cleanup if delay is 0
+        if not cleanup_at and not run.keep_alive:
+            await cleanup_sandbox(
+                api_url=settings.openhands_api_base_url,
+                api_key=api_key,
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+            )
+
         return result.rowcount > 0
 
     # Verification failed - sandbox not available or command still running
@@ -189,15 +249,6 @@ async def _verify_and_mark_run(
         verification.error,
         extra=extra,
     )
-
-    # Clean up sandbox if not keep_alive (best effort, may already be gone)
-    if not run.keep_alive and sandbox_id:
-        await cleanup_sandbox(
-            api_url=settings.openhands_api_base_url,
-            api_key=api_key,
-            sandbox_id=sandbox_id,
-            run_id=run_id,
-        )
 
     error_msg = verification.error or "no completion callback received"
 
@@ -210,19 +261,34 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
+    # Build values for failed state
+    values = {
+        "status": AutomationRunStatus.FAILED,
+        "completed_at": now,
+        "error_detail": f"Timed out: {error_msg}",
+    }
+    if cleanup_at and not run.keep_alive:
+        values["cleanup_at"] = cleanup_at
+
     stmt = (
         update(AutomationRun)
         .where(
             AutomationRun.id == run.id,
             AutomationRun.status == AutomationRunStatus.RUNNING,
         )
-        .values(
-            status=AutomationRunStatus.FAILED,
-            completed_at=now,
-            error_detail=f"Timed out: {error_msg}",
-        )
+        .values(**values)
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
+
+    # Immediate cleanup if delay is 0 (best effort, sandbox may already be gone)
+    if not cleanup_at and not run.keep_alive:
+        await cleanup_sandbox(
+            api_url=settings.openhands_api_base_url,
+            api_key=api_key,
+            sandbox_id=sandbox_id,
+            run_id=run_id,
+        )
+
     return result.rowcount > 0
 
 
@@ -279,12 +345,99 @@ async def mark_stale_runs(
     return marked
 
 
+async def cleanup_pending_sandboxes(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> int:
+    """Clean up sandboxes for completed runs that are past their cleanup_at deadline.
+
+    Finds runs where:
+    - cleanup_at < now (cleanup deadline has passed)
+    - sandbox_id is not NULL (sandbox hasn't been cleaned up yet)
+    - keep_alive is False (not marked for preservation)
+
+    After deleting the sandbox, clears the sandbox_id to prevent duplicate
+    cleanup attempts.
+
+    Returns the number of sandboxes cleaned up.
+    """
+    now = utcnow()
+    cleaned = 0
+
+    async with session_factory() as session:
+        # Fetch runs ready for cleanup
+        result = await session.execute(
+            select(AutomationRun)
+            .options(selectinload(AutomationRun.automation))
+            .where(
+                AutomationRun.cleanup_at.isnot(None),
+                AutomationRun.cleanup_at < now,
+                AutomationRun.sandbox_id.isnot(None),
+                AutomationRun.keep_alive == False,  # noqa: E712
+            )
+        )
+        runs_to_cleanup = result.scalars().all()
+
+        for run in runs_to_cleanup:
+            run_id = str(run.id)
+            sandbox_id = run.sandbox_id
+            extra = _run_extra(run_id=run_id, sandbox_id=sandbox_id)
+
+            logger.info(
+                "Cleaning up sandbox (cleanup_at=%s, now=%s)",
+                run.cleanup_at,
+                now,
+                extra=extra,
+            )
+
+            try:
+                # Get API key for sandbox deletion
+                api_key = await get_api_key_for_automation_run(run)
+
+                # Delete the sandbox
+                deleted = await cleanup_sandbox(
+                    api_url=settings.openhands_api_base_url,
+                    api_key=api_key,
+                    sandbox_id=sandbox_id,
+                    run_id=run_id,
+                )
+
+                # Clear sandbox_id and cleanup_at to prevent duplicate cleanup
+                stmt = (
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run.id)
+                    .values(sandbox_id=None, cleanup_at=None)
+                )
+                await session.execute(stmt)
+                cleaned += 1
+
+                if deleted:
+                    logger.info("Sandbox cleaned up successfully", extra=extra)
+                else:
+                    logger.warning(
+                        "Sandbox cleanup returned False (may already be gone)",
+                        extra=extra,
+                    )
+
+            except Exception:
+                logger.exception("Error cleaning up sandbox", extra=extra)
+
+        if cleaned:
+            await session.commit()
+
+    return cleaned
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Main watchdog loop — scans for stale runs periodically.
+    """Main watchdog loop — scans for stale runs and cleanup periodically.
+
+    Performs two tasks each interval:
+    1. Marks stale RUNNING runs as FAILED (after verification)
+    2. Cleans up sandboxes past their cleanup_at deadline
 
     Args:
         session_factory: Async session maker for database access.
@@ -294,8 +447,9 @@ async def watchdog_loop(
     interval = settings.watchdog_interval_seconds
 
     logger.info(
-        "Watchdog started, scanning every %ds",
+        "Watchdog started, scanning every %ds (cleanup_delay=%d mins)",
         interval,
+        settings.sandbox_cleanup_delay_mins,
     )
 
     while True:
@@ -304,9 +458,15 @@ async def watchdog_loop(
             break
 
         try:
+            # Mark stale runs
             marked = await mark_stale_runs(session_factory, settings)
             if marked:
                 logger.info("Processed %d stale run(s)", marked)
+
+            # Clean up sandboxes past their cleanup deadline
+            cleaned = await cleanup_pending_sandboxes(session_factory, settings)
+            if cleaned:
+                logger.info("Cleaned up %d sandbox(es)", cleaned)
         except Exception:
             logger.exception("Error in watchdog scan")
 

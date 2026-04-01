@@ -1045,3 +1045,191 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["total"] == 60
         assert len(data["runs"]) == 50  # Default limit
+
+
+class TestCompleteRun:
+    """Tests for POST /v1/runs/{run_id}/complete endpoint."""
+
+    async def test_complete_run_sets_cleanup_at_when_delay_configured(
+        self, async_client, async_session
+    ):
+        """When sandbox_cleanup_delay_mins > 0, should set cleanup_at."""
+        from datetime import timedelta
+        from unittest.mock import patch
+
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run with a sandbox_id
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="test-sandbox-123",
+            started_at=utcnow(),
+            timeout_at=utcnow() + timedelta(minutes=10),
+            keep_alive=False,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Mock settings to have delay > 0
+        from automation.config import Settings
+
+        mock_settings = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-key",
+            base_url="http://localhost:8000",
+            sandbox_cleanup_delay_mins=60,  # 1 hour delay
+        )
+
+        with patch("automation.router.get_settings", return_value=mock_settings):
+            response = await async_client.post(
+                f"/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED", "conversation_id": "conv-123"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["conversation_id"] == "conv-123"
+
+        # Verify cleanup_at was set
+        await async_session.refresh(run)
+        assert run.cleanup_at is not None
+        # cleanup_at should be ~60 minutes after completed_at
+        delta = run.cleanup_at - run.completed_at
+        assert timedelta(minutes=59) < delta < timedelta(minutes=61)
+
+    async def test_complete_run_immediate_cleanup_when_delay_zero(
+        self, async_client, async_session
+    ):
+        """When sandbox_cleanup_delay_mins = 0, should not set cleanup_at."""
+        from datetime import timedelta
+        from unittest.mock import AsyncMock, patch
+
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run with a sandbox_id
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="test-sandbox-456",
+            started_at=utcnow(),
+            timeout_at=utcnow() + timedelta(minutes=10),
+            keep_alive=False,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Mock settings to have delay = 0
+        from automation.config import Settings
+
+        mock_settings = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-key",
+            base_url="http://localhost:8000",
+            sandbox_cleanup_delay_mins=0,  # Immediate cleanup
+        )
+
+        with (
+            patch("automation.router.get_settings", return_value=mock_settings),
+            patch(
+                "automation.router.cleanup_sandbox", new_callable=AsyncMock
+            ) as mock_cleanup,
+        ):
+            response = await async_client.post(
+                f"/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED", "conversation_id": "conv-456"},
+            )
+
+        assert response.status_code == 200
+
+        # Verify cleanup was called immediately
+        mock_cleanup.assert_called_once()
+
+        # Verify cleanup_at was NOT set
+        await async_session.refresh(run)
+        assert run.cleanup_at is None
+
+    async def test_complete_run_no_cleanup_when_keep_alive_true(
+        self, async_client, async_session
+    ):
+        """When keep_alive is True, should not set cleanup_at or cleanup."""
+        from datetime import timedelta
+        from unittest.mock import AsyncMock, patch
+
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run with keep_alive=True
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="test-sandbox-keep-alive",
+            started_at=utcnow(),
+            timeout_at=utcnow() + timedelta(minutes=10),
+            keep_alive=True,  # Should prevent cleanup
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Mock settings with delay > 0
+        from automation.config import Settings
+
+        mock_settings = Settings(
+            openhands_api_base_url="https://test.example.com",
+            service_key="test-key",
+            base_url="http://localhost:8000",
+            sandbox_cleanup_delay_mins=60,
+        )
+
+        with (
+            patch("automation.router.get_settings", return_value=mock_settings),
+            patch(
+                "automation.router.cleanup_sandbox", new_callable=AsyncMock
+            ) as mock_cleanup,
+        ):
+            response = await async_client.post(
+                f"/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+
+        # Verify cleanup was NOT called
+        mock_cleanup.assert_not_called()
+
+        # Verify cleanup_at was NOT set
+        await async_session.refresh(run)
+        assert run.cleanup_at is None

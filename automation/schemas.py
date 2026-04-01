@@ -232,6 +232,7 @@ class AutomationRunResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    cleanup_at: datetime | None  # When sandbox cleanup is scheduled
 
     model_config = {"from_attributes": True}
 
