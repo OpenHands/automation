@@ -55,7 +55,7 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["automation/templates"]
+extend-exclude = ["automation/presets"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -109,7 +109,7 @@ include = [
 ]
 exclude = [
     "scripts/test_tarball",
-    "automation/templates",
+    "automation/presets",
 ]
 venvPath = "."
 venv = ".venv"

@@ -1,8 +1,11 @@
-"""FastAPI router for prompt-based automation creation.
+"""FastAPI router for preset-based automation creation.
 
-This endpoint allows users to create an automation by simply providing a prompt,
-without needing to manually create and upload a tarball. The service generates
-the SDK boilerplate code and packages it with the user's prompt.
+Presets are ready-to-use automation templates where users provide arguments
+(like a prompt) instead of writing SDK scripts. The service generates the
+necessary boilerplate code and packages it into a tarball.
+
+Currently supported presets:
+- prompt: Create an automation from a natural language prompt
 """
 
 import io
@@ -26,27 +29,27 @@ from automation.utils.tarball_validation import build_internal_url
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1/template", tags=["Templates"])
+router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
-# Template files directory for prompt-based automations
-TEMPLATES_DIR = Path(__file__).parent / "templates" / "prompt"
+# Preset files directory for prompt-based automations
+PRESETS_DIR = Path(__file__).parent / "presets" / "prompt"
 
-# Template cache to avoid I/O on every request
-_TEMPLATE_CACHE: dict[str, str] | None = None
+# Preset file cache to avoid I/O on every request
+_PRESET_CACHE: dict[str, str] | None = None
 
 
-def _load_templates() -> dict[str, str]:
-    """Load and cache template files from disk.
+def _load_preset_files() -> dict[str, str]:
+    """Load and cache preset files from disk.
 
-    Templates are cached at module level to avoid I/O on every request.
+    Preset files are cached at module level to avoid I/O on every request.
     """
-    global _TEMPLATE_CACHE
-    if _TEMPLATE_CACHE is None:
-        _TEMPLATE_CACHE = {
-            "main.py": (TEMPLATES_DIR / "sdk_main.py").read_text(),
-            "setup.sh": (TEMPLATES_DIR / "setup.sh").read_text(),
+    global _PRESET_CACHE
+    if _PRESET_CACHE is None:
+        _PRESET_CACHE = {
+            "main.py": (PRESETS_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (PRESETS_DIR / "setup.sh").read_text(),
         }
-    return _TEMPLATE_CACHE
+    return _PRESET_CACHE
 
 
 def _safe_truncate(text: str, max_bytes: int) -> str:
@@ -99,13 +102,13 @@ def _generate_tarball(prompt: str) -> bytes:
     Returns:
         bytes: The tarball content as bytes
     """
-    templates = _load_templates()
+    preset_files = _load_preset_files()
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
-        _add_file_to_tar(tar, "main.py", templates["main.py"])
+        _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
-        _add_file_to_tar(tar, "setup.sh", templates["setup.sh"], mode=0o755)
+        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()

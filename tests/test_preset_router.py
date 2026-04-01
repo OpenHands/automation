@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.prompt_router import _generate_tarball
+from automation.preset_router import _generate_tarball
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -93,7 +93,7 @@ class TestGenerateTarball:
 
 @requires_docker
 class TestCreateAutomationFromPrompt:
-    """Tests for POST /v1/template/prompt endpoint."""
+    """Tests for POST /v1/preset/prompt endpoint."""
 
     @pytest.fixture
     def mock_file_store(self):
@@ -143,7 +143,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -185,7 +185,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -218,7 +218,7 @@ class TestCreateAutomationFromPrompt:
             "timeout": 300,
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -246,7 +246,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -257,7 +257,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -269,7 +269,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -281,7 +281,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "invalid-cron"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -292,7 +292,7 @@ class TestCreateAutomationFromPrompt:
             "prompt": "Do something",
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -307,7 +307,7 @@ class TestCreateAutomationFromPrompt:
             "timeout": 120,
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -321,7 +321,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 422
 
@@ -337,7 +337,7 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 201
 
@@ -358,6 +358,6 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/v1/template/prompt", json=payload)
+        response = await async_client.post("/v1/preset/prompt", json=payload)
 
         assert response.status_code == 500
