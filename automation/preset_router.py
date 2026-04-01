@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -252,12 +252,11 @@ class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
     name: str = Field(..., min_length=1, max_length=500)
-    plugins: list[PluginSource] = Field(
+    plugins: PluginSource | list[PluginSource] = Field(
         ...,
-        min_length=1,
-        description="List of plugins to load. Each plugin specifies a source "
-        "(github:owner/repo, git URL, or local path), optional ref "
-        "(branch/tag/commit), and optional repo_path for monorepos.",
+        description="Plugin(s) to load. Can be a single plugin or a list of plugins. "
+        "Each plugin specifies a source (github:owner/repo, git URL, or local path), "
+        "optional ref (branch/tag/commit), and optional repo_path for monorepos.",
     )
     prompt: str = Field(
         ...,
@@ -273,6 +272,18 @@ class CreatePluginAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+
+    @field_validator("plugins", mode="after")
+    @classmethod
+    def ensure_plugins_list(
+        cls, v: PluginSource | list[PluginSource]
+    ) -> list[PluginSource]:
+        """Normalize plugins to always be a list."""
+        if isinstance(v, PluginSource):
+            return [v]
+        if len(v) == 0:
+            raise ValueError("At least one plugin is required")
+        return v
 
 
 def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
@@ -307,11 +318,7 @@ def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
 
 def _format_plugin_sources_for_description(plugins: list[PluginSource]) -> str:
     """Format plugin sources for use in upload description."""
-    sources = []
-    for p in plugins:
-        ref_str = f"@{p.ref}" if p.ref else ""
-        sources.append(f"{p.source}{ref_str}")
-    return ", ".join(sources)
+    return ", ".join(f"{p.source}@{p.ref}" if p.ref else p.source for p in plugins)
 
 
 @router.post("/plugin", status_code=status.HTTP_201_CREATED)

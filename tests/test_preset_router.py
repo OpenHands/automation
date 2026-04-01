@@ -420,6 +420,59 @@ class TestCreateAutomationFromPrompt:
 # --- Plugin Preset Tests ---
 
 
+class TestCreatePluginAutomationRequestValidation:
+    """Tests for CreatePluginAutomationRequest validation."""
+
+    def test_single_plugin_normalized_to_list(self):
+        """Single PluginSource is normalized to a list."""
+        from automation.preset_router import CreatePluginAutomationRequest
+
+        request = CreatePluginAutomationRequest(
+            name="Test",
+            plugins={"source": "github:owner/repo", "ref": "main"},
+            prompt="Test prompt",
+            trigger={"type": "cron", "schedule": "0 0 * * *"},
+        )
+
+        # Should be normalized to a list
+        assert isinstance(request.plugins, list)
+        assert len(request.plugins) == 1
+        assert request.plugins[0].source == "github:owner/repo"
+        assert request.plugins[0].ref == "main"
+
+    def test_plugin_list_preserved(self):
+        """List of plugins is preserved as-is."""
+        from automation.preset_router import CreatePluginAutomationRequest
+
+        request = CreatePluginAutomationRequest(
+            name="Test",
+            plugins=[
+                {"source": "github:owner/repo1"},
+                {"source": "github:owner/repo2", "ref": "v1.0"},
+            ],
+            prompt="Test prompt",
+            trigger={"type": "cron", "schedule": "0 0 * * *"},
+        )
+
+        assert isinstance(request.plugins, list)
+        assert len(request.plugins) == 2
+        assert request.plugins[0].source == "github:owner/repo1"
+        assert request.plugins[1].source == "github:owner/repo2"
+        assert request.plugins[1].ref == "v1.0"
+
+    def test_empty_plugin_list_rejected(self):
+        """Empty plugin list raises validation error."""
+        from automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="At least one plugin is required"):
+            CreatePluginAutomationRequest(
+                name="Test",
+                plugins=[],
+                prompt="Test prompt",
+                trigger={"type": "cron", "schedule": "0 0 * * *"},
+            )
+
+
 class TestGeneratePluginTarball:
     """Tests for the plugin tarball generation function."""
 
@@ -780,3 +833,58 @@ class TestCreateAutomationFromPlugin:
         response = await async_client.post("/v1/preset/plugin", json=payload)
 
         assert response.status_code == 500
+
+    async def test_create_from_plugin_single_plugin_object(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Single plugin object (not in list) is accepted."""
+        payload = {
+            "name": "Single Plugin Test",
+            "plugins": {"source": "github:owner/single-plugin", "ref": "v2.0.0"},
+            "prompt": "Use single plugin",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "Single Plugin Test"
+
+        # Verify tarball contains the plugin as a list
+        tarball_bytes = mock_file_store._captured_content
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode())
+            # Should be normalized to a list
+            assert isinstance(config, list)
+            assert len(config) == 1
+            assert config[0]["source"] == "github:owner/single-plugin"
+            assert config[0]["ref"] == "v2.0.0"
+
+    async def test_create_from_plugin_single_plugin_minimal(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Single plugin with only source is accepted."""
+        payload = {
+            "name": "Minimal Plugin Test",
+            "plugins": {"source": "github:owner/minimal-plugin"},
+            "prompt": "Use plugin",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+
+        # Verify tarball
+        tarball_bytes = mock_file_store._captured_content
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode())
+            assert len(config) == 1
+            assert config[0]["source"] == "github:owner/minimal-plugin"
+            # No ref or repo_path since they were None
+            assert "ref" not in config[0]
