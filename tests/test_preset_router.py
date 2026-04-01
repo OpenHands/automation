@@ -1,9 +1,10 @@
-"""Tests for prompt-based automation creation endpoint."""
+"""Tests for preset-based automation creation endpoint."""
 
 import io
 import socket
 import tarfile
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +16,9 @@ from automation.preset_router import _generate_tarball
 # Test UUIDs matching mock_authenticated_user fixture
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+# Path to preset files
+PRESETS_DIR = Path(__file__).parent.parent / "automation" / "presets"
 
 
 def _docker_available() -> bool:
@@ -32,6 +36,35 @@ requires_docker = pytest.mark.skipif(
     not _docker_available(),
     reason="Docker not available for testcontainers",
 )
+
+
+class TestPresetFileSyntax:
+    """Verify preset files have valid Python/shell syntax.
+
+    These tests catch syntax errors before they break user automations.
+    The preset files are excluded from linting, so this provides a safety net.
+    """
+
+    def test_prompt_preset_sdk_main_syntax(self):
+        """Verify sdk_main.py has valid Python syntax."""
+        sdk_main_path = PRESETS_DIR / "prompt" / "sdk_main.py"
+        assert sdk_main_path.exists(), f"Preset file not found: {sdk_main_path}"
+
+        source = sdk_main_path.read_text()
+        # compile() raises SyntaxError if the code is invalid
+        compile(source, str(sdk_main_path), "exec")
+
+    def test_prompt_preset_setup_sh_exists(self):
+        """Verify setup.sh exists and is not empty."""
+        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
+        assert setup_sh_path.exists(), f"Preset file not found: {setup_sh_path}"
+
+        content = setup_sh_path.read_text()
+        assert len(content) > 0, "setup.sh is empty"
+        # Basic sanity check - should start with shebang or have pip install
+        assert "pip install" in content or content.startswith("#"), (
+            "setup.sh doesn't look like a valid shell script"
+        )
 
 
 class TestGenerateTarball:
