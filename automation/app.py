@@ -134,10 +134,8 @@ def _build_cors_origins() -> list[str]:
 def _create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     settings = get_settings()
-    # When mounted at /api/automation/, Swagger UI needs root_path to find
-    # the OpenAPI spec. Without this, /docs loads /openapi.json (main app's
-    # spec) instead of /api/automation/openapi.json (this service's spec).
-    # Set AUTOMATION_ROOT_PATH="/api/automation" in production.
+    # root_path is derived from AUTOMATION_BASE_URL path component.
+    # e.g., https://app.all-hands.dev/api/automation -> /api/automation
     return FastAPI(
         title="OpenHands Automations Service",
         description=(
