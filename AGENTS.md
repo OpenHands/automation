@@ -127,11 +127,11 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Prompt-Based Automation Creation
 
-The `/v1/from-prompt` endpoint allows creating automations by simply providing a prompt, without manually creating and uploading a tarball.
+The `/v1/template/prompt` endpoint allows creating automations by simply providing a prompt, without manually creating and uploading a tarball.
 
 ### How It Works
 
-1. User sends `POST /v1/from-prompt` with `name`, `prompt`, and `trigger`
+1. User sends `POST /v1/template/prompt` with `name`, `prompt`, and `trigger`
 2. Service generates SDK boilerplate code with the user's prompt
 3. Creates a tarball containing:
    - `main.py` - SDK boilerplate that loads and executes the prompt
@@ -143,8 +143,8 @@ The `/v1/from-prompt` endpoint allows creating automations by simply providing a
 ### Files
 
 - `automation/prompt_router.py` - Endpoint and tarball generation logic
-- `automation/templates/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
-- `automation/templates/setup.sh` - SDK installation script (installs from PyPI)
+- `automation/templates/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
+- `automation/templates/prompt/setup.sh` - SDK installation script (installs from PyPI)
 
 ### Request Schema
 

@@ -149,7 +149,7 @@ app.add_middleware(
 
 # Include uploads_router and prompt_router BEFORE router to avoid route conflict.
 # The main router has /v1/{automation_id} which would match /v1/uploads
-# or /v1/from-prompt and fail UUID validation if included first.
+# or /v1/template/prompt and fail UUID validation if included first.
 app.include_router(uploads_router)
 app.include_router(prompt_router)
 app.include_router(router)

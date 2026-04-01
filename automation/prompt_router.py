@@ -26,10 +26,10 @@ from automation.utils.tarball_validation import build_internal_url
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["Automations"])
+router = APIRouter(prefix="/v1/template", tags=["Templates"])
 
-# Template files directory
-TEMPLATES_DIR = Path(__file__).parent / "templates"
+# Template files directory for prompt-based automations
+TEMPLATES_DIR = Path(__file__).parent / "templates" / "prompt"
 
 # Template cache to avoid I/O on every request
 _TEMPLATE_CACHE: dict[str, str] | None = None
@@ -122,7 +122,7 @@ def _build_storage_path(
     return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
 
 
-@router.post("/from-prompt", status_code=status.HTTP_201_CREATED)
+@router.post("/prompt", status_code=status.HTTP_201_CREATED)
 async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     user: AuthenticatedUser = Depends(authenticate_request),
