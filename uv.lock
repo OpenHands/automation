@@ -2175,7 +2175,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "openhands-sdk", specifier = ">=0.1.0" },
+    { name = "openhands-sdk", specifier = "==1.16.0" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pydantic-settings", specifier = ">=2" },
