@@ -1,6 +1,7 @@
 """Tests for preset-based automation creation endpoint."""
 
 import io
+import json
 import socket
 import tarfile
 import uuid
@@ -8,9 +9,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from openhands.sdk.plugin import PluginSource
 
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.preset_router import _generate_tarball
+from automation.preset_router import _generate_plugin_tarball, _generate_tarball
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -62,6 +64,26 @@ class TestPresetFileSyntax:
         content = setup_sh_path.read_text()
         assert len(content) > 0, "setup.sh is empty"
         # Basic sanity check - should start with shebang or have pip install
+        assert "pip install" in content or content.startswith("#"), (
+            "setup.sh doesn't look like a valid shell script"
+        )
+
+    def test_plugin_preset_sdk_main_syntax(self):
+        """Verify plugin sdk_main.py has valid Python syntax."""
+        sdk_main_path = PRESETS_DIR / "plugin" / "sdk_main.py"
+        assert sdk_main_path.exists(), f"Preset file not found: {sdk_main_path}"
+
+        source = sdk_main_path.read_text()
+        # compile() raises SyntaxError if the code is invalid
+        compile(source, str(sdk_main_path), "exec")
+
+    def test_plugin_preset_setup_sh_exists(self):
+        """Verify plugin setup.sh exists and is not empty."""
+        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
+        assert setup_sh_path.exists(), f"Preset file not found: {setup_sh_path}"
+
+        content = setup_sh_path.read_text()
+        assert len(content) > 0, "setup.sh is empty"
         assert "pip install" in content or content.startswith("#"), (
             "setup.sh doesn't look like a valid shell script"
         )
@@ -391,5 +413,370 @@ class TestCreateAutomationFromPrompt:
         }
 
         response = await async_client.post("/v1/preset/prompt", json=payload)
+
+        assert response.status_code == 500
+
+
+# --- Plugin Preset Tests ---
+
+
+class TestGeneratePluginTarball:
+    """Tests for the plugin tarball generation function."""
+
+    def test_generate_plugin_tarball_structure(self):
+        """Generated plugin tarball contains expected files."""
+        plugins = [PluginSource(source="github:owner/repo", ref="main")]
+        prompt = "Run the plugin command"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        # Verify it's a valid tarball
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "main.py" in names
+            assert "plugins_config.json" in names
+            assert "prompt.txt" in names
+            assert "setup.sh" in names
+
+    def test_generate_plugin_tarball_plugins_config(self):
+        """Generated tarball contains correct plugins_config.json."""
+        plugins = [
+            PluginSource(source="github:owner/repo1", ref="v1.0.0"),
+            PluginSource(source="github:owner/repo2", repo_path="plugins/my-plugin"),
+        ]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode("utf-8"))
+
+            assert len(config) == 2
+            assert config[0]["source"] == "github:owner/repo1"
+            assert config[0]["ref"] == "v1.0.0"
+            assert config[1]["source"] == "github:owner/repo2"
+            assert config[1]["repo_path"] == "plugins/my-plugin"
+
+    def test_generate_plugin_tarball_prompt_content(self):
+        """Generated tarball contains the user's prompt."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "/my-plugin:command --arg value"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            prompt_file = tar.extractfile("prompt.txt")
+            assert prompt_file is not None
+            prompt_content = prompt_file.read().decode("utf-8")
+            assert prompt_content == prompt
+
+    def test_generate_plugin_tarball_main_py_content(self):
+        """Generated tarball contains valid main.py with plugin loading code."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            main_file = tar.extractfile("main.py")
+            assert main_file is not None
+            main_content = main_file.read().decode("utf-8")
+
+            # Verify key SDK imports and patterns are present
+            assert "from openhands.sdk import" in main_content
+            assert "from openhands.sdk.plugin import PluginSource" in main_content
+            assert "Conversation" in main_content
+            assert "OpenHandsCloudWorkspace" in main_content
+            assert "plugins_config.json" in main_content
+            assert "PluginSource.model_validate" in main_content
+            assert "plugins=plugin_sources" in main_content
+
+    def test_generate_plugin_tarball_setup_sh_executable(self):
+        """setup.sh in plugin tarball has executable permissions."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            setup_info = tar.getmember("setup.sh")
+            # Check executable bit is set (0o755 includes 0o100 for owner execute)
+            assert setup_info.mode & 0o100
+
+    def test_generate_plugin_tarball_excludes_none_values(self):
+        """Generated plugins_config.json excludes None values."""
+        # ref and repo_path are None by default
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode("utf-8"))
+
+            assert len(config) == 1
+            assert config[0]["source"] == "github:owner/repo"
+            # None values should be excluded
+            assert "ref" not in config[0]
+            assert "repo_path" not in config[0]
+
+
+@requires_docker
+class TestCreateAutomationFromPlugin:
+    """Tests for POST /v1/preset/plugin endpoint."""
+
+    @pytest.fixture
+    def mock_file_store(self):
+        """Create a mock file store."""
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        store = MagicMock()
+        # Store captured content for test assertions
+        store._captured_content = None
+
+        # Mock write_stream to capture and return size
+        async def mock_write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            content = b""
+            async for chunk in stream:
+                content += chunk
+            store._captured_content = content
+            return len(content)
+
+        store.write_stream = AsyncMock(side_effect=mock_write_stream)
+        store.delete = MagicMock()
+        return store
+
+    @pytest.fixture(autouse=True)
+    def setup_file_store_override(self, mock_file_store):
+        """Override file_store for all tests in this class."""
+        from automation.app import app
+        from automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: mock_file_store
+        yield
+        app.dependency_overrides.pop(get_file_store, None)
+
+    async def test_create_from_plugin_success(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Valid request creates automation and upload, returns 201."""
+        payload = {
+            "name": "My Plugin Automation",
+            "plugins": [
+                {"source": "github:owner/code-review-plugin", "ref": "v1.0.0"},
+                {"source": "github:owner/security-plugin"},
+            ],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "My Plugin Automation"
+        assert data["trigger"]["type"] == "cron"
+        assert data["trigger"]["schedule"] == "0 9 * * 1"
+        assert data["entrypoint"] == "python main.py"
+        assert data["setup_script_path"] == "setup.sh"
+        assert data["tarball_path"].startswith("oh-internal://uploads/")
+        assert data["enabled"] is True
+        assert "id" in data
+        assert data["user_id"] == str(TEST_USER_ID)
+
+        # Verify file store was called and tarball content is correct
+        mock_file_store.write_stream.assert_called_once()
+        call_args = mock_file_store.write_stream.call_args
+        assert call_args.kwargs["path"].startswith("uploads/")
+
+        # Verify tarball content from captured bytes
+        tarball_bytes = mock_file_store._captured_content
+        assert tarball_bytes is not None
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            assert "main.py" in tar.getnames()
+            assert "plugins_config.json" in tar.getnames()
+            assert "prompt.txt" in tar.getnames()
+            assert "setup.sh" in tar.getnames()
+
+            # Verify plugins config
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode())
+            assert len(config) == 2
+            assert config[0]["source"] == "github:owner/code-review-plugin"
+            assert config[0]["ref"] == "v1.0.0"
+            assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_creates_upload_record(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Endpoint creates a TarballUpload record."""
+        payload = {
+            "name": "Upload Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Do something with plugin",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+
+        # Extract upload ID from tarball_path
+        tarball_path = data["tarball_path"]
+        upload_id_str = tarball_path.replace("oh-internal://uploads/", "")
+        upload_id = uuid.UUID(upload_id_str)
+
+        # Verify upload record exists
+        from sqlalchemy import select
+
+        result = await async_session.execute(
+            select(TarballUpload).where(TarballUpload.id == upload_id)
+        )
+        upload = result.scalars().first()
+        assert upload is not None
+        assert upload.status == UploadStatus.COMPLETED
+        assert upload.user_id == TEST_USER_ID
+        assert upload.org_id == TEST_ORG_ID
+        assert "plugin-automation" in upload.name
+
+    async def test_create_from_plugin_creates_automation_record(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Endpoint creates an Automation record."""
+        payload = {
+            "name": "Automation Record Test",
+            "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            "prompt": "Run plugin tasks",
+            "trigger": {"type": "cron", "schedule": "30 10 * * 5"},
+            "timeout": 300,
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        automation_id = uuid.UUID(data["id"])
+
+        # Verify automation record exists
+        from sqlalchemy import select
+
+        result = await async_session.execute(
+            select(Automation).where(Automation.id == automation_id)
+        )
+        automation = result.scalars().first()
+        assert automation is not None
+        assert automation.name == "Automation Record Test"
+        assert automation.entrypoint == "python main.py"
+        assert automation.setup_script_path == "setup.sh"
+        assert automation.timeout == 300
+        assert automation.user_id == TEST_USER_ID
+        assert automation.org_id == TEST_ORG_ID
+
+    async def test_create_from_plugin_missing_plugins(self, async_client):
+        """Missing plugins returns 422."""
+        payload = {
+            "name": "Test",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_from_plugin_empty_plugins(self, async_client):
+        """Empty plugins list returns 422."""
+        payload = {
+            "name": "Test",
+            "plugins": [],
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_from_plugin_missing_prompt(self, async_client):
+        """Missing prompt returns 422."""
+        payload = {
+            "name": "Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_from_plugin_invalid_cron(self, async_client):
+        """Invalid cron schedule returns 422."""
+        payload = {
+            "name": "Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "invalid-cron"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 422
+
+    async def test_create_from_plugin_with_repo_path(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Plugin with repo_path for monorepo is properly serialized."""
+        payload = {
+            "name": "Monorepo Plugin Test",
+            "plugins": [
+                {
+                    "source": "github:company/monorepo",
+                    "ref": "main",
+                    "repo_path": "plugins/my-plugin",
+                }
+            ],
+            "prompt": "Use the monorepo plugin",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
+
+        assert response.status_code == 201
+
+        # Verify tarball contains correct config
+        tarball_bytes = mock_file_store._captured_content
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("plugins_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode())
+            assert config[0]["source"] == "github:company/monorepo"
+            assert config[0]["ref"] == "main"
+            assert config[0]["repo_path"] == "plugins/my-plugin"
+
+    async def test_create_from_plugin_storage_failure(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Storage failure returns 500."""
+        from unittest.mock import AsyncMock
+
+        # Configure the mock to fail on write_stream
+        mock_file_store.write_stream = AsyncMock(
+            side_effect=Exception("Storage unavailable")
+        )
+
+        payload = {
+            "name": "Storage Fail Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post("/v1/preset/plugin", json=payload)
 
         assert response.status_code == 500
