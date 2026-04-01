@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
     cors_origins: str = ""
 
+    # Root path for the API (used by Swagger UI to find the OpenAPI spec).
+    # In production, this is set to "/api/automation" when mounted behind a proxy.
+    # Leave empty for standalone development (defaults to "/").
+    root_path: str = ""
+
     model_config = {"env_prefix": "AUTOMATION_"}
 
     @property

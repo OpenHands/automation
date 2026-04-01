@@ -131,12 +131,23 @@ def _build_cors_origins() -> list[str]:
     return origins
 
 
-app = FastAPI(
-    title="OpenHands Automations Service",
-    description="Scheduled and event-driven automation execution for OpenHands Cloud",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+def _create_app() -> FastAPI:
+    """Create and configure the FastAPI application."""
+    settings = get_settings()
+    # When mounted at /api/automation/, Swagger UI needs root_path to find
+    # the OpenAPI spec. Without this, /docs loads /openapi.json (main app's
+    # spec) instead of /api/automation/openapi.json (this service's spec).
+    # Set AUTOMATION_ROOT_PATH="/api/automation" in production.
+    return FastAPI(
+        title="OpenHands Automations Service",
+        description="Scheduled automation execution for OpenHands Cloud",
+        version="0.1.0",
+        lifespan=lifespan,
+        root_path=settings.root_path if settings.root_path else "",
+    )
+
+
+app = _create_app()
 
 app.add_middleware(
     CORSMiddleware,
