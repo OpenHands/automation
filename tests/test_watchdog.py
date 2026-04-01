@@ -406,7 +406,8 @@ class TestComputeCleanupAt:
         result = _compute_cleanup_at(mock_settings_delayed_cleanup)
         after = utcnow()
 
-        # Result should be roughly 60 minutes in the future
+        # Result should be set (delay > 0) and roughly 60 minutes in the future
+        assert result is not None
         expected_min = before + timedelta(minutes=60)
         expected_max = after + timedelta(minutes=60)
         assert expected_min <= result <= expected_max

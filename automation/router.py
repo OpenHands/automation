@@ -300,6 +300,8 @@ async def complete_run(
         and settings.sandbox_cleanup_delay_mins == 0
     )
     if should_cleanup_now:
+        # sandbox_id is guaranteed non-None by the condition above
+        assert run.sandbox_id is not None
         asyncio.create_task(
             cleanup_sandbox(
                 api_url=settings.openhands_api_base_url,

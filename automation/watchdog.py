@@ -105,7 +105,10 @@ async def _verify_and_mark_run(
         api_key = await get_api_key_for_automation_run(run)
     except Exception as e:
         logger.warning("Failed to get API key for verification: %s", e, extra=extra)
-        # Schedule cleanup if delay is configured, otherwise immediate
+        # Can't cleanup without API key, just mark as failed
+        # Schedule cleanup if delay is configured - but without API key, cleanup
+        # will fail anyway; the sandbox may need manual cleanup or will be cleaned
+        # up by other means (e.g., sandbox TTL)
         cleanup_at = _compute_cleanup_at(settings, now)
         values: dict = {
             "status": AutomationRunStatus.FAILED,
@@ -123,16 +126,7 @@ async def _verify_and_mark_run(
             .values(**values)
         )
         result = await session.execute(stmt)  # type: ignore[assignment]
-
-        # Immediate cleanup if delay is 0
-        if not cleanup_at and not run.keep_alive:
-            await cleanup_sandbox(
-                api_url=settings.openhands_api_base_url,
-                api_key=api_key,
-                sandbox_id=sandbox_id,
-                run_id=run_id,
-            )
-
+        # Note: Can't cleanup sandbox without API key
         return result.rowcount > 0
 
     # Try to verify via sandbox - pass keep_alive=True to prevent deletion
@@ -381,6 +375,8 @@ async def cleanup_pending_sandboxes(
         for run in runs_to_cleanup:
             run_id = str(run.id)
             sandbox_id = run.sandbox_id
+            # sandbox_id is guaranteed non-None by the query filter above
+            assert sandbox_id is not None
             extra = _run_extra(run_id=run_id, sandbox_id=sandbox_id)
 
             logger.info(

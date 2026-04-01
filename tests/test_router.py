@@ -1092,7 +1092,7 @@ class TestCompleteRun:
             sandbox_cleanup_delay_mins=60,  # 1 hour delay
         )
 
-        with patch("automation.router.get_settings", return_value=mock_settings):
+        with patch("automation.config.get_settings", return_value=mock_settings):
             response = await async_client.post(
                 f"/v1/runs/{run.id}/complete",
                 json={"status": "COMPLETED", "conversation_id": "conv-123"},
@@ -1106,6 +1106,7 @@ class TestCompleteRun:
         # Verify cleanup_at was set
         await async_session.refresh(run)
         assert run.cleanup_at is not None
+        assert run.completed_at is not None
         # cleanup_at should be ~60 minutes after completed_at
         delta = run.cleanup_at - run.completed_at
         assert timedelta(minutes=59) < delta < timedelta(minutes=61)
@@ -1153,7 +1154,7 @@ class TestCompleteRun:
         )
 
         with (
-            patch("automation.router.get_settings", return_value=mock_settings),
+            patch("automation.config.get_settings", return_value=mock_settings),
             patch(
                 "automation.router.cleanup_sandbox", new_callable=AsyncMock
             ) as mock_cleanup,
@@ -1215,7 +1216,7 @@ class TestCompleteRun:
         )
 
         with (
-            patch("automation.router.get_settings", return_value=mock_settings),
+            patch("automation.config.get_settings", return_value=mock_settings),
             patch(
                 "automation.router.cleanup_sandbox", new_callable=AsyncMock
             ) as mock_cleanup,
