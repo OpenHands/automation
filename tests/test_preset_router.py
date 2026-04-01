@@ -105,12 +105,11 @@ class TestGenerateTarball:
 
             # Verify key SDK imports and patterns are present
             assert "from openhands.sdk import" in main_content
-            assert "Agent" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "get_mcp_config" in main_content
-            assert "LLMSummarizingCondenser" in main_content
-            assert "condenser=condenser" in main_content
+            assert "get_default_agent" in main_content
+            assert "model_copy" in main_content
             assert "prompt.txt" in main_content
 
     def test_generate_tarball_setup_sh_executable(self):

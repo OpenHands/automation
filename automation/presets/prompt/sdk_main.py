@@ -5,8 +5,8 @@ This script is auto-generated from a user's prompt. It:
   2. Fetches LLM config via workspace.get_llm()
   3. Fetches secrets via workspace.get_secrets()
   4. Fetches MCP config via workspace.get_mcp_config()
-  5. Creates a LLMSummarizingCondenser to manage context
-  6. Creates an Agent with LLM, MCP config, and condenser
+  5. Gets default agent with tools and condenser via get_default_agent()
+  6. Uses model_copy to add MCP config to the agent
   7. Creates a Conversation and injects secrets
   8. Sends the user's prompt and runs the conversation
   9. On context manager exit, the workspace sends a completion callback
@@ -49,10 +49,8 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports
-from openhands.sdk import Agent, Conversation, RemoteConversation, Tool
-from openhands.sdk.context.condenser import LLMSummarizingCondenser
-from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.terminal import TerminalTool
+from openhands.sdk import Conversation, RemoteConversation
+from openhands.tools import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
 
@@ -97,30 +95,18 @@ with OpenHandsCloudWorkspace(
         # Not a hard failure — user may not have MCP configured
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-    # Create context condenser to manage conversation history
-    print("\n=== CONDENSER ===")
-    condenser = LLMSummarizingCondenser(
-        llm=llm.model_copy(update={"usage_id": "condenser"}),
-        max_size=100,
-        keep_first=2,
-    )
-    print("  LLMSummarizingCondenser configured (max_size=100, keep_first=2)")
-
-    # Create agent with tools, MCP config, and condenser
+    # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
-    tools = [
-        Tool(name=TerminalTool.name),
-        Tool(name=FileEditorTool.name),
-    ]
-    agent = Agent(
-        llm=llm,
-        tools=tools,
-        mcp_config=mcp_config,
-        condenser=condenser,
-    )
-    print(f"  tools: {[t.name for t in tools]}")
+    agent = get_default_agent(llm=llm, cli_mode=True)
+
+    # Add MCP config using model_copy if configured
+    if mcp_config:
+        agent = agent.model_copy(update={"mcp_config": mcp_config})
+
+    print(f"  tools: {[t.name for t in agent.tools]}")
     print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
-    print("  condenser: LLMSummarizingCondenser")
+    condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
+    print(f"  condenser: {condenser_name}")
 
     # Create conversation
     print("\n=== CONVERSATION ===")
