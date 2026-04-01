@@ -14,6 +14,7 @@ from automation.config import get_settings
 from automation.db import create_engine, create_session_factory
 from automation.dispatcher import dispatcher_loop
 from automation.logger import setup_all_loggers
+from automation.preset_router import router as preset_router
 from automation.router import router
 from automation.scheduler import scheduler_loop
 from automation.uploads import router as uploads_router
@@ -157,10 +158,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include uploads_router BEFORE router to avoid route conflict.
+# Include uploads_router and preset_router BEFORE router to avoid route conflict.
 # The main router has /v1/{automation_id} which would match /v1/uploads
-# and fail UUID validation if included first.
+# or /v1/preset/prompt and fail UUID validation if included first.
 app.include_router(uploads_router)
+app.include_router(preset_router)
 app.include_router(router)
 
 
