@@ -83,14 +83,16 @@ def run_migrations_online():
     """
     engine = get_engine()
     # Use engine.begin() for auto-commit behavior (required in SQLAlchemy 2.0)
+    # Note: Do NOT use context.begin_transaction() here - engine.begin() already
+    # provides transaction management. Nesting transactions causes issues where
+    # only the first migration gets committed.
     with engine.begin() as connection:
         # Acquire advisory lock - blocks until lock is available
         # This ensures only one migration runs at a time across all pods
         connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
         try:
             context.configure(connection=connection, target_metadata=target_metadata)
-            with context.begin_transaction():
-                context.run_migrations()
+            context.run_migrations()
         finally:
             # Release the lock so other waiting processes can proceed
             connection.execute(text(f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})"))
