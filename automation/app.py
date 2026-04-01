@@ -140,10 +140,12 @@ def _create_app() -> FastAPI:
     # Set AUTOMATION_ROOT_PATH="/api/automation" in production.
     return FastAPI(
         title="OpenHands Automations Service",
-        description="Scheduled automation execution for OpenHands Cloud",
+        description=(
+            "Scheduled and event-driven automation execution for OpenHands Cloud"
+        ),
         version="0.1.0",
         lifespan=lifespan,
-        root_path=settings.root_path if settings.root_path else "",
+        root_path=settings.root_path,
     )
 
 
