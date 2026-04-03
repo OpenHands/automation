@@ -353,16 +353,24 @@ class TestExecuteEntrypointActivity:
         start_response.json.return_value = {"id": "cmd-123"}
         start_response.raise_for_status = MagicMock()
 
-        # Mock bash result - command completed successfully
+        # Mock bash events search - returns items array with exit_code
         result_response = MagicMock()
         result_response.status_code = 200
         result_response.json.return_value = {
-            "exit_code": 0,
-            "stdout": "Success output",
-            "stderr": "",
+            "items": [
+                {
+                    "exit_code": 0,
+                    "stdout": "Success output",
+                    "stderr": "",
+                }
+            ]
         }
+        result_response.raise_for_status = MagicMock()
 
-        with patch("automation.temporal.activities.httpx.AsyncClient") as mock_client:
+        with (
+            patch("automation.temporal.activities.httpx.AsyncClient") as mock_client,
+            patch("automation.temporal.activities.asyncio.sleep", new=AsyncMock()),
+        ):
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(return_value=start_response)
             mock_instance.get = AsyncMock(return_value=result_response)
@@ -384,16 +392,24 @@ class TestExecuteEntrypointActivity:
         start_response.json.return_value = {"id": "cmd-123"}
         start_response.raise_for_status = MagicMock()
 
-        # Mock bash result - command failed
+        # Mock bash events search - returns items array with exit_code
         result_response = MagicMock()
         result_response.status_code = 200
         result_response.json.return_value = {
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": "Error: something went wrong",
+            "items": [
+                {
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": "Error: something went wrong",
+                }
+            ]
         }
+        result_response.raise_for_status = MagicMock()
 
-        with patch("automation.temporal.activities.httpx.AsyncClient") as mock_client:
+        with (
+            patch("automation.temporal.activities.httpx.AsyncClient") as mock_client,
+            patch("automation.temporal.activities.asyncio.sleep", new=AsyncMock()),
+        ):
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(return_value=start_response)
             mock_instance.get = AsyncMock(return_value=result_response)
