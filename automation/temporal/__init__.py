@@ -17,17 +17,17 @@ The main application (automation.app) uses this package to:
 
 To run a standalone worker:
     python -m automation.temporal.worker
+
+Note: This __init__.py intentionally does NOT import activities, workflows,
+or worker modules at package level. Those modules import httpx and other
+libraries that conflict with Temporal's workflow sandbox import system.
+Import them directly when needed:
+    from automation.temporal.activities import ALL_ACTIVITIES
+    from automation.temporal.workflows import ALL_WORKFLOWS
 """
 
-from automation.temporal.activities import (
-    ALL_ACTIVITIES,
-    cleanup_sandbox,
-    create_sandbox,
-    download_tarball,
-    execute_entrypoint,
-    get_api_key,
-    upload_tarball,
-)
+# Only import modules that don't have heavy dependencies (no httpx, sqlalchemy, etc.)
+# These are safe to import at package level
 from automation.temporal.client import (
     close_temporal_client,
     create_temporal_client,
@@ -49,37 +49,26 @@ from automation.temporal.types import (
     WorkflowInput,
     WorkflowResult,
 )
-from automation.temporal.worker import create_worker, run_worker
-from automation.temporal.workflows import ALL_WORKFLOWS, AutomationWorkflow
 
+# DO NOT import these at package level - they contain httpx and other
+# imports that conflict with Temporal's workflow sandbox:
+# - activities (imports httpx)
+# - workflows (imports activities transitively via the sandbox)
+# - worker (imports both)
 
 __all__ = [
-    # Activities
-    "get_api_key",
-    "create_sandbox",
-    "download_tarball",
-    "upload_tarball",
-    "execute_entrypoint",
-    "cleanup_sandbox",
-    "ALL_ACTIVITIES",
-    # Workflows
-    "AutomationWorkflow",
-    "ALL_WORKFLOWS",
-    # Data classes
+    # Data classes (safe - no heavy deps)
     "AutomationConfig",
     "TriggerContext",
     "WorkflowInput",
     "WorkflowResult",
     "SandboxInfo",
     "ExecutionResult",
-    # Client
+    # Client (safe - only temporalio)
     "get_temporal_client",
     "create_temporal_client",
     "close_temporal_client",
-    # Worker
-    "create_worker",
-    "run_worker",
-    # Schedules
+    # Schedules (safe - only temporalio)
     "create_schedule",
     "update_schedule",
     "delete_schedule",
