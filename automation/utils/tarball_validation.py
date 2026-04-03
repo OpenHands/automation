@@ -3,9 +3,11 @@
 Supports two types of tarball sources:
 1. Internal uploads: oh-internal://uploads/{uuid}
 2. External public URLs: https://, s3://, gs://
+
+This module re-exports the pure URL parsing functions from tarball_url.py
+and adds validation functions that require database access.
 """
 
-import re
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -15,60 +17,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from automation.config import INTERNAL_URL_SCHEME
 from automation.models import TarballUpload, UploadStatus
 
-
-# Valid external URL schemes (must be publicly accessible)
-EXTERNAL_URL_SCHEMES = ("https://", "s3://", "gs://")
-
-# HTTP(S) URL schemes that can be downloaded with curl inside a sandbox
-HTTP_URL_SCHEMES = ("http://", "https://")
-
-# Internal URL prefix for uploaded tarballs
-INTERNAL_URL_PREFIX = f"{INTERNAL_URL_SCHEME}://uploads/"
-
-# Compiled regex pattern for internal URLs: oh-internal://uploads/{uuid}
-_INTERNAL_URL_PATTERN = re.compile(
-    rf"^{re.escape(INTERNAL_URL_SCHEME)}://uploads/"
-    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
-    re.IGNORECASE,
+# Re-export pure URL parsing functions from the lightweight module.
+# These are duplicated there to allow workflow code to import them
+# without pulling in fastapi/sqlalchemy/httpx dependencies.
+from automation.utils.tarball_url import (
+    EXTERNAL_URL_SCHEMES,
+    HTTP_URL_SCHEMES,
+    INTERNAL_URL_PREFIX,
+    build_internal_url,
+    get_internal_url_prefix,
+    is_http_url,
+    is_internal_url,
+    is_valid_external_url,
+    parse_internal_upload_id,
 )
-
-
-def get_internal_url_prefix() -> str:
-    """Get the internal URL prefix (e.g., 'oh-internal://uploads/')."""
-    return INTERNAL_URL_PREFIX
-
-
-def build_internal_url(upload_id: UUID) -> str:
-    """Build an internal URL for an upload."""
-    return f"{INTERNAL_URL_PREFIX}{upload_id}"
-
-
-def parse_internal_upload_id(tarball_path: str) -> UUID | None:
-    """
-    Extract upload_id from internal URL.
-
-    Returns the UUID if the path matches the internal format,
-    or None if it's not an internal URL.
-    """
-    match = _INTERNAL_URL_PATTERN.match(tarball_path)
-    if match:
-        return UUID(match.group(1))
-    return None
-
-
-def is_internal_url(tarball_path: str) -> bool:
-    """Check if the tarball_path is an internal upload URL."""
-    return tarball_path.startswith(f"{INTERNAL_URL_SCHEME}://")
-
-
-def is_valid_external_url(tarball_path: str) -> bool:
-    """Check if the tarball_path has a valid external URL scheme."""
-    return tarball_path.startswith(EXTERNAL_URL_SCHEMES)
-
-
-def is_http_url(tarball_path: str) -> bool:
-    """Check if the tarball_path is an HTTP(S) URL downloadable with curl."""
-    return tarball_path.startswith(HTTP_URL_SCHEMES)
 
 
 async def validate_tarball_path(

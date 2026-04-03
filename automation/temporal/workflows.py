@@ -37,7 +37,9 @@ with workflow.unsafe.imports_passed_through():
         WorkflowInput,
         WorkflowResult,
     )
-    from automation.utils.tarball_validation import (
+    # Use the lightweight tarball_url module (no fastapi/sqlalchemy/httpx deps)
+    # instead of tarball_validation which has heavy dependencies
+    from automation.utils.tarball_url import (
         is_http_url,
         parse_internal_upload_id,
     )
