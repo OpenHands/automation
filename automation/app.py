@@ -63,17 +63,23 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to connect to Temporal: %s", e)
         raise
 
-    # Start Temporal worker as background task
+    # Start Temporal worker as background task (unless skip_worker is set)
+    # When running with separate worker pods, skip_worker should be True to avoid
+    # conflicts between ddtrace instrumentation and Temporal's workflow sandbox
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
+    worker_task = None
 
-    worker = await create_worker(temporal_client, settings)
-    worker_task = asyncio.create_task(
-        _run_worker_with_shutdown(worker, shutdown_event),
-        name="temporal-worker",
-    )
-    app.state.worker_task = worker_task
-    logger.info("Temporal worker started")
+    if not settings.skip_worker:
+        worker = await create_worker(temporal_client, settings)
+        worker_task = asyncio.create_task(
+            _run_worker_with_shutdown(worker, shutdown_event),
+            name="temporal-worker",
+        )
+        app.state.worker_task = worker_task
+        logger.info("Temporal worker started")
+    else:
+        logger.info("Skipping in-process worker (AUTOMATION_SKIP_WORKER=true)")
 
     yield
 
@@ -81,16 +87,17 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     shutdown_event.set()
 
-    # Wait for worker to stop
-    try:
-        await asyncio.wait_for(worker_task, timeout=10.0)
-    except TimeoutError:
-        logger.warning("Worker did not stop in time, cancelling")
-        worker_task.cancel()
+    # Wait for worker to stop (if we started one)
+    if worker_task is not None:
         try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+            await asyncio.wait_for(worker_task, timeout=10.0)
+        except TimeoutError:
+            logger.warning("Worker did not stop in time, cancelling")
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
     # Close Temporal client
     await close_temporal_client()
