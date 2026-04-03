@@ -1,16 +1,22 @@
-"""FastAPI router for the automations CRUD API."""
+"""FastAPI router for the automations CRUD API.
 
-import asyncio
+Uses Temporal for workflow execution:
+- Creating/updating automations creates/updates Temporal Schedules
+- Manual dispatch starts a Temporal Workflow
+- Run completion updates database records
+"""
+
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select, update
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from temporalio.client import Client
 
 from automation.auth import AuthenticatedUser, authenticate_request
+from automation.config import get_settings
+from automation.constants import MAX_RUN_DURATION_SECONDS
 from automation.db import get_session
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.schemas import (
@@ -22,15 +28,33 @@ from automation.schemas import (
     RunCompleteRequest,
     UpdateAutomationRequest,
 )
+from automation.temporal.client import get_temporal_client
+from automation.temporal.schedules import (
+    create_schedule,
+    delete_schedule,
+    update_schedule,
+)
+from automation.temporal.types import (
+    AutomationConfig,
+    TriggerContext,
+    WorkflowInput,
+)
+from automation.temporal.workflows import AutomationWorkflow
 from automation.utils import utcnow
-from automation.utils.run import create_pending_run
-from automation.utils.sandbox import cleanup_sandbox
 from automation.utils.tarball_validation import validate_tarball_path
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
+
+
+# --- Dependencies ---
+
+
+async def get_client() -> Client:
+    """Dependency to get the Temporal client."""
+    return await get_temporal_client()
 
 
 # --- CRUD ---
@@ -41,14 +65,14 @@ async def create_automation(
     body: CreateAutomationRequest,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
+    client: Client = Depends(get_client),
 ) -> AutomationResponse:
-    """Create a new automation.
+    """Create a new automation with Temporal scheduling.
 
-    The tarball_path can be either:
-    - Internal upload: oh-internal://uploads/{uuid} (from /v1/uploads)
-    - External public URL: https://, s3://, or gs:// URLs
+    Creates the automation in the database and a corresponding Temporal
+    Schedule if the trigger is cron-based.
     """
-    # Validate tarball_path (checks ownership for internal uploads)
+    # Validate tarball_path
     await validate_tarball_path(
         tarball_path=body.tarball_path,
         user_id=user.user_id,
@@ -69,6 +93,20 @@ async def create_automation(
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
+
+    # Create Temporal Schedule for cron triggers
+    if body.trigger.type == "cron":
+        try:
+            await create_schedule(client, auto)
+        except Exception as e:
+            logger.error("Failed to create Temporal schedule: %s", e)
+            # Rollback the automation creation
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create schedule: {e}",
+            )
+
     return AutomationResponse.model_validate(auto)
 
 
@@ -79,7 +117,7 @@ async def list_automations(
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the authenticated user (excludes soft-deleted)."""
+    """List automations for the authenticated user."""
     base_query = select(Automation).where(
         Automation.user_id == user.user_id,
         Automation.org_id == user.org_id,
@@ -114,40 +152,56 @@ async def get_automation(
 
 
 @router.patch("/{automation_id}")
-async def update_automation(
+async def update_automation_endpoint(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
+    client: Client = Depends(get_client),
 ) -> AutomationResponse:
-    """Partially update an automation."""
+    """Update an automation and its Temporal Schedule."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
     update_data = body.model_dump(exclude_unset=True)
-    # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
     for field, value in update_data.items():
         setattr(auto, field, value)
 
-    # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
+
+    # Update Temporal Schedule
+    if auto.trigger.get("type") == "cron":
+        try:
+            await update_schedule(client, auto)
+        except Exception as e:
+            logger.warning("Failed to update Temporal schedule: %s", e)
+            # Try to create it if it doesn't exist
+            try:
+                await create_schedule(client, auto)
+            except Exception:
+                pass
+
     return AutomationResponse.model_validate(auto)
 
 
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_automation(
+async def delete_automation_endpoint(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
+    client: Client = Depends(get_client),
 ) -> None:
-    """Soft delete an automation."""
+    """Soft delete an automation and its Temporal Schedule."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
     auto.enabled = False
     auto.deleted_at = utcnow()
     await session.flush()
+
+    # Delete Temporal Schedule
+    await delete_schedule(client, automation_id)
 
 
 # --- Runs ---
@@ -158,16 +212,77 @@ async def dispatch_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
+    client: Client = Depends(get_client),
 ) -> AutomationRunResponse:
-    """Manually dispatch an automation run.
+    """Manually dispatch an automation run using Temporal.
 
-    Creates a PENDING run for the specified automation, which will be
-    picked up by the dispatcher and executed.
+    Starts a Temporal Workflow for immediate execution instead of
+    creating a PENDING database record.
     """
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
-    run = await create_pending_run(session, auto)
+    settings = get_settings()
+
+    # Create a database record for tracking
+    run = AutomationRun(
+        automation_id=automation_id,
+        status=AutomationRunStatus.RUNNING,
+        started_at=utcnow(),
+    )
+    session.add(run)
     await session.flush()
     await session.refresh(run)
+
+    # Build workflow input
+    automation_config = AutomationConfig(
+        automation_id=str(auto.id),
+        user_id=str(auto.user_id),
+        org_id=str(auto.org_id),
+        name=auto.name,
+        tarball_path=auto.tarball_path,
+        entrypoint=auto.entrypoint,
+        timeout_seconds=auto.timeout or MAX_RUN_DURATION_SECONDS,
+        trigger=auto.trigger,
+        setup_script_path=auto.setup_script_path,
+    )
+
+    trigger_context = TriggerContext(
+        trigger_type="manual",
+        triggered_by=str(user.user_id),
+    )
+
+    workflow_input = WorkflowInput(
+        automation=automation_config,
+        trigger_context=trigger_context,
+        run_id=str(run.id),
+        callback_url=f"{settings.resolved_base_url}/v1/runs/{run.id}/complete",
+    )
+
+    # Start the workflow
+    workflow_id = f"automation-run-{run.id}"
+    try:
+        await client.start_workflow(
+            AutomationWorkflow.run,
+            workflow_input,
+            id=workflow_id,
+            task_queue=settings.temporal_task_queue,
+        )
+        logger.info(
+            "Started workflow: workflow_id=%s run_id=%s automation_id=%s",
+            workflow_id,
+            run.id,
+            automation_id,
+        )
+    except Exception as e:
+        # Mark run as failed if workflow couldn't start
+        run.status = AutomationRunStatus.FAILED
+        run.error_detail = f"Failed to start workflow: {e}"
+        run.completed_at = utcnow()
+        await session.flush()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start workflow: {e}",
+        )
+
     return AutomationRunResponse.model_validate(run)
 
 
@@ -179,20 +294,14 @@ async def list_automation_runs(
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
-    """List runs for a specific automation.
-
-    Returns runs ordered by creation time (latest first), with pagination.
-    """
-    # Verify the automation exists and belongs to the user
+    """List runs for a specific automation."""
     await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
-    # Count total runs for this automation
     count_result = await session.execute(
         select(func.count()).where(AutomationRun.automation_id == automation_id)
     )
     total = count_result.scalar() or 0
 
-    # Fetch paginated runs ordered by latest first
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.automation_id == automation_id)
@@ -218,19 +327,17 @@ async def complete_run(
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
-    """Receive completion callback from the SDK running inside a sandbox.
+    """Receive completion callback from the SDK.
 
-    Called by ``OpenHandsCloudWorkspace.__exit__`` when the automation
-    entry-point finishes (success or failure).  Transitions the run from
-    RUNNING → COMPLETED or RUNNING → FAILED.
+    This endpoint is called by the SDK running inside a sandbox when
+    the automation entrypoint finishes. It updates the database record.
 
-    Authenticated via the same ``OPENHANDS_API_KEY`` that was passed into
-    the sandbox.  The key is validated against ``/api/keys/current`` (by
-    ``authenticate_request``) and the resulting user must own the run's
-    parent automation.
-
-    If keep_alive is False, deletes the sandbox after updating the run status.
+    Note: With Temporal, workflow completion is also tracked in Temporal's
+    event history, but this callback updates our database for API queries.
     """
+    from sqlalchemy.engine import CursorResult
+    from sqlalchemy.orm import selectinload
+
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.id == run_id)
@@ -240,19 +347,17 @@ async def complete_run(
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    # Verify the caller owns this automation
     automation = run.automation
     if automation.user_id != user.user_id or automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
 
-    # Optimistic locking: only update if the run is still RUNNING.
-    # This prevents races between the watchdog and the callback.
     now = utcnow()
     new_status = (
         AutomationRunStatus.COMPLETED
         if body.status == "COMPLETED"
         else AutomationRunStatus.FAILED
     )
+
     values: dict = {
         "status": new_status,
         "completed_at": now,
@@ -262,6 +367,7 @@ async def complete_run(
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
 
+    # Optimistic update
     stmt = (
         update(AutomationRun)
         .where(
@@ -279,22 +385,7 @@ async def complete_run(
         )
 
     await session.refresh(run)
-    logger.info("Run %s → %s", run_id, new_status.value)
-
-    # Clean up sandbox if not keeping alive
-    if not run.keep_alive and run.sandbox_id:
-        # Fire-and-forget sandbox deletion in background
-        from automation.config import get_settings
-
-        settings = get_settings()
-        asyncio.create_task(
-            cleanup_sandbox(
-                api_url=settings.openhands_api_base_url,
-                api_key=user.api_key,
-                sandbox_id=run.sandbox_id,
-                run_id=str(run_id),
-            )
-        )
+    logger.info("Run completed: run_id=%s status=%s", run_id, new_status.value)
 
     return AutomationRunResponse.model_validate(run)
 
@@ -308,7 +399,7 @@ async def _get_user_automation(
     user_id: uuid.UUID,
     org_id: uuid.UUID,
 ) -> Automation:
-    """Fetch a non-deleted automation, ensuring it belongs to the given user and org."""
+    """Fetch a non-deleted automation belonging to the user."""
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
