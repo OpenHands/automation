@@ -149,7 +149,9 @@ class TestAuthIntegration:
     call to the OpenHands API (the external dependency).
     """
 
-    async def test_valid_key_through_api(self, async_engine, async_session_factory):
+    async def test_valid_key_through_api(
+        self, async_engine, async_session_factory, mock_temporal_client
+    ):
         """Valid API key flows through auth middleware to endpoint."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -165,10 +167,17 @@ class TestAuthIntegration:
             async with async_session_factory() as session:
                 yield session
 
+        from automation.router import get_client
+
+        async def override_get_client():
+            return mock_temporal_client
+
         # Only override the DB session; auth stays real
         app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_client] = override_get_client
         app.state.engine = async_engine
         app.state.session_factory = async_session_factory
+        app.state.temporal_client = mock_temporal_client
 
         # Create a mock http_client in app.state for the DI pattern
         mock_client = AsyncMock()
@@ -192,7 +201,7 @@ class TestAuthIntegration:
             app.dependency_overrides.clear()
 
     async def test_missing_auth_header_through_api(
-        self, async_engine, async_session_factory
+        self, async_engine, async_session_factory, mock_temporal_client
     ):
         """Request without Authorization header is rejected by real auth middleware."""
 
@@ -200,9 +209,16 @@ class TestAuthIntegration:
             async with async_session_factory() as session:
                 yield session
 
+        from automation.router import get_client
+
+        async def override_get_client():
+            return mock_temporal_client
+
         app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_client] = override_get_client
         app.state.engine = async_engine
         app.state.session_factory = async_session_factory
+        app.state.temporal_client = mock_temporal_client
 
         # Create a mock http_client in app.state for the DI pattern
         mock_client = AsyncMock()
@@ -219,7 +235,9 @@ class TestAuthIntegration:
         finally:
             app.dependency_overrides.clear()
 
-    async def test_invalid_key_through_api(self, async_engine, async_session_factory):
+    async def test_invalid_key_through_api(
+        self, async_engine, async_session_factory, mock_temporal_client
+    ):
         """Invalid API key is rejected by auth middleware."""
         mock_response = MagicMock()
         mock_response.status_code = 401
@@ -228,9 +246,16 @@ class TestAuthIntegration:
             async with async_session_factory() as session:
                 yield session
 
+        from automation.router import get_client
+
+        async def override_get_client():
+            return mock_temporal_client
+
         app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_client] = override_get_client
         app.state.engine = async_engine
         app.state.session_factory = async_session_factory
+        app.state.temporal_client = mock_temporal_client
 
         # Create a mock http_client in app.state for the DI pattern
         mock_client = AsyncMock()

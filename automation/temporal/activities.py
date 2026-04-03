@@ -15,7 +15,6 @@ Key activities:
 """
 
 import asyncio
-import json
 import logging
 import uuid
 
@@ -229,9 +228,7 @@ async def download_tarball(input: DownloadTarballInput) -> bytes:
 
             store = get_file_store()
             data = store.read(upload.storage_path)
-            logger.info(
-                "Downloaded tarball: %d bytes, run=%s", len(data), input.run_id
-            )
+            logger.info("Downloaded tarball: %d bytes, run=%s", len(data), input.run_id)
             return data
     finally:
         await engine_result.dispose()

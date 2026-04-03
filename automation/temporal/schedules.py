@@ -20,6 +20,8 @@ from temporalio.client import (
     SchedulePolicy,
     ScheduleSpec,
     ScheduleState,
+    ScheduleUpdate,
+    ScheduleUpdateInput,
 )
 
 from automation.config import get_settings
@@ -131,7 +133,9 @@ async def create_schedule(
             ),
             policy=SchedulePolicy(
                 overlap=ScheduleOverlapPolicy.SKIP,  # Skip if previous run still active
-                catchup_window=timedelta(minutes=5),  # Catch up missed runs within 5 min
+                catchup_window=timedelta(
+                    minutes=5
+                ),  # Catch up missed runs within 5 min
             ),
             state=ScheduleState(
                 paused=not automation.enabled,
@@ -181,8 +185,9 @@ async def update_schedule(
     automation_config = _automation_to_config(automation)
     trigger_context = TriggerContext(trigger_type="cron")
 
-    async def update_fn(input: Schedule) -> Schedule:
-        input.action = ScheduleActionStartWorkflow(
+    async def update_fn(input: ScheduleUpdateInput) -> ScheduleUpdate:
+        schedule = input.description.schedule
+        schedule.action = ScheduleActionStartWorkflow(
             AutomationWorkflow.run,
             args=[
                 WorkflowInput(
@@ -195,12 +200,12 @@ async def update_schedule(
             id=_make_workflow_id(automation.id),
             task_queue=settings.temporal_task_queue,
         )
-        input.spec = ScheduleSpec(
+        schedule.spec = ScheduleSpec(
             cron_expressions=[cron_expression] if cron_expression else [],
             time_zone_name=timezone,
         )
-        input.state.paused = not automation.enabled
-        return input
+        schedule.state.paused = not automation.enabled
+        return ScheduleUpdate(schedule=schedule)
 
     await handle.update(update_fn)
     logger.info("Schedule updated: %s", schedule_id)

@@ -5,9 +5,9 @@ to the Temporal service. Supports both self-hosted and Temporal Cloud.
 """
 
 import logging
-from functools import lru_cache
 
-from temporalio.client import Client, TLSConfig
+from temporalio.client import Client
+from temporalio.service import TLSConfig
 
 from automation.config import Settings, get_settings
 
@@ -89,6 +89,8 @@ async def close_temporal_client() -> None:
     """Close the global Temporal client if it exists."""
     global _client
     if _client is not None:
-        await _client.close()
+        # The Client doesn't have a close method directly, but we should
+        # clear the reference. The underlying connection is managed by
+        # the service client which handles cleanup.
         _client = None
-        logger.info("Temporal client closed")
+        logger.info("Temporal client reference cleared")

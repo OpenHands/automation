@@ -110,7 +110,7 @@ include = [
     "tests",
 ]
 exclude = [
-    "scripts/test_tarball",
+    "scripts",
     "automation/presets",
 ]
 venvPath = "."

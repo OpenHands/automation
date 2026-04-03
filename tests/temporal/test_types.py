@@ -1,7 +1,5 @@
 """Tests for Temporal dataclasses."""
 
-import json
-
 import pytest
 
 from automation.temporal.types import (

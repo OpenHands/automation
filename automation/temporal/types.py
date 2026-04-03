@@ -5,7 +5,6 @@ and activities. They must be JSON-serializable for Temporal's data converter.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 
 @dataclass(frozen=True)

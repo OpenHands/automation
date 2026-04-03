@@ -110,7 +110,7 @@ class TestCreateSandboxActivity:
         # Mock sandbox creation response
         create_response = MagicMock()
         create_response.status_code = 200
-        create_response.json.return_value = {"sandbox_id": sandbox_id}
+        create_response.json.return_value = {"id": sandbox_id}
 
         # Mock sandbox status poll response (immediately running)
         poll_response = MagicMock()
@@ -168,7 +168,7 @@ class TestDownloadTarballActivity:
     @pytest.fixture
     def input(self) -> DownloadTarballInput:
         return DownloadTarballInput(
-            upload_id="upload-123",
+            upload_id="12345678-1234-1234-1234-123456789012",
             run_id="run-123",
         )
 
@@ -179,31 +179,73 @@ class TestDownloadTarballActivity:
         """Test successful internal tarball download."""
         tarball_content = b"mock tarball content"
 
-        with patch(
-            "automation.temporal.activities.get_file_store"
-        ) as mock_get_store:
-            mock_store = AsyncMock()
+        # Mock database and file store
+        mock_upload = MagicMock()
+        mock_upload.storage_path = "path/to/tarball.tar.gz"
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = mock_upload
+        mock_session.execute.return_value = mock_result
+        mock_session.__aenter__.return_value = mock_session
+        mock_session.__aexit__.return_value = None
+
+        mock_session_factory = MagicMock(return_value=mock_session)
+
+        mock_engine_result = MagicMock()
+        mock_engine_result.engine = MagicMock()
+        mock_engine_result.dispose = AsyncMock()
+
+        with (
+            patch(
+                "automation.db.create_engine",
+                return_value=mock_engine_result,
+            ),
+            patch(
+                "automation.db.create_session_factory",
+                return_value=mock_session_factory,
+            ),
+            patch("automation.storage.get_file_store") as mock_get_store,
+        ):
+            mock_store = MagicMock()
             mock_store.read.return_value = tarball_content
             mock_get_store.return_value = mock_store
 
             result = await activity_env.run(download_tarball, input)
 
             assert result == tarball_content
-            mock_store.read.assert_called_once()
+            mock_store.read.assert_called_once_with("path/to/tarball.tar.gz")
 
     @pytest.mark.asyncio
     async def test_download_tarball_not_found(
         self, activity_env: ActivityEnvironment, input: DownloadTarballInput
     ):
-        """Test tarball download when file not found."""
-        with patch(
-            "automation.temporal.activities.get_file_store"
-        ) as mock_get_store:
-            mock_store = AsyncMock()
-            mock_store.read.side_effect = FileNotFoundError("Tarball not found")
-            mock_get_store.return_value = mock_store
+        """Test tarball download when upload record not found."""
+        # Mock database returning no result
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
+        mock_session.execute.return_value = mock_result
+        mock_session.__aenter__.return_value = mock_session
+        mock_session.__aexit__.return_value = None
 
-            with pytest.raises(FileNotFoundError):
+        mock_session_factory = MagicMock(return_value=mock_session)
+
+        mock_engine_result = MagicMock()
+        mock_engine_result.engine = MagicMock()
+        mock_engine_result.dispose = AsyncMock()
+
+        with (
+            patch(
+                "automation.db.create_engine",
+                return_value=mock_engine_result,
+            ),
+            patch(
+                "automation.db.create_session_factory",
+                return_value=mock_session_factory,
+            ),
+        ):
+            with pytest.raises(ValueError, match="Internal tarball upload not found"):
                 await activity_env.run(download_tarball, input)
 
 
@@ -264,18 +306,12 @@ class TestUploadTarballActivity:
         # Mock bash command execution for curl
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"id": "cmd-123"}
+        mock_response.json.return_value = {"exit_code": 0, "stdout": "", "stderr": ""}
         mock_response.raise_for_status = MagicMock()
-
-        # Mock bash result polling
-        bash_result_response = MagicMock()
-        bash_result_response.status_code = 200
-        bash_result_response.json.return_value = {"exit_code": 0}
 
         with patch("automation.temporal.activities.httpx.AsyncClient") as mock_client:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(return_value=mock_response)
-            mock_instance.get = AsyncMock(return_value=bash_result_response)
 
             await activity_env.run(upload_tarball, input)
 

@@ -21,6 +21,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
+
 # Import activity stubs - these are used for type hints and to call activities
 with workflow.unsafe.imports_passed_through():
     from automation.config import get_settings
@@ -125,6 +126,8 @@ class AutomationWorkflow:
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=API_KEY_RETRY_POLICY,
             )
+            # Cast to satisfy type checker - activity returns str
+            assert api_key is not None
 
             # 2. Create sandbox
             sandbox_info = await workflow.execute_activity(
@@ -138,6 +141,8 @@ class AutomationWorkflow:
                 heartbeat_timeout=timedelta(minutes=2),
                 retry_policy=SANDBOX_RETRY_POLICY,
             )
+            # Cast to satisfy type checker - activity returns SandboxInfo
+            assert sandbox_info is not None
 
             # 3. Get tarball into sandbox
             tarball_path = input.automation.tarball_path
