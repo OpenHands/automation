@@ -33,14 +33,6 @@ from automation.temporal.client import (
     create_temporal_client,
     get_temporal_client,
 )
-from automation.temporal.schedules import (
-    create_schedule,
-    delete_schedule,
-    pause_schedule,
-    trigger_schedule,
-    unpause_schedule,
-    update_schedule,
-)
 from automation.temporal.types import (
     AutomationConfig,
     ExecutionResult,
@@ -50,11 +42,12 @@ from automation.temporal.types import (
     WorkflowResult,
 )
 
-# DO NOT import these at package level - they contain httpx and other
-# imports that conflict with Temporal's workflow sandbox:
+# DO NOT import these at package level - they contain httpx, sqlalchemy, or
+# other imports that conflict with Temporal's workflow sandbox:
 # - activities (imports httpx)
 # - workflows (imports activities transitively via the sandbox)
 # - worker (imports both)
+# - schedules (imports automation.models which uses sqlalchemy)
 
 __all__ = [
     # Data classes (safe - no heavy deps)
@@ -68,11 +61,4 @@ __all__ = [
     "get_temporal_client",
     "create_temporal_client",
     "close_temporal_client",
-    # Schedules (safe - only temporalio)
-    "create_schedule",
-    "update_schedule",
-    "delete_schedule",
-    "pause_schedule",
-    "unpause_schedule",
-    "trigger_schedule",
 ]
