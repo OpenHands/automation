@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select, update
@@ -229,8 +230,12 @@ async def complete_run(
     ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
-    If keep_alive is False, deletes the sandbox after updating the run status.
+    Sandbox cleanup behavior depends on the ``sandbox_cleanup_delay_mins`` setting:
+    - If 0: immediate cleanup (legacy behavior)
+    - If > 0: sets ``cleanup_at`` timestamp for delayed cleanup by watchdog
     """
+    from automation.config import get_settings
+
     result = await session.execute(
         select(AutomationRun)
         .where(AutomationRun.id == run_id)
@@ -262,6 +267,13 @@ async def complete_run(
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
 
+    # Schedule sandbox cleanup if not keeping alive
+    settings = get_settings()
+    if not run.keep_alive and run.sandbox_id:
+        delay_mins = settings.sandbox_cleanup_delay_mins
+        if delay_mins > 0:
+            values["cleanup_at"] = now + timedelta(minutes=delay_mins)
+
     stmt = (
         update(AutomationRun)
         .where(
@@ -281,12 +293,15 @@ async def complete_run(
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
 
-    # Clean up sandbox if not keeping alive
-    if not run.keep_alive and run.sandbox_id:
-        # Fire-and-forget sandbox deletion in background
-        from automation.config import get_settings
-
-        settings = get_settings()
+    # If delay is 0, clean up sandbox immediately (legacy behavior)
+    should_cleanup_now = (
+        not run.keep_alive
+        and run.sandbox_id
+        and settings.sandbox_cleanup_delay_mins == 0
+    )
+    if should_cleanup_now:
+        # sandbox_id is guaranteed non-None by the condition above
+        assert run.sandbox_id is not None
         asyncio.create_task(
             cleanup_sandbox(
                 api_url=settings.openhands_api_base_url,

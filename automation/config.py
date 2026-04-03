@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # Watchdog (scans for stale RUNNING runs past their timeout)
     watchdog_interval_seconds: int = 60
 
+    # Sandbox cleanup delay after automation runs complete (in minutes).
+    # Sandboxes are kept available for inspection within this window.
+    # Set to 0 for immediate cleanup (legacy behavior).
+    sandbox_cleanup_delay_mins: int = 60
+
     # Service key for authenticating with the SaaS API to fetch per-user
     # API keys (called by the dispatcher before each automation run).
     service_key: str = ""

@@ -35,3 +35,22 @@ class TestRootPathExtraction:
         """Default settings (no base_url) should return empty root_path."""
         settings = Settings()
         assert settings.root_path == ""
+
+
+class TestSandboxCleanupDelay:
+    """Tests for sandbox_cleanup_delay_mins configuration."""
+
+    def test_default_cleanup_delay(self):
+        """Default cleanup delay should be 60 minutes."""
+        settings = Settings()
+        assert settings.sandbox_cleanup_delay_mins == 60
+
+    def test_custom_cleanup_delay(self):
+        """Should accept custom cleanup delay."""
+        settings = Settings(sandbox_cleanup_delay_mins=120)
+        assert settings.sandbox_cleanup_delay_mins == 120
+
+    def test_zero_cleanup_delay_for_immediate_cleanup(self):
+        """Zero delay means immediate cleanup (legacy behavior)."""
+        settings = Settings(sandbox_cleanup_delay_mins=0)
+        assert settings.sandbox_cleanup_delay_mins == 0

@@ -157,6 +157,13 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Scheduled time for sandbox cleanup. Set when run transitions to terminal
+    # state (COMPLETED/FAILED). NULL means immediate cleanup or already cleaned.
+    # Used by the cleanup scanner to delay sandbox deletion for debugging.
+    cleanup_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
     # Relationship back to automation
     automation: Mapped["Automation"] = relationship("Automation", back_populates="runs")
 
