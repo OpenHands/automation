@@ -3,6 +3,7 @@
 import logging
 import os
 from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,6 +25,7 @@ from automation.auth import (  # noqa: E402
 from automation.config import Settings  # noqa: E402
 from automation.db import get_session  # noqa: E402
 from automation.models import Base  # noqa: E402
+from automation.router import get_client  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -101,10 +103,43 @@ def mock_authenticated_user():
 
 
 @pytest.fixture
+def mock_temporal_client():
+    """Create a mock Temporal client for testing."""
+    mock_client = MagicMock()
+    # Mock schedule operations
+    mock_client.create_schedule = AsyncMock(return_value=None)
+    mock_client.get_schedule_handle = MagicMock()
+    mock_schedule_handle = MagicMock()
+    mock_schedule_handle.delete = AsyncMock(return_value=None)
+    mock_schedule_handle.update = AsyncMock(return_value=None)
+    mock_schedule_handle.pause = AsyncMock(return_value=None)
+    mock_schedule_handle.unpause = AsyncMock(return_value=None)
+    mock_schedule_handle.trigger = AsyncMock(return_value=None)
+    mock_client.get_schedule_handle.return_value = mock_schedule_handle
+    # Mock workflow operations
+    mock_client.start_workflow = AsyncMock(
+        return_value=MagicMock(id="mock-workflow-id")
+    )
+
+    # Mock list_workflows for readiness check (returns async iterator)
+    async def mock_list_workflows(*args, **kwargs):
+        # Return empty async iterator
+        return
+        yield  # Make this a generator  # noqa: B901
+
+    mock_client.list_workflows = mock_list_workflows
+    return mock_client
+
+
+@pytest.fixture
 async def async_client(
-    async_engine, async_session_factory, async_session, mock_authenticated_user
+    async_engine,
+    async_session_factory,
+    async_session,
+    mock_authenticated_user,
+    mock_temporal_client,
 ) -> AsyncGenerator[AsyncClient, None]:
-    """Create an async test client with mocked auth and DB session."""
+    """Create an async test client with mocked auth, DB session, and Temporal client."""
 
     async def override_get_session():
         yield async_session
@@ -112,12 +147,17 @@ async def async_client(
     async def override_authenticate():
         return mock_authenticated_user
 
+    async def override_get_client():
+        return mock_temporal_client
+
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[authenticate_request] = override_authenticate
+    app.dependency_overrides[get_client] = override_get_client
 
     # Set app.state for endpoints that access it directly (e.g., /ready)
     app.state.engine = async_engine
     app.state.session_factory = async_session_factory
+    app.state.temporal_client = mock_temporal_client
     # Create a mock http_client for tests (auth is overridden, but state must exist)
     app.state.http_client = create_http_client()
 
@@ -132,12 +172,13 @@ async def async_client(
 
 
 @pytest.fixture
-def sync_client(async_engine, async_session_factory):
+def sync_client(async_engine, async_session_factory, mock_temporal_client):
     """Create a sync test client for simple endpoint tests."""
     import asyncio
 
     app.state.engine = async_engine
     app.state.session_factory = async_session_factory
+    app.state.temporal_client = mock_temporal_client
     http_client = create_http_client()
     app.state.http_client = http_client
     yield TestClient(app)

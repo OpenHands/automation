@@ -26,14 +26,21 @@ class Settings(BaseSettings):
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
 
-    # Scheduler (polls automations table for due cron jobs)
-    scheduler_interval_seconds: int = 60
-
-    # Dispatcher (polls automation_runs table for pending jobs)
-    dispatcher_interval_seconds: int = 10
-
-    # Watchdog (scans for stale RUNNING runs past their timeout)
-    watchdog_interval_seconds: int = 60
+    # Temporal configuration
+    temporal_host: str = "localhost"
+    temporal_port: int = 7233
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "automations"
+    # For Temporal Cloud: set to True and provide TLS cert/key paths
+    temporal_tls_enabled: bool = False
+    temporal_tls_cert_path: str | None = None
+    temporal_tls_key_path: str | None = None
+    # Skip starting an in-process worker (use when running separate worker pods)
+    # This avoids conflicts between ddtrace and Temporal's workflow sandbox
+    skip_worker: bool = False
+    # Fast-fail mode: disable retries for faster test feedback
+    # When True, all activity retry policies use maximum_attempts=1
+    fast_fail: bool = False
 
     # Service key for authenticating with the SaaS API to fetch per-user
     # API keys (called by the dispatcher before each automation run).
@@ -55,6 +62,11 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def temporal_address(self) -> str:
+        """Full Temporal server address."""
+        return f"{self.temporal_host}:{self.temporal_port}"
 
     @property
     def resolved_base_url(self) -> str:

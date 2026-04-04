@@ -696,7 +696,7 @@ class TestDispatchAutomation:
     """Tests for POST /v1/{id}/dispatch endpoint."""
 
     async def test_dispatch_automation_success(self, async_client, async_session):
-        """Dispatching an automation creates a PENDING run."""
+        """Dispatching an automation creates a RUNNING run and starts a workflow."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -713,11 +713,13 @@ class TestDispatchAutomation:
         assert response.status_code == 201
         data = response.json()
         assert data["automation_id"] == str(automation.id)
-        assert data["status"] == "PENDING"
+        assert (
+            data["status"] == "RUNNING"
+        )  # Now RUNNING since Temporal starts immediately
         assert data["error_detail"] is None
         assert "id" in data
         assert "created_at" in data
-        assert data["started_at"] is None
+        assert data["started_at"] is not None  # Set when Temporal workflow starts
         assert data["completed_at"] is None
 
     async def test_dispatch_automation_not_found(self, async_client):
@@ -789,12 +791,12 @@ class TestDispatchAutomation:
         # Each dispatch creates a unique run
         assert run1["id"] != run2["id"]
         assert run1["automation_id"] == run2["automation_id"] == str(automation.id)
-        assert run1["status"] == run2["status"] == "PENDING"
+        assert (
+            run1["status"] == run2["status"] == "RUNNING"
+        )  # Temporal starts immediately
 
-    async def test_dispatch_updates_last_triggered_at(
-        self, async_client, async_session
-    ):
-        """Dispatching updates the automation's last_triggered_at."""
+    async def test_dispatch_creates_running_run(self, async_client, async_session):
+        """Dispatching creates a run with RUNNING status and started_at set."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -806,15 +808,12 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        assert automation.last_triggered_at is None
-
         response = await async_client.post(f"/v1/{automation.id}/dispatch")
 
         assert response.status_code == 201
-
-        # Refresh from DB to verify last_triggered_at was updated
-        await async_session.refresh(automation)
-        assert automation.last_triggered_at is not None
+        data = response.json()
+        assert data["status"] == "RUNNING"
+        assert data["started_at"] is not None
 
 
 class TestListAutomationRuns:

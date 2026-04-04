@@ -37,6 +37,6 @@ class TestHealthEndpoints:
             assert response.status_code == 503
             data = response.json()
             assert data["status"] == "not_ready"
-            assert "error" in data
+            assert "database unavailable" in data.get("errors", [])
         finally:
             app.state.engine = original_engine
