@@ -48,41 +48,67 @@ with workflow.unsafe.imports_passed_through():
 logger = logging.getLogger(__name__)
 
 
-# Retry policies for different activity types
-API_KEY_RETRY_POLICY = RetryPolicy(
-    initial_interval=timedelta(seconds=5),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(seconds=60),
-    maximum_attempts=5,
-    non_retryable_error_types=["ValueError"],  # Invalid user/org is permanent
-)
+def _get_retry_policies() -> (
+    tuple[RetryPolicy, RetryPolicy, RetryPolicy, RetryPolicy, RetryPolicy]
+):
+    """Get retry policies based on configuration.
 
-SANDBOX_RETRY_POLICY = RetryPolicy(
-    initial_interval=timedelta(seconds=10),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(minutes=2),
-    maximum_attempts=3,
-)
+    When AUTOMATION_FAST_FAIL=true, all policies use maximum_attempts=1
+    for faster test feedback. In production, full retry policies are used
+    for resilience against transient failures.
+    """
+    settings = get_settings()
 
-TARBALL_RETRY_POLICY = RetryPolicy(
-    initial_interval=timedelta(seconds=5),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(seconds=60),
-    maximum_attempts=3,
-    non_retryable_error_types=["ValueError"],  # Missing tarball is permanent
-)
+    if settings.fast_fail:
+        # Fast-fail mode: no retries for faster test feedback
+        no_retry = RetryPolicy(maximum_attempts=1)
+        return no_retry, no_retry, no_retry, no_retry, no_retry
 
-# No retries for execution - if it fails, it fails
-EXECUTION_RETRY_POLICY = RetryPolicy(
-    maximum_attempts=1,
-)
+    # Production retry policies
+    api_key_policy = RetryPolicy(
+        initial_interval=timedelta(seconds=5),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(seconds=60),
+        maximum_attempts=5,
+        non_retryable_error_types=["ValueError"],  # Invalid user/org is permanent
+    )
 
-CLEANUP_RETRY_POLICY = RetryPolicy(
-    initial_interval=timedelta(seconds=5),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(seconds=30),
-    maximum_attempts=3,
-)
+    sandbox_policy = RetryPolicy(
+        initial_interval=timedelta(seconds=10),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(minutes=2),
+        maximum_attempts=3,
+    )
+
+    tarball_policy = RetryPolicy(
+        initial_interval=timedelta(seconds=5),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(seconds=60),
+        maximum_attempts=3,
+        non_retryable_error_types=["ValueError"],  # Missing tarball is permanent
+    )
+
+    # No retries for execution - if it fails, it fails
+    execution_policy = RetryPolicy(maximum_attempts=1)
+
+    cleanup_policy = RetryPolicy(
+        initial_interval=timedelta(seconds=5),
+        backoff_coefficient=2.0,
+        maximum_interval=timedelta(seconds=30),
+        maximum_attempts=3,
+    )
+
+    return api_key_policy, sandbox_policy, tarball_policy, execution_policy, cleanup_policy
+
+
+# Initialize retry policies (evaluated at module load time)
+(
+    API_KEY_RETRY_POLICY,
+    SANDBOX_RETRY_POLICY,
+    TARBALL_RETRY_POLICY,
+    EXECUTION_RETRY_POLICY,
+    CLEANUP_RETRY_POLICY,
+) = _get_retry_policies()
 
 
 @workflow.defn

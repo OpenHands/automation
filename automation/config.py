@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Skip starting an in-process worker (use when running separate worker pods)
     # This avoids conflicts between ddtrace and Temporal's workflow sandbox
     skip_worker: bool = False
+    # Fast-fail mode: disable retries for faster test feedback
+    # When True, all activity retry policies use maximum_attempts=1
+    fast_fail: bool = False
 
     # Service key for authenticating with the SaaS API to fetch per-user
     # API keys (called by the dispatcher before each automation run).
