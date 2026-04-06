@@ -2,72 +2,73 @@
 Custom webhook event for user-defined webhook integrations.
 
 Custom webhooks have minimal structure requirements - the payload
-is stored as-is and users define how to extract the event_key.
+is stored as-is and users define how to extract the event_key using JMESPath.
+
+Example event_key_expr values:
+- "type"                           # Simple field access
+- "event.type"                     # Nested field
+- "type || event.type"             # Fallback: try type, then event.type
+- "join('.', [category, action])"  # Concatenate fields
 """
 
 from typing import Any, ClassVar
 
+import jmespath
+from jmespath import exceptions as jmespath_exceptions
 from pydantic import PrivateAttr, computed_field
 
 from automation.event_schemas import WebhookEvent
 
 
-def extract_by_path(payload: dict[str, Any], path: str) -> str | None:
+def extract_event_key(payload: dict[str, Any], expr: str) -> str:
     """
-    Extract a value from a nested dict using dot-notation path.
+    Extract event key from payload using a JMESPath expression.
 
     Args:
-        payload: The dict to extract from
-        path: Dot-notation path (e.g., "type", "event.name", "data.event_type")
+        payload: The webhook payload dict
+        expr: JMESPath expression that should return the event key string
 
     Returns:
-        The extracted string value, or None if not found
-
-    Examples:
-        >>> extract_by_path({"type": "payment.completed"}, "type")
-        "payment.completed"
-        >>> extract_by_path({"event": {"name": "order.created"}}, "event.name")
-        "order.created"
-    """
-    value: Any = payload
-    for key in path.split("."):
-        if isinstance(value, dict):
-            value = value.get(key)
-        else:
-            return None
-    return str(value) if value is not None else None
-
-
-def extract_event_key(payload: dict[str, Any], paths: list[str]) -> str:
-    """
-    Extract event key from payload, trying multiple paths in order.
-
-    Args:
-        payload: The dict to extract from
-        paths: List of dot-notation paths to try in order
-
-    Returns:
-        The first successfully extracted value
+        The extracted event key as a string
 
     Raises:
-        ValueError: If no path extracts a value
+        ValueError: If expression fails or returns non-string/null
 
     Examples:
-        >>> extract_event_key({"type": "payment.completed"}, ["type"])
+        >>> extract_event_key({"type": "payment.completed"}, "type")
         "payment.completed"
-        >>> extract_event_key({"event": {"name": "order"}}, ["type", "event.name"])
+
+        >>> extract_event_key({"event": {"name": "order"}}, "event.name")
         "order"
-        >>> extract_event_key({"foo": "bar"}, ["type", "event.name"])
+
+        >>> extract_event_key({"a": "x", "b": "y"}, "a || b")
+        "x"
+
+        >>> extract_event_key({"foo": "bar"}, "type")
         ValueError: Could not extract event_key...
     """
-    for path in paths:
-        value = extract_by_path(payload, path)
-        if value is not None:
-            return value
-    raise ValueError(
-        f"Could not extract event_key from payload using paths {paths}. "
-        f"Available top-level keys: {list(payload.keys())}"
-    )
+    try:
+        result = jmespath.search(expr, payload)
+    except jmespath_exceptions.JMESPathError as e:
+        raise ValueError(f"Invalid event_key expression '{expr}': {e}") from e
+
+    if result is None:
+        keys = list(payload.keys())
+        raise ValueError(
+            f"Could not extract event_key from payload using expression '{expr}'. "
+            f"Expression returned null. Available top-level keys: {keys}"
+        )
+
+    if not isinstance(result, str):
+        # Try to convert to string if it's a simple type
+        if isinstance(result, (int, float, bool)):
+            return str(result)
+        raise ValueError(
+            f"Event key expression '{expr}' returned {type(result).__name__}, "
+            f"expected string. Value: {result}"
+        )
+
+    return result
 
 
 class CustomWebhookEvent(WebhookEvent):

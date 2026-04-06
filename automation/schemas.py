@@ -42,7 +42,7 @@ class EventTrigger(BaseModel):
     Event-based trigger configuration.
 
     Triggers automation when a matching event is received from the source.
-    Uses pattern matching via the `on` field and optional source-specific filters.
+    Uses pattern matching via the `on` field and optional JMESPath filter.
 
     ## Event Key Format
 
@@ -56,43 +56,55 @@ class EventTrigger(BaseModel):
     - `push` - Code pushed
     - `issue.created` - Linear issue created
 
-    ## Source-Specific Filters
+    ## Filter Expressions (JMESPath DSL)
 
-    The `filters` dict contains source-specific filter conditions. Each source
-    defines what filters it supports:
+    The `filter` field accepts a JMESPath expression that is evaluated against
+    the raw webhook payload. The expression must evaluate to a truthy value
+    for the event to match.
 
-    **GitHub/GitLab**:
-    - `repositories`: Repository names (e.g., `["org/repo"]`, `["org/*"]`)
-    - `branches`: Branch names for push events (e.g., `["main", "develop"]`)
+    **Available functions:**
+    - `contains(array, value)` - Check if array contains value
+    - `glob(str, pattern)` - Wildcard matching (e.g., 'org/*')
+    - `icontains(str, substr)` - Case-insensitive substring match
+    - `regex(str, pattern)` - Regular expression match
+    - `starts_with(str, prefix)` - Check if string starts with prefix
+    - `ends_with(str, suffix)` - Check if string ends with suffix
+    - `lower(str)` / `upper(str)` - Case conversion
 
-    **Linear**:
-    - `teams`: Team keys (e.g., `["ENG", "DESIGN"]`)
-    - `projects`: Project names
-
-    **Slack**:
-    - `channels`: Channel names (e.g., `["#engineering"]`)
-
-    All filters support wildcards via fnmatch patterns.
+    **Boolean operators:** `&&` (and), `||` (or), `!` (not)
 
     ## Examples
 
     ```json
+    // GitHub: Match @openhands-resolver mentions in comments
+    {
+      "source": "github",
+      "on": "issue_comment.created",
+      "filter": "icontains(comment.body, '@openhands-resolver')"
+    }
+
     // GitHub: PR opened in specific repo
-    {"source": "github", "on": "pull_request.opened",
-     "filters": {"repositories": ["myorg/myrepo"]}}
+    {
+      "source": "github",
+      "on": "pull_request.opened",
+      "filter": "repository.full_name == 'myorg/myrepo'"
+    }
 
-    // GitHub: Any PR in org (wildcard)
-    {"source": "github", "on": "pull_request.*",
-     "filters": {"repositories": ["myorg/*"]}}
+    // GitHub: PR with 'bug' label in any org repo
+    {
+      "source": "github",
+      "on": "pull_request.opened",
+      "filter": "glob(repository.full_name, 'myorg/*')"
+    }
 
-    // GitHub: Push to main branch
-    {"source": "github", "on": "push",
-     "filters": {"repositories": ["myorg/myrepo"], "branches": ["main"]}}
+    // GitHub: Push to main or release branches
+    {
+      "source": "github",
+      "on": "push",
+      "filter": "glob(ref, 'refs/heads/main') || glob(ref, 'refs/heads/release/*')"
+    }
 
-    // Linear: Issue created in ENG team
-    {"source": "linear", "on": "issue.created", "filters": {"teams": ["ENG"]}}
-
-    // No filters - match any
+    // No filter - match any event of this type
     {"source": "github", "on": "push"}
     ```
     """
@@ -113,13 +125,14 @@ class EventTrigger(BaseModel):
             "Can be a single pattern or list of patterns."
         ),
     )
-    filters: dict[str, list[str]] | None = Field(
+    filter: str | None = Field(
         default=None,
         description=(
-            "Source-specific filter conditions. Each source defines filters: "
-            "GitHub/GitLab: repositories, branches. "
-            "Linear: teams, projects. Slack: channels. "
-            "All filters support wildcards (e.g., 'org/*')."
+            "JMESPath expression evaluated against the raw payload. "
+            "Must evaluate to truthy for the event to match. "
+            "Functions: contains(), glob(), icontains(), regex(). "
+            "Example: glob(repository.full_name, 'org/*') && "
+            "icontains(comment.body, '@openhands-resolver')"
         ),
     )
 

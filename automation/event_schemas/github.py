@@ -1,10 +1,9 @@
 """
 GitHub event schema registry.
 
-Self-matching Pydantic models for GitHub webhook events. Each payload class:
+Pydantic models for GitHub webhook events. Each payload class:
 1. Validates the payload structure via Pydantic
 2. Identifies itself via `event_key` property
-3. Can match itself against trigger conditions via `matches()` method
 
 Reference: https://docs.github.com/en/webhooks/webhook-events-and-payloads
 
@@ -17,6 +16,13 @@ Design Decision - extra="ignore":
     For critical fields we rely on, Pydantic's required field validation catches
     missing data. For optional fields with typos, integration tests with real
     GitHub payloads are the safety net.
+
+Filtering is handled by the trigger_matcher module using JMESPath expressions
+evaluated against the raw payload. Example filters:
+    - repository.full_name == 'org/repo'
+    - glob(repository.full_name, 'org/*')
+    - icontains(comment.body, '@openhands-resolver')
+    - contains(pull_request.labels[].name, 'bug')
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
-from automation.event_schemas import WebhookEvent, matches_filter_pattern
+from automation.event_schemas import WebhookEvent
 
 
 # =============================================================================
@@ -82,17 +88,10 @@ class GitHubEvent(WebhookEvent):
     """
     Base class for all GitHub event payloads.
 
-    Extends WebhookEvent with GitHub-specific fields and filter support.
+    Extends WebhookEvent with GitHub-specific fields common to all events.
 
-    Supported filters:
-    - `repositories`: Repository names (e.g., ["org/repo"], ["org/*"])
-    - `branches`: Branch names for push events (e.g., ["main", "develop"])
-
-    Example:
-        payload = PullRequestPayload.model_validate(raw)
-        filters = {"repositories": ["org/repo"]}
-        if payload.matches(on="pull_request.opened", filters=filters):
-            # Trigger automation!
+    Filtering is handled by the trigger_matcher module using JMESPath
+    expressions evaluated against the raw webhook payload.
     """
 
     _source: ClassVar[str] = "github"
@@ -115,35 +114,6 @@ class GitHubEvent(WebhookEvent):
         if action:
             return f"{self._event_type}.{action}"
         return self._event_type
-
-    def _matches_filters(self, filters: dict[str, list[str]]) -> bool:
-        """
-        Check GitHub-specific filters.
-
-        Supported filters:
-        - repositories: Match against repository.full_name
-        - branches: Match against branch name (for push events)
-        """
-        # Repository filter
-        if "repositories" in filters:
-            if not matches_filter_pattern(
-                self.repository.full_name, filters["repositories"]
-            ):
-                return False
-
-        # Branch filter (only applicable to events with branch info)
-        if "branches" in filters:
-            branch = self._get_branch()
-            if branch is not None and not matches_filter_pattern(
-                branch, filters["branches"]
-            ):
-                return False
-
-        return True
-
-    def _get_branch(self) -> str | None:
-        """Get branch name if applicable. Subclasses can override."""
-        return None
 
 
 # =============================================================================
@@ -183,6 +153,11 @@ class PullRequestPayload(GitHubEvent):
     - pull_request.unlabeled
     - pull_request.ready_for_review
     - pull_request.converted_to_draft
+
+    Common JMESPath filters:
+    - pull_request.base.ref == 'main'
+    - glob(repository.full_name, 'org/*')
+    - contains(pull_request.labels[].name, 'bug')
     """
 
     _event_type: ClassVar[str] = "pull_request"
@@ -190,10 +165,6 @@ class PullRequestPayload(GitHubEvent):
     action: str
     number: int
     pull_request: PullRequest
-
-    def _get_branch(self) -> str | None:
-        """Return the PR base branch for branch filtering."""
-        return self.pull_request.base.ref
 
 
 class PullRequestReviewPayload(GitHubEvent):
@@ -275,6 +246,11 @@ class IssueCommentPayload(GitHubEvent):
     - issue_comment.created
     - issue_comment.edited
     - issue_comment.deleted
+
+    Common JMESPath filters:
+    - icontains(comment.body, '@openhands-resolver')
+    - glob(repository.full_name, 'org/*')
+    - sender.login != 'bot'
     """
 
     _event_type: ClassVar[str] = "issue_comment"
@@ -307,9 +283,10 @@ class PushPayload(GitHubEvent):
 
     Event key: "push" (no action field)
 
-    Supported filters:
-    - repositories: Repository names
-    - branches: Branch names (e.g., ["main", "develop"])
+    Common JMESPath filters:
+    - ref == 'refs/heads/main'
+    - glob(ref, 'refs/heads/release/*')
+    - starts_with(ref, 'refs/tags/')
     """
 
     _event_type: ClassVar[str] = "push"
@@ -328,10 +305,6 @@ class PushPayload(GitHubEvent):
     def is_default_branch(self) -> bool:
         """Check if push is to default branch."""
         return self.branch == self.repository.default_branch
-
-    def _get_branch(self) -> str | None:
-        """Return the branch name for branch filtering."""
-        return self.branch
 
 
 # =============================================================================

@@ -2,51 +2,33 @@
 Event schema module for webhook event processing.
 
 This module provides:
-1. `WebhookEvent` base class for self-matching event payloads
+1. `WebhookEvent` base class for typed event payloads
 2. `parse_event()` function to parse payloads from any source
 
 Each source (GitHub, Linear, etc.) has its own WebhookEvent subclass.
 Unknown sources automatically get `CustomWebhookEvent`.
+
+Note: Filtering is handled by the trigger_matcher module using JMESPath
+expressions against the raw payload. The event schemas are for validation
+and providing typed access to payload fields.
 """
 
-import fnmatch
 from collections.abc import Callable
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
 
-def matches_filter_pattern(value: str | None, patterns: list[str]) -> bool:
-    """
-    Check if a value matches any of the filter patterns.
-
-    Supports exact match and wildcards via fnmatch.
-
-    Args:
-        value: The value to check (e.g., repository name, branch)
-        patterns: List of patterns to match against (e.g., ["main", "release/*"])
-
-    Returns:
-        True if value matches any pattern, False otherwise
-    """
-    if value is None:
-        return False
-    for pattern in patterns:
-        if pattern == value or fnmatch.fnmatch(value, pattern):
-            return True
-    return False
-
-
 class WebhookEvent(BaseModel):
     """
     Base class for all webhook event payloads across all sources.
 
-    Subclasses are self-identifying and self-matching:
+    Subclasses are self-identifying:
+    - `source` property returns the event source (e.g., 'github')
     - `event_key` property returns the event identity (e.g., "pull_request.opened")
-    - `matches()` method checks if this event matches trigger conditions
 
-    Each source (GitHub, Linear, etc.) subclasses this and implements
-    source-specific filter matching via `_matches_filters()`.
+    Filtering is handled externally by the trigger_matcher module using
+    JMESPath expressions evaluated against the raw payload.
     """
 
     # Subclasses should define their source
@@ -70,51 +52,6 @@ class WebhookEvent(BaseModel):
         """
         raise NotImplementedError("Subclasses must implement event_key")
 
-    def matches(
-        self,
-        on: str | list[str],
-        filters: dict[str, list[str]] | None = None,
-    ) -> bool:
-        """
-        Check if this event matches the trigger conditions.
-
-        Args:
-            on: Event key pattern(s) to match. Supports wildcards via fnmatch.
-            filters: Source-specific filter conditions (e.g., repositories, teams).
-
-        Returns:
-            True if this event matches all conditions.
-        """
-        if not self._matches_event_key(on):
-            return False
-
-        if filters and not self._matches_filters(filters):
-            return False
-
-        return True
-
-    def _matches_event_key(self, on: str | list[str]) -> bool:
-        """Check if event_key matches any of the patterns."""
-        patterns = [on] if isinstance(on, str) else on
-        event_key = self.event_key
-
-        for pattern in patterns:
-            if pattern == event_key:
-                return True
-            if fnmatch.fnmatch(event_key, pattern):
-                return True
-
-        return False
-
-    def _matches_filters(self, filters: dict[str, list[str]]) -> bool:  # noqa: ARG002
-        """
-        Check if event matches source-specific filters.
-
-        Subclasses override this to implement their filter logic.
-        Default implementation returns True (no filtering).
-        """
-        return True
-
 
 # =============================================================================
 # Parser Registry
@@ -137,7 +74,7 @@ def parse_event(
     payload: dict[str, Any],
     *,
     event_type: str | None = None,
-    event_type_paths: list[str] | None = None,
+    event_key_expr: str | None = None,
 ) -> WebhookEvent:
     """
     Parse a webhook payload into a typed WebhookEvent.
@@ -149,8 +86,9 @@ def parse_event(
         source: The event source (e.g., 'github', 'stripe', 'my-webhook')
         payload: The raw webhook payload
         event_type: The event type (required for known sources like github)
-        event_type_paths: List of dot-notation paths to try for extracting event_key
-                         (used for custom webhooks, default: ["type"])
+        event_key_expr: JMESPath expression for extracting event_key from payload
+                        (used for custom webhooks, default: "type")
+                        Examples: "type", "event.type", "type || event.name"
 
     Returns:
         A WebhookEvent subclass instance
@@ -164,9 +102,9 @@ def parse_event(
     # Unknown source = custom webhook (no registration needed)
     from automation.event_schemas.custom import CustomWebhookEvent, extract_event_key
 
-    # Extract event_key using the configured paths (try in order)
-    paths = event_type_paths or ["type"]
-    event_key = extract_event_key(payload, paths)
+    # Extract event_key using JMESPath expression
+    expr = event_key_expr or "type"
+    event_key = extract_event_key(payload, expr)
 
     return CustomWebhookEvent(
         _event_key=event_key,

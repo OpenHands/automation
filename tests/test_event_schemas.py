@@ -1,10 +1,8 @@
-"""Tests for event schema parsing and matching."""
+"""Tests for event schema parsing and trigger matching."""
 
 import pytest
 
 from automation.event_schemas import (
-    WebhookEvent,
-    matches_filter_pattern,
     parse_event,
 )
 from automation.event_schemas.github import (
@@ -14,44 +12,8 @@ from automation.event_schemas.github import (
     PushPayload,
     ReleasePayload,
 )
-
-
-class TestMatchesFilterPattern:
-    """Tests for the matches_filter_pattern helper function."""
-
-    def test_exact_match(self):
-        """Exact match should return True."""
-        assert matches_filter_pattern("main", ["main"]) is True
-        assert matches_filter_pattern("feature/test", ["feature/test"]) is True
-
-    def test_no_match(self):
-        """Non-matching value should return False."""
-        assert matches_filter_pattern("main", ["develop"]) is False
-        assert matches_filter_pattern("feature/test", ["main"]) is False
-
-    def test_wildcard_match(self):
-        """Wildcard patterns should match correctly."""
-        assert matches_filter_pattern("feature/test", ["feature/*"]) is True
-        # fnmatch * matches everything including path separators
-        assert matches_filter_pattern("feature/foo/bar", ["feature/*"]) is True
-        assert matches_filter_pattern("release-1.0", ["release-*"]) is True
-        # Wildcard at end
-        assert matches_filter_pattern("feature-branch", ["feature-*"]) is True
-        assert matches_filter_pattern("main", ["feature-*"]) is False
-
-    def test_multiple_patterns(self):
-        """Should match if any pattern matches."""
-        assert matches_filter_pattern("main", ["main", "develop"]) is True
-        assert matches_filter_pattern("develop", ["main", "develop"]) is True
-        assert matches_filter_pattern("feature", ["main", "develop"]) is False
-
-    def test_none_value(self):
-        """None value should return False."""
-        assert matches_filter_pattern(None, ["main"]) is False
-
-    def test_empty_patterns(self):
-        """Empty patterns list should return False."""
-        assert matches_filter_pattern("main", []) is False
+from automation.schemas import EventTrigger
+from automation.trigger_matcher import matches_trigger
 
 
 class TestGitHubEventParsing:
@@ -217,14 +179,14 @@ class TestGitHubEventParsing:
             parse_event("github", payload, event_type="unknown_event")
 
 
-class TestGitHubEventMatching:
-    """Tests for GitHub event matching against triggers."""
+class TestTriggerMatching:
+    """Tests for trigger matching using JMESPath filters."""
 
-    def _create_pr_event(
+    def _pr_payload(
         self, action: str = "opened", repo: str = "org/test-repo", branch: str = "main"
-    ) -> WebhookEvent:
-        """Helper to create a PR event."""
-        payload = {
+    ) -> dict:
+        """Create a PR payload dict."""
+        return {
             "action": action,
             "number": 42,
             "pull_request": {
@@ -236,6 +198,7 @@ class TestGitHubEventMatching:
                 "merged": False,
                 "head": {"ref": "feature/test", "sha": "abc123"},
                 "base": {"ref": branch, "sha": "def456"},
+                "labels": [{"name": "bug"}, {"name": "help-wanted"}],
                 "user": {"id": 1, "login": "testuser"},
             },
             "repository": {
@@ -246,13 +209,10 @@ class TestGitHubEventMatching:
             },
             "sender": {"id": 1, "login": "testuser"},
         }
-        return parse_event("github", payload, event_type="pull_request")
 
-    def _create_push_event(
-        self, repo: str = "org/test-repo", branch: str = "main"
-    ) -> WebhookEvent:
-        """Helper to create a push event."""
-        payload = {
+    def _push_payload(self, repo: str = "org/test-repo", branch: str = "main") -> dict:
+        """Create a push payload dict."""
+        return {
             "ref": f"refs/heads/{branch}",
             "before": "abc123",
             "after": "def456",
@@ -265,101 +225,300 @@ class TestGitHubEventMatching:
             },
             "sender": {"id": 1, "login": "testuser"},
         }
-        return parse_event("github", payload, event_type="push")
+
+    def _comment_payload(self, body: str, repo: str = "org/test-repo") -> dict:
+        """Create an issue_comment payload dict."""
+        return {
+            "action": "created",
+            "comment": {
+                "id": 1,
+                "body": body,
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "issue": {
+                "number": 10,
+                "title": "Test issue",
+                "state": "open",
+                "labels": [{"name": "bug"}],
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": repo,
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
 
     def test_exact_event_key_match(self):
         """Exact event key should match."""
-        event = self._create_pr_event(action="opened")
+        payload = self._pr_payload(action="opened")
+        trigger = EventTrigger(source="github", on="pull_request.opened")
 
-        assert event.matches(["pull_request.opened"], {}) is True
-        assert event.matches(["pull_request.closed"], {}) is False
+        assert (
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
+        )
+        assert (
+            matches_trigger(trigger, "github", "pull_request.closed", payload) is False
+        )
 
     def test_wildcard_event_key_match(self):
         """Wildcard event key should match."""
-        event = self._create_pr_event(action="opened")
+        payload = self._pr_payload(action="opened")
+        trigger_match = EventTrigger(source="github", on="pull_request.*")
+        trigger_nomatch = EventTrigger(source="github", on="issues.*")
 
-        assert event.matches(["pull_request.*"], {}) is True
-        assert event.matches(["issues.*"], {}) is False
+        assert (
+            matches_trigger(trigger_match, "github", "pull_request.opened", payload)
+            is True
+        )
+        assert (
+            matches_trigger(trigger_nomatch, "github", "pull_request.opened", payload)
+            is False
+        )
 
     def test_multiple_event_keys(self):
         """Should match if any event key matches."""
-        event = self._create_pr_event(action="opened")
+        payload = self._pr_payload(action="opened")
+        trigger = EventTrigger(source="github", on=["push", "pull_request.opened"])
 
-        assert event.matches(["push", "pull_request.opened"], {}) is True
-        assert event.matches(["push", "issues.opened"], {}) is False
+        assert (
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
+        )
+        assert matches_trigger(trigger, "github", "issues.opened", payload) is False
+
+    def test_source_mismatch(self):
+        """Different source should not match."""
+        payload = self._pr_payload()
+        trigger = EventTrigger(source="gitlab", on="pull_request.opened")
+
+        assert (
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is False
+        )
 
     def test_repository_filter(self):
-        """Repository filter should work."""
-        event = self._create_pr_event(repo="org/test-repo")
+        """Repository filter using JMESPath."""
+        payload = self._pr_payload(repo="org/test-repo")
 
         # Exact match
+        trigger = EventTrigger(
+            source="github",
+            on="pull_request.opened",
+            filter="repository.full_name == 'org/test-repo'",
+        )
         assert (
-            event.matches(["pull_request.opened"], {"repositories": ["org/test-repo"]})
-            is True
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
         )
 
         # No match
+        trigger = EventTrigger(
+            source="github",
+            on="pull_request.opened",
+            filter="repository.full_name == 'other/repo'",
+        )
         assert (
-            event.matches(["pull_request.opened"], {"repositories": ["other/repo"]})
-            is False
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is False
         )
 
-        # Wildcard match
+        # Wildcard match using glob()
+        trigger = EventTrigger(
+            source="github",
+            on="pull_request.opened",
+            filter="glob(repository.full_name, 'org/*')",
+        )
         assert (
-            event.matches(["pull_request.opened"], {"repositories": ["org/*"]}) is True
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
         )
 
     def test_branch_filter_push(self):
-        """Branch filter should work for push events."""
-        event = self._create_push_event(branch="main")
+        """Branch filter for push events using JMESPath."""
+        payload = self._push_payload(branch="main")
 
         # Exact match
-        assert event.matches(["push"], {"branches": ["main"]}) is True
+        trigger = EventTrigger(
+            source="github",
+            on="push",
+            filter="ref == 'refs/heads/main'",
+        )
+        assert matches_trigger(trigger, "github", "push", payload) is True
 
         # No match
-        assert event.matches(["push"], {"branches": ["develop"]}) is False
+        trigger = EventTrigger(
+            source="github",
+            on="push",
+            filter="ref == 'refs/heads/develop'",
+        )
+        assert matches_trigger(trigger, "github", "push", payload) is False
 
         # Wildcard match
-        event_feature = self._create_push_event(branch="feature/test")
-        assert event_feature.matches(["push"], {"branches": ["feature/*"]}) is True
+        payload_feature = self._push_payload(branch="feature/test")
+        trigger = EventTrigger(
+            source="github",
+            on="push",
+            filter="glob(ref, 'refs/heads/feature/*')",
+        )
+        assert matches_trigger(trigger, "github", "push", payload_feature) is True
 
     def test_branch_filter_pr(self):
-        """Branch filter should work for PR base branch."""
-        event = self._create_pr_event(branch="main")
+        """Branch filter for PR base branch using JMESPath."""
+        payload = self._pr_payload(branch="main")
 
         # Exact match
-        assert event.matches(["pull_request.opened"], {"branches": ["main"]}) is True
+        trigger = EventTrigger(
+            source="github",
+            on="pull_request.opened",
+            filter="pull_request.base.ref == 'main'",
+        )
+        assert (
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
+        )
 
         # No match
+        trigger = EventTrigger(
+            source="github",
+            on="pull_request.opened",
+            filter="pull_request.base.ref == 'develop'",
+        )
         assert (
-            event.matches(["pull_request.opened"], {"branches": ["develop"]}) is False
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is False
         )
 
     def test_combined_filters(self):
-        """Multiple filters should all apply (AND logic)."""
-        event = self._create_push_event(repo="org/test-repo", branch="main")
+        """Multiple filters using && (AND logic)."""
+        payload = self._push_payload(repo="org/test-repo", branch="main")
 
         # Both match
-        assert (
-            event.matches(
-                ["push"], {"repositories": ["org/test-repo"], "branches": ["main"]}
-            )
-            is True
+        trigger = EventTrigger(
+            source="github",
+            on="push",
+            filter=(
+                "repository.full_name == 'org/test-repo' && "
+                "ref == 'refs/heads/main'"
+            ),
         )
+        assert matches_trigger(trigger, "github", "push", payload) is True
 
         # Repository matches, branch doesn't
+        trigger = EventTrigger(
+            source="github",
+            on="push",
+            filter=(
+                "repository.full_name == 'org/test-repo' && "
+                "ref == 'refs/heads/develop'"
+            ),
+        )
+        assert matches_trigger(trigger, "github", "push", payload) is False
+
+    def test_no_filter(self):
+        """No filter should match any payload."""
+        payload = self._pr_payload()
+        trigger = EventTrigger(source="github", on="pull_request.opened")
+
         assert (
-            event.matches(
-                ["push"], {"repositories": ["org/test-repo"], "branches": ["develop"]}
-            )
+            matches_trigger(trigger, "github", "pull_request.opened", payload) is True
+        )
+
+
+class TestIssueCommentFiltering:
+    """Tests for issue_comment filtering using JMESPath."""
+
+    def _comment_payload(self, body: str, repo: str = "org/test-repo") -> dict:
+        """Create an issue_comment payload dict."""
+        return {
+            "action": "created",
+            "comment": {
+                "id": 1,
+                "body": body,
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "issue": {
+                "number": 10,
+                "title": "Test issue",
+                "state": "open",
+                "labels": [{"name": "bug"}],
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": repo,
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
+
+    def test_body_contains_match(self):
+        """Comment containing @openhands-resolver should match."""
+        payload = self._comment_payload("Please fix this issue @openhands-resolver")
+        trigger = EventTrigger(
+            source="github",
+            on="issue_comment.created",
+            filter="icontains(comment.body, '@openhands-resolver')",
+        )
+
+        assert (
+            matches_trigger(trigger, "github", "issue_comment.created", payload) is True
+        )
+
+    def test_body_contains_no_match(self):
+        """Comment without the keyword should not match."""
+        payload = self._comment_payload("Regular comment without mention")
+        trigger = EventTrigger(
+            source="github",
+            on="issue_comment.created",
+            filter="icontains(comment.body, '@openhands-resolver')",
+        )
+
+        assert (
+            matches_trigger(trigger, "github", "issue_comment.created", payload)
             is False
         )
 
-        # Branch matches, repository doesn't
+    def test_body_contains_case_insensitive(self):
+        """icontains should be case-insensitive."""
+        payload = self._comment_payload("Please help @OpenHands-Resolver!")
+        trigger = EventTrigger(
+            source="github",
+            on="issue_comment.created",
+            filter="icontains(comment.body, '@openhands-resolver')",
+        )
+
         assert (
-            event.matches(
-                ["push"], {"repositories": ["other/repo"], "branches": ["main"]}
-            )
+            matches_trigger(trigger, "github", "issue_comment.created", payload) is True
+        )
+
+    def test_body_contains_with_repository_filter(self):
+        """Combined body and repository filter."""
+        payload = self._comment_payload(
+            "@openhands-resolver please fix",
+            repo="OpenHands/OpenHands",
+        )
+
+        # Both filters match
+        trigger = EventTrigger(
+            source="github",
+            on="issue_comment.created",
+            filter=(
+                "glob(repository.full_name, 'OpenHands/*') && "
+                "icontains(comment.body, '@openhands-resolver')"
+            ),
+        )
+        assert (
+            matches_trigger(trigger, "github", "issue_comment.created", payload) is True
+        )
+
+        # Body matches, repo doesn't
+        trigger = EventTrigger(
+            source="github",
+            on="issue_comment.created",
+            filter=(
+                "repository.full_name == 'other/repo' && "
+                "icontains(comment.body, '@openhands-resolver')"
+            ),
+        )
+        assert (
+            matches_trigger(trigger, "github", "issue_comment.created", payload)
             is False
         )
 
@@ -367,30 +526,86 @@ class TestGitHubEventMatching:
 class TestCustomWebhookEvent:
     """Tests for custom (unknown source) webhook events."""
 
-    def test_parse_custom_webhook(self):
-        """Custom webhooks should parse with event_type_paths."""
+    def test_parse_custom_webhook_simple(self):
+        """Custom webhooks should parse with simple JMESPath expression."""
         payload = {
-            "event": {"type": "order.created"},
+            "type": "order.created",
             "data": {"order_id": "12345"},
         }
 
-        event = parse_event("custom-source", payload, event_type_paths=["event.type"])
+        event = parse_event("custom-source", payload, event_key_expr="type")
 
         assert event.source == "custom-source"
         assert event.event_key == "order.created"
 
-    def test_custom_webhook_matches(self):
-        """Custom webhook events should match on event key."""
+    def test_parse_custom_webhook_nested(self):
+        """Custom webhooks should parse with nested JMESPath expression."""
         payload = {
             "event": {"type": "order.created"},
             "data": {"order_id": "12345"},
         }
 
-        event = parse_event("custom-source", payload, event_type_paths=["event.type"])
+        event = parse_event("custom-source", payload, event_key_expr="event.type")
 
-        assert event.matches(["order.created"], {}) is True
-        assert event.matches(["order.*"], {}) is True
-        assert event.matches(["user.created"], {}) is False
+        assert event.source == "custom-source"
+        assert event.event_key == "order.created"
+
+    def test_parse_custom_webhook_fallback(self):
+        """Custom webhooks should support JMESPath || fallback."""
+        payload = {
+            "event_name": "payment.completed",
+            "data": {"amount": 100},
+        }
+
+        # Use || for fallback - try type first, then event_name
+        event = parse_event("stripe", payload, event_key_expr="type || event_name")
+
+        assert event.source == "stripe"
+        assert event.event_key == "payment.completed"
+
+    def test_custom_webhook_trigger_matching(self):
+        """Custom webhook events should match triggers."""
+        payload = {
+            "event": {"type": "order.created"},
+            "data": {"order_id": "12345"},
+        }
+
+        trigger = EventTrigger(source="custom-source", on="order.created")
+        result = matches_trigger(trigger, "custom-source", "order.created", payload)
+        assert result is True
+
+        trigger = EventTrigger(source="custom-source", on="order.*")
+        result = matches_trigger(trigger, "custom-source", "order.created", payload)
+        assert result is True
+
+        trigger = EventTrigger(source="custom-source", on="user.created")
+        result = matches_trigger(trigger, "custom-source", "order.created", payload)
+        assert result is False
+
+    def test_custom_webhook_with_filter(self):
+        """Custom webhooks should support JMESPath filters."""
+        payload = {
+            "type": "payment.completed",
+            "data": {"amount": 150, "currency": "USD"},
+        }
+
+        # Filter on nested data
+        trigger = EventTrigger(
+            source="stripe",
+            on="payment.completed",
+            filter="data.amount > `100` && data.currency == 'USD'",
+        )
+        result = matches_trigger(trigger, "stripe", "payment.completed", payload)
+        assert result is True
+
+        # Filter doesn't match
+        trigger = EventTrigger(
+            source="stripe",
+            on="payment.completed",
+            filter="data.amount > `200`",
+        )
+        result = matches_trigger(trigger, "stripe", "payment.completed", payload)
+        assert result is False
 
 
 class TestMalformedPayloads:
@@ -412,11 +627,11 @@ class TestMalformedPayloads:
             parse_event("github", {}, event_type="push")
 
     def test_custom_webhook_missing_event_type(self):
-        """Custom webhook with missing event type path should raise ValueError."""
+        """Custom webhook with missing event key should raise ValueError."""
         payload = {"data": "test"}
 
         with pytest.raises(ValueError) as exc_info:
-            parse_event("custom-source", payload, event_type_paths=["missing.path"])
+            parse_event("custom-source", payload, event_key_expr="missing.path")
 
         assert "Could not extract event_key" in str(exc_info.value)
         assert "missing.path" in str(exc_info.value)
