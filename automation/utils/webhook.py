@@ -9,16 +9,51 @@ import hashlib
 import hmac
 import logging
 import uuid
+from collections.abc import Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from automation.config import get_settings
+from automation.config import Settings, get_settings
 from automation.models import Automation, AutomationRun, CustomWebhook
 from automation.schemas import EventTrigger, WebhookConfig
 
 
 logger = logging.getLogger("automation.utils.webhook")
+
+
+# =============================================================================
+# Builtin Source Registry
+# =============================================================================
+# Registry pattern for builtin webhook sources. Each source maps to a function
+# that extracts the webhook secret from settings. Add new integrations here.
+
+BuiltinConfigFunc = Callable[[Settings], str | None]
+
+BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
+    "github": lambda s: getattr(s, "github_app_webhook_secret", None),
+    "gitlab": lambda s: getattr(s, "gitlab_webhook_secret", None),
+}
+
+
+def register_builtin_source(source: str, config_func: BuiltinConfigFunc) -> None:
+    """Register a new builtin webhook source.
+
+    Args:
+        source: Source name (e.g., "bitbucket")
+        config_func: Function that extracts the webhook secret from Settings
+    """
+    BUILTIN_SOURCES[source] = config_func
+
+
+def is_builtin_source(source: str) -> bool:
+    """Check if a source is a builtin integration."""
+    return source in BUILTIN_SOURCES
+
+
+# =============================================================================
+# Webhook Functions
+# =============================================================================
 
 
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
@@ -54,7 +89,7 @@ async def get_webhook_config(
     """
     Get the webhook configuration for verifying signatures and parsing events.
 
-    For built-in sources (github), uses GITHUB_APP_WEBHOOK_SECRET.
+    For built-in sources (github, gitlab), uses settings from environment.
     For custom sources, looks up config in the custom_webhooks table.
 
     Args:
@@ -67,33 +102,30 @@ async def get_webhook_config(
     """
     settings = get_settings()
 
-    if source == "github":
-        secret = getattr(settings, "github_app_webhook_secret", None)
+    # Check builtin sources first
+    if source in BUILTIN_SOURCES:
+        config_func = BUILTIN_SOURCES[source]
+        secret = config_func(settings)
         if secret:
             return WebhookConfig(secret=secret, is_builtin=True)
         return None
-    elif source == "gitlab":
-        secret = getattr(settings, "gitlab_webhook_secret", None)
-        if secret:
-            return WebhookConfig(secret=secret, is_builtin=True)
-        return None
-    else:
-        # Custom webhook - look up in database
-        result = await session.execute(
-            select(CustomWebhook).where(
-                CustomWebhook.org_id == org_id,
-                CustomWebhook.source == source,
-                CustomWebhook.enabled == True,  # noqa: E712
-            )
+
+    # Custom webhook - look up in database
+    result = await session.execute(
+        select(CustomWebhook).where(
+            CustomWebhook.org_id == org_id,
+            CustomWebhook.source == source,
+            CustomWebhook.enabled == True,  # noqa: E712
         )
-        webhook = result.scalar_one_or_none()
-        if webhook:
-            return WebhookConfig(
-                secret=webhook.webhook_secret,
-                is_builtin=False,
-                event_type_paths=webhook.event_type_paths,
-            )
-        return None
+    )
+    webhook = result.scalar_one_or_none()
+    if webhook:
+        return WebhookConfig(
+            secret=webhook.webhook_secret,
+            is_builtin=False,
+            event_key_expr=webhook.event_key_expr,
+        )
+    return None
 
 
 async def get_event_automations(

@@ -322,7 +322,7 @@ class WebhookConfig(BaseModel):
 
     secret: str
     is_builtin: bool = False  # True for github, gitlab
-    event_type_paths: list[str] = ["type"]
+    event_key_expr: str = "type"  # JMESPath expression for extracting event key
 
     model_config = {"extra": "forbid"}
 

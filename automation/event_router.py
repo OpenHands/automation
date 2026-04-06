@@ -100,6 +100,7 @@ async def receive_event(
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
     # 5. Parse the event into a typed WebhookEvent
+    # raw_payload is the payload used for filter matching
     try:
         if config.is_builtin:
             # Built-in sources (github): event_type comes from preprocessed payload
@@ -114,13 +115,15 @@ async def receive_event(
                     status_code=400,
                     detail="Missing raw_payload in builtin source payload",
                 )
+            raw_payload = payload["raw_payload"]
             event: WebhookEvent = parse_event(
-                source, payload["raw_payload"], event_type=event_type
+                source, raw_payload, event_type=event_type
             )
         else:
-            # Custom webhooks: extract event_key using configured paths
+            # Custom webhooks: extract event_key using JMESPath expression
+            raw_payload = payload
             event = parse_event(
-                source, payload, event_type_paths=config.event_type_paths
+                source, raw_payload, event_key_expr=config.event_key_expr
             )
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
@@ -140,7 +143,8 @@ async def receive_event(
     matched_automations = []
 
     for automation, trigger in automations:
-        if matches_trigger(trigger, event):
+        # Match trigger against raw payload using JMESPath filter
+        if matches_trigger(trigger, source, event.event_key, raw_payload):
             matched_automations.append(automation)
 
     logger.info(
