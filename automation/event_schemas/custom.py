@@ -2,7 +2,7 @@
 Custom webhook event for user-defined webhook integrations.
 
 Custom webhooks have minimal structure requirements - the payload
-is stored as-is and users can match on event_type and action.
+is stored as-is and users define how to extract the event_key.
 """
 
 from typing import Any, ClassVar
@@ -12,25 +12,49 @@ from pydantic import computed_field
 from automation.event_schemas import WebhookEvent
 
 
+def extract_by_path(payload: dict[str, Any], path: str) -> str | None:
+    """
+    Extract a value from a nested dict using dot-notation path.
+
+    Args:
+        payload: The dict to extract from
+        path: Dot-notation path (e.g., "type", "event.name", "data.event_type")
+
+    Returns:
+        The extracted string value, or None if not found
+
+    Examples:
+        >>> extract_by_path({"type": "payment.completed"}, "type")
+        "payment.completed"
+        >>> extract_by_path({"event": {"name": "order.created"}}, "event.name")
+        "order.created"
+    """
+    value: Any = payload
+    for key in path.split("."):
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            return None
+    return str(value) if value is not None else None
+
+
 class CustomWebhookEvent(WebhookEvent):
     """
     Generic event for custom webhooks.
 
-    Custom webhooks have minimal structure requirements.
-    The payload is stored as-is and the event_key is derived from
-    event_type and optional action fields.
-
-    The `_source` is set dynamically based on the actual source name
-    from the webhook URL, not a fixed "custom" value.
+    The event_key is extracted from the payload using a configurable path.
+    The source is set dynamically based on the actual source name from the URL.
     """
 
-    _source: ClassVar[str] = "custom"  # Default, but overridden per-instance
+    _source: ClassVar[str] = "custom"  # Default, overridden per-instance
 
-    event_type: str
-    action: str | None = None
+    # The extracted event identifier (e.g., "payment.completed", "order.created")
+    _event_key: str
+
+    # The raw payload for user access
     payload: dict[str, Any] = {}
 
-    # Allow overriding source per-instance for custom webhooks
+    # Dynamic source name (e.g., "stripe", "my-webhook")
     source_override: str | None = None
 
     @property
@@ -41,7 +65,5 @@ class CustomWebhookEvent(WebhookEvent):
     @computed_field
     @property
     def event_key(self) -> str:
-        """Event key from event_type and optional action."""
-        if self.action:
-            return f"{self.event_type}.{self.action}"
-        return self.event_type
+        """The event identifier extracted from the payload."""
+        return self._event_key

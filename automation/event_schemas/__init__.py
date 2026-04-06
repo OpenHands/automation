@@ -124,7 +124,13 @@ def register_parser(source: str, parser: ParseFunc) -> None:
     _PARSERS[source] = parser
 
 
-def parse_event(source: str, event_type: str, payload: dict[str, Any]) -> WebhookEvent:
+def parse_event(
+    source: str,
+    payload: dict[str, Any],
+    *,
+    event_type: str | None = None,
+    event_type_path: str = "type",
+) -> WebhookEvent:
     """
     Parse a webhook payload into a typed WebhookEvent.
 
@@ -133,23 +139,32 @@ def parse_event(source: str, event_type: str, payload: dict[str, Any]) -> Webhoo
 
     Args:
         source: The event source (e.g., 'github', 'stripe', 'my-webhook')
-        event_type: The event type (e.g., 'pull_request', 'payment')
         payload: The raw webhook payload
+        event_type: The event type (required for known sources like github)
+        event_type_path: Dot-notation path to extract event_key from payload
+                        (used for custom webhooks, default: "type")
 
     Returns:
         A WebhookEvent subclass instance
     """
     parser = _PARSERS.get(source)
     if parser:
+        if event_type is None:
+            raise ValueError(f"event_type is required for source '{source}'")
         return parser(event_type, payload)
 
     # Unknown source = custom webhook (no registration needed)
-    from automation.event_schemas.custom import CustomWebhookEvent
+    from automation.event_schemas.custom import CustomWebhookEvent, extract_by_path
+
+    # Extract event_key using the configured path
+    event_key = extract_by_path(payload, event_type_path)
+    if event_key is None:
+        event_key = "unknown"
+
     return CustomWebhookEvent(
-        event_type=event_type,
-        action=payload.get("action"),
+        _event_key=event_key,
         payload=payload,
-        source_override=source,  # Pass actual source name
+        source_override=source,
     )
 
 

@@ -66,25 +66,46 @@ def _verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(computed, expected_sig)
 
 
-async def _get_webhook_secret(
+class WebhookConfig:
+    """Configuration for processing a webhook."""
+
+    def __init__(
+        self,
+        secret: str,
+        is_builtin: bool = False,
+        event_type_path: str = "type",
+    ):
+        self.secret = secret
+        self.is_builtin = is_builtin  # True for github, gitlab
+        self.event_type_path = event_type_path
+
+
+async def _get_webhook_config(
     source: str,
     org_id: uuid.UUID,
     session: AsyncSession,
-) -> str | None:
+) -> WebhookConfig | None:
     """
-    Get the webhook secret for verifying signatures.
+    Get the webhook configuration for verifying signatures and parsing events.
 
     For built-in sources (github), uses GITHUB_APP_WEBHOOK_SECRET.
-    For custom sources, looks up the secret in the custom_webhooks table.
+    For custom sources, looks up config in the custom_webhooks table.
+
+    Returns:
+        WebhookConfig with secret and parsing settings, or None if not found.
     """
     settings = get_settings()
 
     if source == "github":
-        # Built-in GitHub integration uses the shared webhook secret
-        return getattr(settings, "github_app_webhook_secret", None)
+        secret = getattr(settings, "github_app_webhook_secret", None)
+        if secret:
+            return WebhookConfig(secret=secret, is_builtin=True)
+        return None
     elif source == "gitlab":
-        # Built-in GitLab integration
-        return getattr(settings, "gitlab_webhook_secret", None)
+        secret = getattr(settings, "gitlab_webhook_secret", None)
+        if secret:
+            return WebhookConfig(secret=secret, is_builtin=True)
+        return None
     else:
         # Custom webhook - look up in database
         result = await session.execute(
@@ -96,7 +117,11 @@ async def _get_webhook_secret(
         )
         webhook = result.scalar_one_or_none()
         if webhook:
-            return webhook.webhook_secret
+            return WebhookConfig(
+                secret=webhook.webhook_secret,
+                is_builtin=False,
+                event_type_path=webhook.event_type_path,
+            )
         return None
 
 
@@ -195,12 +220,12 @@ async def receive_event(
     # 1. Read raw body for signature verification
     body = await request.body()
 
-    # 2. Get webhook secret for this source/org
-    secret = await _get_webhook_secret(source, org_id, session)
+    # 2. Get webhook config for this source/org
+    config = await _get_webhook_config(source, org_id, session)
 
-    if not secret:
+    if not config:
         logger.warning(
-            "No webhook secret configured for source=%s org_id=%s",
+            "No webhook configured for source=%s org_id=%s",
             source,
             org_id,
         )
@@ -211,7 +236,7 @@ async def receive_event(
 
     # 3. Verify signature
     signature = x_hub_signature_256 or ""
-    if not _verify_signature(body, signature, secret):
+    if not _verify_signature(body, signature, config.secret):
         logger.warning(
             "Invalid signature for event from source=%s org_id=%s",
             source,
@@ -219,21 +244,27 @@ async def receive_event(
         )
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 4. Parse payload
+    # 4. Parse JSON payload
     try:
         payload = await request.json()
     except Exception as e:
         logger.warning("Failed to parse event payload: %s", e)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # 5. Parse the event payload
-    # For GitHub: OpenHands server sends {event_type, action, raw_payload, ...}
-    # For custom: payload is the raw webhook
-    event_type = payload.get("event_type") or payload.get("type") or "unknown"
-    raw_payload = payload.get("raw_payload", payload)
-
+    # 5. Parse the event into a typed WebhookEvent
     try:
-        event: WebhookEvent = parse_event(source, event_type, raw_payload)
+        if config.is_builtin:
+            # Built-in sources (github): event_type comes from preprocessed payload
+            event_type = payload.get("event_type") or "unknown"
+            raw_payload = payload.get("raw_payload", payload)
+            event: WebhookEvent = parse_event(
+                source, raw_payload, event_type=event_type
+            )
+        else:
+            # Custom webhooks: extract event_key using configured path
+            event = parse_event(
+                source, payload, event_type_path=config.event_type_path
+            )
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")
