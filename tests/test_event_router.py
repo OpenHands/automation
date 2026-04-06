@@ -130,6 +130,7 @@ async def test_receive_github_event_with_matching_automation(
     github_push_payload: dict,
     async_session,
     monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
 ):
     """Test receiving GitHub event that matches an automation."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
@@ -137,9 +138,11 @@ async def test_receive_github_event_with_matching_automation(
     # Create an event-triggered automation
     automation = Automation(
         id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
         org_id=org_id,
         name="Test Push Automation",
-        repo_url="https://github.com/org/test-repo",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
         trigger={
             "type": "event",
             "source": "github",
@@ -307,6 +310,7 @@ async def test_receive_github_event_filter_mismatch(
     github_push_payload: dict,
     async_session,
     monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
 ):
     """Test that events not matching filters don't create runs."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
@@ -314,9 +318,11 @@ async def test_receive_github_event_filter_mismatch(
     # Create automation that filters on different repo
     automation = Automation(
         id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
         org_id=org_id,
         name="Test Push Automation",
-        repo_url="https://github.com/org/test-repo",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
         trigger={
             "type": "event",
             "source": "github",
