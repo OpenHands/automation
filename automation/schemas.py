@@ -4,10 +4,10 @@ import re
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from croniter import croniter
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
 
 from automation.constants import MAX_RUN_DURATION_SECONDS
 
@@ -35,6 +35,110 @@ class CronTrigger(BaseModel):
         if not croniter.is_valid(v):
             raise ValueError(f"Invalid cron expression: {v}")
         return v
+
+
+class EventTrigger(BaseModel):
+    """
+    Event-based trigger configuration.
+
+    Triggers automation when a matching event is received from the source.
+    Uses simple pattern matching via the `on` field and optional source-specific filters.
+
+    ## Event Key Format
+
+    Events are identified by "{event_type}.{action}" or just "{event_type}" for
+    events without actions (like push).
+
+    Examples:
+    - `pull_request.opened` - PR opened
+    - `pull_request.closed` - PR closed
+    - `pull_request.*` - Any PR activity (wildcard)
+    - `push` - Code pushed
+    - `issue.created` - Linear issue created
+
+    ## Source-Specific Filters
+
+    The `filters` dict contains source-specific filter conditions. Each source
+    defines what filters it supports:
+
+    **GitHub/GitLab**:
+    - `repositories`: Repository names (e.g., `["org/repo"]`, `["org/*"]`)
+    - `branches`: Branch names for push events (e.g., `["main", "develop"]`)
+
+    **Linear**:
+    - `teams`: Team keys (e.g., `["ENG", "DESIGN"]`)
+    - `projects`: Project names
+
+    **Slack**:
+    - `channels`: Channel names (e.g., `["#engineering"]`)
+
+    All filters support wildcards via fnmatch patterns.
+
+    ## Examples
+
+    ```json
+    // GitHub: PR opened in specific repo
+    {"source": "github", "on": "pull_request.opened", "filters": {"repositories": ["myorg/myrepo"]}}
+
+    // GitHub: Any PR in org (wildcard)
+    {"source": "github", "on": "pull_request.*", "filters": {"repositories": ["myorg/*"]}}
+
+    // GitHub: Push to main branch
+    {"source": "github", "on": "push", "filters": {"repositories": ["myorg/myrepo"], "branches": ["main"]}}
+
+    // Linear: Issue created in ENG team
+    {"source": "linear", "on": "issue.created", "filters": {"teams": ["ENG"]}}
+
+    // No filters - match any
+    {"source": "github", "on": "push"}
+    ```
+    """
+
+    type: Literal["event"] = "event"
+    source: str = Field(
+        ...,
+        description="Event source: 'github', 'gitlab', 'linear', or custom webhook source name",
+    )
+    on: str | list[str] = Field(
+        ...,
+        description=(
+            "Event key pattern(s) to match. Format: 'event_type.action' or 'event_type'. "
+            "Supports wildcards: 'pull_request.*' matches any PR action. "
+            "Can be a single pattern or list of patterns."
+        ),
+    )
+    filters: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Source-specific filter conditions. Each source defines supported filters: "
+            "GitHub/GitLab: repositories, branches. Linear: teams, projects. Slack: channels. "
+            "All filters support wildcards (e.g., 'org/*')."
+        ),
+    )
+
+    @property
+    def event_patterns(self) -> list[str]:
+        """Get the event patterns as a list."""
+        if isinstance(self.on, str):
+            return [self.on]
+        return self.on
+
+
+def _get_trigger_discriminator(v: dict | BaseModel) -> str:
+    """Discriminator function for trigger types."""
+    if isinstance(v, dict):
+        return v.get("type", "cron")
+    return getattr(v, "type", "cron")
+
+
+# Union type for all triggers, using discriminated union
+Trigger = Annotated[
+    Union[
+        Annotated[CronTrigger, Tag("cron")],
+        Annotated[EventTrigger, Tag("event")],
+    ],
+    Discriminator(_get_trigger_discriminator),
+]
 
 
 class RunStatus(StrEnum):
@@ -85,7 +189,9 @@ def _validate_command_string(
 
 class CreateAutomationRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=500)
-    trigger: CronTrigger
+    trigger: Trigger = Field(
+        ..., description="Trigger configuration (cron or event-based)"
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -140,7 +246,9 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
-    trigger: CronTrigger | None = None
+    trigger: Trigger | None = Field(
+        default=None, description="Trigger configuration (cron or event-based)"
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)

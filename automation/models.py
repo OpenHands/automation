@@ -144,6 +144,9 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Event payload for event-triggered runs (None for cron-triggered runs)
+    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -217,4 +220,38 @@ class TarballUpload(Base):
     # Soft delete
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
+    )
+
+
+class CustomWebhook(Base):
+    """A custom webhook integration for an organization.
+
+    Note: Built-in integrations (github, gitlab) don't use this table.
+    This is only for custom/generic webhook sources where users configure
+    their own webhook URLs and secrets.
+    """
+
+    __tablename__ = "custom_webhooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    webhook_secret: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
     )
