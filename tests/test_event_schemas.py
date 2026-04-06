@@ -3,6 +3,7 @@
 import pytest
 
 from automation.event_schemas import (
+    WebhookEvent,
     matches_filter_pattern,
     parse_event,
 )
@@ -221,7 +222,7 @@ class TestGitHubEventMatching:
 
     def _create_pr_event(
         self, action: str = "opened", repo: str = "org/test-repo", branch: str = "main"
-    ) -> PullRequestPayload:
+    ) -> WebhookEvent:
         """Helper to create a PR event."""
         payload = {
             "action": action,
@@ -249,7 +250,7 @@ class TestGitHubEventMatching:
 
     def _create_push_event(
         self, repo: str = "org/test-repo", branch: str = "main"
-    ) -> PushPayload:
+    ) -> WebhookEvent:
         """Helper to create a push event."""
         payload = {
             "ref": f"refs/heads/{branch}",

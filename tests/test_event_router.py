@@ -9,6 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from automation.auth import AuthenticatedUser
+from automation.config import get_settings
 from automation.models import Automation
 
 
@@ -16,6 +17,14 @@ from automation.models import Automation
 def org_id(mock_authenticated_user: AuthenticatedUser) -> uuid.UUID:
     """Get org_id from authenticated user fixture."""
     return mock_authenticated_user.org_id
+
+
+@pytest.fixture(autouse=True)
+def clear_settings_cache():
+    """Clear settings cache before and after each test."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -89,8 +98,8 @@ async def test_receive_github_event_no_matching_automations(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test receiving GitHub event with no matching automations."""
-    # Set up the builtin webhook secret
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    # Set up the GitHub webhook secret
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     signature = sign_payload(github_push_payload, "test-secret")
 
@@ -116,7 +125,7 @@ async def test_receive_github_event_with_matching_automation(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test receiving GitHub event that matches an automation."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     # Create an event-triggered automation
     automation = Automation(
@@ -157,7 +166,7 @@ async def test_receive_github_event_invalid_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that invalid signature is rejected."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     # Wrong signature
     response = await async_client.post(
@@ -178,7 +187,7 @@ async def test_receive_github_event_missing_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that missing signature is rejected."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
@@ -197,7 +206,7 @@ async def test_receive_github_event_missing_event_type(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that missing event_type returns 400."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     # Payload without event_type
     payload = {"raw_payload": {"data": "test"}}
@@ -220,7 +229,7 @@ async def test_receive_github_event_malformed_payload(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that malformed payload returns 400."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     # Payload with event_type but invalid raw_payload for that type
     payload = {
@@ -246,7 +255,7 @@ async def test_receive_github_event_unknown_event_type(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that unknown GitHub event type returns 400."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     payload = {
         "event_type": "unknown_github_event",
@@ -273,7 +282,7 @@ async def test_receive_github_event_filter_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that events not matching filters don't create runs."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     # Create automation that filters on different repo
     automation = Automation(
@@ -312,7 +321,7 @@ async def test_receive_unknown_source(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that unknown source without custom webhook returns 404."""
-    monkeypatch.setenv("BUILTIN_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     payload = {"data": "test"}
     signature = sign_payload(payload, "test-secret")

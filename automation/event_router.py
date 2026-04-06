@@ -71,12 +71,19 @@ async def receive_event(
         )
         raise HTTPException(
             status_code=404,
-            detail=f"Unknown source or org: {source}",
+            detail=f"Unknown webhook source: {source}",
         )
 
     # 3. Verify signature
-    signature = x_hub_signature_256 or ""
-    if not verify_signature(body, signature, config.secret):
+    if not x_hub_signature_256:
+        logger.warning(
+            "Missing signature for event from source=%s org_id=%s",
+            source,
+            org_id,
+        )
+        raise HTTPException(status_code=401, detail="Missing signature")
+
+    if not verify_signature(body, x_hub_signature_256, config.secret):
         logger.warning(
             "Invalid signature for event from source=%s org_id=%s",
             source,
