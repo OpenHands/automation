@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
-from automation.event_schemas import EventSchemaProvider, NormalizedEvent, WebhookEvent
+from automation.event_schemas import EventSchemaProvider, WebhookEvent
 
 
 # =============================================================================
@@ -84,7 +84,7 @@ class GitHubEvent(WebhookEvent):
             # Trigger automation!
     """
 
-    # Subclasses must define this
+    _source: ClassVar[str] = "github"
     _event_type: ClassVar[str]
 
     # All GitHub events have repository and sender
@@ -410,69 +410,22 @@ class GitHubEventProvider(EventSchemaProvider):
     def source(self) -> str:
         return "github"
 
-    def normalize(self, payload: dict[str, Any]) -> NormalizedEvent:
+    def parse(self, event_type: str, payload: dict[str, Any]) -> GitHubEvent:
         """
-        Normalize a GitHub event payload forwarded from OpenHands server.
+        Parse a raw GitHub webhook payload into a typed event object.
 
-        The payload structure from OpenHands server:
-        - event_type: from X-GitHub-Event header
-        - action: from raw_payload.action
-        - sender: preprocessed {github_id, github_login, keycloak_user_id}
-        - repository: preprocessed {id, full_name, private, default_branch}
-        - organization: {github_org, openhands_org_id}
-        - access_control: {is_github_org_member, is_openhands_org_member, has_openhands_account}
-        - raw_payload: original GitHub webhook payload
+        Args:
+            event_type: The event type from X-GitHub-Event header
+            payload: The raw webhook payload (or raw_payload from OpenHands server)
+
+        Returns:
+            A typed GitHubEvent subclass instance
+
+        Raises:
+            ValueError: If event_type is unknown
+            ValidationError: If payload doesn't match expected structure
         """
-        event_type = payload.get("event_type", "unknown")
-        action = payload.get("action")
-        raw_payload = payload.get("raw_payload", {})
-
-        # Parse into typed GitHubEvent
-        parsed_payload: GitHubEvent | None = None
-        try:
-            parsed_payload = parse_github_event(event_type, raw_payload)
-        except (ValueError, Exception):
-            pass  # Fall back to untyped if parsing fails
-
-        # Build normalized fields (for backward compatibility with filters)
-        normalized = self._build_normalized_fields(payload, parsed_payload)
-
-        return NormalizedEvent(
-            source=self.source,
-            event_type=event_type,
-            action=action,
-            normalized=normalized,
-            parsed_payload=parsed_payload,
-        )
-
-    def _build_normalized_fields(
-        self,
-        payload: dict[str, Any],
-        parsed: GitHubEvent | None,
-    ) -> dict[str, Any]:
-        """Build flattened fields for backward compatibility."""
-        fields: dict[str, Any] = {
-            "event_type": payload.get("event_type"),
-            "action": payload.get("action"),
-            # Preprocessed info from OpenHands server
-            "sender.github_id": payload.get("sender", {}).get("github_id"),
-            "sender.github_login": payload.get("sender", {}).get("github_login"),
-            "sender.keycloak_user_id": payload.get("sender", {}).get("keycloak_user_id"),
-            "repository.id": payload.get("repository", {}).get("id"),
-            "repository.full_name": payload.get("repository", {}).get("full_name"),
-            "repository.private": payload.get("repository", {}).get("private"),
-            "organization.github_org": payload.get("organization", {}).get("github_org"),
-            "organization.openhands_org_id": payload.get("organization", {}).get("openhands_org_id"),
-            "access_control.is_github_org_member": payload.get("access_control", {}).get("is_github_org_member"),
-            "access_control.is_openhands_org_member": payload.get("access_control", {}).get("is_openhands_org_member"),
-            "access_control.has_openhands_account": payload.get("access_control", {}).get("has_openhands_account"),
-        }
-
-        # Add event_key from parsed payload
-        if parsed:
-            fields["event_key"] = parsed.event_key
-
-        return fields
+        return parse_github_event(event_type, payload)
 
     def get_supported_event_types(self) -> list[str]:
         return get_supported_event_types()

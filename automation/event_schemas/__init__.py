@@ -1,37 +1,19 @@
 """
-Event schema registry for detecting event types and normalizing payloads.
+Event schema registry for webhook event processing.
 
-This module provides a maintainable way to:
-1. Detect the event type from a raw payload
-2. Normalize payloads for trigger matching
-3. Support multiple event sources (GitHub, GitLab, Linear, custom webhooks)
+This module provides:
+1. `WebhookEvent` base class for self-matching event payloads
+2. Provider registry for different sources (GitHub, Linear, custom)
 
-Built-in sources (github, gitlab) are registered automatically.
-Custom webhooks use the 'custom' provider which passes events through unchanged.
+Each source implements its own `WebhookEvent` subclass that knows how to
+match itself against trigger conditions.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 import fnmatch
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
-
-
-@dataclass
-class NormalizedEvent:
-    """
-    Result of event normalization.
-
-    Contains both the normalized fields for trigger matching and
-    optionally the parsed Pydantic model for type-safe access.
-    """
-
-    source: str  # e.g., 'github', 'gitlab', 'linear', 'custom'
-    event_type: str  # e.g., 'pull_request', 'push', 'issue'
-    action: str | None  # e.g., 'opened', 'closed', 'created'
-    normalized: dict[str, Any]  # Flattened fields for trigger matching
-    parsed_payload: BaseModel | None = None  # Type-safe parsed payload (if available)
 
 
 class WebhookEvent(BaseModel):
@@ -46,7 +28,15 @@ class WebhookEvent(BaseModel):
     source-specific filter matching via `_matches_filters()`.
     """
 
+    # Subclasses should define their source
+    _source: ClassVar[str] = "unknown"
+
     model_config = {"extra": "ignore"}
+
+    @property
+    def source(self) -> str:
+        """The event source (e.g., 'github', 'linear')."""
+        return self._source
 
     @computed_field
     @property
@@ -69,7 +59,7 @@ class WebhookEvent(BaseModel):
 
         Args:
             on: Event key pattern(s) to match. Supports wildcards via fnmatch.
-            filters: Source-specific filter conditions (e.g., repos, teams).
+            filters: Source-specific filter conditions (e.g., repositories, teams).
 
         Returns:
             True if this event matches all conditions.
@@ -127,19 +117,23 @@ class EventSchemaProvider(ABC):
     @property
     @abstractmethod
     def source(self) -> str:
-        """The source identifier (e.g., 'github', 'gitlab')."""
+        """The source identifier (e.g., 'github', 'linear')."""
         pass
 
     @abstractmethod
-    def normalize(self, payload: dict[str, Any]) -> NormalizedEvent:
+    def parse(self, event_type: str, payload: dict[str, Any]) -> WebhookEvent:
         """
-        Normalize a payload for trigger matching.
+        Parse a raw payload into a typed WebhookEvent.
 
         Args:
-            payload: The raw or preprocessed webhook payload
+            event_type: The event type (e.g., 'pull_request', 'push')
+            payload: The raw webhook payload
 
         Returns:
-            NormalizedEvent with extracted fields
+            A WebhookEvent subclass instance
+
+        Raises:
+            ValueError: If event_type is unknown or payload is invalid
         """
         pass
 

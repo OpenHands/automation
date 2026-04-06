@@ -6,9 +6,35 @@ event structures. The provider does minimal normalization since
 we don't know the payload structure ahead of time.
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
-from automation.event_schemas import EventSchemaProvider, NormalizedEvent
+from pydantic import computed_field
+
+from automation.event_schemas import EventSchemaProvider, WebhookEvent
+
+
+class CustomWebhookEvent(WebhookEvent):
+    """
+    Generic event for custom webhooks.
+
+    Custom webhooks have minimal structure requirements.
+    The payload is stored as-is and the event_key is derived from
+    event_type and optional action fields.
+    """
+
+    _source: ClassVar[str] = "custom"
+
+    event_type: str
+    action: str | None = None
+    payload: dict[str, Any] = {}
+
+    @computed_field
+    @property
+    def event_key(self) -> str:
+        """Event key from event_type and optional action."""
+        if self.action:
+            return f"{self.event_type}.{self.action}"
+        return self.event_type
 
 
 class CustomEventProvider(EventSchemaProvider):
@@ -18,41 +44,28 @@ class CustomEventProvider(EventSchemaProvider):
     def source(self) -> str:
         return "custom"
 
-    def normalize(self, payload: dict[str, Any]) -> NormalizedEvent:
+    def parse(self, event_type: str, payload: dict[str, Any]) -> CustomWebhookEvent:
         """
-        Normalize a custom webhook payload.
+        Parse a custom webhook payload.
 
         For custom webhooks, we make minimal assumptions about structure:
-        - Look for common fields: type, event_type, action, event
-        - Flatten top-level fields for matching
-        """
-        # Try to extract event type from common field names
-        event_type = (
-            payload.get("type")
-            or payload.get("event_type")
-            or payload.get("event")
-            or "custom"
-        )
+        - event_type is passed separately
+        - Look for 'action' field in payload
+        - Store entire payload for user access
 
-        # Try to extract action from common field names
+        Args:
+            event_type: The event type
+            payload: The raw webhook payload
+
+        Returns:
+            A CustomWebhookEvent instance
+        """
         action = payload.get("action")
 
-        # Flatten top-level fields for trigger matching
-        normalized: dict[str, Any] = {
-            "event_type": event_type,
-            "action": action,
-        }
-
-        # Include all top-level string/int/bool fields
-        for key, value in payload.items():
-            if isinstance(value, (str, int, bool, float)):
-                normalized[key] = value
-
-        return NormalizedEvent(
-            source=self.source,
-            event_type=str(event_type),
+        return CustomWebhookEvent(
+            event_type=event_type,
             action=action,
-            normalized=normalized,
+            payload=payload,
         )
 
     def get_supported_event_types(self) -> list[str]:
