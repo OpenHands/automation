@@ -340,7 +340,7 @@ async def test_receive_github_event_filter_mismatch(
     """Test that events not matching filters don't create runs."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
-    # Create automation that filters on different repo
+    # Create automation that filters on different repo (using JMESPath filter)
     automation = Automation(
         id=uuid.uuid4(),
         user_id=mock_authenticated_user.user_id,
@@ -352,7 +352,7 @@ async def test_receive_github_event_filter_mismatch(
             "type": "event",
             "source": "github",
             "on": "push",
-            "filters": {"repositories": ["different/repo"]},
+            "filter": "repository.full_name == 'different/repo'",
         },
     )
     async_session.add(automation)
