@@ -10,7 +10,8 @@ Unknown sources automatically get `CustomWebhookEvent`.
 """
 
 import fnmatch
-from typing import Any, Callable, ClassVar
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
@@ -84,7 +85,7 @@ class WebhookEvent(BaseModel):
 
         return False
 
-    def _matches_filters(self, filters: dict[str, list[str]]) -> bool:
+    def _matches_filters(self, filters: dict[str, list[str]]) -> bool:  # noqa: ARG002
         """
         Check if event matches source-specific filters.
 
@@ -167,10 +168,12 @@ def parse_event(
     )
 
 
-# =============================================================================
-# Register Built-in Parsers
-# =============================================================================
+def _register_builtin_parsers() -> None:
+    """Register parsers for built-in sources. Called at module load."""
+    # Import here to avoid E402 (module level import not at top of file)
+    from automation.event_schemas.github import parse_github_event
 
-from automation.event_schemas.github import parse_github_event
+    register_parser("github", parse_github_event)
 
-register_parser("github", parse_github_event)
+
+_register_builtin_parsers()

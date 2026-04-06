@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from croniter import croniter
 from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
@@ -42,7 +42,7 @@ class EventTrigger(BaseModel):
     Event-based trigger configuration.
 
     Triggers automation when a matching event is received from the source.
-    Uses simple pattern matching via the `on` field and optional source-specific filters.
+    Uses pattern matching via the `on` field and optional source-specific filters.
 
     ## Event Key Format
 
@@ -78,13 +78,16 @@ class EventTrigger(BaseModel):
 
     ```json
     // GitHub: PR opened in specific repo
-    {"source": "github", "on": "pull_request.opened", "filters": {"repositories": ["myorg/myrepo"]}}
+    {"source": "github", "on": "pull_request.opened",
+     "filters": {"repositories": ["myorg/myrepo"]}}
 
     // GitHub: Any PR in org (wildcard)
-    {"source": "github", "on": "pull_request.*", "filters": {"repositories": ["myorg/*"]}}
+    {"source": "github", "on": "pull_request.*",
+     "filters": {"repositories": ["myorg/*"]}}
 
     // GitHub: Push to main branch
-    {"source": "github", "on": "push", "filters": {"repositories": ["myorg/myrepo"], "branches": ["main"]}}
+    {"source": "github", "on": "push",
+     "filters": {"repositories": ["myorg/myrepo"], "branches": ["main"]}}
 
     // Linear: Issue created in ENG team
     {"source": "linear", "on": "issue.created", "filters": {"teams": ["ENG"]}}
@@ -97,12 +100,15 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description="Event source: 'github', 'gitlab', 'linear', or custom webhook source name",
+        description=(
+            "Event source: 'github', 'gitlab', 'linear', or custom webhook source name"
+        ),
     )
     on: str | list[str] = Field(
         ...,
         description=(
-            "Event key pattern(s) to match. Format: 'event_type.action' or 'event_type'. "
+            "Event key pattern(s) to match. "
+            "Format: 'event_type.action' or 'event_type'. "
             "Supports wildcards: 'pull_request.*' matches any PR action. "
             "Can be a single pattern or list of patterns."
         ),
@@ -110,8 +116,9 @@ class EventTrigger(BaseModel):
     filters: dict[str, list[str]] | None = Field(
         default=None,
         description=(
-            "Source-specific filter conditions. Each source defines supported filters: "
-            "GitHub/GitLab: repositories, branches. Linear: teams, projects. Slack: channels. "
+            "Source-specific filter conditions. Each source defines filters: "
+            "GitHub/GitLab: repositories, branches. "
+            "Linear: teams, projects. Slack: channels. "
             "All filters support wildcards (e.g., 'org/*')."
         ),
     )
@@ -133,10 +140,7 @@ def _get_trigger_discriminator(v: dict | BaseModel) -> str:
 
 # Union type for all triggers, using discriminated union
 Trigger = Annotated[
-    Union[
-        Annotated[CronTrigger, Tag("cron")],
-        Annotated[EventTrigger, Tag("event")],
-    ],
+    Annotated[CronTrigger, Tag("cron")] | Annotated[EventTrigger, Tag("event")],
     Discriminator(_get_trigger_discriminator),
 ]
 

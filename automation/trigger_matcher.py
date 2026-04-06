@@ -7,7 +7,7 @@ The matching is delegated to the payload's `matches()` method.
 ## How It Works
 
 1. Payload classes (e.g., `PullRequestPayload`) have a `matches()` method
-2. The trigger defines what to match via `on` (event patterns) and `filters` (source-specific)
+2. The trigger defines what to match via `on` (event patterns) and `filters`
 3. We call `event.matches(on=trigger.on, filters=trigger.filters)`
 
 That's it. The event knows how to match itself.
@@ -17,6 +17,7 @@ import logging
 
 from automation.event_schemas import WebhookEvent
 from automation.schemas import EventTrigger
+
 
 logger = logging.getLogger("automation.trigger_matcher")
 

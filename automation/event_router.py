@@ -24,6 +24,7 @@ from automation.utils.webhook import (
     verify_signature,
 )
 
+
 logger = logging.getLogger("automation.event_router")
 
 router = APIRouter(prefix="/v1/events", tags=["events"])

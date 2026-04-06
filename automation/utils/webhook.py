@@ -18,6 +18,7 @@ from automation.config import get_settings
 from automation.models import Automation, AutomationRun, CustomWebhook
 from automation.schemas import EventTrigger, WebhookConfig
 
+
 logger = logging.getLogger("automation.utils.webhook")
 
 
@@ -122,10 +123,12 @@ async def get_event_automations(
             Automation.org_id == org_id,
             Automation.enabled == True,  # noqa: E712
             Automation.deleted_at.is_(None),
-            Automation.trigger.contains({
-                "type": "event",
-                "source": source,
-            }),
+            Automation.trigger.contains(
+                {
+                    "type": "event",
+                    "source": source,
+                }
+            ),
         )
     )
     automations = result.scalars().all()

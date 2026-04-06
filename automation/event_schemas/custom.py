@@ -78,7 +78,7 @@ class CustomWebhookEvent(WebhookEvent):
     _event_key: str
 
     # The raw payload for user access
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = {}  # noqa: RUF012
 
     # Dynamic source name (e.g., "stripe", "my-webhook")
     source_override: str | None = None

@@ -80,7 +80,8 @@ class GitHubEvent(WebhookEvent):
 
     Example:
         payload = PullRequestPayload.model_validate(raw)
-        if payload.matches(on="pull_request.opened", filters={"repositories": ["org/repo"]}):
+        filters = {"repositories": ["org/repo"]}
+        if payload.matches(on="pull_request.opened", filters=filters):
             # Trigger automation!
     """
 
@@ -115,13 +116,17 @@ class GitHubEvent(WebhookEvent):
         """
         # Repository filter
         if "repositories" in filters:
-            if not self._filter_matches(self.repository.full_name, filters["repositories"]):
+            if not self._filter_matches(
+                self.repository.full_name, filters["repositories"]
+            ):
                 return False
 
         # Branch filter (only applicable to events with branch info)
         if "branches" in filters:
             branch = self._get_branch()
-            if branch is not None and not self._filter_matches(branch, filters["branches"]):
+            if branch is not None and not self._filter_matches(
+                branch, filters["branches"]
+            ):
                 return False
 
         return True
@@ -298,7 +303,7 @@ class PushPayload(GitHubEvent):
     ref: str  # refs/heads/main
     before: str  # SHA before push
     after: str  # SHA after push
-    commits: list[PushCommit] = []
+    commits: list[PushCommit] = []  # noqa: RUF012
 
     @property
     def branch(self) -> str:
@@ -392,6 +397,3 @@ def parse_github_event(event_type: str, raw_payload: dict[str, Any]) -> GitHubEv
 def get_supported_event_types() -> list[str]:
     """Get list of all supported GitHub event types."""
     return list(GITHUB_PAYLOAD_CLASSES.keys())
-
-
-
