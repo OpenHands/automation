@@ -7,6 +7,16 @@ Self-matching Pydantic models for GitHub webhook events. Each payload class:
 3. Can match itself against trigger conditions via `matches()` method
 
 Reference: https://docs.github.com/en/webhooks/webhook-events-and-payloads
+
+Design Decision - extra="ignore":
+    We use extra="ignore" on all nested models because GitHub's webhook payloads
+    frequently change (adding new fields). Using extra="forbid" would break on
+    every GitHub API update. The trade-off is:
+    - Typos in field names won't error (mitigated by Pydantic's required fields)
+    - New GitHub fields are silently ignored (acceptable - we only parse what we need)
+    For critical fields we rely on, Pydantic's required field validation catches
+    missing data. For optional fields with typos, integration tests with real
+    GitHub payloads are the safety net.
 """
 
 from __future__ import annotations

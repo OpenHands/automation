@@ -47,7 +47,10 @@ def extract_event_key(payload: dict[str, Any], paths: list[str]) -> str:
         paths: List of dot-notation paths to try in order
 
     Returns:
-        The first successfully extracted value, or "unknown" if none found
+        The first successfully extracted value
+
+    Raises:
+        ValueError: If no path extracts a value
 
     Examples:
         >>> extract_event_key({"type": "payment.completed"}, ["type"])
@@ -55,13 +58,16 @@ def extract_event_key(payload: dict[str, Any], paths: list[str]) -> str:
         >>> extract_event_key({"event": {"name": "order"}}, ["type", "event.name"])
         "order"
         >>> extract_event_key({"foo": "bar"}, ["type", "event.name"])
-        "unknown"
+        ValueError: Could not extract event_key...
     """
     for path in paths:
         value = extract_by_path(payload, path)
         if value is not None:
             return value
-    return "unknown"
+    raise ValueError(
+        f"Could not extract event_key from payload using paths {paths}. "
+        f"Available top-level keys: {list(payload.keys())}"
+    )
 
 
 class CustomWebhookEvent(WebhookEvent):

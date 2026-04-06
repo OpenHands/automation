@@ -412,9 +412,11 @@ class TestMalformedPayloads:
             parse_event("github", {}, event_type="push")
 
     def test_custom_webhook_missing_event_type(self):
-        """Custom webhook with missing event type path should use 'unknown'."""
+        """Custom webhook with missing event type path should raise ValueError."""
         payload = {"data": "test"}
 
-        event = parse_event("custom-source", payload, event_type_paths=["missing.path"])
+        with pytest.raises(ValueError) as exc_info:
+            parse_event("custom-source", payload, event_type_paths=["missing.path"])
 
-        assert event.event_key == "unknown"
+        assert "Could not extract event_key" in str(exc_info.value)
+        assert "missing.path" in str(exc_info.value)

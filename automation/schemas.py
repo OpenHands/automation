@@ -132,10 +132,17 @@ class EventTrigger(BaseModel):
 
 
 def _get_trigger_discriminator(v: dict | BaseModel) -> str:
-    """Discriminator function for trigger types."""
+    """Discriminator function for trigger types.
+
+    Raises:
+        ValueError: If trigger is missing required 'type' field
+    """
     if isinstance(v, dict):
-        return v.get("type", "cron")
-    return getattr(v, "type", "cron")
+        trigger_type = v.get("type")
+        if not trigger_type:
+            raise ValueError("Trigger missing required 'type' field")
+        return trigger_type
+    return getattr(v, "type")
 
 
 # Union type for all triggers, using discriminated union

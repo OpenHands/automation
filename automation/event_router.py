@@ -13,6 +13,7 @@ Security Notes:
     - Request body size should be capped (e.g., 1MB) at the proxy level
 """
 
+import json
 import logging
 import uuid
 
@@ -94,9 +95,9 @@ async def receive_event(
     # 4. Parse JSON payload
     try:
         payload = await request.json()
-    except Exception as e:
-        logger.warning("Failed to parse event payload: %s", e)
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    except json.JSONDecodeError as e:
+        logger.warning("Malformed JSON in event payload: %s", e)
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
     # 5. Parse the event into a typed WebhookEvent
     try:
@@ -108,15 +109,21 @@ async def receive_event(
                     status_code=400,
                     detail="Missing event_type in builtin source payload",
                 )
-            raw_payload = payload.get("raw_payload", payload)
+            if "raw_payload" not in payload:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Missing raw_payload in builtin source payload",
+                )
             event: WebhookEvent = parse_event(
-                source, raw_payload, event_type=event_type
+                source, payload["raw_payload"], event_type=event_type
             )
         else:
             # Custom webhooks: extract event_key using configured paths
             event = parse_event(
                 source, payload, event_type_paths=config.event_type_paths
             )
+    except HTTPException:
+        raise  # Re-raise HTTPExceptions as-is
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")

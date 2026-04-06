@@ -1046,3 +1046,57 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["total"] == 60
         assert len(data["runs"]) == 50  # Default limit
+
+
+class TestBackwardCompatibility:
+    """Tests ensuring existing cron triggers work with discriminated union."""
+
+    async def test_cron_trigger_create_and_retrieve(self, async_client):
+        """Existing cron triggers should still work with discriminated union."""
+        # Create automation with cron trigger
+        response = await async_client.post(
+            "/v1",
+            json={
+                "name": "Cron Backward Compat Test",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"},
+                "tarball_path": "oh-internal://test.tar.gz",
+                "entrypoint": "python main.py",
+            },
+        )
+        # oh-internal:// without actual upload returns 404
+        # We care about trigger parsing, not file existence
+        assert response.status_code in (201, 404)
+
+    async def test_cron_trigger_with_s3_path(self, async_client):
+        """Cron trigger with S3 path creates and retrieves correctly."""
+        response = await async_client.post(
+            "/v1",
+            json={
+                "name": "Cron S3 Test",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"},
+                "tarball_path": "s3://bucket/code.tar.gz",
+                "entrypoint": "python main.py",
+            },
+        )
+        assert response.status_code == 201
+        automation_id = response.json()["id"]
+
+        # Verify it can be retrieved
+        response = await async_client.get(f"/v1/{automation_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["trigger"]["type"] == "cron"
+        assert data["trigger"]["schedule"] == "0 0 * * *"
+
+    async def test_trigger_missing_type_returns_422(self, async_client):
+        """Trigger without type field returns 422 (fail fast)."""
+        response = await async_client.post(
+            "/v1",
+            json={
+                "name": "Missing Type",
+                "trigger": {"schedule": "0 0 * * *"},  # No "type" field
+                "tarball_path": "s3://bucket/code.tar.gz",
+                "entrypoint": "python main.py",
+            },
+        )
+        assert response.status_code == 422

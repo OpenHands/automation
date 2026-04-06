@@ -246,6 +246,32 @@ async def test_receive_github_event_missing_event_type(
 
 
 @pytest.mark.asyncio
+async def test_receive_github_event_missing_raw_payload(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that missing raw_payload returns 400."""
+    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+
+    # Payload with event_type but no raw_payload
+    payload = {"event_type": "push"}
+    signature, body = sign_payload(payload, "test-secret")
+
+    response = await async_client.post(
+        f"/v1/events/{org_id}/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Missing raw_payload" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_receive_github_event_malformed_payload(
     async_client: AsyncClient,
     org_id: uuid.UUID,
