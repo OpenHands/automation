@@ -74,9 +74,7 @@ class TestCreateAutomation:
         detail = response.json()["detail"]
         # Discriminated union includes the tag name ("cron") in the path
         schedule_errors = [
-            e
-            for e in detail
-            if e["loc"] == ["body", "trigger", "cron", "schedule"]
+            e for e in detail if e["loc"] == ["body", "trigger", "cron", "schedule"]
         ]
         assert len(schedule_errors) == 1
         assert "Invalid cron expression" in schedule_errors[0]["msg"]

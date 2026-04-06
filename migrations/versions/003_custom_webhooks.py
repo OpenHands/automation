@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 
 revision: str = "003"
@@ -28,15 +28,15 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("org_id", UUID(as_uuid=True), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("source", sa.String(100), nullable=False),  # user-defined source name
+        sa.Column("source", sa.String(100), nullable=False),  # user-defined name
         sa.Column("webhook_secret", sa.String(255), nullable=False),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
-        # Dot-notation paths to extract event identifier from payload
-        # Paths are tried in order until one returns a value
-        # Default ["type"] works for many webhooks (e.g., Stripe: {"type": "payment.completed"})
+        # Dot-notation paths to extract event identifier from payload.
+        # Paths tried in order until one returns a value.
+        # Default ["type"] for webhooks like Stripe: {"type": "payment.completed"}
         sa.Column(
             "event_type_paths",
-            sa.dialects.postgresql.JSONB,
+            JSONB,
             nullable=False,
             server_default='["type"]',
         ),
