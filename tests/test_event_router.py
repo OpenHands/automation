@@ -83,11 +83,15 @@ def github_pr_payload() -> dict:
     }
 
 
-def sign_payload(payload: dict, secret: str) -> str:
-    """Generate HMAC signature for payload."""
+def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
+    """Generate HMAC signature for payload.
+
+    Returns tuple of (signature, body_bytes) since we need to send the exact
+    same bytes that were signed.
+    """
     body = json.dumps(payload).encode()
     sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return f"sha256={sig}"
+    return f"sha256={sig}", body
 
 
 @pytest.mark.asyncio
@@ -101,12 +105,15 @@ async def test_receive_github_event_no_matching_automations(
     # Set up the GitHub webhook secret
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
-    signature = sign_payload(github_push_payload, "test-secret")
+    signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=github_push_payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 200
@@ -143,12 +150,15 @@ async def test_receive_github_event_with_matching_automation(
     async_session.add(automation)
     await async_session.commit()
 
-    signature = sign_payload(github_push_payload, "test-secret")
+    signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=github_push_payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 200
@@ -168,11 +178,16 @@ async def test_receive_github_event_invalid_signature(
     """Test that invalid signature is rejected."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
+    _, body = sign_payload(github_push_payload, "test-secret")
+
     # Wrong signature
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=github_push_payload,
-        headers={"X-Hub-Signature-256": "sha256=invalid"},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": "sha256=invalid",
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 401
@@ -189,9 +204,12 @@ async def test_receive_github_event_missing_signature(
     """Test that missing signature is rejected."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
+    _, body = sign_payload(github_push_payload, "test-secret")
+
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=github_push_payload,
+        content=body,
+        headers={"Content-Type": "application/json"},
         # No X-Hub-Signature-256 header
     )
 
@@ -210,12 +228,15 @@ async def test_receive_github_event_missing_event_type(
 
     # Payload without event_type
     payload = {"raw_payload": {"data": "test"}}
-    signature = sign_payload(payload, "test-secret")
+    signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 400
@@ -236,12 +257,15 @@ async def test_receive_github_event_malformed_payload(
         "event_type": "push",
         "raw_payload": {"invalid": "data"},  # Missing required fields
     }
-    signature = sign_payload(payload, "test-secret")
+    signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 400
@@ -261,12 +285,15 @@ async def test_receive_github_event_unknown_event_type(
         "event_type": "unknown_github_event",
         "raw_payload": {"data": "test"},
     }
-    signature = sign_payload(payload, "test-secret")
+    signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 400
@@ -300,12 +327,15 @@ async def test_receive_github_event_filter_mismatch(
     async_session.add(automation)
     await async_session.commit()
 
-    signature = sign_payload(github_push_payload, "test-secret")
+    signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/github",
-        json=github_push_payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 200
@@ -324,12 +354,15 @@ async def test_receive_unknown_source(
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
     payload = {"data": "test"}
-    signature = sign_payload(payload, "test-secret")
+    signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
         f"/v1/events/{org_id}/unknown-source",
-        json=payload,
-        headers={"X-Hub-Signature-256": signature},
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
     )
 
     assert response.status_code == 404
