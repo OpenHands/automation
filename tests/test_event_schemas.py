@@ -389,25 +389,17 @@ class TestTriggerMatching:
         payload = self._push_payload(repo="org/test-repo", branch="main")
 
         # Both match
-        trigger = EventTrigger(
-            source="github",
-            on="push",
-            filter=(
-                "repository.full_name == 'org/test-repo' && "
-                "ref == 'refs/heads/main'"
-            ),
+        filter_expr = (
+            "repository.full_name == 'org/test-repo' && ref == 'refs/heads/main'"
         )
+        trigger = EventTrigger(source="github", on="push", filter=filter_expr)
         assert matches_trigger(trigger, "github", "push", payload) is True
 
         # Repository matches, branch doesn't
-        trigger = EventTrigger(
-            source="github",
-            on="push",
-            filter=(
-                "repository.full_name == 'org/test-repo' && "
-                "ref == 'refs/heads/develop'"
-            ),
+        filter_expr = (
+            "repository.full_name == 'org/test-repo' && ref == 'refs/heads/develop'"
         )
+        trigger = EventTrigger(source="github", on="push", filter=filter_expr)
         assert matches_trigger(trigger, "github", "push", payload) is False
 
     def test_no_filter(self):
