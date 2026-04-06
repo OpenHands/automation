@@ -1,17 +1,16 @@
 """
-Event schema registry for webhook event processing.
+Event schema module for webhook event processing.
 
 This module provides:
 1. `WebhookEvent` base class for self-matching event payloads
-2. Provider registry for different sources (GitHub, Linear, custom)
+2. `parse_event()` function to parse payloads from any source
 
-Each source implements its own `WebhookEvent` subclass that knows how to
-match itself against trigger conditions.
+Each source (GitHub, Linear, etc.) has its own WebhookEvent subclass.
+Unknown sources automatically get `CustomWebhookEvent`.
 """
 
-from abc import ABC, abstractmethod
 import fnmatch
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 from pydantic import BaseModel, computed_field
 
@@ -64,11 +63,9 @@ class WebhookEvent(BaseModel):
         Returns:
             True if this event matches all conditions.
         """
-        # Check event key matches
         if not self._matches_event_key(on):
             return False
 
-        # Check source-specific filters
         if filters and not self._matches_filters(filters):
             return False
 
@@ -111,60 +108,55 @@ class WebhookEvent(BaseModel):
         return False
 
 
-class EventSchemaProvider(ABC):
-    """Base class for event schema providers."""
+# =============================================================================
+# Parser Registry
+# =============================================================================
 
-    @property
-    @abstractmethod
-    def source(self) -> str:
-        """The source identifier (e.g., 'github', 'linear')."""
-        pass
+# Type for parse functions
+ParseFunc = Callable[[str, dict[str, Any]], WebhookEvent]
 
-    @abstractmethod
-    def parse(self, event_type: str, payload: dict[str, Any]) -> WebhookEvent:
-        """
-        Parse a raw payload into a typed WebhookEvent.
-
-        Args:
-            event_type: The event type (e.g., 'pull_request', 'push')
-            payload: The raw webhook payload
-
-        Returns:
-            A WebhookEvent subclass instance
-
-        Raises:
-            ValueError: If event_type is unknown or payload is invalid
-        """
-        pass
-
-    @abstractmethod
-    def get_supported_event_types(self) -> list[str]:
-        """Return list of supported event types for documentation/validation."""
-        pass
+# Registry of parse functions for known sources
+_PARSERS: dict[str, ParseFunc] = {}
 
 
-# Registry of event schema providers
-_PROVIDERS: dict[str, EventSchemaProvider] = {}
+def register_parser(source: str, parser: ParseFunc) -> None:
+    """Register a parse function for a source."""
+    _PARSERS[source] = parser
 
 
-def register_provider(provider: EventSchemaProvider) -> None:
-    """Register an event schema provider."""
-    _PROVIDERS[provider.source] = provider
+def parse_event(source: str, event_type: str, payload: dict[str, Any]) -> WebhookEvent:
+    """
+    Parse a webhook payload into a typed WebhookEvent.
+
+    For known sources (github, linear, etc.), uses the registered parser.
+    For unknown sources (custom webhooks), returns a CustomWebhookEvent.
+
+    Args:
+        source: The event source (e.g., 'github', 'stripe', 'my-webhook')
+        event_type: The event type (e.g., 'pull_request', 'payment')
+        payload: The raw webhook payload
+
+    Returns:
+        A WebhookEvent subclass instance
+    """
+    parser = _PARSERS.get(source)
+    if parser:
+        return parser(event_type, payload)
+
+    # Unknown source = custom webhook (no registration needed)
+    from automation.event_schemas.custom import CustomWebhookEvent
+    return CustomWebhookEvent(
+        event_type=event_type,
+        action=payload.get("action"),
+        payload=payload,
+        source_override=source,  # Pass actual source name
+    )
 
 
-def get_provider(source: str) -> EventSchemaProvider | None:
-    """Get the schema provider for a source."""
-    return _PROVIDERS.get(source)
+# =============================================================================
+# Register Built-in Parsers
+# =============================================================================
 
+from automation.event_schemas.github import parse_github_event
 
-def get_all_providers() -> dict[str, EventSchemaProvider]:
-    """Get all registered providers."""
-    return _PROVIDERS.copy()
-
-
-# Import and register built-in providers
-from automation.event_schemas.github import GitHubEventProvider
-from automation.event_schemas.custom import CustomEventProvider
-
-register_provider(GitHubEventProvider())
-register_provider(CustomEventProvider())
+register_parser("github", parse_github_event)

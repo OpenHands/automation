@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
 from automation.db import get_session
-from automation.event_schemas import WebhookEvent, get_provider
+from automation.event_schemas import WebhookEvent, parse_event
 from automation.models import Automation, AutomationRun, CustomWebhook
 from automation.schemas import EventTrigger
 from automation.trigger_matcher import matches_trigger
@@ -226,23 +226,14 @@ async def receive_event(
         logger.warning("Failed to parse event payload: %s", e)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # 5. Get event schema provider and parse
-    provider = get_provider(source)
-    if not provider:
-        logger.warning("No schema provider for source=%s", source)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported event source: {source}",
-        )
-
-    # Extract event_type and raw payload
+    # 5. Parse the event payload
     # For GitHub: OpenHands server sends {event_type, action, raw_payload, ...}
     # For custom: payload is the raw webhook
     event_type = payload.get("event_type") or payload.get("type") or "unknown"
     raw_payload = payload.get("raw_payload", payload)
 
     try:
-        event: WebhookEvent = provider.parse(event_type, raw_payload)
+        event: WebhookEvent = parse_event(source, event_type, raw_payload)
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")

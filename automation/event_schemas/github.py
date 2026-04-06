@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
-from automation.event_schemas import EventSchemaProvider, WebhookEvent
+from automation.event_schemas import WebhookEvent
 
 
 # =============================================================================
@@ -394,38 +394,4 @@ def get_supported_event_types() -> list[str]:
     return list(GITHUB_PAYLOAD_CLASSES.keys())
 
 
-# =============================================================================
-# Event Schema Provider (integrates with the provider system)
-# =============================================================================
 
-
-class GitHubEventProvider(EventSchemaProvider):
-    """
-    Schema provider for GitHub webhook events.
-
-    Parses payloads into self-matching GitHubEvent subclasses.
-    """
-
-    @property
-    def source(self) -> str:
-        return "github"
-
-    def parse(self, event_type: str, payload: dict[str, Any]) -> GitHubEvent:
-        """
-        Parse a raw GitHub webhook payload into a typed event object.
-
-        Args:
-            event_type: The event type from X-GitHub-Event header
-            payload: The raw webhook payload (or raw_payload from OpenHands server)
-
-        Returns:
-            A typed GitHubEvent subclass instance
-
-        Raises:
-            ValueError: If event_type is unknown
-            ValidationError: If payload doesn't match expected structure
-        """
-        return parse_github_event(event_type, payload)
-
-    def get_supported_event_types(self) -> list[str]:
-        return get_supported_event_types()
