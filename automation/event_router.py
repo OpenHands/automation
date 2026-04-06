@@ -128,11 +128,7 @@ async def receive_event(
     # 7. Create runs for matched automations
     run_ids: list[str] = []
     for automation in matched_automations:
-        run = await create_automation_run(
-            automation,
-            event_payload=payload,
-            session=session,
-        )
+        run = await create_automation_run(automation, session)
         run_ids.append(str(run.id))
 
     await session.commit()

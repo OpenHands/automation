@@ -9,7 +9,6 @@ import hashlib
 import hmac
 import logging
 import uuid
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,7 +150,6 @@ async def get_event_automations(
 
 async def create_automation_run(
     automation: Automation,
-    event_payload: dict[str, Any],
     session: AsyncSession,
 ) -> AutomationRun:
     """
@@ -159,7 +157,6 @@ async def create_automation_run(
 
     Args:
         automation: The automation to run
-        event_payload: The webhook payload that triggered this run
         session: Database session
 
     Returns:
@@ -168,7 +165,6 @@ async def create_automation_run(
     run = AutomationRun(
         id=uuid.uuid4(),
         automation_id=automation.id,
-        event_payload=event_payload,
     )
     session.add(run)
     return run

@@ -144,9 +144,6 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Event payload for event-triggered runs (None for cron-triggered runs)
-    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
