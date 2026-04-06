@@ -31,13 +31,14 @@ def upgrade() -> None:
         sa.Column("source", sa.String(100), nullable=False),  # user-defined source name
         sa.Column("webhook_secret", sa.String(255), nullable=False),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
-        # Dot-notation path to extract event identifier from payload
-        # Default "type" works for many webhooks (e.g., Stripe: {"type": "payment.completed"})
+        # Dot-notation paths to extract event identifier from payload
+        # Paths are tried in order until one returns a value
+        # Default ["type"] works for many webhooks (e.g., Stripe: {"type": "payment.completed"})
         sa.Column(
-            "event_type_path",
-            sa.String(255),
+            "event_type_paths",
+            sa.dialects.postgresql.JSONB,
             nullable=False,
-            server_default="type",
+            server_default='["type"]',
         ),
         sa.Column(
             "created_at",

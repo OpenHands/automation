@@ -38,6 +38,32 @@ def extract_by_path(payload: dict[str, Any], path: str) -> str | None:
     return str(value) if value is not None else None
 
 
+def extract_event_key(payload: dict[str, Any], paths: list[str]) -> str:
+    """
+    Extract event key from payload, trying multiple paths in order.
+
+    Args:
+        payload: The dict to extract from
+        paths: List of dot-notation paths to try in order
+
+    Returns:
+        The first successfully extracted value, or "unknown" if none found
+
+    Examples:
+        >>> extract_event_key({"type": "payment.completed"}, ["type"])
+        "payment.completed"
+        >>> extract_event_key({"event": {"name": "order"}}, ["type", "event.name"])
+        "order"
+        >>> extract_event_key({"foo": "bar"}, ["type", "event.name"])
+        "unknown"
+    """
+    for path in paths:
+        value = extract_by_path(payload, path)
+        if value is not None:
+            return value
+    return "unknown"
+
+
 class CustomWebhookEvent(WebhookEvent):
     """
     Generic event for custom webhooks.

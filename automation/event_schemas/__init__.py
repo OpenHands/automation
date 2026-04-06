@@ -129,7 +129,7 @@ def parse_event(
     payload: dict[str, Any],
     *,
     event_type: str | None = None,
-    event_type_path: str = "type",
+    event_type_paths: list[str] | None = None,
 ) -> WebhookEvent:
     """
     Parse a webhook payload into a typed WebhookEvent.
@@ -141,8 +141,8 @@ def parse_event(
         source: The event source (e.g., 'github', 'stripe', 'my-webhook')
         payload: The raw webhook payload
         event_type: The event type (required for known sources like github)
-        event_type_path: Dot-notation path to extract event_key from payload
-                        (used for custom webhooks, default: "type")
+        event_type_paths: List of dot-notation paths to try for extracting event_key
+                         (used for custom webhooks, default: ["type"])
 
     Returns:
         A WebhookEvent subclass instance
@@ -154,12 +154,11 @@ def parse_event(
         return parser(event_type, payload)
 
     # Unknown source = custom webhook (no registration needed)
-    from automation.event_schemas.custom import CustomWebhookEvent, extract_by_path
+    from automation.event_schemas.custom import CustomWebhookEvent, extract_event_key
 
-    # Extract event_key using the configured path
-    event_key = extract_by_path(payload, event_type_path)
-    if event_key is None:
-        event_key = "unknown"
+    # Extract event_key using the configured paths (try in order)
+    paths = event_type_paths or ["type"]
+    event_key = extract_event_key(payload, paths)
 
     return CustomWebhookEvent(
         _event_key=event_key,

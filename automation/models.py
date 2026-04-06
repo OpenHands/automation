@@ -230,11 +230,11 @@ class CustomWebhook(Base):
     This is only for custom/generic webhook sources where users configure
     their own webhook URLs and secrets.
 
-    The event_type_path field specifies how to extract the event identifier
-    from the incoming payload using dot-notation:
-    - "type" -> payload["type"]
-    - "event.name" -> payload["event"]["name"]
-    - "data.event_type" -> payload["data"]["event_type"]
+    The event_type_paths field specifies how to extract the event identifier
+    from the incoming payload using dot-notation. Paths are tried in order
+    until one returns a value:
+    - ["type"] -> try payload["type"]
+    - ["event.type", "type"] -> try payload["event"]["type"], then payload["type"]
     """
 
     __tablename__ = "custom_webhooks"
@@ -246,10 +246,11 @@ class CustomWebhook(Base):
     webhook_secret: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
 
-    # Dot-notation path to extract event identifier from payload
-    # Default "type" works for many webhooks (e.g., Stripe)
-    event_type_path: Mapped[str] = mapped_column(
-        String(255), nullable=False, default="type"
+    # Dot-notation paths to extract event identifier from payload
+    # Paths are tried in order until one returns a value
+    # Default ["type"] works for many webhooks (e.g., Stripe)
+    event_type_paths: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=["type"]
     )
 
     created_at: Mapped[datetime] = mapped_column(

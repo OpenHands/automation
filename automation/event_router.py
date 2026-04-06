@@ -73,11 +73,11 @@ class WebhookConfig:
         self,
         secret: str,
         is_builtin: bool = False,
-        event_type_path: str = "type",
+        event_type_paths: list[str] | None = None,
     ):
         self.secret = secret
         self.is_builtin = is_builtin  # True for github, gitlab
-        self.event_type_path = event_type_path
+        self.event_type_paths = event_type_paths or ["type"]
 
 
 async def _get_webhook_config(
@@ -120,7 +120,7 @@ async def _get_webhook_config(
             return WebhookConfig(
                 secret=webhook.webhook_secret,
                 is_builtin=False,
-                event_type_path=webhook.event_type_path,
+                event_type_paths=webhook.event_type_paths,
             )
         return None
 
@@ -261,9 +261,9 @@ async def receive_event(
                 source, raw_payload, event_type=event_type
             )
         else:
-            # Custom webhooks: extract event_key using configured path
+            # Custom webhooks: extract event_key using configured paths
             event = parse_event(
-                source, payload, event_type_path=config.event_type_path
+                source, payload, event_type_paths=config.event_type_paths
             )
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
