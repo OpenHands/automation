@@ -7,7 +7,7 @@ is stored as-is and users define how to extract the event_key.
 
 from typing import Any, ClassVar
 
-from pydantic import computed_field
+from pydantic import PrivateAttr, computed_field
 
 from automation.event_schemas import WebhookEvent
 
@@ -75,13 +75,19 @@ class CustomWebhookEvent(WebhookEvent):
     _source: ClassVar[str] = "custom"  # Default, overridden per-instance
 
     # The extracted event identifier (e.g., "payment.completed", "order.created")
-    _event_key: str
+    # Using PrivateAttr since this is set at construction, not from payload
+    _event_key: str = PrivateAttr()
 
     # The raw payload for user access
     payload: dict[str, Any] = {}  # noqa: RUF012
 
     # Dynamic source name (e.g., "stripe", "my-webhook")
     source_override: str | None = None
+
+    def __init__(self, _event_key: str, **data: Any) -> None:
+        """Initialize with the extracted event key."""
+        super().__init__(**data)
+        self._event_key = _event_key
 
     @property
     def source(self) -> str:

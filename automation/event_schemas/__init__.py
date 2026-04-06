@@ -16,6 +16,27 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, computed_field
 
 
+def matches_filter_pattern(value: str | None, patterns: list[str]) -> bool:
+    """
+    Check if a value matches any of the filter patterns.
+
+    Supports exact match and wildcards via fnmatch.
+
+    Args:
+        value: The value to check (e.g., repository name, branch)
+        patterns: List of patterns to match against (e.g., ["main", "release/*"])
+
+    Returns:
+        True if value matches any pattern, False otherwise
+    """
+    if value is None:
+        return False
+    for pattern in patterns:
+        if pattern == value or fnmatch.fnmatch(value, pattern):
+            return True
+    return False
+
+
 class WebhookEvent(BaseModel):
     """
     Base class for all webhook event payloads across all sources.
@@ -93,20 +114,6 @@ class WebhookEvent(BaseModel):
         Default implementation returns True (no filtering).
         """
         return True
-
-    @staticmethod
-    def _filter_matches(value: str | None, patterns: list[str]) -> bool:
-        """
-        Helper to check if a value matches any of the filter patterns.
-
-        Supports exact match and wildcards via fnmatch.
-        """
-        if value is None:
-            return False
-        for pattern in patterns:
-            if pattern == value or fnmatch.fnmatch(value, pattern):
-                return True
-        return False
 
 
 # =============================================================================

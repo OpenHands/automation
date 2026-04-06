@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
-from automation.event_schemas import WebhookEvent
+from automation.event_schemas import WebhookEvent, matches_filter_pattern
 
 
 # =============================================================================
@@ -116,7 +116,7 @@ class GitHubEvent(WebhookEvent):
         """
         # Repository filter
         if "repositories" in filters:
-            if not self._filter_matches(
+            if not matches_filter_pattern(
                 self.repository.full_name, filters["repositories"]
             ):
                 return False
@@ -124,7 +124,7 @@ class GitHubEvent(WebhookEvent):
         # Branch filter (only applicable to events with branch info)
         if "branches" in filters:
             branch = self._get_branch()
-            if branch is not None and not self._filter_matches(
+            if branch is not None and not matches_filter_pattern(
                 branch, filters["branches"]
             ):
                 return False
@@ -180,6 +180,10 @@ class PullRequestPayload(GitHubEvent):
     action: str
     number: int
     pull_request: PullRequest
+
+    def _get_branch(self) -> str | None:
+        """Return the PR base branch for branch filtering."""
+        return self.pull_request.base.ref
 
 
 class PullRequestReviewPayload(GitHubEvent):

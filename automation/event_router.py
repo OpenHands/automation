@@ -5,6 +5,12 @@ Endpoint: POST /v1/events/{org_id}/{source}
 
 Built-in sources (github, gitlab) verify signatures using the shared secret
 from the OpenHands server. Custom sources verify using per-org webhook secrets.
+
+Security Notes:
+    - Rate limiting should be applied at the infrastructure layer (nginx/ALB)
+      to prevent DoS attacks via HMAC verification spam
+    - Recommended: limit by IP and by org_id
+    - Request body size should be capped (e.g., 1MB) at the proxy level
 """
 
 import logging
@@ -89,7 +95,12 @@ async def receive_event(
     try:
         if config.is_builtin:
             # Built-in sources (github): event_type comes from preprocessed payload
-            event_type = payload.get("event_type") or "unknown"
+            event_type = payload.get("event_type")
+            if not event_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Missing event_type in builtin source payload",
+                )
             raw_payload = payload.get("raw_payload", payload)
             event: WebhookEvent = parse_event(
                 source, raw_payload, event_type=event_type
