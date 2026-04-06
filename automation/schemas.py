@@ -288,6 +288,27 @@ class UpdateAutomationRequest(BaseModel):
         return v
 
 
+# --- Webhook Schemas ---
+
+
+class WebhookConfig(BaseModel):
+    """Configuration for processing a webhook."""
+
+    secret: str
+    is_builtin: bool = False  # True for github, gitlab
+    event_type_paths: list[str] = ["type"]
+
+    model_config = {"extra": "forbid"}
+
+
+class EventResponse(BaseModel):
+    """Response for event processing."""
+
+    received: bool
+    matched: int
+    runs_created: list[str]  # List of run IDs created
+
+
 # --- Responses ---
 
 
