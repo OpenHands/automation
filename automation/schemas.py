@@ -136,6 +136,18 @@ class EventTrigger(BaseModel):
         ),
     )
 
+    @field_validator("filter")
+    @classmethod
+    def validate_filter_expression(cls, v: str | None) -> str | None:
+        """Validate JMESPath filter expression at creation time."""
+        if v:
+            from automation.filter_eval import validate_filter
+
+            is_valid, error = validate_filter(v)
+            if not is_valid:
+                raise ValueError(f"Invalid filter expression: {error}")
+        return v
+
     @property
     def event_patterns(self) -> list[str]:
         """Get the event patterns as a list."""
@@ -145,16 +157,22 @@ class EventTrigger(BaseModel):
 
 
 def _get_trigger_discriminator(v: dict | BaseModel) -> str:
-    """Discriminator function for trigger types.
+    """Discriminator function for Pydantic's discriminated union.
 
-    Returns the trigger type, or a sentinel value if missing.
-    Pydantic will generate a validation error for unmatched tags.
+    Returns the trigger type string, which Pydantic uses to select the
+    correct model (CronTrigger or EventTrigger) from the union.
+
+    Why sentinel instead of raising ValueError:
+        Pydantic discriminator functions must return a string - they cannot
+        raise exceptions. By returning an invalid sentinel value, Pydantic
+        generates a proper ValidationError with context like:
+        "Input tag '__missing_trigger_type__' found using 'type' does not
+        match any of the expected tags: 'cron', 'event'"
+        This produces a user-friendly 422 response via FastAPI.
     """
     if isinstance(v, dict):
         trigger_type = v.get("type")
         if not trigger_type:
-            # Return sentinel that won't match any tag
-            # Pydantic generates validation error for unknown tags
             return "__missing_trigger_type__"
         return trigger_type
     return getattr(v, "type")

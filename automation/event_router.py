@@ -11,6 +11,17 @@ Security Notes:
       to prevent DoS attacks via HMAC verification spam
     - Recommended: limit by IP and by org_id
     - Request body size should be capped (e.g., 1MB) at the proxy level
+
+Authentication Model:
+    This endpoint uses HMAC signature verification instead of standard JWT auth.
+    Webhooks are authenticated by verifying the signature against a shared secret.
+    This is standard practice for webhook receivers (GitHub, Stripe, etc.).
+
+    Replay Attack Considerations:
+    - Old valid payloads could be replayed since signatures don't expire
+    - GitHub includes delivery IDs for deduplication; consider tracking these
+    - For high-security scenarios, add timestamp validation (X-GitHub-Timestamp)
+    - Current risk is acceptable: replay triggers same automation again (idempotent)
 """
 
 import json
