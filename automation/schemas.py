@@ -140,7 +140,8 @@ def _get_trigger_discriminator(v: dict | BaseModel) -> str:
     if isinstance(v, dict):
         trigger_type = v.get("type")
         if not trigger_type:
-            # Return sentinel that won't match any tag - Pydantic generates validation error
+            # Return sentinel that won't match any tag
+            # Pydantic generates validation error for unknown tags
             return "__missing_trigger_type__"
         return trigger_type
     return getattr(v, "type")
