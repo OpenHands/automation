@@ -146,8 +146,7 @@ async def test_receive_github_event_with_matching_automation(
         trigger={
             "type": "event",
             "source": "github",
-            "events": ["push"],
-            "filters": {},
+            "on": "push",  # Match push events
         },
     )
     async_session.add(automation)
@@ -326,7 +325,7 @@ async def test_receive_github_event_filter_mismatch(
         trigger={
             "type": "event",
             "source": "github",
-            "events": ["push"],
+            "on": "push",
             "filters": {"repositories": ["different/repo"]},
         },
     )
