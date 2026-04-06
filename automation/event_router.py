@@ -154,10 +154,18 @@ async def receive_event(
         org_id,
     )
 
-    # 7. Create runs for matched automations
+    # 7. Create PENDING runs for matched automations
+    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
+    # For custom webhooks, use the raw payload directly
+    event_payload = (
+        event.model_dump(mode="json") if hasattr(event, "model_dump") else raw_payload
+    )
+
     run_ids: list[str] = []
     for automation in matched_automations:
-        run = await create_automation_run(automation, session)
+        run = await create_automation_run(
+            automation, session, event_payload=event_payload
+        )
         run_ids.append(str(run.id))
 
     await session.commit()

@@ -171,12 +171,18 @@ async def _execute_run(
         }
 
         # Trigger context so the SDK script knows *why* it was invoked
-        event_payload = {
+        # Includes automation metadata and event payload (for event-triggered runs)
+        trigger_context = {
             "trigger": automation.trigger,
             "automation_id": str(automation.id),
             "automation_name": automation.name,
         }
-        env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(event_payload)
+
+        # Include webhook event payload if this is an event-triggered run
+        if run.event_payload is not None:
+            trigger_context["event"] = run.event_payload
+
+        env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default

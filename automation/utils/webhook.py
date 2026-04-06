@@ -10,6 +10,7 @@ import hmac
 import logging
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,6 +184,7 @@ async def get_event_automations(
 async def create_automation_run(
     automation: Automation,
     session: AsyncSession,
+    event_payload: dict[str, Any] | None = None,
 ) -> AutomationRun:
     """
     Create a PENDING automation run for an event-triggered automation.
@@ -190,6 +192,9 @@ async def create_automation_run(
     Args:
         automation: The automation to run
         session: Database session
+        event_payload: The webhook payload that triggered this run (optional)
+                       For GitHub events: model_dump() of parsed Pydantic event
+                       For custom webhooks: the raw payload dict
 
     Returns:
         The created AutomationRun instance
@@ -197,6 +202,7 @@ async def create_automation_run(
     run = AutomationRun(
         id=uuid.uuid4(),
         automation_id=automation.id,
+        event_payload=event_payload,
     )
     session.add(run)
     return run

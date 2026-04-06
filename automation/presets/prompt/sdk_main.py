@@ -8,7 +8,7 @@ This script is auto-generated from a user's prompt. It:
   5. Gets default agent with tools and condenser via get_default_agent()
   6. Uses model_copy to add MCP config to the agent
   7. Creates a Conversation and injects secrets
-  8. Sends the user's prompt and runs the conversation
+  8. Sends the user's prompt (with event context if available) and runs
   9. On context manager exit, the workspace sends a completion callback
 
 Env vars injected by the dispatcher (read by the SDK automatically):
@@ -18,8 +18,10 @@ Env vars injected by the dispatcher (read by the SDK automatically):
   SESSION_API_KEY            - session key for sandbox settings auth
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
+  AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
 """
 
+import json
 import os
 import sys
 import time
@@ -48,6 +50,21 @@ print(
 )
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
+# Parse event payload if present (for event-triggered automations)
+event_payload_json = os.environ.get("AUTOMATION_EVENT_PAYLOAD", "")
+event_context = None
+if event_payload_json:
+    try:
+        event_context = json.loads(event_payload_json)
+        print(f"  AUTOMATION_EVENT_PAYLOAD: present")
+        if "event" in event_context:
+            print(f"    trigger_type: {event_context.get('trigger', {}).get('type')}")
+            print(f"    event_key: {event_context['event'].get('event_key', 'N/A')}")
+    except json.JSONDecodeError as e:
+        print(f"  AUTOMATION_EVENT_PAYLOAD: invalid JSON ({e})")
+else:
+    print(f"  AUTOMATION_EVENT_PAYLOAD: NONE")
+
 # SDK imports
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.tools import get_default_agent
@@ -58,6 +75,22 @@ from openhands.workspace import OpenHandsCloudWorkspace
 PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt.txt")
 with open(PROMPT_FILE) as f:
     USER_PROMPT = f.read()
+
+# If this is an event-triggered run, prepend event context to the prompt
+if event_context and "event" in event_context:
+    event_data = event_context["event"]
+    event_json = json.dumps(event_data, indent=2)
+    USER_PROMPT = f"""This automation was triggered by a webhook event.
+
+## Event Payload
+```json
+{event_json}
+```
+
+## Task
+{USER_PROMPT}"""
+    print("\n=== EVENT-TRIGGERED ===")
+    print(f"  Event context prepended to prompt")
 
 
 print("\n=== SDK WORKSPACE ===")

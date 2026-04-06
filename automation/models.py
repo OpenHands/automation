@@ -144,6 +144,12 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Event payload for event-triggered runs (JSON)
+    # Contains the webhook payload that triggered this run.
+    # For GitHub events: model_dump() of the parsed Pydantic event
+    # For custom webhooks: the raw payload dict
+    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
