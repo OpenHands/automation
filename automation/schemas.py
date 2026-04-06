@@ -134,13 +134,14 @@ class EventTrigger(BaseModel):
 def _get_trigger_discriminator(v: dict | BaseModel) -> str:
     """Discriminator function for trigger types.
 
-    Raises:
-        ValueError: If trigger is missing required 'type' field
+    Returns the trigger type, or a sentinel value if missing.
+    Pydantic will generate a validation error for unmatched tags.
     """
     if isinstance(v, dict):
         trigger_type = v.get("type")
         if not trigger_type:
-            raise ValueError("Trigger missing required 'type' field")
+            # Return sentinel that won't match any tag - Pydantic generates validation error
+            return "__missing_trigger_type__"
         return trigger_type
     return getattr(v, "type")
 
