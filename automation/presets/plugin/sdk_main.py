@@ -51,19 +51,12 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # Parse event payload if present (for event-triggered automations)
-event_payload_json = os.environ.get("AUTOMATION_EVENT_PAYLOAD", "")
 event_context = None
-if event_payload_json:
+if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
     try:
         event_context = json.loads(event_payload_json)
-        print(f"  AUTOMATION_EVENT_PAYLOAD: present")
-        if "event" in event_context:
-            print(f"    trigger_type: {event_context.get('trigger', {}).get('type')}")
-            print(f"    event_key: {event_context['event'].get('event_key', 'N/A')}")
     except json.JSONDecodeError as e:
-        print(f"  AUTOMATION_EVENT_PAYLOAD: invalid JSON ({e})")
-else:
-    print(f"  AUTOMATION_EVENT_PAYLOAD: NONE")
+        print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
 
 # SDK imports
 from openhands.sdk import Conversation, RemoteConversation
@@ -85,8 +78,7 @@ with open(PROMPT_FILE) as f:
 
 # If this is an event-triggered run, prepend event context to the prompt
 if event_context and "event" in event_context:
-    event_data = event_context["event"]
-    event_json = json.dumps(event_data, indent=2)
+    event_json = json.dumps(event_context["event"], indent=2)
     USER_PROMPT = f"""This automation was triggered by a webhook event.
 
 ## Event Payload
@@ -96,8 +88,6 @@ if event_context and "event" in event_context:
 
 ## Task
 {USER_PROMPT}"""
-    print("\n=== EVENT-TRIGGERED ===")
-    print(f"  Event context prepended to prompt")
 
 # Deserialize plugin sources using Pydantic validation
 plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
