@@ -8,7 +8,14 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from automation.auth import AuthenticatedUser
 from automation.models import Automation
+
+
+@pytest.fixture
+def org_id(mock_authenticated_user: AuthenticatedUser) -> uuid.UUID:
+    """Get org_id from authenticated user fixture."""
+    return mock_authenticated_user.org_id
 
 
 @pytest.fixture
