@@ -3,7 +3,7 @@ Event router for receiving webhook events and triggering automations.
 
 Endpoint: POST /v1/events/{org_id}/{source}
 
-Built-in sources (github, gitlab) verify signatures using the shared secret
+Built-in sources (github) verify signatures using the shared secret
 from the OpenHands server. Custom sources verify using per-org webhook secrets.
 
 Security Notes:
@@ -59,14 +59,13 @@ async def receive_event(
     """
     Receive a webhook event from a source.
 
-    For built-in sources (github, gitlab), the event is forwarded from the
+    For built-in sources (github), the event is forwarded from the
     OpenHands server with a normalized payload.
 
     For custom sources, the raw webhook payload is received directly.
 
     The payload signature is verified using:
     - GITHUB_APP_WEBHOOK_SECRET for github
-    - GITLAB_WEBHOOK_SECRET for gitlab
     - Per-org webhook_secret from custom_webhooks table for custom sources
     """
     # 1. Read raw body for signature verification

@@ -20,6 +20,7 @@ from automation.router import router
 from automation.scheduler import scheduler_loop
 from automation.uploads import router as uploads_router
 from automation.watchdog import watchdog_loop
+from automation.webhook_router import router as webhook_router
 
 
 logger = logging.getLogger("automation.app")
@@ -159,12 +160,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include uploads_router, preset_router, and event_router BEFORE router to avoid
-# route conflict. The main router has /v1/{automation_id} which would match
-# /v1/uploads, /v1/preset/prompt, or /v1/events and fail UUID validation.
+# Include specific routers BEFORE main router to avoid route conflict.
+# The main router has /v1/{automation_id} which would match any /v1/<path>
+# and fail UUID validation.
 app.include_router(uploads_router)
 app.include_router(preset_router)
 app.include_router(event_router)
+app.include_router(webhook_router)
 app.include_router(router)
 
 

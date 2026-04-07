@@ -229,7 +229,7 @@ class TarballUpload(Base):
 class CustomWebhook(Base):
     """A custom webhook integration for an organization.
 
-    Note: Built-in integrations (github, gitlab) don't use this table.
+    Note: Built-in integrations (github) don't use this table.
     This is only for custom/generic webhook sources where users configure
     their own webhook URLs and secrets.
 

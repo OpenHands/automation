@@ -33,7 +33,6 @@ BuiltinConfigFunc = Callable[[Settings], str | None]
 
 BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
     "github": lambda s: getattr(s, "github_app_webhook_secret", None),
-    "gitlab": lambda s: getattr(s, "gitlab_webhook_secret", None),
 }
 
 
@@ -90,7 +89,7 @@ async def get_webhook_config(
     """
     Get the webhook configuration for verifying signatures and parsing events.
 
-    For built-in sources (github, gitlab), uses settings from environment.
+    For built-in sources (github), uses settings from environment.
     For custom sources, looks up config in the custom_webhooks table.
 
     Args:

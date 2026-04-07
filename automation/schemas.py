@@ -112,9 +112,7 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description=(
-            "Event source: 'github', 'gitlab', 'linear', or custom webhook source name"
-        ),
+        description="Event source: 'github' or custom webhook source name",
     )
     on: str | list[str] = Field(
         ...,
@@ -339,7 +337,7 @@ class WebhookConfig(BaseModel):
     """Configuration for processing a webhook."""
 
     secret: str
-    is_builtin: bool = False  # True for github, gitlab
+    is_builtin: bool = False  # True for github
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
 
     model_config = {"extra": "forbid"}
@@ -351,6 +349,135 @@ class EventResponse(BaseModel):
     received: bool
     matched: int
     runs_created: list[str]  # List of run IDs created
+
+
+# Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
+_SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
+
+# Reserved source names (built-in integrations)
+RESERVED_SOURCES = frozenset({"github"})
+
+
+class CustomWebhookCreate(BaseModel):
+    """Request schema for creating a custom webhook."""
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Human-readable name for this webhook",
+    )
+    source: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description=(
+            "Unique source identifier (lowercase, alphanumeric with hyphens). "
+            "Used in the webhook URL: /v1/events/{org_id}/{source}"
+        ),
+    )
+    event_key_expr: str = Field(
+        default="type",
+        max_length=500,
+        description=(
+            "JMESPath expression to extract event type from payload. "
+            "Examples: 'type', 'event.type', 'type || event_name'"
+        ),
+    )
+
+    @field_validator("source")
+    @classmethod
+    def validate_source_name(cls, v: str) -> str:
+        """Validate source name format and check for reserved names."""
+        v_lower = v.lower()
+        if v_lower in RESERVED_SOURCES:
+            raise ValueError(
+                f"'{v}' is a reserved source name. "
+                "Use the built-in integration instead."
+            )
+        if not _SOURCE_NAME_RE.match(v_lower):
+            raise ValueError(
+                "Source must be lowercase alphanumeric with hyphens, 1-50 chars, "
+                "starting and ending with alphanumeric"
+            )
+        return v_lower
+
+    @field_validator("event_key_expr")
+    @classmethod
+    def validate_event_key_expr(cls, v: str) -> str:
+        """Validate JMESPath expression syntax."""
+        import jmespath
+        from jmespath import exceptions as jmespath_exceptions
+
+        try:
+            jmespath.compile(v)
+        except jmespath_exceptions.JMESPathError as e:
+            raise ValueError(f"Invalid JMESPath expression: {e}") from e
+        return v
+
+
+class CustomWebhookUpdate(BaseModel):
+    """Request schema for updating a custom webhook."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    event_key_expr: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+
+    @field_validator("event_key_expr")
+    @classmethod
+    def validate_event_key_expr(cls, v: str | None) -> str | None:
+        """Validate JMESPath expression syntax if provided."""
+        if v is None:
+            return v
+        import jmespath
+        from jmespath import exceptions as jmespath_exceptions
+
+        try:
+            jmespath.compile(v)
+        except jmespath_exceptions.JMESPathError as e:
+            raise ValueError(f"Invalid JMESPath expression: {e}") from e
+        return v
+
+
+class CustomWebhookResponse(BaseModel):
+    """Response schema for custom webhook (without secret)."""
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    name: str
+    source: str
+    webhook_url: str
+    event_key_expr: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CustomWebhookCreateResponse(CustomWebhookResponse):
+    """Response schema for webhook creation (includes secret, shown only once)."""
+
+    webhook_secret: str = Field(
+        ...,
+        description="Webhook signing secret. Store securely - only shown on create.",
+    )
+
+
+class CustomWebhookSecretResponse(BaseModel):
+    """Response schema for secret rotation."""
+
+    webhook_secret: str = Field(
+        ...,
+        description="New webhook signing secret. Store securely - only shown once.",
+    )
+
+
+class CustomWebhookListResponse(BaseModel):
+    """Response schema for listing webhooks."""
+
+    webhooks: list[CustomWebhookResponse]
+    total: int
 
 
 # --- Responses ---
