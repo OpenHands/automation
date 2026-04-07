@@ -220,15 +220,15 @@ async def test_receive_github_event_missing_signature(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_missing_event_type(
+async def test_receive_github_event_undetectable_payload(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that missing event_type returns 400."""
+    """Test that undetectable payload structure returns 400."""
     monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
-    # Payload without event_type
+    # Payload with raw_payload that doesn't match any known GitHub event structure
     payload = {"raw_payload": {"data": "test"}}
     signature, body = sign_payload(payload, "test-secret")
 
@@ -242,7 +242,7 @@ async def test_receive_github_event_missing_event_type(
     )
 
     assert response.status_code == 400
-    assert "Missing event_type" in response.json()["detail"]
+    assert "Cannot detect github event type" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
