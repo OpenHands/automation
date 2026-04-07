@@ -12,6 +12,11 @@ Security Notes:
     - Recommended: limit by IP and by org_id
     - Request body size should be capped (e.g., 1MB) at the proxy level
 
+TODO: Application-level rate limiting per org or org+source:
+    - Track request counts in Redis with sliding window
+    - Return 429 with Retry-After header when exceeded
+    - Consider different limits for builtin (github) vs custom sources
+
 Authentication Model:
     This endpoint uses HMAC signature verification instead of standard JWT auth.
     Webhooks are authenticated by verifying the signature against a shared secret.

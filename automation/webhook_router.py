@@ -4,8 +4,14 @@ Provides CRUD operations for custom webhook integrations. Users can register
 webhook sources (e.g., Stripe, custom services) and receive a signing secret
 to configure in the external service.
 
-Built-in integrations (GitHub, GitLab, Linear) don't use this - they're
-configured via environment variables.
+Built-in integrations (GitHub) don't use this - they're configured via
+environment variables.
+
+TODO: Implement rate limiting for webhook endpoints. Consider:
+- Per-org rate limits (e.g., 100 requests/minute across all sources)
+- Per-org+source rate limits (e.g., 50 requests/minute per source)
+- Use Redis or in-memory token bucket for distributed rate limiting
+- Return 429 Too Many Requests with Retry-After header when exceeded
 """
 
 import secrets
