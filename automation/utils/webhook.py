@@ -60,25 +60,29 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     """
     Verify HMAC-SHA256 signature.
 
+    Accepts both formats:
+    - GitHub/normalized: 'sha256=<hex>'
+    - Raw hex digest: '<hex>' (e.g., Linear)
+
     Args:
         payload: Raw request body bytes
-        signature: Signature from header (format: 'sha256=<hex>')
+        signature: Signature from header
         secret: The shared secret
 
     Returns:
         True if signature is valid
     """
-    if not signature.startswith("sha256="):
-        return False
+    # Normalize: strip 'sha256=' prefix if present
+    if signature.startswith("sha256="):
+        signature = signature[7:]
 
-    expected_sig = signature[7:]  # Remove 'sha256=' prefix
     computed = hmac.new(
         secret.encode("utf-8"),
         msg=payload,
         digestmod=hashlib.sha256,
     ).hexdigest()
 
-    return hmac.compare_digest(computed, expected_sig)
+    return hmac.compare_digest(computed, signature)
 
 
 async def get_webhook_config(

@@ -30,18 +30,21 @@ class TestVerifySignature:
 
         assert verify_signature(payload, signature, secret) is False
 
-    def test_wrong_prefix(self):
-        """Signature without sha256= prefix should return False."""
+    def test_signature_formats(self):
+        """Both raw hex and sha256= prefixed signatures should work."""
         payload = b'{"event": "test"}'
         secret = "test-secret-key"
 
-        # Generate valid hash but wrong format
+        # Generate valid hash
         expected_sig = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
-        # Missing sha256= prefix
-        assert verify_signature(payload, expected_sig, secret) is False
+        # Raw hex without prefix should work (e.g., Linear's format)
+        assert verify_signature(payload, expected_sig, secret) is True
 
-        # Wrong prefix
+        # With sha256= prefix should also work (GitHub's format)
+        assert verify_signature(payload, f"sha256={expected_sig}", secret) is True
+
+        # Wrong prefix should fail (sha1= is not supported)
         assert verify_signature(payload, f"sha1={expected_sig}", secret) is False
 
     def test_empty_signature(self):
