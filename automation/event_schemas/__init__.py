@@ -57,14 +57,14 @@ class WebhookEvent(BaseModel):
 # Parser Registry
 # =============================================================================
 
-# Type for parse functions
-ParseFunc = Callable[[str, dict[str, Any]], WebhookEvent]
+# Type for auto-detection parse functions: (payload) -> WebhookEvent
+AutoParseFunc = Callable[[dict[str, Any]], WebhookEvent]
 
-# Registry of parse functions for known sources
-_PARSERS: dict[str, ParseFunc] = {}
+# Registry of parse functions for known sources (auto-detect event type from payload)
+_PARSERS: dict[str, AutoParseFunc] = {}
 
 
-def register_parser(source: str, parser: ParseFunc) -> None:
+def register_parser(source: str, parser: AutoParseFunc) -> None:
     """Register a parse function for a source."""
     _PARSERS[source] = parser
 
@@ -73,31 +73,31 @@ def parse_event(
     source: str,
     payload: dict[str, Any],
     *,
-    event_type: str | None = None,
     event_key_expr: str | None = None,
 ) -> WebhookEvent:
     """
     Parse a webhook payload into a typed WebhookEvent.
 
-    For known sources (github, linear, etc.), uses the registered parser.
-    For unknown sources (custom webhooks), returns a CustomWebhookEvent.
+    For known sources (github, linear, etc.), auto-detects event type from
+    payload structure and returns a typed event. For unknown sources (custom
+    webhooks), returns a CustomWebhookEvent.
 
     Args:
         source: The event source (e.g., 'github', 'stripe', 'my-webhook')
         payload: The raw webhook payload
-        event_type: The event type (required for known sources like github)
         event_key_expr: JMESPath expression for extracting event_key from payload
                         (used for custom webhooks, default: "type")
-                        Examples: "type", "event.type", "type || event.name"
 
     Returns:
         A WebhookEvent subclass instance
+
+    Raises:
+        ValueError: If event type cannot be determined from payload
     """
+    # Known source - auto-detect event type from payload
     parser = _PARSERS.get(source)
     if parser:
-        if event_type is None:
-            raise ValueError(f"event_type is required for source '{source}'")
-        return parser(event_type, payload)
+        return parser(payload)
 
     # Unknown source = custom webhook (no registration needed)
     from automation.event_schemas.custom import CustomWebhookEvent, extract_event_key
@@ -115,10 +115,9 @@ def parse_event(
 
 def _register_builtin_parsers() -> None:
     """Register parsers for built-in sources. Called at module load."""
-    # Import here to avoid E402 (module level import not at top of file)
-    from automation.event_schemas.github import parse_github_event
+    from automation.event_schemas.github import parse_github_event_auto
 
-    register_parser("github", parse_github_event)
+    register_parser("github", parse_github_event_auto)
 
 
 _register_builtin_parsers()

@@ -114,22 +114,14 @@ async def receive_event(
     # raw_payload is the payload used for filter matching
     try:
         if config.is_builtin:
-            # Built-in sources (github): event_type comes from preprocessed payload
-            event_type = payload.get("event_type")
-            if not event_type:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Missing event_type in builtin source payload",
-                )
+            # Built-in sources (github): extract raw_payload, auto-detect event type
             if "raw_payload" not in payload:
                 raise HTTPException(
                     status_code=400,
                     detail="Missing raw_payload in builtin source payload",
                 )
             raw_payload = payload["raw_payload"]
-            event: WebhookEvent = parse_event(
-                source, raw_payload, event_type=event_type
-            )
+            event: WebhookEvent = parse_event(source, raw_payload)
         else:
             # Custom webhooks: extract event_key using JMESPath expression
             raw_payload = payload

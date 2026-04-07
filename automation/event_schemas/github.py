@@ -27,11 +27,15 @@ evaluated against the raw payload. Example filters:
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, computed_field
 
 from automation.event_schemas import WebhookEvent
+
+
+if TYPE_CHECKING:
+    from automation.event_schemas import detection
 
 
 # =============================================================================
@@ -360,12 +364,84 @@ GITHUB_PAYLOAD_CLASSES: dict[str, type[GitHubEvent]] = {
 }
 
 
+# =============================================================================
+# Event Type Detection
+# =============================================================================
+
+# Detection rules: (event_type, jmespath_expression)
+# Order matters - more specific patterns must come first
+#
+# Note: We use contains(keys(@), 'key') to check for key existence because:
+# - Direct key access returns the value, which is falsy for empty dicts/lists
+# - `&&` in JMESPath returns the second operand if both truthy, not a boolean
+# - contains(keys(@), 'key') always returns true/false based on key presence
+GITHUB_DETECTION_RULES: list[tuple[str, str]] = [
+    # PR review: has both pull_request AND review keys
+    (
+        "pull_request_review",
+        "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",
+    ),
+    # PR: has pull_request (but not review, checked above)
+    ("pull_request", "contains(keys(@), 'pull_request')"),
+    # Issue comment: has both issue AND comment keys
+    ("issue_comment", "contains(keys(@), 'issue') && contains(keys(@), 'comment')"),
+    # Issues: has issue (but not comment, checked above)
+    ("issues", "contains(keys(@), 'issue')"),
+    # Push: has ref AND commits keys
+    ("push", "contains(keys(@), 'ref') && contains(keys(@), 'commits')"),
+    # Release: has release key
+    ("release", "contains(keys(@), 'release')"),
+    # Workflow run: has workflow_run key
+    ("workflow_run", "contains(keys(@), 'workflow_run')"),
+    # Check run: has check_run key
+    ("check_run", "contains(keys(@), 'check_run')"),
+]
+
+# Lazy-initialized detector (created on first use)
+# Type annotation uses string literal to avoid forward reference issues
+_detector: detection.EventTypeDetector | None = None
+
+
+def _get_detector() -> detection.EventTypeDetector:
+    """Get or create the GitHub event type detector."""
+    from automation.event_schemas import detection
+
+    global _detector
+    if _detector is None:
+        _detector = detection.EventTypeDetector(GITHUB_DETECTION_RULES, source="github")
+    return _detector
+
+
+def detect_github_event_type(payload: dict[str, Any]) -> str:
+    """
+    Detect GitHub event type from payload structure.
+
+    Uses JMESPath expressions to identify the event type based on
+    which keys are present in the payload.
+
+    Args:
+        payload: The raw GitHub webhook payload
+
+    Returns:
+        The event type string (e.g., 'pull_request', 'push')
+
+    Raises:
+        ValueError: If event type cannot be determined from payload
+    """
+    return _get_detector().detect(payload)
+
+
+# =============================================================================
+# Parsing Functions
+# =============================================================================
+
+
 def parse_github_event(event_type: str, raw_payload: dict[str, Any]) -> GitHubEvent:
     """
     Parse a raw GitHub webhook payload into a typed event object.
 
     Args:
-        event_type: The event type from X-GitHub-Event header
+        event_type: The event type (from X-GitHub-Event header or detection)
         raw_payload: The raw webhook payload
 
     Returns:
@@ -379,6 +455,27 @@ def parse_github_event(event_type: str, raw_payload: dict[str, Any]) -> GitHubEv
     if cls is None:
         raise ValueError(f"Unknown GitHub event type: {event_type}")
     return cls.model_validate(raw_payload)
+
+
+def parse_github_event_auto(raw_payload: dict[str, Any]) -> GitHubEvent:
+    """
+    Parse a raw GitHub webhook payload by auto-detecting the event type.
+
+    This is the preferred method when the event type is not provided
+    (e.g., when forwarded from another service without the header).
+
+    Args:
+        raw_payload: The raw GitHub webhook payload
+
+    Returns:
+        A typed GitHubEvent subclass instance
+
+    Raises:
+        ValueError: If event type cannot be detected or is unsupported
+        ValidationError: If payload doesn't match expected structure
+    """
+    event_type = detect_github_event_type(raw_payload)
+    return parse_github_event(event_type, raw_payload)
 
 
 def get_supported_event_types() -> list[str]:

@@ -5,22 +5,27 @@ import pytest
 from automation.event_schemas import (
     parse_event,
 )
+from automation.event_schemas.detection import EventTypeDetector
 from automation.event_schemas.github import (
+    GITHUB_DETECTION_RULES,
     IssueCommentPayload,
     IssuesPayload,
     PullRequestPayload,
+    PullRequestReviewPayload,
     PushPayload,
     ReleasePayload,
+    detect_github_event_type,
+    parse_github_event_auto,
 )
 from automation.schemas import EventTrigger
 from automation.trigger_matcher import matches_trigger
 
 
 class TestGitHubEventParsing:
-    """Tests for GitHub event parsing."""
+    """Tests for GitHub event parsing with auto-detection."""
 
     def test_parse_pull_request_opened(self):
-        """Parse pull_request.opened event."""
+        """Parse pull_request.opened event via auto-detection."""
         payload = {
             "action": "opened",
             "number": 42,
@@ -44,7 +49,7 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        event = parse_event("github", payload, event_type="pull_request")
+        event = parse_event("github", payload)
 
         assert isinstance(event, PullRequestPayload)
         assert event.event_key == "pull_request.opened"
@@ -53,7 +58,7 @@ class TestGitHubEventParsing:
         assert event.pull_request.number == 42
 
     def test_parse_push_event(self):
-        """Parse push event."""
+        """Parse push event via auto-detection."""
         payload = {
             "ref": "refs/heads/main",
             "before": "abc123",
@@ -74,14 +79,14 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        event = parse_event("github", payload, event_type="push")
+        event = parse_event("github", payload)
 
         assert isinstance(event, PushPayload)
         assert event.event_key == "push"
         assert event.ref == "refs/heads/main"
 
     def test_parse_issues_event(self):
-        """Parse issues.opened event."""
+        """Parse issues.opened event via auto-detection."""
         payload = {
             "action": "opened",
             "issue": {
@@ -100,14 +105,14 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        event = parse_event("github", payload, event_type="issues")
+        event = parse_event("github", payload)
 
         assert isinstance(event, IssuesPayload)
         assert event.event_key == "issues.opened"
         assert event.issue.number == 10
 
     def test_parse_issue_comment_event(self):
-        """Parse issue_comment.created event."""
+        """Parse issue_comment.created event via auto-detection."""
         payload = {
             "action": "created",
             "comment": {
@@ -131,14 +136,14 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        event = parse_event("github", payload, event_type="issue_comment")
+        event = parse_event("github", payload)
 
         assert isinstance(event, IssueCommentPayload)
         assert event.event_key == "issue_comment.created"
         assert event.comment.body == "Test comment"
 
     def test_parse_release_event(self):
-        """Parse release.published event."""
+        """Parse release.published event via auto-detection."""
         payload = {
             "action": "published",
             "release": {
@@ -156,16 +161,16 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        event = parse_event("github", payload, event_type="release")
+        event = parse_event("github", payload)
 
         assert isinstance(event, ReleasePayload)
         assert event.event_key == "release.published"
         assert event.release.tag_name == "v1.0.0"
 
-    def test_parse_unknown_event_type(self):
-        """Unknown event type should raise ValueError."""
+    def test_parse_unknown_payload_raises(self):
+        """Unknown payload structure should raise ValueError."""
         payload = {
-            "action": "test",
+            "unknown_key": "test",
             "repository": {
                 "id": 123,
                 "name": "test-repo",
@@ -175,8 +180,8 @@ class TestGitHubEventParsing:
             "sender": {"id": 1, "login": "testuser"},
         }
 
-        with pytest.raises(ValueError, match="Unknown GitHub event type"):
-            parse_event("github", payload, event_type="unknown_event")
+        with pytest.raises(ValueError, match="Cannot detect github event type"):
+            parse_event("github", payload)
 
 
 class TestTriggerMatching:
@@ -605,18 +610,20 @@ class TestMalformedPayloads:
 
     def test_missing_required_fields(self):
         """Missing required fields should raise validation error."""
+        # Payload has pull_request key so detection works, but missing required fields
         payload = {
             "action": "opened",
-            # Missing pull_request, repository, sender
+            "pull_request": {},  # Empty - missing required fields
+            # Missing repository, sender
         }
 
         with pytest.raises(Exception):  # Pydantic ValidationError
-            parse_event("github", payload, event_type="pull_request")
+            parse_event("github", payload)
 
     def test_empty_payload(self):
-        """Empty payload should raise error."""
-        with pytest.raises(Exception):
-            parse_event("github", {}, event_type="push")
+        """Empty payload should raise detection error."""
+        with pytest.raises(ValueError, match="Cannot detect github event type"):
+            parse_event("github", {})
 
     def test_custom_webhook_missing_event_type(self):
         """Custom webhook with missing event key should raise ValueError."""
@@ -627,3 +634,272 @@ class TestMalformedPayloads:
 
         assert "Could not extract event_key" in str(exc_info.value)
         assert "missing.path" in str(exc_info.value)
+
+
+class TestEventTypeDetector:
+    """Tests for the JMESPath-based EventTypeDetector."""
+
+    def test_simple_key_detection(self):
+        """Detect event type from single key presence."""
+        # Use contains(keys(@), 'key') for reliable key existence checks
+        detector = EventTypeDetector(
+            [
+                ("release", "contains(keys(@), 'release')"),
+                ("push", "contains(keys(@), 'ref')"),
+            ]
+        )
+
+        assert detector.detect({"release": {}}) == "release"
+        assert detector.detect({"ref": "main"}) == "push"
+
+    def test_compound_key_detection(self):
+        """Detect event type from multiple key presence (AND)."""
+        detector = EventTypeDetector(
+            [
+                (
+                    "issue_comment",
+                    "contains(keys(@), 'issue') && contains(keys(@), 'comment')",
+                ),
+                ("issues", "contains(keys(@), 'issue')"),
+            ]
+        )
+
+        # Has both keys -> issue_comment
+        assert detector.detect({"issue": {}, "comment": {}}) == "issue_comment"
+        # Has only issue -> issues
+        assert detector.detect({"issue": {}}) == "issues"
+
+    def test_rule_order_specificity(self):
+        """More specific rules should come first and win."""
+        detector = EventTypeDetector(
+            [
+                (
+                    "pull_request_review",
+                    "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",
+                ),
+                ("pull_request", "contains(keys(@), 'pull_request')"),
+            ]
+        )
+
+        # Has both -> pull_request_review
+        assert (
+            detector.detect({"pull_request": {}, "review": {}}) == "pull_request_review"
+        )
+        # Has only pull_request -> pull_request
+        assert detector.detect({"pull_request": {}}) == "pull_request"
+
+    def test_no_match_raises(self):
+        """ValueError raised when no rule matches."""
+        detector = EventTypeDetector(
+            [("push", "contains(keys(@), 'ref') && contains(keys(@), 'commits')")]
+        )
+
+        with pytest.raises(ValueError, match="Cannot detect"):
+            detector.detect({"unknown_key": 123})
+
+    def test_detect_or_none(self):
+        """detect_or_none returns None instead of raising."""
+        detector = EventTypeDetector(
+            [("push", "contains(keys(@), 'ref') && contains(keys(@), 'commits')")]
+        )
+
+        assert detector.detect_or_none({"unknown": 1}) is None
+        assert detector.detect_or_none({"ref": "x", "commits": []}) == "push"
+
+    def test_invalid_expression_raises_at_init(self):
+        """Invalid JMESPath expression raises ValueError at init time."""
+        with pytest.raises(ValueError, match="Invalid detection rule"):
+            EventTypeDetector([("bad", "invalid(((")])
+
+    def test_supported_types(self):
+        """supported_types returns list of event types."""
+        detector = EventTypeDetector(
+            [
+                ("type_a", "contains(keys(@), 'a')"),
+                ("type_b", "contains(keys(@), 'b')"),
+            ]
+        )
+        assert detector.supported_types == ["type_a", "type_b"]
+
+
+class TestGitHubAutoDetection:
+    """Tests for GitHub event type auto-detection."""
+
+    def _base_payload(self) -> dict:
+        """Base payload with required fields."""
+        return {
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": "org/test-repo",
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
+
+    def test_detect_pull_request(self):
+        """Detect pull_request event."""
+        payload = {
+            **self._base_payload(),
+            "action": "opened",
+            "number": 42,
+            "pull_request": {
+                "number": 42,
+                "title": "Test PR",
+                "state": "open",
+                "head": {"ref": "feature", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"},
+                "user": {"id": 1, "login": "testuser"},
+            },
+        }
+
+        assert detect_github_event_type(payload) == "pull_request"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, PullRequestPayload)
+        assert event.event_key == "pull_request.opened"
+
+    def test_detect_pull_request_review(self):
+        """Detect pull_request_review event (has both pull_request AND review)."""
+        payload = {
+            **self._base_payload(),
+            "action": "submitted",
+            "review": {"state": "approved"},
+            "pull_request": {
+                "number": 42,
+                "title": "Test PR",
+                "state": "open",
+                "head": {"ref": "feature", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"},
+                "user": {"id": 1, "login": "testuser"},
+            },
+        }
+
+        assert detect_github_event_type(payload) == "pull_request_review"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, PullRequestReviewPayload)
+        assert event.event_key == "pull_request_review.submitted"
+
+    def test_detect_issue_comment(self):
+        """Detect issue_comment event (has both issue AND comment)."""
+        payload = {
+            **self._base_payload(),
+            "action": "created",
+            "issue": {
+                "number": 10,
+                "title": "Test issue",
+                "state": "open",
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "comment": {
+                "id": 1,
+                "body": "Test comment",
+                "user": {"id": 1, "login": "testuser"},
+            },
+        }
+
+        assert detect_github_event_type(payload) == "issue_comment"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, IssueCommentPayload)
+        assert event.event_key == "issue_comment.created"
+
+    def test_detect_issues(self):
+        """Detect issues event (has issue but NOT comment)."""
+        payload = {
+            **self._base_payload(),
+            "action": "opened",
+            "issue": {
+                "number": 10,
+                "title": "Test issue",
+                "state": "open",
+                "user": {"id": 1, "login": "testuser"},
+            },
+        }
+
+        assert detect_github_event_type(payload) == "issues"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, IssuesPayload)
+        assert event.event_key == "issues.opened"
+
+    def test_detect_push(self):
+        """Detect push event (has ref AND commits)."""
+        payload = {
+            **self._base_payload(),
+            "ref": "refs/heads/main",
+            "before": "abc123",
+            "after": "def456",
+            "commits": [],
+        }
+
+        assert detect_github_event_type(payload) == "push"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, PushPayload)
+        assert event.event_key == "push"
+
+    def test_detect_release(self):
+        """Detect release event."""
+        payload = {
+            **self._base_payload(),
+            "action": "published",
+            "release": {
+                "tag_name": "v1.0.0",
+                "name": "Release 1.0.0",
+            },
+        }
+
+        assert detect_github_event_type(payload) == "release"
+
+        event = parse_github_event_auto(payload)
+        assert isinstance(event, ReleasePayload)
+        assert event.event_key == "release.published"
+
+    def test_detect_unknown_raises(self):
+        """Unknown payload structure raises ValueError."""
+        payload = {
+            **self._base_payload(),
+            "unknown_event_type": {"data": "test"},
+        }
+
+        with pytest.raises(ValueError, match="Cannot detect github event type"):
+            detect_github_event_type(payload)
+
+    def test_parse_event_uses_auto_detection(self):
+        """parse_event() uses auto-detection for GitHub payloads."""
+        payload = {
+            **self._base_payload(),
+            "ref": "refs/heads/main",
+            "before": "abc",
+            "after": "def",
+            "commits": [],
+        }
+
+        event = parse_event("github", payload)
+        assert isinstance(event, PushPayload)
+        assert event.event_key == "push"
+
+
+class TestGitHubDetectionRules:
+    """Tests for GITHUB_DETECTION_RULES configuration."""
+
+    def test_rules_are_valid_jmespath(self):
+        """All detection rules should be valid JMESPath expressions."""
+        # This will raise if any expression is invalid
+        detector = EventTypeDetector(GITHUB_DETECTION_RULES, source="github")
+        assert len(detector.rules) == len(GITHUB_DETECTION_RULES)
+
+    def test_rules_cover_all_payload_classes(self):
+        """Detection rules should cover common event types."""
+        detector = EventTypeDetector(GITHUB_DETECTION_RULES, source="github")
+        supported = set(detector.supported_types)
+
+        # Core event types should be detectable
+        assert "pull_request" in supported
+        assert "pull_request_review" in supported
+        assert "issues" in supported
+        assert "issue_comment" in supported
+        assert "push" in supported
+        assert "release" in supported
