@@ -52,36 +52,20 @@ def _build_webhook_url(org_id: uuid.UUID, source: str) -> str:
     return f"{base_url}/v1/events/{org_id}/{source}"
 
 
-def _webhook_to_response(
-    webhook: CustomWebhook,
-    include_secret: str | None = None,
-) -> CustomWebhookResponse:
-    """Convert a CustomWebhook model to a response schema.
-
-    Args:
-        webhook: The webhook model to convert.
-        include_secret: If provided, return CustomWebhookCreateResponse with
-            this secret value. If None, return base CustomWebhookResponse.
-    """
-    webhook_url = _build_webhook_url(webhook.org_id, webhook.source)
-
-    base_fields = {
-        "id": webhook.id,
-        "org_id": webhook.org_id,
-        "name": webhook.name,
-        "source": webhook.source,
-        "webhook_url": webhook_url,
-        "event_key_expr": webhook.event_key_expr,
-        "signature_header": webhook.signature_header,
-        "enabled": webhook.enabled,
-        "created_at": webhook.created_at,
-        "updated_at": webhook.updated_at,
-    }
-
-    if include_secret is not None:
-        return CustomWebhookCreateResponse(**base_fields, webhook_secret=include_secret)
-
-    return CustomWebhookResponse(**base_fields)
+def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
+    """Convert a CustomWebhook model to a response schema."""
+    return CustomWebhookResponse(
+        id=webhook.id,
+        org_id=webhook.org_id,
+        name=webhook.name,
+        source=webhook.source,
+        webhook_url=_build_webhook_url(webhook.org_id, webhook.source),
+        event_key_expr=webhook.event_key_expr,
+        signature_header=webhook.signature_header,
+        enabled=webhook.enabled,
+        created_at=webhook.created_at,
+        updated_at=webhook.updated_at,
+    )
 
 
 def _webhook_to_create_response(
@@ -90,28 +74,15 @@ def _webhook_to_create_response(
 ) -> CustomWebhookCreateResponse:
     """Convert a CustomWebhook model to a create response schema.
 
-    Always returns CustomWebhookCreateResponse. The webhook_secret field
-    is only populated if the system generated it (not user-provided).
-
     Args:
         webhook: The webhook model to convert.
         generated_secret: System-generated secret to include, or None if
             user provided their own (won't be echoed back).
     """
-    webhook_url = _build_webhook_url(webhook.org_id, webhook.source)
-
+    base = _webhook_to_response(webhook)
     return CustomWebhookCreateResponse(
-        id=webhook.id,
-        org_id=webhook.org_id,
-        name=webhook.name,
-        source=webhook.source,
-        webhook_url=webhook_url,
-        webhook_secret=generated_secret,  # None if user-provided
-        event_key_expr=webhook.event_key_expr,
-        signature_header=webhook.signature_header,
-        enabled=webhook.enabled,
-        created_at=webhook.created_at,
-        updated_at=webhook.updated_at,
+        **base.model_dump(),
+        webhook_secret=generated_secret,
     )
 
 
