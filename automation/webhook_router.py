@@ -54,38 +54,59 @@ def _build_webhook_url(org_id: uuid.UUID, source: str) -> str:
 
 def _webhook_to_response(
     webhook: CustomWebhook,
-    generated_secret: str | None = None,
-) -> CustomWebhookResponse | CustomWebhookCreateResponse:
+    include_secret: str | None = None,
+) -> CustomWebhookResponse:
     """Convert a CustomWebhook model to a response schema.
 
     Args:
         webhook: The webhook model to convert.
-        generated_secret: If provided (system-generated a secret), include it
-            in the response. None means the user provided their own secret.
+        include_secret: If provided, return CustomWebhookCreateResponse with
+            this secret value. If None, return base CustomWebhookResponse.
     """
     webhook_url = _build_webhook_url(webhook.org_id, webhook.source)
 
-    if generated_secret is not None:
-        return CustomWebhookCreateResponse(
-            id=webhook.id,
-            org_id=webhook.org_id,
-            name=webhook.name,
-            source=webhook.source,
-            webhook_url=webhook_url,
-            webhook_secret=generated_secret,
-            event_key_expr=webhook.event_key_expr,
-            signature_header=webhook.signature_header,
-            enabled=webhook.enabled,
-            created_at=webhook.created_at,
-            updated_at=webhook.updated_at,
-        )
+    base_fields = {
+        "id": webhook.id,
+        "org_id": webhook.org_id,
+        "name": webhook.name,
+        "source": webhook.source,
+        "webhook_url": webhook_url,
+        "event_key_expr": webhook.event_key_expr,
+        "signature_header": webhook.signature_header,
+        "enabled": webhook.enabled,
+        "created_at": webhook.created_at,
+        "updated_at": webhook.updated_at,
+    }
 
-    return CustomWebhookResponse(
+    if include_secret is not None:
+        return CustomWebhookCreateResponse(**base_fields, webhook_secret=include_secret)
+
+    return CustomWebhookResponse(**base_fields)
+
+
+def _webhook_to_create_response(
+    webhook: CustomWebhook,
+    generated_secret: str | None = None,
+) -> CustomWebhookCreateResponse:
+    """Convert a CustomWebhook model to a create response schema.
+
+    Always returns CustomWebhookCreateResponse. The webhook_secret field
+    is only populated if the system generated it (not user-provided).
+
+    Args:
+        webhook: The webhook model to convert.
+        generated_secret: System-generated secret to include, or None if
+            user provided their own (won't be echoed back).
+    """
+    webhook_url = _build_webhook_url(webhook.org_id, webhook.source)
+
+    return CustomWebhookCreateResponse(
         id=webhook.id,
         org_id=webhook.org_id,
         name=webhook.name,
         source=webhook.source,
         webhook_url=webhook_url,
+        webhook_secret=generated_secret,  # None if user-provided
         event_key_expr=webhook.event_key_expr,
         signature_header=webhook.signature_header,
         enabled=webhook.enabled,
@@ -144,9 +165,7 @@ async def create_webhook(
 
     await session.refresh(webhook)
 
-    response = _webhook_to_response(webhook, generated_secret=generated_secret)
-    assert isinstance(response, CustomWebhookCreateResponse)
-    return response
+    return _webhook_to_create_response(webhook, generated_secret=generated_secret)
 
 
 @router.get("")
@@ -195,9 +214,7 @@ async def get_webhook(
             detail="Webhook not found",
         )
 
-    response = _webhook_to_response(webhook)
-    assert isinstance(response, CustomWebhookResponse)
-    return response
+    return _webhook_to_response(webhook)
 
 
 @router.patch("/{webhook_id}")
@@ -229,9 +246,7 @@ async def update_webhook(
     await session.commit()
     await session.refresh(webhook)
 
-    response = _webhook_to_response(webhook)
-    assert isinstance(response, CustomWebhookResponse)
-    return response
+    return _webhook_to_response(webhook)
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
