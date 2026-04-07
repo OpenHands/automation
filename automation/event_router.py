@@ -70,7 +70,7 @@ async def receive_event(
     For custom sources, the raw webhook payload is received directly.
 
     The payload signature is verified using:
-    - GITHUB_APP_WEBHOOK_SECRET for github
+    - AUTOMATION_WEBHOOK_SECRET for github (builtin)
     - Per-org webhook_secret from custom_webhooks table for custom sources
     """
     # 1. Read raw body for signature verification

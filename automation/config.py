@@ -54,9 +54,9 @@ class Settings(BaseSettings):
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
     cors_origins: str = ""
 
-    # Event-based triggers: Built-in integration secret
-    # This is the same secret used by the OpenHands server for GitHub webhook signing
-    github_app_webhook_secret: str = ""
+    # Event-based triggers: Shared secret for verifying webhook signatures
+    # Used by the OpenHands server when forwarding GitHub events
+    webhook_secret: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

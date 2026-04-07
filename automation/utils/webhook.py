@@ -32,7 +32,7 @@ logger = logging.getLogger("automation.utils.webhook")
 BuiltinConfigFunc = Callable[[Settings], str | None]
 
 BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
-    "github": lambda s: getattr(s, "github_app_webhook_secret", None),
+    "github": lambda s: s.webhook_secret or None,
 }
 
 

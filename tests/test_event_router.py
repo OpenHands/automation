@@ -103,7 +103,7 @@ async def test_receive_github_event_no_matching_automations(
 ):
     """Test receiving GitHub event with no matching automations."""
     # Set up the GitHub webhook secret
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     signature, body = sign_payload(github_push_payload, "test-secret")
 
@@ -133,7 +133,7 @@ async def test_receive_github_event_with_matching_automation(
     mock_authenticated_user,
 ):
     """Test receiving GitHub event that matches an automation."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Create an event-triggered automation
     automation = Automation(
@@ -178,7 +178,7 @@ async def test_receive_github_event_invalid_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that invalid signature is rejected."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     _, body = sign_payload(github_push_payload, "test-secret")
 
@@ -204,7 +204,7 @@ async def test_receive_github_event_missing_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that missing signature is rejected."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     _, body = sign_payload(github_push_payload, "test-secret")
 
@@ -226,7 +226,7 @@ async def test_receive_github_event_undetectable_payload(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that undetectable payload structure returns 400."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Payload with raw_payload that doesn't match any known GitHub event structure
     payload = {"raw_payload": {"data": "test"}}
@@ -252,7 +252,7 @@ async def test_receive_github_event_missing_raw_payload(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that missing raw_payload returns 400."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Payload with event_type but no raw_payload
     payload = {"event_type": "push"}
@@ -278,7 +278,7 @@ async def test_receive_github_event_malformed_payload(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that malformed payload returns 400."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Payload with event_type but invalid raw_payload for that type
     payload = {
@@ -307,7 +307,7 @@ async def test_receive_github_event_unknown_event_type(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that unknown GitHub event type returns 400."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     payload = {
         "event_type": "unknown_github_event",
@@ -338,7 +338,7 @@ async def test_receive_github_event_filter_mismatch(
     mock_authenticated_user,
 ):
     """Test that events not matching filters don't create runs."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Create automation that filters on different repo (using JMESPath filter)
     automation = Automation(
@@ -382,7 +382,7 @@ async def test_receive_unknown_source(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that unknown source without custom webhook returns 404."""
-    monkeypatch.setenv("AUTOMATION_GITHUB_APP_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     payload = {"data": "test"}
     signature, body = sign_payload(payload, "test-secret")
