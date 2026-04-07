@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.schemas import AutomationResponse, CronTrigger
+from automation.schemas import AutomationResponse, Trigger
 from automation.storage import FileStore, get_file_store
 from automation.utils.tarball_validation import build_internal_url
 
@@ -92,7 +92,13 @@ class CreatePromptAutomationRequest(BaseModel):
         max_length=50000,
         description="The prompt to execute in the automation",
     )
-    trigger: CronTrigger
+    trigger: Trigger = Field(
+        ...,
+        description=(
+            "Trigger configuration. Either a cron trigger (type: 'cron') "
+            "or an event trigger (type: 'event') for webhook-based automation."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
@@ -267,7 +273,13 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
-    trigger: CronTrigger
+    trigger: Trigger = Field(
+        ...,
+        description=(
+            "Trigger configuration. Either a cron trigger (type: 'cron') "
+            "or an event trigger (type: 'event') for webhook-based automation."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
