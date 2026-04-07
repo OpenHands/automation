@@ -33,7 +33,7 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.db import get_session
@@ -59,7 +59,6 @@ async def receive_event(
     source: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
 ) -> EventResponse:
     """
     Receive a webhook event from a source.
@@ -70,8 +69,8 @@ async def receive_event(
     For custom sources, the raw webhook payload is received directly.
 
     The payload signature is verified using:
-    - AUTOMATION_WEBHOOK_SECRET for github (builtin)
-    - Per-org webhook_secret from custom_webhooks table for custom sources
+    - AUTOMATION_WEBHOOK_SECRET for github (builtin, header: X-Hub-Signature-256)
+    - Per-org webhook_secret for custom sources (header configured per webhook)
     """
     # 1. Read raw body for signature verification
     body = await request.body()
@@ -90,16 +89,22 @@ async def receive_event(
             detail=f"Unknown webhook source: {source}",
         )
 
-    # 3. Verify signature
-    if not x_hub_signature_256:
+    # 3. Get signature from the configured header (source-specific)
+    signature = request.headers.get(config.signature_header)
+
+    if not signature:
         logger.warning(
-            "Missing signature for event from source=%s org_id=%s",
+            "Missing signature header '%s' for event from source=%s org_id=%s",
+            config.signature_header,
             source,
             org_id,
         )
-        raise HTTPException(status_code=401, detail="Missing signature")
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing signature header: {config.signature_header}",
+        )
 
-    if not verify_signature(body, x_hub_signature_256, config.secret):
+    if not verify_signature(body, signature, config.secret):
         logger.warning(
             "Invalid signature for event from source=%s org_id=%s",
             source,

@@ -54,20 +54,27 @@ def _build_webhook_url(org_id: uuid.UUID, source: str) -> str:
 
 def _webhook_to_response(
     webhook: CustomWebhook,
-    include_secret: bool = False,
+    generated_secret: str | None = None,
 ) -> CustomWebhookResponse | CustomWebhookCreateResponse:
-    """Convert a CustomWebhook model to a response schema."""
+    """Convert a CustomWebhook model to a response schema.
+
+    Args:
+        webhook: The webhook model to convert.
+        generated_secret: If provided (system-generated a secret), include it
+            in the response. None means the user provided their own secret.
+    """
     webhook_url = _build_webhook_url(webhook.org_id, webhook.source)
 
-    if include_secret:
+    if generated_secret is not None:
         return CustomWebhookCreateResponse(
             id=webhook.id,
             org_id=webhook.org_id,
             name=webhook.name,
             source=webhook.source,
             webhook_url=webhook_url,
-            webhook_secret=webhook.webhook_secret,
+            webhook_secret=generated_secret,
             event_key_expr=webhook.event_key_expr,
+            signature_header=webhook.signature_header,
             enabled=webhook.enabled,
             created_at=webhook.created_at,
             updated_at=webhook.updated_at,
@@ -80,6 +87,7 @@ def _webhook_to_response(
         source=webhook.source,
         webhook_url=webhook_url,
         event_key_expr=webhook.event_key_expr,
+        signature_header=webhook.signature_header,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -96,17 +104,30 @@ async def create_webhook(
     Register a new custom webhook source.
 
     Creates a webhook integration for receiving events from external services.
-    Returns a signing secret that must be configured in the external service.
 
-    **Important:** The `webhook_secret` is only returned on creation. Store it
-    securely - it cannot be retrieved later (only rotated).
+    **Secret handling:**
+    - If `webhook_secret` is provided, it will be used (not echoed in response).
+    - If not provided, one will be generated and included in the response.
+
+    **Important:** Generated secrets are only shown once. Store securely.
     """
+    # Determine secret: user-provided or system-generated
+    generated_secret: str | None = None
+    if data.webhook_secret:
+        # User provided their own secret
+        secret = data.webhook_secret
+    else:
+        # Generate one and remember to return it
+        secret = _generate_webhook_secret()
+        generated_secret = secret
+
     webhook = CustomWebhook(
         org_id=auth.org_id,
         name=data.name,
         source=data.source,
-        webhook_secret=_generate_webhook_secret(),
+        webhook_secret=secret,
         event_key_expr=data.event_key_expr,
+        signature_header=data.signature_header,
         enabled=True,
     )
 
@@ -123,7 +144,7 @@ async def create_webhook(
 
     await session.refresh(webhook)
 
-    response = _webhook_to_response(webhook, include_secret=True)
+    response = _webhook_to_response(webhook, generated_secret=generated_secret)
     assert isinstance(response, CustomWebhookCreateResponse)
     return response
 
@@ -189,7 +210,7 @@ async def update_webhook(
     """
     Update a webhook's configuration.
 
-    Only `name`, `event_key_expr`, and `enabled` can be updated.
+    Updatable fields: `name`, `event_key_expr`, `signature_header`, `enabled`.
     The `source` cannot be changed after creation.
     """
     webhook = await session.get(CustomWebhook, webhook_id)

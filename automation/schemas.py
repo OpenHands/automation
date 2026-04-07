@@ -339,6 +339,7 @@ class WebhookConfig(BaseModel):
     secret: str
     is_builtin: bool = False  # True for github
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
+    signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
 
     model_config = {"extra": "forbid"}
 
@@ -356,6 +357,10 @@ _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
 # Reserved source names (built-in integrations)
 RESERVED_SOURCES = frozenset({"github"})
+
+
+# Valid HTTP header name pattern
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]$")
 
 
 class CustomWebhookCreate(BaseModel):
@@ -382,6 +387,23 @@ class CustomWebhookCreate(BaseModel):
         description=(
             "JMESPath expression to extract event type from payload. "
             "Examples: 'type', 'event.type', 'type || event_name'"
+        ),
+    )
+    signature_header: str = Field(
+        default="X-Signature-256",
+        max_length=100,
+        description=(
+            "HTTP header name containing the HMAC signature. "
+            "Examples: 'X-Signature-256', 'Stripe-Signature', 'X-Slack-Signature'"
+        ),
+    )
+    webhook_secret: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=255,
+        description=(
+            "Optional signing secret. If not provided, one will be generated. "
+            "Use this when the external service provides a fixed secret."
         ),
     )
 
@@ -415,12 +437,24 @@ class CustomWebhookCreate(BaseModel):
             raise ValueError(f"Invalid JMESPath expression: {e}") from e
         return v
 
+    @field_validator("signature_header")
+    @classmethod
+    def validate_signature_header(cls, v: str) -> str:
+        """Validate HTTP header name format."""
+        if not _HEADER_NAME_RE.match(v):
+            raise ValueError(
+                "Header must be alphanumeric with hyphens, 1-100 chars, "
+                "starting with a letter"
+            )
+        return v
+
 
 class CustomWebhookUpdate(BaseModel):
     """Request schema for updating a custom webhook."""
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
+    signature_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
     @field_validator("event_key_expr")
@@ -438,6 +472,19 @@ class CustomWebhookUpdate(BaseModel):
             raise ValueError(f"Invalid JMESPath expression: {e}") from e
         return v
 
+    @field_validator("signature_header")
+    @classmethod
+    def validate_signature_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        if not _HEADER_NAME_RE.match(v):
+            raise ValueError(
+                "Header must be alphanumeric with hyphens, 1-100 chars, "
+                "starting with a letter"
+            )
+        return v
+
 
 class CustomWebhookResponse(BaseModel):
     """Response schema for custom webhook (without secret)."""
@@ -448,6 +495,7 @@ class CustomWebhookResponse(BaseModel):
     source: str
     webhook_url: str
     event_key_expr: str
+    signature_header: str
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -456,11 +504,18 @@ class CustomWebhookResponse(BaseModel):
 
 
 class CustomWebhookCreateResponse(CustomWebhookResponse):
-    """Response schema for webhook creation (includes secret, shown only once)."""
+    """Response schema for webhook creation.
 
-    webhook_secret: str = Field(
-        ...,
-        description="Webhook signing secret. Store securely - only shown on create.",
+    webhook_secret is only included when the system generated it (user didn't
+    provide one). If the user provided their own secret, it won't be echoed back.
+    """
+
+    webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Webhook signing secret (only shown if system-generated). "
+            "Store securely - only shown on create."
+        ),
     )
 
 

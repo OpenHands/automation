@@ -238,6 +238,12 @@ class CustomWebhook(Base):
     - "type" -> payload["type"]
     - "event.type" -> payload["event"]["type"]
     - "type || event.name" -> try payload["type"], then payload["event"]["name"]
+
+    The signature_header field specifies which HTTP header contains the HMAC
+    signature. Different providers use different headers:
+    - Stripe: "Stripe-Signature"
+    - Slack: "X-Slack-Signature"
+    - Generic: "X-Signature-256" (default)
     """
 
     __tablename__ = "custom_webhooks"
@@ -253,6 +259,11 @@ class CustomWebhook(Base):
     # Default "type" works for many webhooks (e.g., Stripe)
     event_key_expr: Mapped[str] = mapped_column(
         String(500), nullable=False, default="type"
+    )
+
+    # HTTP header name for HMAC signature (provider-specific)
+    signature_header: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="X-Signature-256"
     )
 
     created_at: Mapped[datetime] = mapped_column(

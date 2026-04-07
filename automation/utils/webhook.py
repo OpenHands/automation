@@ -107,7 +107,11 @@ async def get_webhook_config(
         config_func = BUILTIN_SOURCES[source]
         secret = config_func(settings)
         if secret:
-            return WebhookConfig(secret=secret, is_builtin=True)
+            return WebhookConfig(
+                secret=secret,
+                is_builtin=True,
+                signature_header="X-Hub-Signature-256",  # GitHub's header
+            )
         return None
 
     # Custom webhook - look up in database
@@ -124,6 +128,7 @@ async def get_webhook_config(
             secret=webhook.webhook_secret,
             is_builtin=False,
             event_key_expr=webhook.event_key_expr,
+            signature_header=webhook.signature_header,
         )
     return None
 

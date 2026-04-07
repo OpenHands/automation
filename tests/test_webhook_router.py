@@ -25,6 +25,8 @@ class TestCustomWebhookCreateSchema:
         assert data.name == "Stripe Payments"
         assert data.source == "stripe"
         assert data.event_key_expr == "type"
+        assert data.signature_header == "X-Signature-256"  # default
+        assert data.webhook_secret is None  # optional
 
     def test_source_normalized_to_lowercase(self):
         """Source should be normalized to lowercase."""
@@ -101,6 +103,53 @@ class TestCustomWebhookCreateSchema:
         data = CustomWebhookCreate(name="Test", source="test")
         assert data.event_key_expr == "type"
 
+    def test_custom_signature_header(self):
+        """Custom signature header can be specified."""
+        data = CustomWebhookCreate(
+            name="Stripe",
+            source="stripe",
+            signature_header="Stripe-Signature",
+        )
+        assert data.signature_header == "Stripe-Signature"
+
+    def test_signature_header_validation(self):
+        """Signature header must be valid HTTP header name."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(
+                name="Test",
+                source="test",
+                signature_header="Invalid Header!",
+            )
+        assert "alphanumeric" in str(exc_info.value).lower()
+
+    def test_signature_header_cannot_start_with_number(self):
+        """Signature header must start with a letter."""
+        with pytest.raises(ValidationError):
+            CustomWebhookCreate(
+                name="Test",
+                source="test",
+                signature_header="123-Header",
+            )
+
+    def test_user_provided_secret(self):
+        """User can provide their own webhook secret."""
+        data = CustomWebhookCreate(
+            name="External Service",
+            source="external",
+            webhook_secret="my-external-service-secret-key",
+        )
+        assert data.webhook_secret == "my-external-service-secret-key"
+
+    def test_user_provided_secret_min_length(self):
+        """User-provided secret must be at least 8 characters."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(
+                name="Test",
+                source="test",
+                webhook_secret="short",
+            )
+        assert "8" in str(exc_info.value)
+
 
 class TestCustomWebhookUpdateSchema:
     """Tests for CustomWebhookUpdate validation."""
@@ -110,6 +159,7 @@ class TestCustomWebhookUpdateSchema:
         data = CustomWebhookUpdate()
         assert data.name is None
         assert data.event_key_expr is None
+        assert data.signature_header is None
         assert data.enabled is None
 
     def test_partial_update(self):
@@ -128,6 +178,17 @@ class TestCustomWebhookUpdateSchema:
         with pytest.raises(ValidationError) as exc_info:
             CustomWebhookUpdate(event_key_expr="[invalid")
         assert "JMESPath" in str(exc_info.value)
+
+    def test_update_signature_header(self):
+        """Can update signature header."""
+        data = CustomWebhookUpdate(signature_header="X-Custom-Sig")
+        assert data.signature_header == "X-Custom-Sig"
+
+    def test_invalid_signature_header_update(self):
+        """Invalid signature header in update is rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookUpdate(signature_header="Invalid Header!")
+        assert "alphanumeric" in str(exc_info.value).lower()
 
 
 class TestReservedSources:
