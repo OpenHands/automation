@@ -181,7 +181,7 @@ class TestAuthIntegration:
                 transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
                 response = await client.get(
-                    "/v1",
+                    "/api/automation/v1",
                     headers={"Authorization": "Bearer real-key-123"},
                 )
 
@@ -213,7 +213,7 @@ class TestAuthIntegration:
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
-                response = await client.get("/v1")
+                response = await client.get("/api/automation/v1")
 
             assert response.status_code == 401
         finally:
@@ -243,7 +243,7 @@ class TestAuthIntegration:
                 transport=ASGITransport(app=app), base_url="http://test"
             ) as client:
                 response = await client.get(
-                    "/v1",
+                    "/api/automation/v1",
                     headers={"Authorization": "Bearer bad-key"},
                 )
 

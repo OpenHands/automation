@@ -132,11 +132,11 @@ def _build_cors_origins() -> list[str]:
     return origins
 
 
+BASE_PATH = "/api/automation"
+
+
 def _create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
-    settings = get_settings()
-    # root_path is derived from AUTOMATION_BASE_URL path component.
-    # e.g., https://app.all-hands.dev/api/automation -> /api/automation
     return FastAPI(
         title="OpenHands Automations Service",
         description=(
@@ -144,7 +144,6 @@ def _create_app() -> FastAPI:
         ),
         version="0.1.0",
         lifespan=lifespan,
-        root_path=settings.root_path,
     )
 
 
@@ -161,17 +160,17 @@ app.add_middleware(
 # Include uploads_router and preset_router BEFORE router to avoid route conflict.
 # The main router has /v1/{automation_id} which would match /v1/uploads
 # or /v1/preset/prompt and fail UUID validation if included first.
-app.include_router(uploads_router)
-app.include_router(preset_router)
-app.include_router(router)
+app.include_router(uploads_router, prefix=BASE_PATH)
+app.include_router(preset_router, prefix=BASE_PATH)
+app.include_router(router, prefix=BASE_PATH)
 
 
-@app.get("/health")
+@app.get(f"{BASE_PATH}/health")
 async def health():
     return {"status": "ok"}
 
 
-@app.get("/ready")
+@app.get(f"{BASE_PATH}/ready")
 async def readiness():
     """Readiness probe — checks DB connectivity.
 

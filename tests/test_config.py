@@ -3,35 +3,20 @@
 from automation.config import Settings
 
 
-class TestRootPathExtraction:
-    """Verify root_path is correctly extracted from base_url."""
+class TestResolvedBaseUrl:
+    """Verify resolved_base_url includes the /api/automation path."""
 
-    def test_root_path_with_path_component(self):
-        """Extract path from full URL."""
+    def test_resolved_base_url_with_base_url_set(self):
+        """When base_url is set, it is returned as-is."""
         settings = Settings(base_url="https://app.all-hands.dev/api/automation")
-        assert settings.root_path == "/api/automation"
+        assert settings.resolved_base_url == "https://app.all-hands.dev/api/automation"
 
-    def test_root_path_with_trailing_slash(self):
-        """Trailing slash should be stripped."""
-        settings = Settings(base_url="https://app.all-hands.dev/api/automation/")
-        assert settings.root_path == "/api/automation"
+    def test_resolved_base_url_fallback_includes_base_path(self):
+        """When base_url is empty, localhost fallback includes /api/automation."""
+        settings = Settings(base_url="", server_port=8000)
+        assert settings.resolved_base_url == "http://localhost:8000/api/automation"
 
-    def test_root_path_without_path(self):
-        """URL at root should return empty string."""
-        settings = Settings(base_url="https://app.all-hands.dev")
-        assert settings.root_path == ""
-
-    def test_root_path_with_only_slash(self):
-        """URL with only root path should return empty string."""
-        settings = Settings(base_url="https://app.all-hands.dev/")
-        assert settings.root_path == ""
-
-    def test_root_path_empty_base_url(self):
-        """Empty base_url should return empty string."""
-        settings = Settings(base_url="")
-        assert settings.root_path == ""
-
-    def test_root_path_default_base_url(self):
-        """Default settings (no base_url) should return empty root_path."""
-        settings = Settings()
-        assert settings.root_path == ""
+    def test_resolved_base_url_fallback_custom_port(self):
+        """Localhost fallback uses the configured server_port."""
+        settings = Settings(base_url="", server_port=9000)
+        assert settings.resolved_base_url == "http://localhost:9000/api/automation"

@@ -1,7 +1,6 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
-from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings
 
@@ -59,19 +58,7 @@ class Settings(BaseSettings):
     @property
     def resolved_base_url(self) -> str:
         """Public base URL with localhost fallback for dev."""
-        return self.base_url or f"http://localhost:{self.server_port}"
-
-    @property
-    def root_path(self) -> str:
-        """Root path for Swagger UI, derived from base_url.
-
-        When base_url is set (e.g., https://app.all-hands.dev/api/automation),
-        extracts the path component (/api/automation) for FastAPI's root_path.
-        This allows Swagger UI to correctly resolve the OpenAPI spec URL.
-        """
-        if self.base_url:
-            return urlparse(self.base_url).path.rstrip("/")
-        return ""
+        return self.base_url or f"http://localhost:{self.server_port}/api/automation"
 
 
 # Hardcoded internal URL scheme for uploaded tarballs.
