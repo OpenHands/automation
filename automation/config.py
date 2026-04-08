@@ -39,8 +39,9 @@ class Settings(BaseSettings):
     # API keys (called by the dispatcher before each automation run).
     service_key: str = ""
 
-    # Public URL for the automation service (used for sandbox callbacks).
-    # In production, this is the ingress URL (e.g., https://automation.all-hands.dev).
+    # Public base URL where this service is reachable (without /api/automation).
+    # Example: https://app.all-hands.dev or https://domain/acmecorp
+    # The /api/automation path is appended automatically by resolved_base_url.
     # If empty, falls back to http://localhost:{server_port} (dev only).
     base_url: str = ""
 
@@ -57,21 +58,25 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "AUTOMATION_"}
 
     @property
-    def resolved_base_url(self) -> str:
-        """Public base URL with localhost fallback for dev."""
-        return self.base_url or f"http://localhost:{self.server_port}"
+    def base_path(self) -> str:
+        """Route prefix derived from base_url path component + /api/automation.
 
-    @property
-    def root_path(self) -> str:
-        """Root path for Swagger UI, derived from base_url.
-
-        When base_url is set (e.g., https://app.all-hands.dev/api/automation),
-        extracts the path component (/api/automation) for FastAPI's root_path.
-        This allows Swagger UI to correctly resolve the OpenAPI spec URL.
+        Examples:
+            base_url=""                          -> /api/automation
+            base_url="https://domain"            -> /api/automation
+            base_url="https://domain/acmecorp"   -> /acmecorp/api/automation
         """
         if self.base_url:
-            return urlparse(self.base_url).path.rstrip("/")
-        return ""
+            prefix = urlparse(self.base_url).path.rstrip("/")
+        else:
+            prefix = ""
+        return f"{prefix}/api/automation"
+
+    @property
+    def resolved_base_url(self) -> str:
+        """Public base URL with /api/automation appended."""
+        base = self.base_url or f"http://localhost:{self.server_port}"
+        return f"{base.rstrip('/')}/api/automation"
 
 
 # Hardcoded internal URL scheme for uploaded tarballs.
