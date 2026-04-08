@@ -697,15 +697,6 @@ class TestEventTypeDetector:
         with pytest.raises(ValueError, match="Cannot detect"):
             detector.detect({"unknown_key": 123})
 
-    def test_detect_or_none(self):
-        """detect_or_none returns None instead of raising."""
-        detector = EventTypeDetector(
-            [("push", "contains(keys(@), 'ref') && contains(keys(@), 'commits')")]
-        )
-
-        assert detector.detect_or_none({"unknown": 1}) is None
-        assert detector.detect_or_none({"ref": "x", "commits": []}) == "push"
-
     def test_invalid_expression_raises_at_init(self):
         """Invalid JMESPath expression raises ValueError at init time."""
         with pytest.raises(ValueError, match="Invalid detection rule"):

@@ -125,21 +125,6 @@ class EventTypeDetector:
             f"Top-level keys: {list(payload.keys())[:10]}"
         )
 
-    def detect_or_none(self, payload: dict[str, Any]) -> str | None:
-        """
-        Detect event type from payload, returning None if no match.
-
-        Args:
-            payload: The raw webhook payload
-
-        Returns:
-            The detected event type string, or None if no rule matches
-        """
-        for rule in self._rules:
-            if rule.compiled.search(payload):
-                return rule.event_type
-        return None
-
     @property
     def supported_types(self) -> list[str]:
         """Get list of event types this detector can identify."""
