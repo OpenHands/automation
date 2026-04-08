@@ -32,7 +32,7 @@ def github_push_payload() -> dict:
     """Sample GitHub push event payload."""
     return {
         "event_type": "push",
-        "raw_payload": {
+        "payload": {
             "ref": "refs/heads/main",
             "before": "abc123",
             "after": "def456",
@@ -59,7 +59,7 @@ def github_pr_payload() -> dict:
     """Sample GitHub pull_request event payload."""
     return {
         "event_type": "pull_request",
-        "raw_payload": {
+        "payload": {
             "action": "opened",
             "pull_request": {
                 "id": 1,
@@ -228,8 +228,8 @@ async def test_receive_github_event_undetectable_payload(
     """Test that undetectable payload structure returns 400."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
-    # Payload with raw_payload that doesn't match any known GitHub event structure
-    payload = {"raw_payload": {"data": "test"}}
+    # Payload with payload that doesn't match any known GitHub event structure
+    payload = {"payload": {"data": "test"}}
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
@@ -246,15 +246,15 @@ async def test_receive_github_event_undetectable_payload(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_missing_raw_payload(
+async def test_receive_github_event_missing_payload(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that missing raw_payload returns 400."""
+    """Test that missing payload returns 400."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
-    # Payload with event_type but no raw_payload
+    # Payload with event_type but no payload
     payload = {"event_type": "push"}
     signature, body = sign_payload(payload, "test-secret")
 
@@ -268,7 +268,7 @@ async def test_receive_github_event_missing_raw_payload(
     )
 
     assert response.status_code == 400
-    assert "Missing raw_payload" in response.json()["detail"]
+    assert "Missing payload" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -280,10 +280,10 @@ async def test_receive_github_event_malformed_payload(
     """Test that malformed payload returns 400."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
-    # Payload with event_type but invalid raw_payload for that type
+    # Payload with event_type but invalid payload for that type
     payload = {
         "event_type": "push",
-        "raw_payload": {"invalid": "data"},  # Missing required fields
+        "payload": {"invalid": "data"},  # Missing required fields
     }
     signature, body = sign_payload(payload, "test-secret")
 
@@ -311,7 +311,7 @@ async def test_receive_github_event_unknown_event_type(
 
     payload = {
         "event_type": "unknown_github_event",
-        "raw_payload": {"data": "test"},
+        "payload": {"data": "test"},
     }
     signature, body = sign_payload(payload, "test-secret")
 

@@ -7,7 +7,7 @@ This module provides the interface for matching events against triggers.
 
 1. Match event source (github, linear, etc.)
 2. Match event key pattern (e.g., "pull_request.opened", "push")
-3. Evaluate JMESPath filter expression against the raw payload
+3. Evaluate JMESPath filter expression against the webhook payload
 
 The JMESPath filter enables powerful, decoupled filtering without
 source-specific code. Any JSON path in the payload can be matched.
@@ -28,7 +28,7 @@ def matches_trigger(
     trigger: EventTrigger,
     event_source: str,
     event_key: str,
-    raw_payload: dict[str, Any],
+    payload: dict[str, Any],
 ) -> bool:
     """
     Check if an event matches an event trigger.
@@ -37,7 +37,7 @@ def matches_trigger(
         trigger: The event trigger configuration
         event_source: Source of the event (e.g., 'github', 'linear')
         event_key: Event key (e.g., 'pull_request.opened', 'push')
-        raw_payload: The raw webhook payload for filter evaluation
+        payload: The webhook payload for filter evaluation
 
     Returns:
         True if the event matches all trigger conditions
@@ -62,7 +62,7 @@ def matches_trigger(
     # 3. Filter expression must evaluate to true (if specified)
     if trigger.filter:
         try:
-            if not evaluate_filter(trigger.filter, raw_payload):
+            if not evaluate_filter(trigger.filter, payload):
                 logger.debug(
                     "Filter did not match: %s for event %s",
                     trigger.filter,

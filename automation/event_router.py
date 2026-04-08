@@ -120,22 +120,22 @@ async def receive_event(
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
     # 5. Parse the event into a typed WebhookEvent
-    # raw_payload is the payload used for filter matching
+    # webhook_payload is the actual webhook payload used for filter matching
     try:
         if config.is_builtin:
-            # Built-in sources (github): extract raw_payload, auto-detect event type
-            if "raw_payload" not in payload:
+            # Built-in sources (github): extract nested payload, auto-detect event type
+            if "payload" not in payload:
                 raise HTTPException(
                     status_code=400,
-                    detail="Missing raw_payload in builtin source payload",
+                    detail="Missing payload in builtin source request",
                 )
-            raw_payload = payload["raw_payload"]
-            event: WebhookEvent = parse_event(source, raw_payload)
+            webhook_payload = payload["payload"]
+            event: WebhookEvent = parse_event(source, webhook_payload)
         else:
             # Custom webhooks: extract event_key using JMESPath expression
-            raw_payload = payload
+            webhook_payload = payload
             event = parse_event(
-                source, raw_payload, event_key_expr=config.event_key_expr
+                source, webhook_payload, event_key_expr=config.event_key_expr
             )
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
@@ -155,8 +155,8 @@ async def receive_event(
     matched_automations = []
 
     for automation, trigger in automations:
-        # Match trigger against raw payload using JMESPath filter
-        if matches_trigger(trigger, source, event.event_key, raw_payload):
+        # Match trigger against webhook payload using JMESPath filter
+        if matches_trigger(trigger, source, event.event_key, webhook_payload):
             matched_automations.append(automation)
 
     logger.info(
@@ -168,9 +168,11 @@ async def receive_event(
 
     # 7. Create PENDING runs for matched automations
     # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
-    # For custom webhooks, use the raw payload directly
+    # For custom webhooks, use the webhook payload directly
     event_payload = (
-        event.model_dump(mode="json") if hasattr(event, "model_dump") else raw_payload
+        event.model_dump(mode="json")
+        if hasattr(event, "model_dump")
+        else webhook_payload
     )
 
     run_ids: list[str] = []

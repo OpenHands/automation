@@ -436,13 +436,13 @@ def detect_github_event_type(payload: dict[str, Any]) -> str:
 # =============================================================================
 
 
-def parse_github_event(event_type: str, raw_payload: dict[str, Any]) -> GitHubEvent:
+def parse_github_event(event_type: str, payload: dict[str, Any]) -> GitHubEvent:
     """
     Parse a raw GitHub webhook payload into a typed event object.
 
     Args:
         event_type: The event type (from X-GitHub-Event header or detection)
-        raw_payload: The raw webhook payload
+        payload: The raw webhook payload
 
     Returns:
         A typed GitHubEvent subclass instance
@@ -454,10 +454,10 @@ def parse_github_event(event_type: str, raw_payload: dict[str, Any]) -> GitHubEv
     cls = GITHUB_PAYLOAD_CLASSES.get(event_type)
     if cls is None:
         raise ValueError(f"Unknown GitHub event type: {event_type}")
-    return cls.model_validate(raw_payload)
+    return cls.model_validate(payload)
 
 
-def parse_github_event_auto(raw_payload: dict[str, Any]) -> GitHubEvent:
+def parse_github_event_auto(payload: dict[str, Any]) -> GitHubEvent:
     """
     Parse a raw GitHub webhook payload by auto-detecting the event type.
 
@@ -465,7 +465,7 @@ def parse_github_event_auto(raw_payload: dict[str, Any]) -> GitHubEvent:
     (e.g., when forwarded from another service without the header).
 
     Args:
-        raw_payload: The raw GitHub webhook payload
+        payload: The raw GitHub webhook payload
 
     Returns:
         A typed GitHubEvent subclass instance
@@ -474,8 +474,8 @@ def parse_github_event_auto(raw_payload: dict[str, Any]) -> GitHubEvent:
         ValueError: If event type cannot be detected or is unsupported
         ValidationError: If payload doesn't match expected structure
     """
-    event_type = detect_github_event_type(raw_payload)
-    return parse_github_event(event_type, raw_payload)
+    event_type = detect_github_event_type(payload)
+    return parse_github_event(event_type, payload)
 
 
 def get_supported_event_types() -> list[str]:
