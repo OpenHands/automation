@@ -164,12 +164,17 @@ app.include_router(preset_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 
+# Static /health and /ready paths are a convenience for k8s probes — the fixed
+# path requires less templating.  Base-path endpoints are still available for
+# publicly-routed traffic like integration tests.
 @app.get("/health")
+@app.get(f"{_base_path}/health")
 async def health():
     return {"status": "ok"}
 
 
 @app.get("/ready")
+@app.get(f"{_base_path}/ready")
 async def readiness():
     """Readiness probe — checks DB connectivity.
 
