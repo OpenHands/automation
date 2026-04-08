@@ -197,7 +197,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -239,7 +241,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -272,7 +276,9 @@ class TestCreateAutomationFromPrompt:
             "timeout": 300,
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -300,7 +306,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -311,7 +319,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -323,7 +333,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -335,7 +347,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "invalid-cron"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -346,7 +360,9 @@ class TestCreateAutomationFromPrompt:
             "prompt": "Do something",
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -361,7 +377,9 @@ class TestCreateAutomationFromPrompt:
             "timeout": 120,
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -375,7 +393,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -391,7 +411,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 201
 
@@ -412,7 +434,9 @@ class TestCreateAutomationFromPrompt:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/prompt", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
 
         assert response.status_code == 500
 
@@ -633,7 +657,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -681,7 +707,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -716,7 +744,9 @@ class TestCreateAutomationFromPlugin:
             "timeout": 300,
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -745,7 +775,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -758,7 +790,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -770,7 +804,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -783,7 +819,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "invalid-cron"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 422
 
@@ -804,7 +842,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
 
@@ -836,7 +876,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 500
 
@@ -851,7 +893,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -880,7 +924,9 @@ class TestCreateAutomationFromPlugin:
             "trigger": {"type": "cron", "schedule": "0 0 * * *"},
         }
 
-        response = await async_client.post("/api/automation/v1/preset/plugin", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
 
         assert response.status_code == 201
 
