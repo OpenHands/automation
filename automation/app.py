@@ -134,10 +134,7 @@ def _build_cors_origins() -> list[str]:
 
 def _create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
-    settings = get_settings()
-    base_path = settings.base_path
-
-    application = FastAPI(
+    return FastAPI(
         title="OpenHands Automations Service",
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
@@ -146,43 +143,45 @@ def _create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=_build_cors_origins(),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Include uploads_router and preset_router BEFORE router to avoid route conflict.
-    # The main router has /v1/{automation_id} which would match /v1/uploads
-    # or /v1/preset/prompt and fail UUID validation if included first.
-    application.include_router(uploads_router, prefix=base_path)
-    application.include_router(preset_router, prefix=base_path)
-    application.include_router(router, prefix=base_path)
-
-    @application.get(f"{base_path}/health")
-    async def health():
-        return {"status": "ok"}
-
-    @application.get(f"{base_path}/ready")
-    async def readiness():
-        """Readiness probe — checks DB connectivity.
-
-        Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
-        """
-        try:
-            async with application.state.engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-            return {"status": "ready"}
-        except Exception as e:
-            logger.error("Readiness check failed: %s", e, exc_info=True)
-            return JSONResponse(
-                status_code=503,
-                content={"status": "not_ready", "error": "database unavailable"},
-            )
-
-    return application
-
 
 app = _create_app()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_build_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_base_path = get_settings().base_path
+
+# Include uploads_router and preset_router BEFORE router to avoid route conflict.
+# The main router has /v1/{automation_id} which would match /v1/uploads
+# or /v1/preset/prompt and fail UUID validation if included first.
+app.include_router(uploads_router, prefix=_base_path)
+app.include_router(preset_router, prefix=_base_path)
+app.include_router(router, prefix=_base_path)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness():
+    """Readiness probe — checks DB connectivity.
+
+    Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
+    """
+    try:
+        async with app.state.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return {"status": "ready"}
+    except Exception as e:
+        logger.error("Readiness check failed: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "error": "database unavailable"},
+        )
