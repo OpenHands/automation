@@ -72,7 +72,7 @@ The frontend application uses the following environment variables:
 | `VITE_OPENHANDS_HOST`  | The OpenHands backend host with port                 | `127.0.0.1:3030`  |
 | `VITE_FRONTEND_PORT`   | Port to run the frontend application                 | `3002`            |
 
-You can create a `.env` file in the frontend directory with these variables.
+You can create a `.env` file in the frontend directory based on the `.env.example` file.
 
 ### Project Structure
 
