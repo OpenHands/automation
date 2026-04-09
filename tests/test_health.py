@@ -10,7 +10,7 @@ class TestHealthEndpoints:
 
     def test_health_endpoint(self, sync_client):
         """GET /health returns ok status."""
-        response = sync_client.get("/health")
+        response = sync_client.get("/api/automation/health")
 
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
@@ -18,7 +18,7 @@ class TestHealthEndpoints:
     async def test_ready_endpoint_success(self, async_client):
         """GET /ready returns ready status when DB is available."""
         # async_client fixture sets up app.state.engine
-        response = await async_client.get("/ready")
+        response = await async_client.get("/api/automation/ready")
 
         assert response.status_code == 200
         assert response.json() == {"status": "ready"}
@@ -32,7 +32,7 @@ class TestHealthEndpoints:
         app.state.engine = mock_engine
 
         try:
-            response = await async_client.get("/ready")
+            response = await async_client.get("/api/automation/ready")
 
             assert response.status_code == 503
             data = response.json()

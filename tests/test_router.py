@@ -26,7 +26,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run script.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -52,7 +52,7 @@ class TestCreateAutomation:
             "entrypoint": "python main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -68,7 +68,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run script.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
         detail = response.json()["detail"]
@@ -83,7 +83,7 @@ class TestCreateAutomation:
         """Missing required fields returns 422."""
         payload = {"name": "Incomplete"}
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -95,7 +95,7 @@ class TestCreateAutomation:
             "tarball_path": "s3://bucket/path/to/code.tar.gz",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -108,7 +108,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
         assert any(
@@ -126,7 +126,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         # Should pass schema validation (422 would mean schema rejected it)
         # Will get 404 because the upload doesn't exist, but that's fine -
@@ -142,7 +142,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py; rm -rf /",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -155,7 +155,7 @@ class TestCreateAutomation:
             "entrypoint": "/usr/bin/python main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -169,7 +169,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -183,7 +183,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -197,7 +197,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -211,7 +211,7 @@ class TestCreateAutomation:
             "entrypoint": "uv run main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         assert response.json()["setup_script_path"] == "scripts/setup.sh"
@@ -226,7 +226,7 @@ class TestCreateAutomation:
             "timeout": 300,
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -241,7 +241,7 @@ class TestCreateAutomation:
             "entrypoint": "python main.py",
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -257,7 +257,7 @@ class TestCreateAutomation:
             "timeout": 0,
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -271,7 +271,7 @@ class TestCreateAutomation:
             "timeout": -100,
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -285,7 +285,7 @@ class TestCreateAutomation:
             "timeout": 601,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 422
 
@@ -299,7 +299,7 @@ class TestCreateAutomation:
             "timeout": 600,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
         }
 
-        response = await async_client.post("/v1", json=payload)
+        response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
@@ -311,7 +311,7 @@ class TestListAutomations:
 
     async def test_list_automations_empty(self, async_client):
         """No automations returns empty list."""
-        response = await async_client.get("/v1")
+        response = await async_client.get("/api/automation/v1")
 
         assert response.status_code == 200
         data = response.json()
@@ -332,7 +332,7 @@ class TestListAutomations:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get("/v1")
+        response = await async_client.get("/api/automation/v1")
 
         assert response.status_code == 200
         data = response.json()
@@ -355,7 +355,7 @@ class TestListAutomations:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get("/v1")
+        response = await async_client.get("/api/automation/v1")
 
         assert response.status_code == 200
         data = response.json()
@@ -376,7 +376,7 @@ class TestListAutomations:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get("/v1")
+        response = await async_client.get("/api/automation/v1")
 
         assert response.status_code == 200
         data = response.json()
@@ -398,7 +398,7 @@ class TestListAutomations:
             async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get("/v1?limit=2&offset=0")
+        response = await async_client.get("/api/automation/v1?limit=2&offset=0")
 
         assert response.status_code == 200
         data = response.json()
@@ -422,7 +422,7 @@ class TestGetAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 200
         data = response.json()
@@ -433,7 +433,7 @@ class TestGetAutomation:
         """Invalid ID returns 404."""
         fake_id = uuid.uuid4()
 
-        response = await async_client.get(f"/v1/{fake_id}")
+        response = await async_client.get(f"/api/automation/v1/{fake_id}")
 
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
@@ -452,7 +452,7 @@ class TestGetAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 404
 
@@ -469,7 +469,7 @@ class TestGetAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 404
 
@@ -492,7 +492,7 @@ class TestDeleteAutomation:
         await async_session.commit()
         automation_id = automation.id
 
-        response = await async_client.delete(f"/v1/{automation_id}")
+        response = await async_client.delete(f"/api/automation/v1/{automation_id}")
 
         assert response.status_code == 204
 
@@ -505,7 +505,7 @@ class TestDeleteAutomation:
         """DELETE on non-existent ID returns 404."""
         fake_id = uuid.uuid4()
 
-        response = await async_client.delete(f"/v1/{fake_id}")
+        response = await async_client.delete(f"/api/automation/v1/{fake_id}")
 
         assert response.status_code == 404
 
@@ -523,7 +523,7 @@ class TestDeleteAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.delete(f"/v1/{automation.id}")
+        response = await async_client.delete(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 404
 
@@ -545,7 +545,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"name": "Updated Name"},
         )
 
@@ -568,7 +568,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"trigger": {"type": "cron", "schedule": "*/5 * * * *"}},
         )
 
@@ -590,7 +590,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"enabled": False},
         )
 
@@ -602,7 +602,7 @@ class TestUpdateAutomation:
         fake_id = uuid.uuid4()
 
         response = await async_client.patch(
-            f"/v1/{fake_id}",
+            f"/api/automation/v1/{fake_id}",
             json={"name": "Updated"},
         )
 
@@ -622,7 +622,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"name": "Hacked"},
         )
 
@@ -643,7 +643,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"timeout": 120},
         )
 
@@ -664,7 +664,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"timeout": -10},
         )
 
@@ -686,7 +686,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         response = await async_client.patch(
-            f"/v1/{automation.id}",
+            f"/api/automation/v1/{automation.id}",
             json={"timeout": 700},  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
         )
 
@@ -709,7 +709,9 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(f"/v1/{automation.id}/dispatch")
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -725,7 +727,7 @@ class TestDispatchAutomation:
         """Dispatching a nonexistent automation returns 404."""
         fake_id = uuid.uuid4()
 
-        response = await async_client.post(f"/v1/{fake_id}/dispatch")
+        response = await async_client.post(f"/api/automation/v1/{fake_id}/dispatch")
 
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
@@ -744,7 +746,9 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(f"/v1/{automation.id}/dispatch")
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
 
         assert response.status_code == 404
 
@@ -761,7 +765,9 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.post(f"/v1/{automation.id}/dispatch")
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
 
         assert response.status_code == 404
 
@@ -778,8 +784,8 @@ class TestDispatchAutomation:
         async_session.add(automation)
         await async_session.commit()
 
-        resp1 = await async_client.post(f"/v1/{automation.id}/dispatch")
-        resp2 = await async_client.post(f"/v1/{automation.id}/dispatch")
+        resp1 = await async_client.post(f"/api/automation/v1/{automation.id}/dispatch")
+        resp2 = await async_client.post(f"/api/automation/v1/{automation.id}/dispatch")
 
         assert resp1.status_code == 201
         assert resp2.status_code == 201
@@ -809,7 +815,9 @@ class TestDispatchAutomation:
 
         assert automation.last_triggered_at is None
 
-        response = await async_client.post(f"/v1/{automation.id}/dispatch")
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
 
         assert response.status_code == 201
 
@@ -834,7 +842,7 @@ class TestListAutomationRuns:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 200
         data = response.json()
@@ -855,12 +863,14 @@ class TestListAutomationRuns:
         await async_session.commit()
 
         # Dispatch a run
-        dispatch_resp = await async_client.post(f"/v1/{automation.id}/dispatch")
+        dispatch_resp = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
         assert dispatch_resp.status_code == 201
         run_id = dispatch_resp.json()["id"]
 
         # List runs
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 200
         data = response.json()
@@ -901,7 +911,7 @@ class TestListAutomationRuns:
         await async_session.commit()
 
         # List runs
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 200
         data = response.json()
@@ -926,12 +936,14 @@ class TestListAutomationRuns:
 
         # Dispatch 5 runs
         for _ in range(5):
-            resp = await async_client.post(f"/v1/{automation.id}/dispatch")
+            resp = await async_client.post(
+                f"/api/automation/v1/{automation.id}/dispatch"
+            )
             assert resp.status_code == 201
 
         # Get first page
         response = await async_client.get(
-            f"/v1/{automation.id}/runs",
+            f"/api/automation/v1/{automation.id}/runs",
             params={"limit": 2, "offset": 0},
         )
 
@@ -942,7 +954,7 @@ class TestListAutomationRuns:
 
         # Get second page
         response = await async_client.get(
-            f"/v1/{automation.id}/runs",
+            f"/api/automation/v1/{automation.id}/runs",
             params={"limit": 2, "offset": 2},
         )
 
@@ -955,7 +967,7 @@ class TestListAutomationRuns:
         """Listing runs for nonexistent automation returns 404."""
         fake_id = uuid.uuid4()
 
-        response = await async_client.get(f"/v1/{fake_id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{fake_id}/runs")
 
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
@@ -973,7 +985,7 @@ class TestListAutomationRuns:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 404
 
@@ -991,7 +1003,7 @@ class TestListAutomationRuns:
         async_session.add(automation)
         await async_session.commit()
 
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 404
 
@@ -1009,7 +1021,7 @@ class TestListAutomationRuns:
         await async_session.commit()
 
         response = await async_client.get(
-            f"/v1/{automation.id}/runs",
+            f"/api/automation/v1/{automation.id}/runs",
             params={"limit": 101},
         )
 
@@ -1040,7 +1052,7 @@ class TestListAutomationRuns:
         await async_session.commit()
 
         # List runs without specifying limit
-        response = await async_client.get(f"/v1/{automation.id}/runs")
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
 
         assert response.status_code == 200
         data = response.json()
