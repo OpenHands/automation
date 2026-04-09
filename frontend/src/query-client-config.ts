@@ -1,8 +1,6 @@
 import { QueryCache, MutationCache, QueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
-import i18next from "i18next";
-import toast from "react-hot-toast";
-import { I18nKey } from "./i18n/declaration";
+import { displayErrorToast } from "./utils/custom-toast-handlers";
 
 const retrieveErrorMessage = (error: unknown): string | null => {
   if (error instanceof AxiosError) {
@@ -37,15 +35,15 @@ export const queryClient = new QueryClient({
       }
 
       if (!query.meta?.disableToast) {
-        const errorMessage =
-          retrieveErrorMessage(error) || i18next.t(I18nKey.ERROR$GENERIC);
+        const errorMessage = retrieveErrorMessage(error);
 
-        if (!shownErrors.has(errorMessage)) {
-          toast.error(errorMessage);
-          shownErrors.add(errorMessage);
+        const key = errorMessage || "generic";
+        if (!shownErrors.has(key)) {
+          displayErrorToast(errorMessage);
+          shownErrors.add(key);
 
           setTimeout(() => {
-            shownErrors.delete(errorMessage);
+            shownErrors.delete(key);
           }, 3000);
         }
       }
@@ -56,9 +54,8 @@ export const queryClient = new QueryClient({
       handle401Error(error, queryClient);
 
       if (!mutation?.meta?.disableToast) {
-        const message =
-          retrieveErrorMessage(error) || i18next.t(I18nKey.ERROR$GENERIC);
-        toast.error(message);
+        const message = retrieveErrorMessage(error);
+        displayErrorToast(message);
       }
     },
   }),

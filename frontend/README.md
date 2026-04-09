@@ -50,6 +50,35 @@ The dev server proxies API requests to:
 - `/api/automation/*` → Automation Service (`127.0.0.1:8000`)
 - `/api/*` → OpenHands Backend (`127.0.0.1:3030`)
 
+### Running with Mocked APIs (No Backend Required)
+
+For frontend development without running any backend services, use the mock development mode:
+
+```sh
+npm run dev:mock
+```
+
+This starts the application with [MSW (Mock Service Worker)](https://mswjs.io/) intercepting all API requests and returning realistic mock responses. No Automation Service or OpenHands Backend is needed.
+
+**What gets mocked:**
+
+- `GET /api/automation/v1` — Returns a list of 5 sample automations (3 active, 2 inactive)
+- `GET /api/automation/v1/:id` — Returns automation detail
+- `PATCH /api/automation/v1/:id` — Simulates enable/disable toggle
+- `DELETE /api/automation/v1/:id` — Simulates deletion
+- `POST /api/authenticate` — Always returns 200 OK
+- `GET /api/me` — Returns mock user context with owner permissions
+
+Mock data is stateful within a session — toggling or deleting an automation persists until the page is refreshed.
+
+**How it works:**
+
+The `VITE_MOCK_API` environment variable controls mock mode. When set to `true`, the MSW browser service worker is registered in `entry.client.tsx` before the app renders. Mock handlers are defined in `src/mocks/` and follow the same API contracts as the real backends.
+
+| Variable         | `npm run dev` | `npm run dev:mock` |
+| ---------------- | ------------- | ------------------ |
+| `VITE_MOCK_API`  | `false`       | `true`             |
+
 ### Building for Production
 
 ```sh
@@ -86,6 +115,7 @@ frontend
 │   ├── constants        # Application constants
 │   ├── hooks            # Custom React hooks
 │   ├── i18n             # Internationalization (declaration, config)
+│   ├── mocks            # MSW mock handlers and fixtures (dev:mock)
 │   ├── icons            # SVG icons
 │   ├── routes           # React Router route components
 │   ├── stores           # Zustand state stores

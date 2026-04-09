@@ -4,6 +4,7 @@ import "./tailwind.css";
 import "./index.css";
 import React from "react";
 import { Toaster } from "react-hot-toast";
+import { TOAST_OPTIONS } from "./utils/custom-toast-handlers";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -18,7 +19,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {children}
         <ScrollRestoration />
         <Scripts />
-        <Toaster />
+        <Toaster toastOptions={TOAST_OPTIONS} />
       </body>
     </html>
   );

@@ -3,6 +3,7 @@ import viteTsconfigPaths from "vite-tsconfig-paths";
 import { reactRouter } from "@react-router/dev/vite";
 import { configDefaults } from "vitest/config";
 import tailwindcss from "@tailwindcss/vite";
+import svgr from "vite-plugin-svgr";
 
 export default defineConfig(({ mode }) => {
   const {
@@ -18,6 +19,7 @@ export default defineConfig(({ mode }) => {
       !process.env.VITEST && reactRouter(),
       viteTsconfigPaths(),
       tailwindcss(),
+      svgr(),
     ],
     optimizeDeps: {
       include: [

@@ -1,0 +1,98 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { vi, describe, it, expect } from "vitest";
+import { MemoryRouter } from "react-router";
+import { AutomationCard } from "#/components/automations/automation-card";
+import type { Automation } from "#/types/automation";
+
+const mockNavigate = vi.fn();
+vi.mock("react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router")>()),
+  useNavigate: () => mockNavigate,
+}));
+
+const mockAutomation: Automation = {
+  id: "abc-123",
+  name: "PR Triage Digest",
+  description: "Summarize new pull requests.",
+  trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
+  enabled: true,
+  repository: "acme/frontend-app",
+  model: "Claude Opus",
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-03-01T00:00:00Z",
+};
+
+function renderCard(
+  automation = mockAutomation,
+  onToggle = vi.fn(),
+  onDelete = vi.fn(),
+) {
+  return render(
+    <MemoryRouter>
+      <AutomationCard
+        automation={automation}
+        onToggle={onToggle}
+        onDelete={onDelete}
+      />
+    </MemoryRouter>,
+  );
+}
+
+describe("AutomationCard", () => {
+  it("renders automation name, description, and metadata chips", () => {
+    renderCard();
+
+    expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    expect(
+      screen.getByText("Summarize new pull requests."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("acme/frontend-app")).toBeInTheDocument();
+    expect(screen.getByText("Weekdays at 09:00")).toBeInTheDocument();
+    expect(screen.getByText("Claude Opus")).toBeInTheDocument();
+  });
+
+  it("navigates to detail page when card is clicked", async () => {
+    const user = userEvent.setup();
+    renderCard();
+
+    await user.click(screen.getByText("PR Triage Digest"));
+
+    expect(mockNavigate).toHaveBeenCalledWith("/abc-123");
+  });
+
+  it("calls onToggle without navigating when toggle is clicked", async () => {
+    const onToggle = vi.fn();
+    const user = userEvent.setup();
+    mockNavigate.mockClear();
+    renderCard(mockAutomation, onToggle);
+
+    await user.click(screen.getByRole("switch"));
+
+    expect(onToggle).toHaveBeenCalledWith("abc-123", true);
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("calls onDelete via kebab menu without navigating", async () => {
+    const onDelete = vi.fn();
+    const user = userEvent.setup();
+    mockNavigate.mockClear();
+    renderCard(mockAutomation, vi.fn(), onDelete);
+
+    await user.click(screen.getByLabelText("Automation actions"));
+    await user.click(screen.getByText("AUTOMATIONS$DELETE"));
+
+    expect(onDelete).toHaveBeenCalledWith("abc-123");
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("shows trigger type when schedule_human is not available", () => {
+    const automation = {
+      ...mockAutomation,
+      trigger: { type: "cron" },
+    };
+    renderCard(automation);
+
+    expect(screen.getByText("cron")).toBeInTheDocument();
+  });
+});
