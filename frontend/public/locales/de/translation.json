@@ -1,0 +1,12 @@
+{
+  "AUTOMATIONS$TITLE": "Automatisierungen",
+  "AUTOMATIONS$DESCRIPTION": "Verwalten Sie Ihre OpenHands-Automatisierungen",
+  "AUTOMATIONS$EMPTY": "Ihre Automatisierungen werden hier angezeigt.",
+  "AUTOMATIONS$DETAIL$TITLE": "Automatisierungsdetails",
+  "AUTOMATIONS$DETAIL$BACK": "Zurück zu Automatisierungen",
+  "AUTOMATIONS$DETAIL$ID_LABEL": "Automatisierungs-ID:",
+  "AUTOMATIONS$DETAIL$PLACEHOLDER": "Automatisierungsdetails werden hier angezeigt.",
+  "ERROR$GENERIC": "Ein Fehler ist aufgetreten. Bitte versuchen Sie es erneut.",
+  "ERROR$UNKNOWN": "Ein unbekannter Fehler ist aufgetreten.",
+  "ERROR$SOMETHING_WENT_WRONG": "Etwas ist schiefgelaufen"
+}

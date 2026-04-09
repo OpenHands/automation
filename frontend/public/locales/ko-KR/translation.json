@@ -1,0 +1,12 @@
+{
+  "AUTOMATIONS$TITLE": "자동화",
+  "AUTOMATIONS$DESCRIPTION": "OpenHands 자동화 관리",
+  "AUTOMATIONS$EMPTY": "자동화가 여기에 표시됩니다.",
+  "AUTOMATIONS$DETAIL$TITLE": "자동화 상세",
+  "AUTOMATIONS$DETAIL$BACK": "자동화 목록으로 돌아가기",
+  "AUTOMATIONS$DETAIL$ID_LABEL": "자동화 ID:",
+  "AUTOMATIONS$DETAIL$PLACEHOLDER": "자동화 상세 정보가 여기에 표시됩니다.",
+  "ERROR$GENERIC": "오류가 발생했습니다. 다시 시도해 주세요.",
+  "ERROR$UNKNOWN": "알 수 없는 오류가 발생했습니다.",
+  "ERROR$SOMETHING_WENT_WRONG": "문제가 발생했습니다"
+}

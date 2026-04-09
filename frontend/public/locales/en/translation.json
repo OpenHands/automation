@@ -1,0 +1,12 @@
+{
+  "AUTOMATIONS$TITLE": "Automations",
+  "AUTOMATIONS$DESCRIPTION": "Manage your OpenHands automations",
+  "AUTOMATIONS$EMPTY": "Your automations will appear here.",
+  "AUTOMATIONS$DETAIL$TITLE": "Automation Detail",
+  "AUTOMATIONS$DETAIL$BACK": "Back to Automations",
+  "AUTOMATIONS$DETAIL$ID_LABEL": "Automation ID:",
+  "AUTOMATIONS$DETAIL$PLACEHOLDER": "Automation details will appear here.",
+  "ERROR$GENERIC": "An error occurred. Please try again.",
+  "ERROR$UNKNOWN": "An unknown error occurred.",
+  "ERROR$SOMETHING_WENT_WRONG": "Something went wrong"
+}

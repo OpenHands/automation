@@ -1,0 +1,122 @@
+{
+  "AUTOMATIONS$TITLE": {
+    "en": "Automations",
+    "ja": "オートメーション",
+    "zh-CN": "自动化",
+    "zh-TW": "自動化",
+    "ko-KR": "자동화",
+    "de": "Automatisierungen",
+    "fr": "Automatisations",
+    "it": "Automazioni",
+    "pt": "Automações",
+    "es": "Automatizaciones"
+  },
+  "AUTOMATIONS$DESCRIPTION": {
+    "en": "Manage your OpenHands automations",
+    "ja": "OpenHandsのオートメーションを管理",
+    "zh-CN": "管理您的 OpenHands 自动化",
+    "zh-TW": "管理您的 OpenHands 自動化",
+    "ko-KR": "OpenHands 자동화 관리",
+    "de": "Verwalten Sie Ihre OpenHands-Automatisierungen",
+    "fr": "Gérez vos automatisations OpenHands",
+    "it": "Gestisci le tue automazioni OpenHands",
+    "pt": "Gerencie suas automações OpenHands",
+    "es": "Gestiona tus automatizaciones de OpenHands"
+  },
+  "AUTOMATIONS$EMPTY": {
+    "en": "Your automations will appear here.",
+    "ja": "オートメーションがここに表示されます。",
+    "zh-CN": "您的自动化将显示在此处。",
+    "zh-TW": "您的自動化將顯示在此處。",
+    "ko-KR": "자동화가 여기에 표시됩니다.",
+    "de": "Ihre Automatisierungen werden hier angezeigt.",
+    "fr": "Vos automatisations apparaîtront ici.",
+    "it": "Le tue automazioni appariranno qui.",
+    "pt": "Suas automações aparecerão aqui.",
+    "es": "Sus automatizaciones aparecerán aquí."
+  },
+  "AUTOMATIONS$DETAIL$TITLE": {
+    "en": "Automation Detail",
+    "ja": "オートメーション詳細",
+    "zh-CN": "自动化详情",
+    "zh-TW": "自動化詳情",
+    "ko-KR": "자동화 상세",
+    "de": "Automatisierungsdetails",
+    "fr": "Détail de l'automatisation",
+    "it": "Dettaglio automazione",
+    "pt": "Detalhe da automação",
+    "es": "Detalle de automatización"
+  },
+  "AUTOMATIONS$DETAIL$BACK": {
+    "en": "Back to Automations",
+    "ja": "オートメーション一覧に戻る",
+    "zh-CN": "返回自动化列表",
+    "zh-TW": "返回自動化列表",
+    "ko-KR": "자동화 목록으로 돌아가기",
+    "de": "Zurück zu Automatisierungen",
+    "fr": "Retour aux automatisations",
+    "it": "Torna alle automazioni",
+    "pt": "Voltar para automações",
+    "es": "Volver a automatizaciones"
+  },
+  "AUTOMATIONS$DETAIL$ID_LABEL": {
+    "en": "Automation ID:",
+    "ja": "オートメーション ID:",
+    "zh-CN": "自动化 ID：",
+    "zh-TW": "自動化 ID：",
+    "ko-KR": "자동화 ID:",
+    "de": "Automatisierungs-ID:",
+    "fr": "ID d'automatisation :",
+    "it": "ID automazione:",
+    "pt": "ID da automação:",
+    "es": "ID de automatización:"
+  },
+  "AUTOMATIONS$DETAIL$PLACEHOLDER": {
+    "en": "Automation details will appear here.",
+    "ja": "オートメーションの詳細がここに表示されます。",
+    "zh-CN": "自动化详情将显示在此处。",
+    "zh-TW": "自動化詳情將顯示在此處。",
+    "ko-KR": "자동화 상세 정보가 여기에 표시됩니다.",
+    "de": "Automatisierungsdetails werden hier angezeigt.",
+    "fr": "Les détails de l'automatisation apparaîtront ici.",
+    "it": "I dettagli dell'automazione appariranno qui.",
+    "pt": "Os detalhes da automação aparecerão aqui.",
+    "es": "Los detalles de la automatización aparecerán aquí."
+  },
+  "ERROR$GENERIC": {
+    "en": "An error occurred. Please try again.",
+    "ja": "エラーが発生しました。もう一度お試しください。",
+    "zh-CN": "发生错误。请重试。",
+    "zh-TW": "發生錯誤。請重試。",
+    "ko-KR": "오류가 발생했습니다. 다시 시도해 주세요.",
+    "de": "Ein Fehler ist aufgetreten. Bitte versuchen Sie es erneut.",
+    "fr": "Une erreur est survenue. Veuillez réessayer.",
+    "it": "Si è verificato un errore. Riprova.",
+    "pt": "Ocorreu um erro. Por favor, tente novamente.",
+    "es": "Ocurrió un error. Por favor, inténtelo de nuevo."
+  },
+  "ERROR$UNKNOWN": {
+    "en": "An unknown error occurred.",
+    "ja": "不明なエラーが発生しました。",
+    "zh-CN": "发生未知错误。",
+    "zh-TW": "發生未知錯誤。",
+    "ko-KR": "알 수 없는 오류가 발생했습니다.",
+    "de": "Ein unbekannter Fehler ist aufgetreten.",
+    "fr": "Une erreur inconnue est survenue.",
+    "it": "Si è verificato un errore sconosciuto.",
+    "pt": "Ocorreu um erro desconhecido.",
+    "es": "Ocurrió un error desconocido."
+  },
+  "ERROR$SOMETHING_WENT_WRONG": {
+    "en": "Something went wrong",
+    "ja": "問題が発生しました",
+    "zh-CN": "出了点问题",
+    "zh-TW": "出了點問題",
+    "ko-KR": "문제가 발생했습니다",
+    "de": "Etwas ist schiefgelaufen",
+    "fr": "Quelque chose s'est mal passé",
+    "it": "Qualcosa è andato storto",
+    "pt": "Algo deu errado",
+    "es": "Algo salió mal"
+  }
+}
