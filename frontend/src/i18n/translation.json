@@ -5,11 +5,16 @@
     "zh-CN": "自动化",
     "zh-TW": "自動化",
     "ko-KR": "자동화",
+    "no": "Automatiseringer",
+    "ar": "الأتمتة",
     "de": "Automatisierungen",
     "fr": "Automatisations",
     "it": "Automazioni",
     "pt": "Automações",
-    "es": "Automatizaciones"
+    "es": "Automatizaciones",
+    "ca": "Automatitzacions",
+    "tr": "Otomasyonlar",
+    "uk": "Автоматизації"
   },
   "AUTOMATIONS$DESCRIPTION": {
     "en": "Manage your OpenHands automations",
@@ -17,11 +22,16 @@
     "zh-CN": "管理您的 OpenHands 自动化",
     "zh-TW": "管理您的 OpenHands 自動化",
     "ko-KR": "OpenHands 자동화 관리",
+    "no": "Administrer dine OpenHands-automatiseringer",
+    "ar": "إدارة أتمتة OpenHands الخاصة بك",
     "de": "Verwalten Sie Ihre OpenHands-Automatisierungen",
     "fr": "Gérez vos automatisations OpenHands",
     "it": "Gestisci le tue automazioni OpenHands",
     "pt": "Gerencie suas automações OpenHands",
-    "es": "Gestiona tus automatizaciones de OpenHands"
+    "es": "Gestiona tus automatizaciones de OpenHands",
+    "ca": "Gestioneu les vostres automatitzacions d'OpenHands",
+    "tr": "OpenHands otomasyonlarınızı yönetin",
+    "uk": "Керуйте автоматизаціями OpenHands"
   },
   "AUTOMATIONS$EMPTY": {
     "en": "Your automations will appear here.",
@@ -29,11 +39,16 @@
     "zh-CN": "您的自动化将显示在此处。",
     "zh-TW": "您的自動化將顯示在此處。",
     "ko-KR": "자동화가 여기에 표시됩니다.",
+    "no": "Automatiseringene dine vil vises her.",
+    "ar": "ستظهر الأتمتة الخاصة بك هنا.",
     "de": "Ihre Automatisierungen werden hier angezeigt.",
     "fr": "Vos automatisations apparaîtront ici.",
     "it": "Le tue automazioni appariranno qui.",
     "pt": "Suas automações aparecerão aqui.",
-    "es": "Sus automatizaciones aparecerán aquí."
+    "es": "Sus automatizaciones aparecerán aquí.",
+    "ca": "Les vostres automatitzacions apareixeran aquí.",
+    "tr": "Otomasyonlarınız burada görünecektir.",
+    "uk": "Ваші автоматизації з'являться тут."
   },
   "AUTOMATIONS$DETAIL$TITLE": {
     "en": "Automation Detail",
@@ -41,11 +56,16 @@
     "zh-CN": "自动化详情",
     "zh-TW": "自動化詳情",
     "ko-KR": "자동화 상세",
+    "no": "Automatiseringsdetaljer",
+    "ar": "تفاصيل الأتمتة",
     "de": "Automatisierungsdetails",
     "fr": "Détail de l'automatisation",
     "it": "Dettaglio automazione",
     "pt": "Detalhe da automação",
-    "es": "Detalle de automatización"
+    "es": "Detalle de automatización",
+    "ca": "Detall de l'automatització",
+    "tr": "Otomasyon Detayı",
+    "uk": "Деталі автоматизації"
   },
   "AUTOMATIONS$DETAIL$BACK": {
     "en": "Back to Automations",
@@ -53,11 +73,16 @@
     "zh-CN": "返回自动化列表",
     "zh-TW": "返回自動化列表",
     "ko-KR": "자동화 목록으로 돌아가기",
+    "no": "Tilbake til automatiseringer",
+    "ar": "العودة إلى الأتمتة",
     "de": "Zurück zu Automatisierungen",
     "fr": "Retour aux automatisations",
     "it": "Torna alle automazioni",
     "pt": "Voltar para automações",
-    "es": "Volver a automatizaciones"
+    "es": "Volver a automatizaciones",
+    "ca": "Tornar a les automatitzacions",
+    "tr": "Otomasyonlara Dön",
+    "uk": "Назад до автоматизацій"
   },
   "AUTOMATIONS$DETAIL$ID_LABEL": {
     "en": "Automation ID:",
@@ -65,11 +90,16 @@
     "zh-CN": "自动化 ID：",
     "zh-TW": "自動化 ID：",
     "ko-KR": "자동화 ID:",
+    "no": "Automatiserings-ID:",
+    "ar": "معرّف الأتمتة:",
     "de": "Automatisierungs-ID:",
     "fr": "ID d'automatisation :",
     "it": "ID automazione:",
     "pt": "ID da automação:",
-    "es": "ID de automatización:"
+    "es": "ID de automatización:",
+    "ca": "ID de l'automatització:",
+    "tr": "Otomasyon Kimliği:",
+    "uk": "ID автоматизації:"
   },
   "AUTOMATIONS$DETAIL$PLACEHOLDER": {
     "en": "Automation details will appear here.",
@@ -77,11 +107,16 @@
     "zh-CN": "自动化详情将显示在此处。",
     "zh-TW": "自動化詳情將顯示在此處。",
     "ko-KR": "자동화 상세 정보가 여기에 표시됩니다.",
+    "no": "Automatiseringsdetaljer vil vises her.",
+    "ar": "ستظهر تفاصيل الأتمتة هنا.",
     "de": "Automatisierungsdetails werden hier angezeigt.",
     "fr": "Les détails de l'automatisation apparaîtront ici.",
     "it": "I dettagli dell'automazione appariranno qui.",
     "pt": "Os detalhes da automação aparecerão aqui.",
-    "es": "Los detalles de la automatización aparecerán aquí."
+    "es": "Los detalles de la automatización aparecerán aquí.",
+    "ca": "Els detalls de l'automatització apareixeran aquí.",
+    "tr": "Otomasyon detayları burada görünecektir.",
+    "uk": "Деталі автоматизації з'являться тут."
   },
   "ERROR$GENERIC": {
     "en": "An error occurred. Please try again.",
@@ -89,11 +124,16 @@
     "zh-CN": "发生错误。请重试。",
     "zh-TW": "發生錯誤。請重試。",
     "ko-KR": "오류가 발생했습니다. 다시 시도해 주세요.",
+    "no": "En feil oppstod. Vennligst prøv igjen.",
+    "ar": "حدث خطأ. يرجى المحاولة مرة أخرى.",
     "de": "Ein Fehler ist aufgetreten. Bitte versuchen Sie es erneut.",
     "fr": "Une erreur est survenue. Veuillez réessayer.",
     "it": "Si è verificato un errore. Riprova.",
     "pt": "Ocorreu um erro. Por favor, tente novamente.",
-    "es": "Ocurrió un error. Por favor, inténtelo de nuevo."
+    "es": "Ocurrió un error. Por favor, inténtelo de nuevo.",
+    "ca": "S'ha produït un error. Si us plau, torneu-ho a provar.",
+    "tr": "Bir hata oluştu. Lütfen tekrar deneyin.",
+    "uk": "Сталася помилка. Будь ласка, спробуйте ще раз."
   },
   "ERROR$UNKNOWN": {
     "en": "An unknown error occurred.",
@@ -101,11 +141,16 @@
     "zh-CN": "发生未知错误。",
     "zh-TW": "發生未知錯誤。",
     "ko-KR": "알 수 없는 오류가 발생했습니다.",
+    "no": "En ukjent feil oppstod.",
+    "ar": "حدث خطأ غير معروف.",
     "de": "Ein unbekannter Fehler ist aufgetreten.",
     "fr": "Une erreur inconnue est survenue.",
     "it": "Si è verificato un errore sconosciuto.",
     "pt": "Ocorreu um erro desconhecido.",
-    "es": "Ocurrió un error desconocido."
+    "es": "Ocurrió un error desconocido.",
+    "ca": "S'ha produït un error desconegut.",
+    "tr": "Bilinmeyen bir hata oluştu.",
+    "uk": "Сталася невідома помилка."
   },
   "ERROR$SOMETHING_WENT_WRONG": {
     "en": "Something went wrong",
@@ -113,10 +158,15 @@
     "zh-CN": "出了点问题",
     "zh-TW": "出了點問題",
     "ko-KR": "문제가 발생했습니다",
+    "no": "Noe gikk galt",
+    "ar": "حدث خطأ ما",
     "de": "Etwas ist schiefgelaufen",
     "fr": "Quelque chose s'est mal passé",
     "it": "Qualcosa è andato storto",
     "pt": "Algo deu errado",
-    "es": "Algo salió mal"
+    "es": "Algo salió mal",
+    "ca": "Alguna cosa ha anat malament",
+    "tr": "Bir şeyler ters gitti",
+    "uk": "Щось пішло не так"
   }
 }

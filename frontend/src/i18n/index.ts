@@ -9,11 +9,16 @@ export const AvailableLanguages = [
   { label: "简体中文", value: "zh-CN" },
   { label: "繁體中文", value: "zh-TW" },
   { label: "한국어", value: "ko-KR" },
+  { label: "Norsk", value: "no" },
+  { label: "Arabic", value: "ar" },
   { label: "Deutsch", value: "de" },
   { label: "Français", value: "fr" },
   { label: "Italiano", value: "it" },
   { label: "Português", value: "pt" },
   { label: "Español", value: "es" },
+  { label: "Català", value: "ca" },
+  { label: "Türkçe", value: "tr" },
+  { label: "Українська", value: "uk" },
 ];
 
 i18n
