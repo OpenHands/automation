@@ -241,7 +241,7 @@ class TestWebhookUrlGeneration:
         url = _build_webhook_url(org_id, "stripe")
 
         assert url == (
-            "https://automation.example.com/v1/events/"
+            "https://automation.example.com/api/automation/v1/events/"
             "12345678-1234-5678-1234-567812345678/stripe"
         )
 
@@ -264,7 +264,7 @@ class TestWebhookUrlGeneration:
         url = _build_webhook_url(org_id, "stripe")
 
         assert url == (
-            "http://localhost:8000/v1/events/"
+            "http://localhost:8000/api/automation/v1/events/"
             "12345678-1234-5678-1234-567812345678/stripe"
         )
 
