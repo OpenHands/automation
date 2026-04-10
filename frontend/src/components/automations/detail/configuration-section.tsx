@@ -3,7 +3,7 @@ import { I18nKey } from "#/i18n/declaration";
 import type { Automation } from "#/types/automation";
 import CogIcon from "#/icons/cog.svg?react";
 import GitBranchIcon from "#/icons/git-branch.svg?react";
-import TargetIcon from "#/icons/target.svg?react";
+import CheckCircleIcon from "#/icons/check-circle.svg?react";
 import CalendarIcon from "#/icons/calendar.svg?react";
 import SparkleIcon from "#/icons/sparkle.svg?react";
 import BellIcon from "#/icons/bell.svg?react";
@@ -47,7 +47,7 @@ export function ConfigurationSection({
         </ConfigField>
 
         <ConfigField
-          icon={<TargetIcon className="size-3.5" />}
+          icon={<CheckCircleIcon className="size-3.5" />}
           label={t(I18nKey.AUTOMATIONS$DETAIL$TRIGGER)}
         >
           {triggerDisplay}
