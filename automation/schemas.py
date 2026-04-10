@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from croniter import croniter
-from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from automation.constants import MAX_RUN_DURATION_SECONDS
 
@@ -24,6 +24,8 @@ _PATH_TRAVERSAL_RE = re.compile(r"(^|/)\.\.(/|$)")
 
 class CronTrigger(BaseModel):
     """Cron-based trigger configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["cron"] = "cron"
     schedule: str = Field(..., description="Cron expression, e.g. '0 9 * * 5'")
@@ -108,6 +110,8 @@ class EventTrigger(BaseModel):
     {"source": "github", "on": "push"}
     ```
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["event"] = "event"
     source: str = Field(
@@ -230,6 +234,8 @@ def _validate_command_string(
 
 
 class CreateAutomationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=500)
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
@@ -287,6 +293,8 @@ class CreateAutomationRequest(BaseModel):
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = Field(default=None, min_length=1, max_length=500)
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
@@ -336,12 +344,12 @@ class UpdateAutomationRequest(BaseModel):
 class WebhookConfig(BaseModel):
     """Configuration for processing a webhook."""
 
+    model_config = ConfigDict(extra="forbid")
+
     secret: str
     is_builtin: bool = False  # True for github
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
-
-    model_config = {"extra": "forbid"}
 
 
 class EventResponse(BaseModel):
@@ -365,6 +373,8 @@ _HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]
 
 class CustomWebhookCreate(BaseModel):
     """Request schema for creating a custom webhook."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,
@@ -451,6 +461,8 @@ class CustomWebhookCreate(BaseModel):
 
 class CustomWebhookUpdate(BaseModel):
     """Request schema for updating a custom webhook."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
@@ -566,6 +578,8 @@ class AutomationListResponse(BaseModel):
 
 class RunCompleteRequest(BaseModel):
     """Payload sent by the SDK's OpenHandsCloudWorkspace on context manager exit."""
+
+    model_config = ConfigDict(extra="forbid")
 
     status: Literal["COMPLETED", "FAILED"]
     run_id: str | None = None

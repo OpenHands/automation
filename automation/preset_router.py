@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -84,6 +84,8 @@ async def _bytes_to_async_iter(data: bytes) -> AsyncIterator[bytes]:
 
 class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
     prompt: str = Field(
@@ -256,6 +258,8 @@ async def create_automation_from_prompt(
 
 class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
     plugins: list[PluginSource] = Field(
