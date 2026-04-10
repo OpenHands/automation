@@ -14,9 +14,29 @@ export interface Automation {
   model: string;
   created_at: string;
   updated_at: string;
+  prompt?: string;
+  branch?: string;
+  plugins?: string[];
+  notification?: string;
+  timezone?: string;
+  last_run_at?: string | null;
 }
 
 export interface AutomationsResponse {
   automations: Automation[];
+  total: number;
+}
+
+export interface AutomationRun {
+  id: string;
+  status: string;
+  conversation_id: string;
+  error_detail: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface AutomationRunsResponse {
+  runs: AutomationRun[];
   total: number;
 }

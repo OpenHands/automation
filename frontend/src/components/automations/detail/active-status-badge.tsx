@@ -1,0 +1,24 @@
+import { useTranslation } from "react-i18next";
+import { I18nKey } from "#/i18n/declaration";
+
+interface ActiveStatusBadgeProps {
+  active: boolean;
+}
+
+export function ActiveStatusBadge({ active }: ActiveStatusBadgeProps) {
+  const { t } = useTranslation();
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${
+        active
+          ? "bg-status-success-badge-bg text-status-success-text"
+          : "bg-border text-content-muted"
+      }`}
+    >
+      {active
+        ? t(I18nKey.AUTOMATIONS$DETAIL$ACTIVE)
+        : t(I18nKey.AUTOMATIONS$DETAIL$INACTIVE)}
+    </span>
+  );
+}
