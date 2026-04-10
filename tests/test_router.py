@@ -1067,7 +1067,7 @@ class TestBackwardCompatibility:
         """Existing cron triggers should still work with discriminated union."""
         # Create automation with cron trigger using S3 path (valid scheme)
         response = await async_client.post(
-            "/v1",
+            "/api/automation/v1",
             json={
                 "name": "Cron Backward Compat Test",
                 "trigger": {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"},
@@ -1079,7 +1079,7 @@ class TestBackwardCompatibility:
         automation_id = response.json()["id"]
 
         # Verify it can be retrieved with correct trigger type
-        response = await async_client.get(f"/v1/{automation_id}")
+        response = await async_client.get(f"/api/automation/v1/{automation_id}")
         assert response.status_code == 200
         data = response.json()
         assert data["trigger"]["type"] == "cron"
@@ -1088,7 +1088,7 @@ class TestBackwardCompatibility:
     async def test_cron_trigger_with_s3_path(self, async_client):
         """Cron trigger with S3 path creates and retrieves correctly."""
         response = await async_client.post(
-            "/v1",
+            "/api/automation/v1",
             json={
                 "name": "Cron S3 Test",
                 "trigger": {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"},
@@ -1100,7 +1100,7 @@ class TestBackwardCompatibility:
         automation_id = response.json()["id"]
 
         # Verify it can be retrieved
-        response = await async_client.get(f"/v1/{automation_id}")
+        response = await async_client.get(f"/api/automation/v1/{automation_id}")
         assert response.status_code == 200
         data = response.json()
         assert data["trigger"]["type"] == "cron"
@@ -1109,7 +1109,7 @@ class TestBackwardCompatibility:
     async def test_trigger_missing_type_returns_422(self, async_client):
         """Trigger without type field returns 422 (fail fast)."""
         response = await async_client.post(
-            "/v1",
+            "/api/automation/v1",
             json={
                 "name": "Missing Type",
                 "trigger": {"schedule": "0 0 * * *"},  # No "type" field

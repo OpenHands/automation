@@ -108,7 +108,7 @@ async def test_receive_github_event_no_matching_automations(
     signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -155,7 +155,7 @@ async def test_receive_github_event_with_matching_automation(
     signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -184,7 +184,7 @@ async def test_receive_github_event_invalid_signature(
 
     # Wrong signature
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": "sha256=invalid",
@@ -209,7 +209,7 @@ async def test_receive_github_event_missing_signature(
     _, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={"Content-Type": "application/json"},
         # No X-Hub-Signature-256 header
@@ -233,7 +233,7 @@ async def test_receive_github_event_undetectable_payload(
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -259,7 +259,7 @@ async def test_receive_github_event_missing_payload(
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -288,7 +288,7 @@ async def test_receive_github_event_malformed_payload(
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -316,7 +316,7 @@ async def test_receive_github_event_unknown_event_type(
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -361,7 +361,7 @@ async def test_receive_github_event_filter_mismatch(
     signature, body = sign_payload(github_push_payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/github",
+        f"/api/automation/v1/events/{org_id}/github",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
@@ -388,7 +388,7 @@ async def test_receive_unknown_source(
     signature, body = sign_payload(payload, "test-secret")
 
     response = await async_client.post(
-        f"/v1/events/{org_id}/unknown-source",
+        f"/api/automation/v1/events/{org_id}/unknown-source",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
