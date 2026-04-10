@@ -11,16 +11,20 @@ interface ActivitySectionProps {
   lastRunAt: string | null | undefined;
 }
 
-function formatDate(dateStr: string): string {
+function formatDate(dateStr: string, locale: string): string {
   const date = new Date(dateStr);
-  return date.toLocaleDateString("en-US", {
+  return date.toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
     day: "numeric",
   });
 }
 
-function formatRelativeTime(dateStr: string): string {
+function formatRelativeTime(
+  dateStr: string,
+  locale: string,
+  t: (key: I18nKey, options?: Record<string, unknown>) => string,
+): string {
   const now = Date.now();
   const then = new Date(dateStr).getTime();
   const diffMs = now - then;
@@ -28,19 +32,23 @@ function formatRelativeTime(dateStr: string): string {
   const diffHours = Math.floor(diffMs / 3_600_000);
   const diffDays = Math.floor(diffMs / 86_400_000);
 
-  if (diffMins < 1) return "Just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return formatDate(dateStr);
+  if (diffMins < 1) return t(I18nKey.AUTOMATIONS$DETAIL$TIME_JUST_NOW);
+  if (diffMins < 60)
+    return t(I18nKey.AUTOMATIONS$DETAIL$TIME_MINUTES_AGO, { count: diffMins });
+  if (diffHours < 24)
+    return t(I18nKey.AUTOMATIONS$DETAIL$TIME_HOURS_AGO, { count: diffHours });
+  if (diffDays === 1) return t(I18nKey.AUTOMATIONS$DETAIL$TIME_YESTERDAY);
+  if (diffDays < 7)
+    return t(I18nKey.AUTOMATIONS$DETAIL$TIME_DAYS_AGO, { count: diffDays });
+  return formatDate(dateStr, locale);
 }
 
 export function ActivitySection({
   createdAt,
   lastRunAt,
 }: ActivitySectionProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language;
 
   return (
     <SectionCard
@@ -52,14 +60,16 @@ export function ActivitySection({
           icon={<CalendarIcon className="size-3.5" />}
           label={t(I18nKey.AUTOMATIONS$DETAIL$CREATED)}
         >
-          {formatDate(createdAt)}
+          {formatDate(createdAt, locale)}
         </ConfigField>
 
         <ConfigField
           icon={<ClockIcon className="size-3.5" />}
           label={t(I18nKey.AUTOMATIONS$DETAIL$LAST_RUN)}
         >
-          {lastRunAt ? formatRelativeTime(lastRunAt) : "Never"}
+          {lastRunAt
+            ? formatRelativeTime(lastRunAt, locale, t)
+            : t(I18nKey.AUTOMATIONS$DETAIL$TIME_NEVER)}
         </ConfigField>
       </div>
     </SectionCard>
