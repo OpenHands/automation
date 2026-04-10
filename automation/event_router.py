@@ -34,6 +34,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.db import get_session
@@ -171,7 +172,7 @@ async def receive_event(
     # For custom webhooks, use the webhook payload directly
     event_payload = (
         event.model_dump(mode="json")
-        if hasattr(event, "model_dump")
+        if isinstance(event, BaseModel)
         else webhook_payload
     )
 
