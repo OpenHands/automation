@@ -1,49 +1,23 @@
----
-name: Run tests
+name: 8core Smoke Test
 
 on:
-    push:
-        branches: [main]
-    pull_request:
-        branches: ['**']
+  workflow_dispatch:
 
-permissions:
-    contents: write
-    pull-requests: write
+run-name: 8core Smoke Test
 
 jobs:
-    unit-tests:
-        runs-on: ubuntu-24.04
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v5
+  smoke-test:
+    runs-on: ubuntu-latest-8core
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v7
-              with:
-                  enable-cache: true
-                  python-version: '3.12'
+    steps:
+      - name: Show runner details
+        run: |
+          echo "runner_name=$RUNNER_NAME"
+          echo "runner_os=$RUNNER_OS"
+          echo "runner_arch=$RUNNER_ARCH"
+          uname -a
 
-            - name: Install deps
-              run: uv sync --frozen --group dev
-
-            - name: Run unit tests with coverage
-              run: |
-                  rm -f .coverage
-                  CI=true uv run python -m pytest -vvs \
-                    --cov=automation \
-                    --cov-report=term-missing \
-                    --cov-report=xml:coverage.xml \
-                    --cov-fail-under=0 \
-                    tests/
-
-            - name: Pytest coverage PR comment
-              if: always() && github.event_name == 'pull_request'
-              continue-on-error: true
-              uses: MishaKav/pytest-coverage-comment@v1
-              with:
-                  github-token: ${{ secrets.GITHUB_TOKEN }}
-                  pytest-xml-coverage-path: coverage.xml
-                  title: Coverage Report
-                  create-new-comment: false
-                  hide-report: false
+      - name: Simple shell check
+        run: |
+          echo "hello from 8core runner"
+          sleep 10
