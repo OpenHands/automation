@@ -1,6 +1,11 @@
 import { http, HttpResponse, delay } from "msw";
-import type { Automation, AutomationsResponse } from "#/types/automation";
+import type {
+  Automation,
+  AutomationsResponse,
+  AutomationRunsResponse,
+} from "#/types/automation";
 import { MOCK_AUTOMATIONS_RESPONSE } from "./automations.mock";
+import { MOCK_AUTOMATION_RUNS } from "./automation-runs.mock";
 
 // Mutable copy for CRUD operations within the mock session
 const automations = new Map<string, Automation>(
@@ -29,6 +34,33 @@ export const automationHandlers = [
     const response: AutomationsResponse = {
       automations: page,
       total: all.length,
+    };
+
+    return HttpResponse.json(response);
+  }),
+
+  // GET /api/automation/v1/:id/runs — List automation runs
+  http.get("/api/automation/v1/:id/runs", async ({ params, request }) => {
+    await delay(200);
+
+    const id = params.id as string;
+    if (!automations.has(id)) {
+      return HttpResponse.json(
+        { detail: "Automation not found" },
+        { status: 404 },
+      );
+    }
+
+    const url = new URL(request.url);
+    const limit = Number(url.searchParams.get("limit") ?? "50");
+    const offset = Number(url.searchParams.get("offset") ?? "0");
+
+    const allRuns = MOCK_AUTOMATION_RUNS[id] ?? [];
+    const page = allRuns.slice(offset, offset + limit);
+
+    const response: AutomationRunsResponse = {
+      runs: page,
+      total: allRuns.length,
     };
 
     return HttpResponse.json(response);

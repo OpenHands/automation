@@ -21,6 +21,16 @@ export default {
           muted: "#8c8c8c",
           icon: "#3a3a3a",
         },
+        // Status badges
+        status: {
+          "success-bg": "rgba(16, 185, 129, 0.1)",
+          "success-border": "rgba(16, 185, 129, 0.4)",
+          "success-text": "#6ee7b7",
+          "success-badge-bg": "rgba(16, 185, 129, 0.15)",
+          "fail-bg": "rgba(244, 63, 94, 0.1)",
+          "fail-border": "rgba(244, 63, 94, 0.4)",
+          "fail-text": "#fda4af",
+        },
         // Toggle switch
         toggle: {
           active: "#34d399",
@@ -30,6 +40,9 @@ export default {
           "inactive-knob": "#8c8c8c",
           "inactive-border": "#3a3a3a",
         },
+        // Overlay backgrounds
+        "muted-overlay": "rgba(5, 5, 5, 0.4)",
+        "pill-bg": "rgba(31, 31, 31, 0.3)",
         // Legacy tokens (preserved from original config)
         modal: {
           background: "#171717",
