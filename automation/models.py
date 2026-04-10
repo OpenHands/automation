@@ -248,29 +248,53 @@ class CustomWebhook(Base):
 
     __tablename__ = "custom_webhooks"
 
+    # Primary key for the custom webhook record
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    # Organization that owns this webhook integration
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Human-readable display name (e.g., "Stripe Production", "Slack Alerts")
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Webhook source identifier used in URL routing and trigger matching.
+    # Must be unique per org. Forms part of the webhook endpoint URL:
+    # POST /v1/events/{org_id}/{source}
     source: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Shared secret for HMAC-SHA256 signature verification.
+    # The webhook provider signs payloads with this secret; we verify
+    # the signature to ensure authenticity and integrity.
     webhook_secret: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Whether this webhook integration is active. Disabled webhooks
+    # reject incoming events with 404 (as if the source doesn't exist).
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
 
-    # JMESPath expression to extract event identifier from payload
-    # Default "type" works for many webhooks (e.g., Stripe)
+    # JMESPath expression to extract the event type identifier from the
+    # incoming payload. The extracted value is matched against the trigger's
+    # `on` patterns. Default "type" works for many webhooks (e.g., Stripe
+    # sends {"type": "payment.completed", ...}). Supports JMESPath
+    # alternatives: "type || event.name" tries multiple paths in order.
     event_key_expr: Mapped[str] = mapped_column(
         String(500), nullable=False, default="type"
     )
 
-    # HTTP header name for HMAC signature (provider-specific)
+    # HTTP header name containing the HMAC signature. Different providers
+    # use different headers (e.g., Stripe: "Stripe-Signature",
+    # Slack: "X-Slack-Signature"). Defaults to "X-Signature-256".
     signature_header: Mapped[str] = mapped_column(
         String(100), nullable=False, default="X-Signature-256"
     )
 
+    # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
+    # Timestamp of the last update; auto-set on modification
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
