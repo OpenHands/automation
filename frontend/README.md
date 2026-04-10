@@ -47,6 +47,7 @@ npm run dev
 This will start the application in development mode on [http://localhost:3002/automations](http://localhost:3002/automations).
 
 The dev server proxies API requests to:
+
 - `/api/automation/*` → Automation Service (`127.0.0.1:8000`)
 - `/api/*` → OpenHands Backend (`127.0.0.1:3030`)
 
@@ -75,9 +76,9 @@ Mock data is stateful within a session — toggling or deleting an automation pe
 
 The `VITE_MOCK_API` environment variable controls mock mode. When set to `true`, the MSW browser service worker is registered in `entry.client.tsx` before the app renders. Mock handlers are defined in `src/mocks/` and follow the same API contracts as the real backends.
 
-| Variable         | `npm run dev` | `npm run dev:mock` |
-| ---------------- | ------------- | ------------------ |
-| `VITE_MOCK_API`  | `false`       | `true`             |
+| Variable        | `npm run dev` | `npm run dev:mock` |
+| --------------- | ------------- | ------------------ |
+| `VITE_MOCK_API` | `false`       | `true`             |
 
 ### Building for Production
 
@@ -95,11 +96,11 @@ npm start
 
 The frontend application uses the following environment variables:
 
-| Variable               | Description                                          | Default Value     |
-| ---------------------- | ---------------------------------------------------- | ----------------- |
-| `VITE_AUTOMATION_HOST` | The automation service host with port                | `127.0.0.1:8000`  |
-| `VITE_OPENHANDS_HOST`  | The OpenHands backend host with port                 | `127.0.0.1:3030`  |
-| `VITE_FRONTEND_PORT`   | Port to run the frontend application                 | `3002`            |
+| Variable               | Description                           | Default Value    |
+| ---------------------- | ------------------------------------- | ---------------- |
+| `VITE_AUTOMATION_HOST` | The automation service host with port | `127.0.0.1:8000` |
+| `VITE_OPENHANDS_HOST`  | The OpenHands backend host with port  | `127.0.0.1:3030` |
+| `VITE_FRONTEND_PORT`   | Port to run the frontend application  | `3002`           |
 
 You can create a `.env` file in the frontend directory based on the `.env.example` file.
 
@@ -181,6 +182,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/). 
 ### Pre-commit Hooks
 
 Husky runs lint-staged on pre-commit, which:
+
 - Runs ESLint with auto-fix
 - Formats code with Prettier
 - Checks TypeScript types
