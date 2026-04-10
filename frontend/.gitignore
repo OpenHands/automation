@@ -1,0 +1,10 @@
+# i18n translation files made by script using `make-i18n`
+public/locales/**/*
+src/i18n/declaration.ts
+.env
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+.react-router/
