@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from automation.models import Automation
 from automation.utils import utcnow
 
@@ -11,6 +13,73 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+
+@pytest.fixture
+def _automation_for_permission_tests(async_session):
+    """Create an automation owned by the test user for permission tests."""
+
+    async def _create():
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Permission Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    return _create
+
+
+class TestPermissionEnforcement:
+    """Tests for require_permission on mutating endpoints."""
+
+    async def test_update_without_permission_returns_403(
+        self, readonly_client, async_session
+    ):
+        """PATCH returns 403 when user lacks manage_automations permission."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Updated"},
+        )
+
+        assert response.status_code == 403
+        assert "manage_automations" in response.json()["detail"]
+
+    async def test_delete_without_permission_returns_403(
+        self, readonly_client, async_session
+    ):
+        """DELETE returns 403 when user lacks manage_automations permission."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 403
+        assert "manage_automations" in response.json()["detail"]
 
 
 class TestCreateAutomation:
@@ -362,13 +431,14 @@ class TestListAutomations:
         assert data["automations"] == []
         assert data["total"] == 0
 
-    async def test_list_automations_only_own(self, async_client, async_session):
-        """User cannot see other users' automations."""
-        # Create automation for different user
+    async def test_list_automations_cross_org_returns_empty(
+        self, async_client, async_session
+    ):
+        """Automations from another organization are not visible."""
         automation = Automation(
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
-            name="Other User Automation",
+            name="Other Org Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
@@ -456,12 +526,14 @@ class TestGetAutomation:
 
         assert response.status_code == 404
 
-    async def test_get_automation_wrong_user(self, async_client, async_session):
-        """Cannot access other user's automation."""
+    async def test_get_automation_cross_org_returns_404(
+        self, async_client, async_session
+    ):
+        """Cannot access automation from another organization."""
         automation = Automation(
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
-            name="Other User Automation",
+            name="Other Org Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
@@ -506,6 +578,25 @@ class TestDeleteAutomation:
         fake_id = uuid.uuid4()
 
         response = await async_client.delete(f"/api/automation/v1/{fake_id}")
+
+        assert response.status_code == 404
+
+    async def test_delete_automation_cross_org_returns_404(
+        self, async_client, async_session
+    ):
+        """Cannot delete automation from another organization."""
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=OTHER_ORG_ID,
+            name="Other Org Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.delete(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 404
 
@@ -608,12 +699,14 @@ class TestUpdateAutomation:
 
         assert response.status_code == 404
 
-    async def test_update_automation_wrong_user(self, async_client, async_session):
-        """Cannot update another user's automation."""
+    async def test_update_automation_cross_org_returns_404(
+        self, async_client, async_session
+    ):
+        """Cannot update automation from another organization."""
         automation = Automation(
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
-            name="Other User",
+            name="Other Org",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -752,12 +845,14 @@ class TestDispatchAutomation:
 
         assert response.status_code == 404
 
-    async def test_dispatch_automation_wrong_user(self, async_client, async_session):
-        """Cannot dispatch another user's automation."""
+    async def test_dispatch_automation_cross_org_returns_404(
+        self, async_client, async_session
+    ):
+        """Cannot dispatch automation from another organization."""
         automation = Automation(
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
-            name="Other User Automation",
+            name="Other Org Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -972,12 +1067,12 @@ class TestListAutomationRuns:
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
 
-    async def test_list_runs_wrong_user(self, async_client, async_session):
-        """Cannot list runs for another user's automation."""
+    async def test_list_runs_cross_org_returns_404(self, async_client, async_session):
+        """Cannot list runs for automation from another organization."""
         automation = Automation(
             user_id=OTHER_USER_ID,
             org_id=OTHER_ORG_ID,
-            name="Other User Automation",
+            name="Other Org Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",

@@ -10,7 +10,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from automation.auth import AuthenticatedUser, authenticate_request
+from automation.auth import AuthenticatedUser, require_permission
 from automation.db import get_session
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.schemas import (
@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
+_require_manage_automations = require_permission("manage_automations")
+
 
 # --- CRUD ---
 
@@ -40,7 +42,7 @@ router = APIRouter(prefix="/v1", tags=["Automations"])
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_automation(
     body: CreateAutomationRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Create a new automation.
@@ -77,7 +79,7 @@ async def create_automation(
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
     """List automations for the authenticated user (excludes soft-deleted)."""
@@ -106,7 +108,7 @@ async def list_automations(
 @router.get("/{automation_id}")
 async def get_automation(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
@@ -118,7 +120,7 @@ async def get_automation(
 async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Partially update an automation."""
@@ -141,7 +143,7 @@ async def update_automation(
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_automation(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft delete an automation."""
@@ -157,7 +159,7 @@ async def delete_automation(
 @router.post("/{automation_id}/dispatch", status_code=status.HTTP_201_CREATED)
 async def dispatch_automation(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Manually dispatch an automation run.
@@ -177,7 +179,7 @@ async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
@@ -216,7 +218,7 @@ async def list_automation_runs(
 async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.

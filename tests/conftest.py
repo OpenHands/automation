@@ -99,6 +99,22 @@ def mock_authenticated_user():
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
         email="test@example.com",
         role="owner",
+        permissions=["view_org_settings", "manage_automations"],
+        auth_method=AuthMethod.API_KEY,
+        api_key="test-api-key",
+    )
+
+
+@pytest.fixture
+def mock_readonly_user():
+    """Return a mock authenticated user without manage_automations permission."""
+    import uuid
+
+    return AuthenticatedUser(
+        user_id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
+        email="test@example.com",
+        role="member",
         permissions=["view_org_settings"],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
@@ -124,6 +140,35 @@ async def async_client(
     app.state.engine = async_engine
     app.state.session_factory = async_session_factory
     # Create a mock http_client for tests (auth is overridden, but state must exist)
+    app.state.http_client = create_http_client()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+    await app.state.http_client.aclose()
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def readonly_client(
+    async_engine, async_session_factory, async_session, mock_readonly_user
+) -> AsyncGenerator[AsyncClient, None]:
+    """Create an async test client with a user lacking manage_automations permission."""
+
+    async def override_get_session():
+        yield async_session
+
+    async def override_authenticate():
+        return mock_readonly_user
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[authenticate_request] = override_authenticate
+
+    app.state.engine = async_engine
+    app.state.session_factory = async_session_factory
     app.state.http_client = create_http_client()
 
     async with AsyncClient(

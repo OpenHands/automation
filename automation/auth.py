@@ -147,6 +147,37 @@ async def _make_auth_request_with_retry(
     return await client.get(url, headers=headers)
 
 
+def require_permission(permission: str):
+    """Factory that returns a FastAPI dependency enforcing a permission.
+
+    Checks whether the authenticated user has the given permission string
+    in their permissions list.  Raises HTTP 403 if missing, otherwise
+    returns the ``AuthenticatedUser``.
+
+    Not wired to any endpoint yet — future use only.  Enabling a
+    permission gate requires changing
+    ``Depends(authenticate_request)`` to
+    ``Depends(require_permission("manage_automations"))``.
+    """
+
+    async def _check(
+        user: "AuthenticatedUser" = Depends(authenticate_request),
+    ) -> "AuthenticatedUser":
+        if permission not in user.permissions:
+            logger.warning(
+                "Permission denied: user %s missing permission %s",
+                user.user_id,
+                permission,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires {permission} permission",
+            )
+        return user
+
+    return _check
+
+
 async def authenticate_request(
     request: Request,
     client: httpx.AsyncClient = Depends(get_http_client),

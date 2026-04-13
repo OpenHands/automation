@@ -17,6 +17,7 @@ from automation.auth import (
     _make_auth_request_with_retry,
     authenticate_request,
     clear_auth_cache,
+    require_permission,
 )
 from automation.db import get_session
 
@@ -31,7 +32,7 @@ MOCK_USERS_ME_RESPONSE = {
     "org_id": str(TEST_ORG_ID),
     "email": "test@example.com",
     "role": "owner",
-    "permissions": ["view_org_settings", "manage_api_keys"],
+    "permissions": ["view_org_settings", "manage_api_keys", "manage_automations"],
 }
 
 
@@ -82,7 +83,11 @@ class TestAuthentication:
         assert result.org_id == TEST_ORG_ID
         assert result.email == "test@example.com"
         assert result.role == "owner"
-        assert result.permissions == ["view_org_settings", "manage_api_keys"]
+        assert result.permissions == [
+            "view_org_settings",
+            "manage_api_keys",
+            "manage_automations",
+        ]
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "valid-api-key"
 
@@ -660,3 +665,63 @@ class TestRetryMechanism:
         # Verify backoff increases (tenacity uses 2^x * multiplier pattern)
         calls = [call[0][0] for call in mock_sleep.call_args_list]
         assert calls[0] < calls[1] < calls[2]
+
+
+class TestRequirePermission:
+    """Tests for require_permission factory function."""
+
+    async def test_permission_present_returns_user(self):
+        """User with the required permission is returned successfully."""
+        user = AuthenticatedUser(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            email="test@example.com",
+            role="owner",
+            permissions=["manage_automations", "view_org_settings"],
+            auth_method=AuthMethod.API_KEY,
+            api_key="key",
+        )
+
+        checker = require_permission("manage_automations")
+        result = await checker(user=user)
+
+        assert result is user
+
+    async def test_permission_missing_raises_403(self):
+        """User without the required permission gets HTTP 403."""
+        user = AuthenticatedUser(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            email="test@example.com",
+            role="member",
+            permissions=["view_org_settings"],
+            auth_method=AuthMethod.API_KEY,
+            api_key="key",
+        )
+
+        checker = require_permission("manage_automations")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await checker(user=user)
+
+        assert exc_info.value.status_code == 403
+        assert "manage_automations" in exc_info.value.detail
+
+    async def test_different_permission_raises_403(self):
+        """Having a different permission does not satisfy the requirement."""
+        user = AuthenticatedUser(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            email="test@example.com",
+            role="member",
+            permissions=["some_other_permission"],
+            auth_method=AuthMethod.API_KEY,
+            api_key="key",
+        )
+
+        checker = require_permission("manage_automations")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await checker(user=user)
+
+        assert exc_info.value.status_code == 403
