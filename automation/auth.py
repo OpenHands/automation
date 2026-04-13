@@ -84,7 +84,6 @@ class AuthenticatedUser:
     permissions: list[str]
     auth_method: AuthMethod
     api_key: str | None = None  # Set when auth_method == API_KEY
-    cookie: str | None = None  # Set when auth_method == COOKIE
 
 
 def clear_auth_cache() -> None:
@@ -268,7 +267,6 @@ async def authenticate_request(
         permissions=permissions,
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
-        cookie=credential if auth_method == AuthMethod.COOKIE else None,
     )
     _auth_cache[cache_key] = user
     return user
