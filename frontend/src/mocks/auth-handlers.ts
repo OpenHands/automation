@@ -6,8 +6,8 @@ export const authHandlers = [
     HttpResponse.json({ status: "ok" }, { status: 200 }),
   ),
 
-  // GET /api/me — Get user context
-  http.get("/api/me", () =>
+  // GET /api/v1/users/me — Get user context
+  http.get("/api/v1/users/me", () =>
     HttpResponse.json({
       user_id: "00000000-0000-0000-0000-000000000001",
       email: "dev@example.com",
