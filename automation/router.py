@@ -23,6 +23,7 @@ from automation.schemas import (
     UpdateAutomationRequest,
 )
 from automation.utils import utcnow
+from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
 from automation.utils.run import create_pending_run
 from automation.utils.sandbox import cleanup_sandbox
 from automation.utils.tarball_validation import validate_tarball_path
@@ -224,9 +225,9 @@ async def complete_run(
     entry-point finishes (success or failure).  Transitions the run from
     RUNNING → COMPLETED or RUNNING → FAILED.
 
-    Authenticated via the same ``OPENHANDS_API_KEY`` that was passed into
-    the sandbox.  The key is validated against ``/api/keys/current`` (by
-    ``authenticate_request``) and the resulting user must own the run's
+    Authenticated via the same credentials that were passed into
+    the sandbox.  The credentials are validated against ``/api/v1/users/me``
+    (by ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
     If keep_alive is False, deletes the sandbox after updating the run status.
@@ -287,14 +288,29 @@ async def complete_run(
         from automation.config import get_settings
 
         settings = get_settings()
-        asyncio.create_task(
-            cleanup_sandbox(
-                api_url=settings.openhands_api_base_url,
-                api_key=user.api_key,
-                sandbox_id=run.sandbox_id,
-                run_id=str(run_id),
+        api_key = user.api_key
+        if api_key is None:
+            # Cookie-authenticated users don't carry an API key;
+            # mint a temporary per-user key for sandbox cleanup.
+            try:
+                api_key = await get_api_key_for_automation_run(run)
+            except (APIKeyError, ValueError):
+                logger.warning(
+                    "Could not mint API key for sandbox cleanup (run %s), "
+                    "skipping cleanup",
+                    run_id,
+                )
+                api_key = None
+
+        if api_key is not None:
+            asyncio.create_task(
+                cleanup_sandbox(
+                    api_url=settings.openhands_api_base_url,
+                    api_key=api_key,
+                    sandbox_id=run.sandbox_id,
+                    run_id=str(run_id),
+                )
             )
-        )
 
     return AutomationRunResponse.model_validate(run)
 

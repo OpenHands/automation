@@ -18,6 +18,7 @@ os.environ["LOG_JSON"] = "0"
 from automation.app import app  # noqa: E402
 from automation.auth import (  # noqa: E402
     AuthenticatedUser,
+    AuthMethod,
     authenticate_request,
     create_http_client,
 )
@@ -96,6 +97,10 @@ def mock_authenticated_user():
     return AuthenticatedUser(
         user_id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
+        email="test@example.com",
+        role="owner",
+        permissions=["view_org_settings"],
+        auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )
 
