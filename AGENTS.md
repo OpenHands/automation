@@ -8,7 +8,7 @@ Self-contained microservice that schedules and dispatches automation runs inside
 automation/
 ├── automation/              # Main application package
 │   ├── app.py              # FastAPI app, lifespan, background tasks
-│   ├── auth.py             # API key auth via OpenHands /api/keys/current
+│   ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
 │   ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
 │   ├── constants.py        # Timeouts, polling intervals, sandbox constants
 │   ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)

@@ -224,9 +224,9 @@ async def complete_run(
     entry-point finishes (success or failure).  Transitions the run from
     RUNNING → COMPLETED or RUNNING → FAILED.
 
-    Authenticated via the same ``OPENHANDS_API_KEY`` that was passed into
-    the sandbox.  The key is validated against ``/api/keys/current`` (by
-    ``authenticate_request``) and the resulting user must own the run's
+    Authenticated via the same credentials that were passed into
+    the sandbox.  The credentials are validated against ``/api/v1/users/me``
+    (by ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
     If keep_alive is False, deletes the sandbox after updating the run status.
@@ -290,7 +290,7 @@ async def complete_run(
         asyncio.create_task(
             cleanup_sandbox(
                 api_url=settings.openhands_api_base_url,
-                api_key=user.api_key,
+                api_key=user.api_key or settings.service_key,
                 sandbox_id=run.sandbox_id,
                 run_id=str(run_id),
             )
