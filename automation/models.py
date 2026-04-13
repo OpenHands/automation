@@ -144,6 +144,12 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Event payload for event-triggered runs (JSON)
+    # Contains the webhook payload that triggered this run.
+    # For GitHub events: model_dump() of the parsed Pydantic event
+    # For custom webhooks: the raw payload dict
+    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -217,4 +223,85 @@ class TarballUpload(Base):
     # Soft delete
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
+    )
+
+
+class CustomWebhook(Base):
+    """A custom webhook integration for an organization.
+
+    Note: Built-in integrations (github) don't use this table.
+    This is only for custom/generic webhook sources where users configure
+    their own webhook URLs and secrets.
+
+    The event_key_expr field specifies a JMESPath expression to extract the
+    event identifier from the incoming payload. Examples:
+    - "type" -> payload["type"]
+    - "event.type" -> payload["event"]["type"]
+    - "type || event.name" -> try payload["type"], then payload["event"]["name"]
+
+    The signature_header field specifies which HTTP header contains the HMAC
+    signature. Different providers use different headers:
+    - Stripe: "Stripe-Signature"
+    - Slack: "X-Slack-Signature"
+    - Generic: "X-Signature-256" (default)
+    """
+
+    __tablename__ = "custom_webhooks"
+
+    # Primary key for the custom webhook record
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+
+    # Organization that owns this webhook integration
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Human-readable display name (e.g., "Stripe Production", "Slack Alerts")
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Webhook source identifier used in URL routing and trigger matching.
+    # Must be unique per org. Forms part of the webhook endpoint URL:
+    # POST /v1/events/{org_id}/{source}
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Shared secret for HMAC-SHA256 signature verification.
+    # The webhook provider signs payloads with this secret; we verify
+    # the signature to ensure authenticity and integrity.
+    webhook_secret: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Whether this webhook integration is active. Disabled webhooks
+    # reject incoming events with 404 (as if the source doesn't exist).
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    # JMESPath expression to extract the event type identifier from the
+    # incoming payload. The extracted value is matched against the trigger's
+    # `on` patterns. Default "type" works for many webhooks (e.g., Stripe
+    # sends {"type": "payment.completed", ...}). Supports JMESPath
+    # alternatives: "type || event.name" tries multiple paths in order.
+    event_key_expr: Mapped[str] = mapped_column(
+        String(500), nullable=False, default="type"
+    )
+
+    # HTTP header name containing the HMAC signature. Different providers
+    # use different headers (e.g., Stripe: "Stripe-Signature",
+    # Slack: "X-Slack-Signature"). Defaults to "X-Signature-256".
+    signature_header: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="X-Signature-256"
+    )
+
+    # Timestamp when the webhook integration was created
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    # Timestamp of the last update; auto-set on modification
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
     )

@@ -19,13 +19,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
 from automation.db import get_session
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.schemas import AutomationResponse, CronTrigger
+from automation.schemas import AutomationResponse, Trigger
 from automation.storage import FileStore, get_file_store
 from automation.utils.tarball_validation import build_internal_url
 
@@ -85,6 +85,8 @@ async def _bytes_to_async_iter(data: bytes) -> AsyncIterator[bytes]:
 class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=500)
     prompt: str = Field(
         ...,
@@ -92,7 +94,13 @@ class CreatePromptAutomationRequest(BaseModel):
         max_length=50000,
         description="The prompt to execute in the automation",
     )
-    trigger: CronTrigger
+    trigger: Trigger = Field(
+        ...,
+        description=(
+            "Trigger configuration. Either a cron trigger (type: 'cron') "
+            "or an event trigger (type: 'event') for webhook-based automation."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
@@ -251,6 +259,8 @@ async def create_automation_from_prompt(
 class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=500)
     plugins: list[PluginSource] = Field(
         ...,
@@ -267,7 +277,13 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
-    trigger: CronTrigger
+    trigger: Trigger = Field(
+        ...,
+        description=(
+            "Trigger configuration. Either a cron trigger (type: 'cron') "
+            "or an event trigger (type: 'event') for webhook-based automation."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
