@@ -34,8 +34,6 @@ vi.mock("react-router", async (importOriginal) => ({
   }),
 }));
 
-vi.mock("zustand");
-
 afterEach(() => {
   cleanup();
 });

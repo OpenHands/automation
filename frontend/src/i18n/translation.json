@@ -1,4 +1,38 @@
 {
+  "AUTH$LOGGING_BACK_IN": {
+    "en": "Logging back into OpenHands...",
+    "ja": "OpenHandsへの再ログイン中...",
+    "zh-CN": "正在重新登录 OpenHands...",
+    "zh-TW": "正在重新登入 OpenHands...",
+    "ko-KR": "OpenHands에 다시 로그인 중...",
+    "no": "Logger inn på nytt i OpenHands...",
+    "ar": "جارٍ إعادة تسجيل الدخول إلى OpenHands...",
+    "de": "Melde mich erneut bei OpenHands an...",
+    "fr": "Reconnexion à OpenHands...",
+    "it": "Accesso nuovamente a OpenHands...",
+    "pt": "Entrando novamente no OpenHands...",
+    "es": "Volviendo a iniciar sesión en OpenHands...",
+    "ca": "Tornant a iniciar sessió a OpenHands...",
+    "tr": "OpenHands'a tekrar giriş yapılıyor...",
+    "uk": "Повторний вхід до OpenHands..."
+  },
+  "AUTH$LOADING": {
+    "en": "Loading...",
+    "ja": "読み込み中...",
+    "zh-CN": "加载中...",
+    "zh-TW": "載入中...",
+    "ko-KR": "로딩 중...",
+    "no": "Laster...",
+    "ar": "جارٍ التحميل...",
+    "de": "Laden...",
+    "fr": "Chargement...",
+    "it": "Caricamento...",
+    "pt": "Carregando...",
+    "es": "Cargando...",
+    "ca": "Carregant...",
+    "tr": "Yükleniyor...",
+    "uk": "Завантаження..."
+  },
   "AUTOMATIONS$TITLE": {
     "en": "Automations",
     "ja": "オートメーション",
