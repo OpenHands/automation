@@ -153,11 +153,6 @@ def require_permission(permission: str):
     Checks whether the authenticated user has the given permission string
     in their permissions list.  Raises HTTP 403 if missing, otherwise
     returns the ``AuthenticatedUser``.
-
-    Not wired to any endpoint yet — future use only.  Enabling a
-    permission gate requires changing
-    ``Depends(authenticate_request)`` to
-    ``Depends(require_permission("manage_automations"))``.
     """
 
     async def _check(
