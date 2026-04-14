@@ -5,6 +5,8 @@ import {
   clearLoginData,
   LoginMethod,
   LOCAL_STORAGE_KEYS,
+  getSelectedOrg,
+  getTheme,
 } from "#/utils/local-storage";
 
 describe("local-storage", () => {
@@ -30,5 +32,29 @@ describe("local-storage", () => {
     clearLoginData();
 
     expect(getLoginMethod()).toBeNull();
+  });
+
+  describe("getSelectedOrg", () => {
+    it("returns null when no org is stored", () => {
+      expect(getSelectedOrg()).toBeNull();
+    });
+
+    it("returns stored org id", () => {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.SELECTED_ORG, "org-123");
+
+      expect(getSelectedOrg()).toBe("org-123");
+    });
+  });
+
+  describe("getTheme", () => {
+    it("returns null when no theme is stored", () => {
+      expect(getTheme()).toBeNull();
+    });
+
+    it("returns stored theme value", () => {
+      localStorage.setItem(LOCAL_STORAGE_KEYS.THEME, "light");
+
+      expect(getTheme()).toBe("light");
+    });
   });
 });
