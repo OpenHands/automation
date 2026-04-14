@@ -2,8 +2,9 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import AutomationService from "#/api/automation-service";
+import { useUserStore } from "#/stores/user-store";
 import type { AutomationsResponse } from "#/types/automation";
 import AutomationsList from "#/routes/automations-list";
 
@@ -75,7 +76,22 @@ describe("AutomationsList", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useUserStore.setState({
+      user: {
+        user_id: "u1",
+        email: "test@example.com",
+        org_id: "o1",
+        org_name: "Test Org",
+        role: "owner",
+        permissions: ["manage_secrets"],
+      },
+      isInitialized: true,
+    });
     getAutomationsSpy = vi.spyOn(AutomationService, "getAutomations");
+  });
+
+  afterEach(() => {
+    useUserStore.setState({ user: null, isInitialized: false });
   });
 
   it("shows loading skeletons while data is being fetched", () => {
