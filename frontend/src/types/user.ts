@@ -5,4 +5,5 @@ export interface User {
   org_name: string;
   role: string;
   permissions: string[];
+  language?: string;
 }

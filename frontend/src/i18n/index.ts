@@ -30,6 +30,9 @@ i18n
     debug: import.meta.env.NODE_ENV === "development",
     supportedLngs: AvailableLanguages.map((lang) => lang.value),
     nonExplicitSupportedLngs: false,
+    backend: {
+      loadPath: "/automations/locales/{{lng}}/{{ns}}.json",
+    },
   });
 
 export default i18n;

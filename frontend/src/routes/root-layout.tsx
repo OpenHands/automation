@@ -4,6 +4,7 @@ import { useIsAuthed } from "#/hooks/use-is-authed";
 import { useMe } from "#/hooks/use-me";
 import { useAutoLogin } from "#/hooks/use-auto-login";
 import { useCrossTabState } from "#/hooks/use-cross-tab-state";
+import { useLanguageSync } from "#/hooks/use-language-sync";
 import { ReauthModal } from "#/components/reauth-modal";
 import { LOCAL_STORAGE_KEYS } from "#/utils/local-storage";
 
@@ -17,8 +18,9 @@ export default function RootLayout() {
     isFetching: isFetchingAuth,
   } = useIsAuthed();
 
-  useMe(isAuthed === true);
+  const { data: user } = useMe(isAuthed === true);
   useAutoLogin();
+  useLanguageSync(user);
 
   const checkLoginMethodExists = React.useCallback(
     () =>

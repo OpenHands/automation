@@ -90,6 +90,7 @@ class TestAuthentication:
         ]
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "valid-api-key"
+        assert result.cookie is None
 
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header and no cookie raises 401."""
@@ -227,10 +228,6 @@ class TestCookieAuthentication:
 
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "api-key-value"
-
-        # Verify outbound request used Authorization header
-        call_args = mock_http_client.get.call_args
-        headers = call_args[1]["headers"]
         assert "Authorization" in headers
         assert "Cookie" not in headers
 

@@ -1,5 +1,6 @@
 export const LOCAL_STORAGE_KEYS = {
   LOGIN_METHOD: "openhands_login_method",
+  I18N_LANGUAGE: "i18nextLng",
 };
 
 export enum LoginMethod {

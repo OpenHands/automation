@@ -51,6 +51,52 @@ The dev server proxies API requests to:
 - `/api/automation/*` → Automation Service (`127.0.0.1:8000`)
 - `/api/*` → OpenHands Backend (`127.0.0.1:3030`)
 
+### Running with OpenHands (Cross-Tab Sync)
+
+To test features that require cross-tab communication with the OpenHands frontend (e.g., language synchronization via `localStorage`), both apps must be served from the same origin. A local reverse proxy script is included for this purpose.
+
+**1. Start both dev servers:**
+
+```sh
+# Terminal 1 — OpenHands frontend (port 3030)
+cd /path/to/OpenHands/frontend
+npm run dev
+
+# Terminal 2 — Automation frontend (port 3002)
+cd /path/to/automation/frontend
+npm run dev
+```
+
+**2. Start the reverse proxy:**
+
+```sh
+# Terminal 3
+npm run dev:proxy
+```
+
+**3. Access both apps via the proxy:**
+
+- OpenHands: [http://localhost:3000](http://localhost:3000)
+- Automations: [http://localhost:3000/automations](http://localhost:3000/automations)
+
+Both apps now share the same origin (`localhost:3000`), so `localStorage` and `storage` events work across tabs.
+
+The proxy routes requests as follows:
+
+| Path | Target |
+| --- | --- |
+| `/automations/*` | `localhost:3002` (Automation frontend) |
+| `/api/automation/*` | `localhost:3002` (→ Vite proxy → Automation backend) |
+| `/api/*` | `localhost:3030` (OpenHands backend) |
+| `/*` | `localhost:3030` (OpenHands frontend) |
+
+Port defaults can be overridden via CLI arguments:
+
+```sh
+node scripts/dev-proxy.mjs [proxyPort] [ohPort] [autoPort]
+# e.g., node scripts/dev-proxy.mjs 3000 3030 3002
+```
+
 ### Running with Mocked APIs (No Backend Required)
 
 For frontend development without running any backend services, use the mock development mode:

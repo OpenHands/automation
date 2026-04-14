@@ -14,6 +14,7 @@ export const authHandlers = [
       org_id: "00000000-0000-0000-0000-000000000001",
       org_name: "Acme Corp",
       role: "owner",
+      language: "en",
       permissions: [
         "manage_secrets",
         "manage_mcp",
