@@ -5,6 +5,8 @@ import { useMe } from "#/hooks/use-me";
 import { useAutoLogin } from "#/hooks/use-auto-login";
 import { useCrossTabState } from "#/hooks/use-cross-tab-state";
 import { useLanguageSync } from "#/hooks/use-language-sync";
+import { useOrgSync } from "#/hooks/use-org-sync";
+import { useThemeSync } from "#/hooks/use-theme-sync";
 import { ReauthModal } from "#/components/reauth-modal";
 import { LOCAL_STORAGE_KEYS } from "#/utils/local-storage";
 
@@ -21,6 +23,8 @@ export default function RootLayout() {
   const { data: user } = useMe(isAuthed === true);
   useAutoLogin();
   useLanguageSync(user);
+  useOrgSync(user?.org_id);
+  useThemeSync();
 
   const checkLoginMethodExists = React.useCallback(
     () =>

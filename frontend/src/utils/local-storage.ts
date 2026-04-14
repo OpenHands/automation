@@ -1,6 +1,8 @@
 export const LOCAL_STORAGE_KEYS = {
   LOGIN_METHOD: "openhands_login_method",
   I18N_LANGUAGE: "i18nextLng",
+  SELECTED_ORG: "openhands_selected_org",
+  THEME: "openhands_theme",
 };
 
 export enum LoginMethod {
@@ -24,3 +26,11 @@ export const getLoginMethod = (): LoginMethod | null => {
 export const clearLoginData = (): void => {
   localStorage.removeItem(LOCAL_STORAGE_KEYS.LOGIN_METHOD);
 };
+
+export const getSelectedOrg = (): string | null =>
+  localStorage.getItem(LOCAL_STORAGE_KEYS.SELECTED_ORG);
+
+export type Theme = "dark" | "light";
+
+export const getTheme = (): Theme | null =>
+  localStorage.getItem(LOCAL_STORAGE_KEYS.THEME) as Theme | null;
