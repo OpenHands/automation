@@ -6,6 +6,7 @@ import { ToggleSwitch } from "./toggle-switch";
 import { MetadataChip } from "./metadata-chip";
 import { KebabMenu } from "./kebab-menu";
 import type { KebabMenuItem } from "./kebab-menu";
+import { useHasPermission } from "#/hooks/use-has-permission";
 import FolderIcon from "#/icons/folder.svg?react";
 import ClockIcon from "#/icons/clock.svg?react";
 import SparkleIcon from "#/icons/sparkle.svg?react";
@@ -25,6 +26,7 @@ export function AutomationCard({
 }: AutomationCardProps) {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const canManage = useHasPermission("manage_automations");
 
   const scheduleLabel =
     automation.trigger.schedule_human || automation.trigger.type;
@@ -66,12 +68,14 @@ export function AutomationCard({
         </div>
 
         <div className="ml-4 flex shrink-0 items-center gap-2">
-          <ToggleSwitch
-            enabled={automation.enabled}
-            label={`Toggle ${automation.name}`}
-            onToggle={() => onToggle(automation.id, automation.enabled)}
-          />
-          <KebabMenu items={menuItems} />
+          {canManage && (
+            <ToggleSwitch
+              enabled={automation.enabled}
+              label={`Toggle ${automation.name}`}
+              onToggle={() => onToggle(automation.id, automation.enabled)}
+            />
+          )}
+          {canManage && <KebabMenu items={menuItems} />}
         </div>
       </div>
 

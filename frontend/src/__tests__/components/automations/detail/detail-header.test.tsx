@@ -1,8 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
-import { vi, describe, it, expect } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Automation } from "#/types/automation";
+import type { User } from "#/types/user";
+import { useUserStore } from "#/stores/user-store";
 import { DetailHeader } from "#/components/automations/detail/detail-header";
 
 const mockAutomation: Automation = {
@@ -17,7 +19,23 @@ const mockAutomation: Automation = {
   updated_at: "2026-03-23T09:00:00Z",
 };
 
+const mockUser: User = {
+  user_id: "u1",
+  email: "test@example.com",
+  org_id: "o1",
+  org_name: "Test Org",
+  role: "owner",
+  permissions: ["manage_secrets"],
+};
+
 describe("DetailHeader", () => {
+  beforeEach(() => {
+    useUserStore.setState({ user: mockUser, isInitialized: true });
+  });
+
+  afterEach(() => {
+    useUserStore.setState({ user: null, isInitialized: false });
+  });
   it("renders automation name and description", () => {
     render(
       <MemoryRouter>
@@ -84,5 +102,20 @@ describe("DetailHeader", () => {
     await user.click(screen.getByLabelText("Automation actions"));
     await user.click(screen.getByText("AUTOMATIONS$DELETE"));
     expect(onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows toggle and kebab with baseline permissions", () => {
+    render(
+      <MemoryRouter>
+        <DetailHeader
+          automation={mockAutomation}
+          onToggle={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+    expect(screen.getByLabelText("Automation actions")).toBeInTheDocument();
   });
 });

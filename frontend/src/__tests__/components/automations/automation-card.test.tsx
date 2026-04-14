@@ -1,9 +1,20 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { vi, describe, it, expect } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryRouter } from "react-router";
 import { AutomationCard } from "#/components/automations/automation-card";
+import { useUserStore } from "#/stores/user-store";
 import type { Automation } from "#/types/automation";
+import type { User } from "#/types/user";
+
+const mockUser: User = {
+  user_id: "u1",
+  email: "test@example.com",
+  org_id: "o1",
+  org_name: "Test Org",
+  role: "owner",
+  permissions: ["manage_secrets"],
+};
 
 const mockNavigate = vi.fn();
 vi.mock("react-router", async (importOriginal) => ({
@@ -40,6 +51,13 @@ function renderCard(
 }
 
 describe("AutomationCard", () => {
+  beforeEach(() => {
+    useUserStore.setState({ user: mockUser, isInitialized: true });
+  });
+
+  afterEach(() => {
+    useUserStore.setState({ user: null, isInitialized: false });
+  });
   it("renders automation name, description, and metadata chips", () => {
     renderCard();
 
@@ -94,5 +112,12 @@ describe("AutomationCard", () => {
     renderCard(automation);
 
     expect(screen.getByText("cron")).toBeInTheDocument();
+  });
+
+  it("shows toggle and kebab with baseline permissions", () => {
+    renderCard();
+
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+    expect(screen.getByLabelText("Automation actions")).toBeInTheDocument();
   });
 });

@@ -5,6 +5,7 @@ import { ToggleSwitch } from "#/components/automations/toggle-switch";
 import { KebabMenu } from "#/components/automations/kebab-menu";
 import PowerIcon from "#/icons/power.svg?react";
 import TrashIcon from "#/icons/trash.svg?react";
+import { useHasPermission } from "#/hooks/use-has-permission";
 import { ActiveStatusBadge } from "./active-status-badge";
 
 interface DetailHeaderProps {
@@ -19,6 +20,7 @@ export function DetailHeader({
   onDelete,
 }: DetailHeaderProps) {
   const { t } = useTranslation();
+  const canManage = useHasPermission("manage_automations");
 
   const kebabItems = [
     {
@@ -46,16 +48,18 @@ export function DetailHeader({
           <ActiveStatusBadge active={automation.enabled} />
         </div>
         <div className="flex items-center gap-2">
-          <ToggleSwitch
-            enabled={automation.enabled}
-            label={
-              automation.enabled
-                ? t(I18nKey.AUTOMATIONS$TURN_OFF)
-                : t(I18nKey.AUTOMATIONS$TURN_ON)
-            }
-            onToggle={onToggle}
-          />
-          <KebabMenu items={kebabItems} />
+          {canManage && (
+            <ToggleSwitch
+              enabled={automation.enabled}
+              label={
+                automation.enabled
+                  ? t(I18nKey.AUTOMATIONS$TURN_OFF)
+                  : t(I18nKey.AUTOMATIONS$TURN_ON)
+              }
+              onToggle={onToggle}
+            />
+          )}
+          {canManage && <KebabMenu items={kebabItems} />}
         </div>
       </div>
       <p className="text-sm text-content-muted">{automation.description}</p>
