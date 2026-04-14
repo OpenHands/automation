@@ -40,6 +40,11 @@ export default function RootLayout() {
   const handleStorageChange = React.useCallback(
     (event: StorageEvent) => {
       if (event.key === LOCAL_STORAGE_KEYS.LOGIN_METHOD) {
+        if (event.newValue === null) {
+          const redirectUrl = encodeURIComponent(window.location.pathname);
+          window.location.href = `/login?redirect=${redirectUrl}`;
+          return;
+        }
         setLoginMethodExists(checkLoginMethodExists());
       }
     },
