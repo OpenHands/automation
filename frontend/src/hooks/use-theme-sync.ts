@@ -13,6 +13,7 @@ export function useThemeSync() {
     if (theme === "light") {
       document.documentElement.classList.remove("dark");
     } else {
+      // Default to dark theme when no preference is stored
       document.documentElement.classList.add("dark");
     }
   }, []);

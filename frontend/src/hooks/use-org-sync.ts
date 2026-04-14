@@ -20,6 +20,8 @@ export function useOrgSync(currentOrgId: string | undefined) {
         event.newValue !== null &&
         event.newValue !== currentOrgId
       ) {
+        // Invalidate all queries — all automation data is org-scoped, so
+        // every cached response is stale after an org switch.
         queryClient.invalidateQueries();
       }
     },
@@ -29,6 +31,7 @@ export function useOrgSync(currentOrgId: string | undefined) {
   const handleWindowFocus = React.useCallback(() => {
     const storedOrg = getSelectedOrg();
     if (storedOrg && storedOrg !== currentOrgId) {
+      // See comment above — full invalidation is intentional.
       queryClient.invalidateQueries();
     }
   }, [currentOrgId, queryClient]);
