@@ -31,7 +31,7 @@ i18n
     supportedLngs: AvailableLanguages.map((lang) => lang.value),
     nonExplicitSupportedLngs: false,
     backend: {
-      loadPath: "/automations/locales/{{lng}}/{{ns}}.json",
+      loadPath: `${import.meta.env.BASE_URL}locales/{{lng}}/{{ns}}.json`,
     },
   });
 

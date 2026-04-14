@@ -18,6 +18,10 @@ export function useLanguageSync(user: User | undefined) {
   const { i18n } = useTranslation();
   const queryClient = useQueryClient();
 
+  // Priority 1: Apply language from API response whenever user data arrives.
+  // If a cross-tab storage event fires before user data loads, the refetch
+  // triggered by invalidateQueries will return the updated language from the
+  // API, so this effect self-corrects any transient mismatch.
   React.useEffect(() => {
     if (user?.language && user.language !== i18n.language) {
       i18n.changeLanguage(user.language);
@@ -31,6 +35,14 @@ export function useLanguageSync(user: User | undefined) {
         event.newValue &&
         event.newValue !== i18n.language
       ) {
+        const { supportedLngs } = i18n.options;
+        if (
+          Array.isArray(supportedLngs) &&
+          !supportedLngs.includes(event.newValue)
+        ) {
+          return;
+        }
+
         i18n.changeLanguage(event.newValue);
         queryClient.invalidateQueries({ queryKey: ME_QUERY_KEY });
       }
@@ -38,7 +50,5 @@ export function useLanguageSync(user: User | undefined) {
     [i18n, queryClient],
   );
 
-  const handleWindowFocus = React.useCallback(() => {}, []);
-
-  useCrossTabState(handleStorageChange, handleWindowFocus);
+  useCrossTabState(handleStorageChange);
 }

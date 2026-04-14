@@ -16,6 +16,9 @@ vi.mock("react-i18next", async (importOriginal) => ({
       language: "en",
       changeLanguage: changeLanguageMock,
       exists: () => false,
+      options: {
+        supportedLngs: ["en", "ja", "zh-CN", "fr", "de"],
+      },
     },
   }),
 }));
@@ -113,6 +116,23 @@ describe("useLanguageSync", () => {
         new StorageEvent("storage", {
           key: "some_other_key",
           newValue: "de",
+        }),
+      );
+    });
+
+    expect(changeLanguageMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores storage events with unsupported language codes", () => {
+    const { Wrapper } = createWrapper();
+
+    renderHook(() => useLanguageSync(undefined), { wrapper: Wrapper });
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: LOCAL_STORAGE_KEYS.I18N_LANGUAGE,
+          newValue: "invalid-lang-xyz",
         }),
       );
     });
