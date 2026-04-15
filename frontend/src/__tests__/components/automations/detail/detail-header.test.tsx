@@ -25,7 +25,7 @@ const mockUser: User = {
   org_id: "o1",
   org_name: "Test Org",
   role: "owner",
-  permissions: ["manage_secrets"],
+  permissions: ["manage_secrets", "manage_automations"],
 };
 
 describe("DetailHeader", () => {

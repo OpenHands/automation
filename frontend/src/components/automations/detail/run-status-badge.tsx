@@ -2,14 +2,15 @@ import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import CheckCircleIcon from "#/icons/check-circle.svg?react";
 import XCircleIcon from "#/icons/x-circle.svg?react";
+import { AutomationRunStatus } from "#/types/automation";
 
 interface RunStatusBadgeProps {
-  status: string;
+  status: AutomationRunStatus;
 }
 
 export function RunStatusBadge({ status }: RunStatusBadgeProps) {
   const { t } = useTranslation();
-  const isSuccess = status === "successful";
+  const isSuccess = status === AutomationRunStatus.COMPLETED;
 
   return (
     <span

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import AutomationService from "#/api/automation-service";
+import { AutomationRunStatus } from "#/types/automation";
 import type { AutomationRunsResponse } from "#/types/automation";
 import { ActivityLogSection } from "#/components/automations/detail/activity-log-section";
 
@@ -25,7 +26,7 @@ const mockRuns: AutomationRunsResponse = {
   runs: [
     {
       id: "r1",
-      status: "successful",
+      status: AutomationRunStatus.COMPLETED,
       conversation_id: "conv-r1",
       error_detail: null,
       started_at: "2026-03-23T09:00:00Z",
@@ -33,7 +34,7 @@ const mockRuns: AutomationRunsResponse = {
     },
     {
       id: "r2",
-      status: "failed",
+      status: AutomationRunStatus.FAILED,
       conversation_id: "conv-r2",
       error_detail: "Process exited with code 1",
       started_at: "2026-03-22T09:00:00Z",

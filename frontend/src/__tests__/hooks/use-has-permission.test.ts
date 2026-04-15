@@ -19,6 +19,13 @@ describe("useHasPermission", () => {
   });
 
   describe("when permission is not enforced (baseline)", () => {
+    beforeEach(() => {
+      vi.resetModules();
+      vi.doMock("#/utils/permissions", () => ({
+        ENFORCED_PERMISSIONS: new Set(),
+      }));
+    });
+
     it("returns false when user is not authenticated", async () => {
       const { useHasPermission } = await import("#/hooks/use-has-permission");
       const { result } = renderHook(() =>
@@ -28,7 +35,8 @@ describe("useHasPermission", () => {
     });
 
     it("returns true when user is authenticated", async () => {
-      useUserStore.setState({ user: mockUser, isInitialized: true });
+      const { useUserStore: freshStore } = await import("#/stores/user-store");
+      freshStore.setState({ user: mockUser, isInitialized: true });
       const { useHasPermission } = await import("#/hooks/use-has-permission");
       const { result } = renderHook(() =>
         useHasPermission("manage_automations"),

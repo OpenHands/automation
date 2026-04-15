@@ -80,18 +80,22 @@ export function AutomationCard({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <MetadataChip
-          icon={<FolderIcon className="size-3.5" />}
-          label={automation.repository}
-        />
+        {automation.repository && (
+          <MetadataChip
+            icon={<FolderIcon className="size-3.5" />}
+            label={automation.repository}
+          />
+        )}
         <MetadataChip
           icon={<ClockIcon className="size-3.5" />}
           label={scheduleLabel}
         />
-        <MetadataChip
-          icon={<SparkleIcon className="size-3.5" />}
-          label={automation.model}
-        />
+        {automation.model && (
+          <MetadataChip
+            icon={<SparkleIcon className="size-3.5" />}
+            label={automation.model}
+          />
+        )}
       </div>
     </div>
   );
