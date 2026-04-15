@@ -15,4 +15,14 @@ describe("RunStatusBadge", () => {
     render(<RunStatusBadge status={AutomationRunStatus.FAILED} />);
     expect(screen.getByText("AUTOMATIONS$DETAIL$FAILED")).toBeInTheDocument();
   });
+
+  it("renders pending label for pending status", () => {
+    render(<RunStatusBadge status={AutomationRunStatus.PENDING} />);
+    expect(screen.getByText("AUTOMATIONS$DETAIL$PENDING")).toBeInTheDocument();
+  });
+
+  it("renders running label for running status", () => {
+    render(<RunStatusBadge status={AutomationRunStatus.RUNNING} />);
+    expect(screen.getByText("AUTOMATIONS$DETAIL$RUNNING")).toBeInTheDocument();
+  });
 });

@@ -28,6 +28,8 @@ export interface AutomationsResponse {
 }
 
 export enum AutomationRunStatus {
+  PENDING = "PENDING",
+  RUNNING = "RUNNING",
   COMPLETED = "COMPLETED",
   FAILED = "FAILED",
 }
