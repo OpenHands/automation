@@ -21,6 +21,19 @@ export default defineConfig(({ mode }) => {
       viteTsconfigPaths(),
       tailwindcss(),
       svgr(),
+      // Allow the MSW service worker (served under /automations/) to use scope "/"
+      // so it can intercept fetch requests from pages at /automations (no trailing slash).
+      {
+        name: "msw-service-worker-scope",
+        configureServer(server) {
+          server.middlewares.use((_req, res, next) => {
+            if (_req.url?.includes("mockServiceWorker.js")) {
+              res.setHeader("Service-Worker-Allowed", "/");
+            }
+            next();
+          });
+        },
+      },
     ],
     optimizeDeps: {
       include: [

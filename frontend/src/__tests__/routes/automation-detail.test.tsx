@@ -6,6 +6,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { AxiosError } from "axios";
 import AutomationService from "#/api/automation-service";
 import { useUserStore } from "#/stores/user-store";
+import { AutomationRunStatus } from "#/types/automation";
 import type { Automation, AutomationRunsResponse } from "#/types/automation";
 import AutomationDetail from "#/routes/automation-detail";
 
@@ -60,7 +61,7 @@ const mockRuns: AutomationRunsResponse = {
   runs: [
     {
       id: "r1",
-      status: "successful",
+      status: AutomationRunStatus.COMPLETED,
       conversation_id: "conv-r1",
       error_detail: null,
       started_at: "2026-03-23T09:00:00Z",
@@ -83,7 +84,7 @@ describe("AutomationDetail", () => {
         org_id: "o1",
         org_name: "Test Org",
         role: "owner",
-        permissions: ["manage_secrets"],
+        permissions: ["manage_secrets", "manage_automations"],
       },
       isInitialized: true,
     });

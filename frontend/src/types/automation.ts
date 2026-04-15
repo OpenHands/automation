@@ -27,9 +27,16 @@ export interface AutomationsResponse {
   total: number;
 }
 
+export enum AutomationRunStatus {
+  PENDING = "PENDING",
+  RUNNING = "RUNNING",
+  COMPLETED = "COMPLETED",
+  FAILED = "FAILED",
+}
+
 export interface AutomationRun {
   id: string;
-  status: string;
+  status: AutomationRunStatus;
   conversation_id: string;
   error_detail: string | null;
   started_at: string;

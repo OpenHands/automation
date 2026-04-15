@@ -34,6 +34,7 @@ export const authHandlers = [
         "change_organization_name",
         "delete_organization",
         "manage_org_claims",
+        "manage_automations",
       ],
     }),
   ),

@@ -41,6 +41,26 @@ describe("ConfigurationSection", () => {
     ).toBeInTheDocument();
   });
 
+  it("hides repository and model fields when values are empty", () => {
+    const automation = {
+      ...mockAutomation,
+      repository: "",
+      model: "",
+    };
+
+    render(<ConfigurationSection automation={automation} />);
+
+    expect(
+      screen.queryByText("AUTOMATIONS$DETAIL$REPOSITORIES"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("AUTOMATIONS$DETAIL$MODEL"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("AUTOMATIONS$DETAIL$CONFIGURATION"),
+    ).toBeInTheDocument();
+  });
+
   it("does not render notification field when not provided", () => {
     const automationWithoutNotification = {
       ...mockAutomation,

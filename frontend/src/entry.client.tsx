@@ -13,6 +13,12 @@ async function prepareApp() {
     const { worker } = await import("./mocks/browser");
     await worker.start({
       onUnhandledRequest: "bypass",
+      serviceWorker: {
+        // Serve from /automations/ (Vite base path) but scope to / so the
+        // worker intercepts API requests from /automations (no trailing slash).
+        url: "/automations/mockServiceWorker.js",
+        options: { scope: "/" },
+      },
     });
   }
 }

@@ -13,7 +13,7 @@ const mockUser: User = {
   org_id: "o1",
   org_name: "Test Org",
   role: "owner",
-  permissions: ["manage_secrets"],
+  permissions: ["manage_secrets", "manage_automations"],
 };
 
 const mockNavigate = vi.fn();
@@ -102,6 +102,19 @@ describe("AutomationCard", () => {
 
     expect(onDelete).toHaveBeenCalledWith("abc-123");
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("hides repository and model chips when values are empty", () => {
+    const automation = {
+      ...mockAutomation,
+      repository: "",
+      model: "",
+    };
+    renderCard(automation);
+
+    expect(screen.queryByText("acme/frontend-app")).not.toBeInTheDocument();
+    expect(screen.queryByText("Claude Opus")).not.toBeInTheDocument();
+    expect(screen.getByText("Weekdays at 09:00")).toBeInTheDocument();
   });
 
   it("shows trigger type when schedule_human is not available", () => {

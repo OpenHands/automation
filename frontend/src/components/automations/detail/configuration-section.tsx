@@ -36,15 +36,17 @@ export function ConfigurationSection({
       title={t(I18nKey.AUTOMATIONS$DETAIL$CONFIGURATION)}
     >
       <div className="grid grid-cols-2 gap-x-4 gap-y-5">
-        <ConfigField
-          icon={<GitBranchIcon className="size-3.5" />}
-          label={t(I18nKey.AUTOMATIONS$DETAIL$REPOSITORIES)}
-        >
-          <span className="flex items-center gap-1">
-            {automation.repository}
-            {automation.branch && <BranchBadge branch={automation.branch} />}
-          </span>
-        </ConfigField>
+        {automation.repository && (
+          <ConfigField
+            icon={<GitBranchIcon className="size-3.5" />}
+            label={t(I18nKey.AUTOMATIONS$DETAIL$REPOSITORIES)}
+          >
+            <span className="flex items-center gap-1">
+              {automation.repository}
+              {automation.branch && <BranchBadge branch={automation.branch} />}
+            </span>
+          </ConfigField>
+        )}
 
         <ConfigField
           icon={<CheckCircleIcon className="size-3.5" />}
@@ -60,12 +62,14 @@ export function ConfigurationSection({
           {scheduleDisplay}
         </ConfigField>
 
-        <ConfigField
-          icon={<SparkleIcon className="size-3.5" />}
-          label={t(I18nKey.AUTOMATIONS$DETAIL$MODEL)}
-        >
-          {automation.model}
-        </ConfigField>
+        {automation.model && (
+          <ConfigField
+            icon={<SparkleIcon className="size-3.5" />}
+            label={t(I18nKey.AUTOMATIONS$DETAIL$MODEL)}
+          >
+            {automation.model}
+          </ConfigField>
+        )}
 
         {automation.notification && (
           <ConfigField
