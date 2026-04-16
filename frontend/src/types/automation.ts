@@ -7,14 +7,13 @@ export interface AutomationTrigger {
 export interface Automation {
   id: string;
   name: string;
-  description: string;
   trigger: AutomationTrigger;
   enabled: boolean;
   repository: string;
   model: string;
   created_at: string;
   updated_at: string;
-  prompt?: string;
+  prompt: string | null;
   branch?: string;
   plugins?: string[];
   notification?: string;

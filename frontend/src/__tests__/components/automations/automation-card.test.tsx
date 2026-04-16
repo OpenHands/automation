@@ -25,7 +25,7 @@ vi.mock("react-router", async (importOriginal) => ({
 const mockAutomation: Automation = {
   id: "abc-123",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
+  prompt: "Summarize new pull requests.",
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",
@@ -58,7 +58,7 @@ describe("AutomationCard", () => {
   afterEach(() => {
     useUserStore.setState({ user: null, isInitialized: false });
   });
-  it("renders automation name, description, and metadata chips", () => {
+  it("renders automation name, prompt, and metadata chips", () => {
     renderCard();
 
     expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();

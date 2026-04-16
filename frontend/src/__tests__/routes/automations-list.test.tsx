@@ -36,7 +36,7 @@ const mockAutomations: AutomationsResponse = {
     {
       id: "1",
       name: "PR Triage Digest",
-      description: "Summarize new pull requests and flag risky changes.",
+      prompt: "Summarize new pull requests and flag risky changes.",
       trigger: { type: "schedule", schedule_human: "Weekdays at 09:00" },
       enabled: true,
       repository: "acme/frontend-app",
@@ -47,7 +47,7 @@ const mockAutomations: AutomationsResponse = {
     {
       id: "2",
       name: "Nightly Security Pass",
-      description: "Run a repository scan and create a remediation summary.",
+      prompt: "Run a repository scan and create a remediation summary.",
       trigger: { type: "schedule", schedule_human: "Daily at 01:30" },
       enabled: true,
       repository: "acme/backend-api",
@@ -58,7 +58,7 @@ const mockAutomations: AutomationsResponse = {
     {
       id: "3",
       name: "Release Readiness Review",
-      description:
+      prompt:
         "Compile release blockers, open incidents, and pending approvals.",
       trigger: { type: "schedule", schedule_human: "Fridays at 11:00" },
       enabled: false,

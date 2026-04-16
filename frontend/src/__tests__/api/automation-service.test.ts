@@ -10,7 +10,7 @@ import type {
 const mockAutomation: Automation = {
   id: "1",
   name: "Test Automation",
-  description: "A test automation",
+  prompt: "A test automation",
   trigger: { type: "schedule", schedule_human: "Daily at 09:00" },
   enabled: true,
   repository: "acme/repo",

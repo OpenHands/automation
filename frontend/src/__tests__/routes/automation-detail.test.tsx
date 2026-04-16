@@ -38,7 +38,6 @@ function renderPage(automationId = "1") {
 const mockAutomation: Automation = {
   id: "1",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
   trigger: {
     type: "cron",
     schedule: "0 9 * * 1-5",
@@ -115,9 +114,6 @@ describe("AutomationDetail", () => {
 
     // Header
     expect(screen.getByText("AUTOMATIONS$DETAIL$ACTIVE")).toBeInTheDocument();
-    expect(
-      screen.getByText("Summarize new pull requests."),
-    ).toBeInTheDocument();
 
     // Prompt section
     expect(screen.getByText("AUTOMATIONS$DETAIL$PROMPT")).toBeInTheDocument();

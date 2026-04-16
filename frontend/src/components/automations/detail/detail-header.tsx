@@ -62,7 +62,6 @@ export function DetailHeader({
           {canManage && <KebabMenu items={kebabItems} />}
         </div>
       </div>
-      <p className="text-sm text-content-muted">{automation.description}</p>
     </div>
   );
 }

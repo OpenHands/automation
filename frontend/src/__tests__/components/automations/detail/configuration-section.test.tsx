@@ -6,7 +6,7 @@ import { ConfigurationSection } from "#/components/automations/detail/configurat
 const mockAutomation: Automation = {
   id: "1",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
+  prompt: "Summarize new pull requests.",
   trigger: {
     type: "cron",
     schedule: "0 9 * * 1-5",

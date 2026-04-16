@@ -35,7 +35,7 @@ export default function AutomationsList() {
     return data.automations.filter(
       (a) =>
         a.name.toLowerCase().includes(q) ||
-        a.description.toLowerCase().includes(q) ||
+        (a.prompt ?? "").toLowerCase().includes(q) ||
         a.repository.toLowerCase().includes(q) ||
         a.model.toLowerCase().includes(q),
     );
