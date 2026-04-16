@@ -20,8 +20,6 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
     {
       id: "a1000000-0000-0000-0000-000000000001",
       name: "PR Triage Digest",
-      description:
-        "Summarize new pull requests and flag risky changes every weekday morning.",
       trigger: {
         type: "cron",
         schedule: "0 9 * * 1-5",
@@ -43,8 +41,6 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
     {
       id: "a1000000-0000-0000-0000-000000000002",
       name: "Nightly Security Pass",
-      description:
-        "Run a repository scan and create a remediation summary for critical findings.",
       trigger: {
         type: "cron",
         schedule: "30 1 * * *",
@@ -66,8 +62,6 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
     {
       id: "a1000000-0000-0000-0000-000000000003",
       name: "Docs Sync on Push",
-      description:
-        "Watch the docs repository and prepare a changelog-ready summary when pushes land.",
       trigger: {
         type: "cron",
         schedule: "*/5 * * * *",
@@ -89,8 +83,6 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
     {
       id: "a1000000-0000-0000-0000-000000000004",
       name: "Release Readiness Review",
-      description:
-        "Compile release blockers, open incidents, and pending approvals before Friday ship.",
       trigger: {
         type: "cron",
         schedule: "0 11 * * 5",
@@ -112,8 +104,6 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
     {
       id: "a1000000-0000-0000-0000-000000000005",
       name: "Incident Webhook Summary",
-      description:
-        "Summarize incoming incident webhooks and post a digest to the on-call channel.",
       trigger: {
         type: "cron",
         schedule: "0 */2 * * *",

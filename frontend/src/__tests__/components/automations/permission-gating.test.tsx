@@ -18,7 +18,7 @@ vi.mock("#/utils/permissions", async (importOriginal) => ({
 const mockAutomation: Automation = {
   id: "1",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
+  prompt: "Summarize new pull requests.",
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",

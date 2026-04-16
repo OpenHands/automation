@@ -499,6 +499,45 @@ class TestGetAutomation:
         assert data["name"] == "Test Automation"
         assert data["id"] == str(automation.id)
 
+    async def test_get_automation_returns_prompt(self, async_client, async_session):
+        """GET returns prompt field when set."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Prompt Automation",
+            prompt="Summarize PRs daily",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 200
+        assert response.json()["prompt"] == "Summarize PRs daily"
+
+    async def test_get_automation_without_prompt_returns_null(
+        self, async_client, async_session
+    ):
+        """GET returns null prompt when not set."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="No Prompt Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 200
+        assert response.json()["prompt"] is None
+
     async def test_get_automation_not_found(self, async_client):
         """Invalid ID returns 404."""
         fake_id = uuid.uuid4()
@@ -720,6 +759,28 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 404
+
+    async def test_update_automation_prompt(self, async_client, async_session):
+        """PATCH updates the automation prompt."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Prompt Update Test",
+            prompt="Original prompt",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["prompt"] == "Updated prompt"
 
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""

@@ -7,7 +7,7 @@ import type { Automation } from "#/types/automation";
 const mockAutomation: Automation = {
   id: "1",
   name: "Test Automation",
-  description: "A test automation",
+  prompt: "A test automation",
   trigger: { type: "cron", schedule_human: "Daily" },
   enabled: true,
   repository: "acme/test",

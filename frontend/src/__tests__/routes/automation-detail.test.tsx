@@ -38,7 +38,6 @@ function renderPage(automationId = "1") {
 const mockAutomation: Automation = {
   id: "1",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
   trigger: {
     type: "cron",
     schedule: "0 9 * * 1-5",
@@ -115,9 +114,6 @@ describe("AutomationDetail", () => {
 
     // Header
     expect(screen.getByText("AUTOMATIONS$DETAIL$ACTIVE")).toBeInTheDocument();
-    expect(
-      screen.getByText("Summarize new pull requests."),
-    ).toBeInTheDocument();
 
     // Prompt section
     expect(screen.getByText("AUTOMATIONS$DETAIL$PROMPT")).toBeInTheDocument();
@@ -143,6 +139,21 @@ describe("AutomationDetail", () => {
     expect(
       screen.getByText("AUTOMATIONS$DETAIL$BACK_TO_LIST"),
     ).toBeInTheDocument();
+  });
+
+  it("does not render prompt section when prompt is absent", async () => {
+    const automationWithoutPrompt = { ...mockAutomation, prompt: undefined };
+    getAutomationSpy.mockResolvedValue(automationWithoutPrompt);
+    getRunsSpy.mockResolvedValue(mockRuns);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByText("AUTOMATIONS$DETAIL$PROMPT"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows not-found state when API returns 404", async () => {

@@ -63,7 +63,7 @@ export function AutomationCard({
             {automation.name}
           </h3>
           <p className="mt-1 line-clamp-2 text-sm text-content-muted">
-            {automation.description}
+            {automation.prompt}
           </p>
         </div>
 

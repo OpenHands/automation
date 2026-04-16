@@ -296,6 +296,7 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    prompt: str | None = Field(default=None, max_length=50000)
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
@@ -555,6 +556,7 @@ class AutomationResponse(BaseModel):
     user_id: uuid.UUID
     org_id: uuid.UUID
     name: str
+    prompt: str | None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None

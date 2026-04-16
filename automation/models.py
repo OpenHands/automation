@@ -52,6 +52,9 @@ class Automation(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
 
+    # Optional prompt (set when created via preset endpoints)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     trigger: Mapped[dict] = mapped_column(JSONB, nullable=False)
 

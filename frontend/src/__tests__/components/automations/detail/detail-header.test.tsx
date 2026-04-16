@@ -10,7 +10,7 @@ import { DetailHeader } from "#/components/automations/detail/detail-header";
 const mockAutomation: Automation = {
   id: "1",
   name: "PR Triage Digest",
-  description: "Summarize new pull requests.",
+  prompt: "Summarize new pull requests.",
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",
@@ -36,7 +36,7 @@ describe("DetailHeader", () => {
   afterEach(() => {
     useUserStore.setState({ user: null, isInitialized: false });
   });
-  it("renders automation name and description", () => {
+  it("renders automation name and active badge", () => {
     render(
       <MemoryRouter>
         <DetailHeader
@@ -48,9 +48,7 @@ describe("DetailHeader", () => {
     );
 
     expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
-    expect(
-      screen.getByText("Summarize new pull requests."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("AUTOMATIONS$DETAIL$ACTIVE")).toBeInTheDocument();
   });
 
   it("renders active badge when automation is enabled", () => {
