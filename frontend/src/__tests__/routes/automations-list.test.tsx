@@ -167,6 +167,61 @@ describe("AutomationsList", () => {
     });
   });
 
+  it("does not crash when searching and optional fields are missing from API response", async () => {
+    const user = userEvent.setup();
+    const response: AutomationsResponse = {
+      automations: [
+        {
+          id: "1",
+          name: "PR Triage Digest",
+          trigger: { type: "schedule", schedule_human: "Weekdays at 09:00" },
+          enabled: true,
+          created_at: "2026-01-10T00:00:00Z",
+          updated_at: "2026-03-23T09:00:00Z",
+        } as AutomationsResponse["automations"][number],
+      ],
+      total: 1,
+    };
+    getAutomationsSpy.mockResolvedValue(response);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByPlaceholderText(
+      "AUTOMATIONS$SEARCH_PLACEHOLDER",
+    );
+    await user.type(searchInput, "zzz-no-match");
+
+    expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
+  });
+
+  it("matches search query against description, repository, and model fields", async () => {
+    const user = userEvent.setup();
+    getAutomationsSpy.mockResolvedValue(mockAutomations);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByPlaceholderText(
+      "AUTOMATIONS$SEARCH_PLACEHOLDER",
+    );
+
+    // Match by repository
+    await user.type(searchInput, "backend-api");
+    expect(screen.getByText("Nightly Security Pass")).toBeInTheDocument();
+    expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
+
+    // Clear and match by model
+    await user.clear(searchInput);
+    await user.type(searchInput, "Gemini");
+    expect(screen.getByText("Release Readiness Review")).toBeInTheDocument();
+    expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
+  });
+
   it("navigates to automation detail when card is clicked", async () => {
     getAutomationsSpy.mockResolvedValue(mockAutomations);
     renderPage();
