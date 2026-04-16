@@ -145,6 +145,21 @@ describe("AutomationDetail", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not render prompt section when prompt is absent", async () => {
+    const automationWithoutPrompt = { ...mockAutomation, prompt: undefined };
+    getAutomationSpy.mockResolvedValue(automationWithoutPrompt);
+    getRunsSpy.mockResolvedValue(mockRuns);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByText("AUTOMATIONS$DETAIL$PROMPT"),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows not-found state when API returns 404", async () => {
     const error404 = new AxiosError(
       "Not Found",

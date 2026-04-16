@@ -204,6 +204,7 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
+        assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
         assert data["entrypoint"] == "python main.py"
@@ -293,6 +294,7 @@ class TestCreateAutomationFromPrompt:
         automation = result.scalars().first()
         assert automation is not None
         assert automation.name == "Automation Record Test"
+        assert automation.prompt == "Print hello"
         assert automation.entrypoint == "python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
@@ -664,6 +666,7 @@ class TestCreateAutomationFromPlugin:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Plugin Automation"
+        assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
         assert data["entrypoint"] == "python main.py"
@@ -761,6 +764,7 @@ class TestCreateAutomationFromPlugin:
         automation = result.scalars().first()
         assert automation is not None
         assert automation.name == "Automation Record Test"
+        assert automation.prompt == "Run plugin tasks"
         assert automation.entrypoint == "python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
