@@ -178,7 +178,7 @@ describe("AutomationsList", () => {
           enabled: true,
           created_at: "2026-01-10T00:00:00Z",
           updated_at: "2026-03-23T09:00:00Z",
-        } as AutomationsResponse["automations"][number],
+        },
       ],
       total: 1,
     };
