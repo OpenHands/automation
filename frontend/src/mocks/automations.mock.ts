@@ -36,7 +36,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       plugins: ["GitHub", "Slack", "Linear"],
       notification: "Slack digest to #eng-reviews",
       timezone: "America/Los_Angeles",
-      last_run_at: daysAgo(0),
+      last_triggered_at: daysAgo(0),
     },
     {
       id: "a1000000-0000-0000-0000-000000000002",
@@ -57,7 +57,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       plugins: ["GitHub"],
       notification: "Email to security-team@acme.com",
       timezone: "UTC",
-      last_run_at: daysAgo(0),
+      last_triggered_at: daysAgo(0),
     },
     {
       id: "a1000000-0000-0000-0000-000000000003",
@@ -78,7 +78,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       plugins: ["GitHub", "Slack"],
       notification: "Slack to #docs-updates",
       timezone: "America/New_York",
-      last_run_at: daysAgo(1),
+      last_triggered_at: daysAgo(1),
     },
     {
       id: "a1000000-0000-0000-0000-000000000004",
@@ -99,7 +99,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       plugins: ["GitHub", "Linear"],
       notification: "Slack to #releases",
       timezone: "America/Chicago",
-      last_run_at: daysAgo(14),
+      last_triggered_at: daysAgo(14),
     },
     {
       id: "a1000000-0000-0000-0000-000000000005",
@@ -120,7 +120,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       plugins: ["Slack"],
       notification: "Slack to #oncall",
       timezone: "UTC",
-      last_run_at: null,
+      last_triggered_at: null,
     },
   ],
   total: 5,

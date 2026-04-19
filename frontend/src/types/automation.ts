@@ -18,7 +18,7 @@ export interface Automation {
   plugins?: string[];
   notification?: string;
   timezone?: string;
-  last_run_at?: string | null;
+  last_triggered_at?: string | null;
 }
 
 export interface AutomationsResponse {

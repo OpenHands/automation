@@ -79,7 +79,7 @@ export default function AutomationDetail() {
       )}
       <ActivitySection
         createdAt={automation.created_at}
-        lastRunAt={automation.last_run_at}
+        lastRunAt={automation.last_triggered_at}
       />
       <ActivityLogSection automationId={automation.id} />
       <DeleteConfirmationModal

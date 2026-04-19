@@ -53,7 +53,7 @@ const mockAutomation: Automation = {
   plugins: ["GitHub", "Slack"],
   notification: "Slack digest to #eng-reviews",
   timezone: "America/Los_Angeles",
-  last_run_at: "2026-03-23T09:00:00Z",
+  last_triggered_at: "2026-03-23T09:00:00Z",
 };
 
 const mockRuns: AutomationRunsResponse = {
@@ -139,6 +139,24 @@ describe("AutomationDetail", () => {
     expect(
       screen.getByText("AUTOMATIONS$DETAIL$BACK_TO_LIST"),
     ).toBeInTheDocument();
+  });
+
+  it("renders the last-triggered time (not 'Never') when API returns last_triggered_at", async () => {
+    const recentIso = new Date(Date.now() - 5 * 60_000).toISOString();
+    getAutomationSpy.mockResolvedValue({
+      ...mockAutomation,
+      last_triggered_at: recentIso,
+    });
+    getRunsSpy.mockResolvedValue(mockRuns);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByText("AUTOMATIONS$DETAIL$TIME_NEVER"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not render prompt section when prompt is absent", async () => {
