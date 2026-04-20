@@ -43,7 +43,7 @@ jobs:
               with:
                   repository: ${{ env.DEPLOY_REPO }}
                   ref: ${{ env.BASE_BRANCH }}
-                  token: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  token: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}
                   fetch-depth: 0
                   path: deploy-repo
 
@@ -122,7 +122,7 @@ jobs:
             - name: Create or get deploy PR
               id: manage-pr
               env:
-                  GH_TOKEN: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
+                  GH_TOKEN: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}
                   BRANCH_NAME: ${{ steps.deploy-pr.outputs.branch_name }}
                   PR_TITLE: ${{ inputs.pr_title }}
               run: |
