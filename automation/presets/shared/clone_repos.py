@@ -4,7 +4,7 @@
 This script is shared by both prompt and plugin presets. It:
 1. Reads repos_config.json from the same directory as the script
 2. Fetches git tokens from the sandbox settings API
-3. Clones each repo to /workspace/repos/repo_N
+3. Clones each repo to /workspace/project/repo_N (agent's working directory)
 
 Environment variables used:
 - SANDBOX_ID: Sandbox identifier for settings API
@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 # Configuration
-REPOS_DIR = Path("/workspace/repos")
+REPOS_DIR = Path("/workspace/project")  # Clone repos into agent's working directory
 CLONE_TIMEOUT = 300  # 5 minutes per repo
 
 

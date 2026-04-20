@@ -14,7 +14,7 @@ MAX_RUN_DURATION_SECONDS = int(MAX_RUN_DURATION.total_seconds())
 # Sandbox execution constants
 SANDBOX_POLL_INTERVAL = 5  # seconds between status checks
 SANDBOX_READY_TIMEOUT = 300  # max wait for sandbox to become ready
-WORK_DIR = "/workspace/automation"
+WORK_DIR = "/workspace/project"  # Agent's working directory; repos cloned here too
 TARBALL_PATH = "/tmp/automation.tar.gz"
 
 # Limits for external tarball downloads (in sandbox)

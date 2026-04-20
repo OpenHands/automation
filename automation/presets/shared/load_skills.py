@@ -8,8 +8,8 @@ to load skills from cloned repos in /workspace/repos.
 import sys
 from pathlib import Path
 
-# Directory where repos are cloned by setup.sh
-REPOS_DIR = Path("/workspace/repos")
+# Directory where repos are cloned by setup.sh (same as agent's working directory)
+REPOS_DIR = Path("/workspace/project")
 
 
 def load_skills_from_repos() -> tuple[list, object | None]:
