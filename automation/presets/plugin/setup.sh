@@ -1,11 +1,20 @@
 #!/bin/bash
-# Install the OpenHands SDK from PyPI (released versions).
+# Install the OpenHands SDK from PyPI and clone any configured repositories.
 # All versions pinned to avoid potential issues due to version mismatch.
 set -e
 
-echo "[setup] installing openhands SDK from PyPI"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "[setup] Installing OpenHands SDK from PyPI"
 pip install -q --no-cache-dir \
   openhands-sdk==1.16.1 \
   openhands-workspace==1.16.1 \
   openhands-tools==1.16.1
-echo "[setup] done"
+
+# Clone repos if config and clone script exist
+if [ -f "$SCRIPT_DIR/repos_config.json" ] && [ -f "$SCRIPT_DIR/clone_repos.py" ]; then
+    echo "[setup] Found repos_config.json, cloning repositories..."
+    python3 "$SCRIPT_DIR/clone_repos.py"
+fi
+
+echo "[setup] Done"

@@ -12,7 +12,11 @@ import pytest
 from openhands.sdk.plugin import PluginSource
 
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.preset_router import _generate_plugin_tarball, _generate_tarball
+from automation.preset_router import (
+    RepoSource,
+    _generate_plugin_tarball,
+    _generate_tarball,
+)
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -143,6 +147,71 @@ class TestGenerateTarball:
             setup_info = tar.getmember("setup.sh")
             # Check executable bit is set (0o755 includes 0o100 for owner execute)
             assert setup_info.mode & 0o100
+
+    def test_generate_tarball_without_repos(self):
+        """Generated tarball without repos does not include repos_config.json."""
+        prompt = "Test prompt"
+        tarball_bytes = _generate_tarball(prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" not in names
+
+    def test_generate_tarball_with_repos(self):
+        """Generated tarball with repos includes repos config and clone script."""
+        prompt = "Test prompt"
+        repos = [
+            RepoSource(url="owner/repo1"),
+            RepoSource(url="owner/repo2", ref="main"),
+        ]
+        tarball_bytes = _generate_tarball(prompt, repos=repos)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" in names
+            assert "clone_repos.py" in names
+
+            # Verify repos config content
+            repos_file = tar.extractfile("repos_config.json")
+            assert repos_file is not None
+            repos_config = json.load(repos_file)
+            assert len(repos_config) == 2
+            assert repos_config[0]["url"] == "owner/repo1"
+            assert "ref" not in repos_config[0]  # None excluded
+            assert repos_config[1]["url"] == "owner/repo2"
+            assert repos_config[1]["ref"] == "main"
+
+            # Verify clone script is included
+            clone_script = tar.extractfile("clone_repos.py")
+            assert clone_script is not None
+            clone_content = clone_script.read().decode("utf-8")
+            assert "def clone_repos" in clone_content
+
+
+class TestRepoSource:
+    """Tests for RepoSource model."""
+
+    def test_repo_source_string_normalization(self):
+        """RepoSource accepts a string and normalizes it to object."""
+        repo = RepoSource.model_validate("owner/repo")
+        assert repo.url == "owner/repo"
+        assert repo.ref is None
+
+    def test_repo_source_with_ref(self):
+        """RepoSource accepts ref parameter."""
+        repo = RepoSource(url="owner/repo", ref="v1.0.0")
+        assert repo.url == "owner/repo"
+        assert repo.ref == "v1.0.0"
+
+    def test_repo_source_full_url(self):
+        """RepoSource accepts full URLs."""
+        repo = RepoSource(url="https://github.com/owner/repo")
+        assert repo.url == "https://github.com/owner/repo"
+
+    def test_repo_source_gitlab_url(self):
+        """RepoSource accepts GitLab URLs."""
+        repo = RepoSource(url="https://gitlab.com/owner/repo")
+        assert repo.url == "https://gitlab.com/owner/repo"
 
 
 @requires_docker
@@ -602,6 +671,47 @@ class TestGeneratePluginTarball:
             # None values should be excluded
             assert "ref" not in config[0]
             assert "repo_path" not in config[0]
+
+    def test_generate_plugin_tarball_without_repos(self):
+        """Generated plugin tarball without repos does not include repos_config.json."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" not in names
+
+    def test_generate_plugin_tarball_with_repos(self):
+        """Plugin tarball with repos includes repos config and clone script."""
+        plugins = [PluginSource(source="github:owner/plugin")]
+        prompt = "Test prompt"
+        repos = [
+            RepoSource(url="owner/repo1"),
+            RepoSource(url="https://gitlab.com/owner/repo2", ref="develop"),
+        ]
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt, repos=repos)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" in names
+            assert "clone_repos.py" in names
+            assert "plugins_config.json" in names  # All should be present
+
+            # Verify repos config content
+            repos_file = tar.extractfile("repos_config.json")
+            assert repos_file is not None
+            repos_config = json.load(repos_file)
+            assert len(repos_config) == 2
+            assert repos_config[0]["url"] == "owner/repo1"
+            assert repos_config[1]["url"] == "https://gitlab.com/owner/repo2"
+            assert repos_config[1]["ref"] == "develop"
+
+            # Verify clone script is included
+            clone_script = tar.extractfile("clone_repos.py")
+            assert clone_script is not None
+            clone_content = clone_script.read().decode("utf-8")
+            assert "def clone_repos" in clone_content
 
 
 @requires_docker

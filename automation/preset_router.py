@@ -16,6 +16,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
@@ -32,15 +33,61 @@ from automation.utils.tarball_validation import build_internal_url
 
 logger = logging.getLogger(__name__)
 
+
+# --- Repository Source Model ---
+
+
+class RepoSource(BaseModel):
+    """Repository source specification for cloning.
+
+    Repositories are cloned during automation setup and skills (AGENTS.md,
+    .agents/skills/, etc.) are automatically loaded from each cloned repo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(
+        ...,
+        description=(
+            "Repository identifier. Can be 'owner/repo' format (assumes GitHub) "
+            "or a full URL (https://github.com/owner/repo, https://gitlab.com/owner/repo)."
+        ),
+    )
+    ref: str | None = Field(
+        default=None,
+        description="Optional branch, tag, or commit SHA to checkout.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_string_input(cls, data: Any) -> Any:
+        """Allow passing just a URL string instead of full object."""
+        if isinstance(data, str):
+            return {"url": data}
+        return data
+
+
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directories
 PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
 PLUGIN_PRESET_DIR = Path(__file__).parent / "presets" / "plugin"
+SHARED_PRESET_DIR = Path(__file__).parent / "presets" / "shared"
 
 # Preset file caches to avoid I/O on every request
 _PROMPT_PRESET_CACHE: dict[str, str] | None = None
 _PLUGIN_PRESET_CACHE: dict[str, str] | None = None
+_SHARED_PRESET_CACHE: dict[str, str] | None = None
+
+
+def _load_shared_preset_files() -> dict[str, str]:
+    """Load and cache shared preset files from disk."""
+    global _SHARED_PRESET_CACHE
+    if _SHARED_PRESET_CACHE is None:
+        _SHARED_PRESET_CACHE = {
+            "clone_repos.py": (SHARED_PRESET_DIR / "clone_repos.py").read_text(),
+        }
+    return _SHARED_PRESET_CACHE
 
 
 def _load_prompt_preset_files() -> dict[str, str]:
@@ -105,6 +152,24 @@ class CreatePromptAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repository/repositories to clone. Skills (AGENTS.md, .agents/skills/) "
+            "are automatically loaded from each cloned repository. "
+            "Can be a single repo or a list of repos."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repos(cls, data: Any) -> Any:
+        """Normalize repos to always be a list if provided."""
+        if isinstance(data, dict) and "repos" in data and data["repos"] is not None:
+            repos = data["repos"]
+            if isinstance(repos, (str, dict)):
+                data["repos"] = [repos]
+        return data
 
 
 def _add_file_to_tar(
@@ -118,13 +183,19 @@ def _add_file_to_tar(
     tar.addfile(info, io.BytesIO(content_bytes))
 
 
-def _generate_tarball(prompt: str) -> bytes:
+def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> bytes:
     """Generate a tarball containing SDK code and the user's prompt.
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
+    - clone_repos.py: (optional) Script to clone repositories
+    - repos_config.json: (optional) Repository configuration for cloning
+
+    Args:
+        prompt: The user's prompt text
+        repos: Optional list of repositories to clone
 
     Returns:
         bytes: The tarball content as bytes
@@ -136,6 +207,15 @@ def _generate_tarball(prompt: str) -> bytes:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+        # Add repos config and clone script if repos specified
+        if repos:
+            shared_files = _load_shared_preset_files()
+            repos_config = [r.model_dump(exclude_none=True) for r in repos]
+            _add_file_to_tar(
+                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+            )
+            _add_file_to_tar(tar, "clone_repos.py", shared_files["clone_repos.py"])
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -167,12 +247,14 @@ async def create_automation_from_prompt(
 
     The generated automation will:
     1. Set up the OpenHands SDK environment
-    2. Create a conversation with the user's LLM settings
-    3. Execute the provided prompt
-    4. Report completion status back to the automation service
+    2. Clone any specified repositories (optional)
+    3. Load skills from cloned repositories (AGENTS.md, .agents/skills/)
+    4. Create a conversation with the user's LLM settings
+    5. Execute the provided prompt
+    6. Report completion status back to the automation service
     """
-    # 1. Generate tarball with SDK code and prompt
-    tarball_content = _generate_tarball(body.prompt)
+    # 1. Generate tarball with SDK code, prompt, and optional repos config
+    tarball_content = _generate_tarball(body.prompt, repos=body.repos)
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
@@ -289,22 +371,38 @@ class CreatePluginAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repository/repositories to clone. Skills (AGENTS.md, .agents/skills/) "
+            "are automatically loaded from each cloned repository. "
+            "Can be a single repo or a list of repos."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_plugins(cls, data: dict) -> dict:  # type: ignore[type-arg]
-        """Normalize plugins to always be a list."""
-        if isinstance(data, dict) and "plugins" in data:
-            plugins = data["plugins"]
-            if isinstance(plugins, dict):
-                # Single plugin object -> wrap in list
-                data["plugins"] = [plugins]
-            elif isinstance(plugins, list) and len(plugins) == 0:
-                raise ValueError("At least one plugin is required")
+    def normalize_plugins_and_repos(cls, data: dict) -> dict:  # type: ignore[type-arg]
+        """Normalize plugins and repos to always be lists."""
+        if isinstance(data, dict):
+            # Normalize plugins
+            if "plugins" in data:
+                plugins = data["plugins"]
+                if isinstance(plugins, dict):
+                    data["plugins"] = [plugins]
+                elif isinstance(plugins, list) and len(plugins) == 0:
+                    raise ValueError("At least one plugin is required")
+            # Normalize repos
+            if "repos" in data and data["repos"] is not None:
+                repos = data["repos"]
+                if isinstance(repos, (str, dict)):
+                    data["repos"] = [repos]
         return data
 
 
-def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
+def _generate_plugin_tarball(
+    plugins: list[PluginSource], prompt: str, repos: list[RepoSource] | None = None
+) -> bytes:
     """Generate a tarball containing SDK code, plugin config, and prompt.
 
     The tarball contains:
@@ -312,6 +410,13 @@ def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
+    - clone_repos.py: (optional) Script to clone repositories
+    - repos_config.json: (optional) Repository configuration for cloning
+
+    Args:
+        plugins: List of plugins to load
+        prompt: The user's prompt text
+        repos: Optional list of repositories to clone
 
     Returns:
         bytes: The tarball content as bytes
@@ -329,6 +434,15 @@ def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+        # Add repos config and clone script if repos specified
+        if repos:
+            shared_files = _load_shared_preset_files()
+            repos_config = [r.model_dump(exclude_none=True) for r in repos]
+            _add_file_to_tar(
+                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+            )
+            _add_file_to_tar(tar, "clone_repos.py", shared_files["clone_repos.py"])
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -354,10 +468,12 @@ async def create_automation_from_plugin(
 
     The generated automation will:
     1. Set up the OpenHands SDK environment
-    2. Create a conversation with the user's LLM settings
-    3. Load all specified plugins (fetched at runtime from their sources)
-    4. Execute the provided prompt (which can invoke plugin commands)
-    5. Report completion status back to the automation service
+    2. Clone any specified repositories (optional)
+    3. Load skills from cloned repositories (AGENTS.md, .agents/skills/)
+    4. Create a conversation with the user's LLM settings
+    5. Load all specified plugins (fetched at runtime from their sources)
+    6. Execute the provided prompt (which can invoke plugin commands)
+    7. Report completion status back to the automation service
 
     Plugin sources can be:
     - GitHub shorthand: github:owner/repo
@@ -365,8 +481,10 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
-    # 1. Generate tarball with SDK code, plugin config, and prompt
-    tarball_content = _generate_plugin_tarball(body.plugins, body.prompt)
+    # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
+    tarball_content = _generate_plugin_tarball(
+        body.plugins, body.prompt, repos=body.repos
+    )
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()

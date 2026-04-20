@@ -2,14 +2,15 @@
 
 This script is auto-generated from a user's prompt. It:
   1. Opens OpenHandsCloudWorkspace with local_agent_server_mode=True
-  2. Fetches LLM config via workspace.get_llm()
-  3. Fetches secrets via workspace.get_secrets()
-  4. Fetches MCP config via workspace.get_mcp_config()
-  5. Gets default agent with tools and condenser via get_default_agent()
-  6. Uses model_copy to add MCP config to the agent
-  7. Creates a Conversation and injects secrets
-  8. Sends the user's prompt (with event context if available) and runs
-  9. On context manager exit, the workspace sends a completion callback
+  2. Loads skills from cloned repos (if repos were configured)
+  3. Fetches LLM config via workspace.get_llm()
+  4. Fetches secrets via workspace.get_secrets()
+  5. Fetches MCP config via workspace.get_mcp_config()
+  6. Gets default agent with tools and condenser via get_default_agent()
+  7. Uses model_copy to add MCP config and skills to the agent
+  8. Creates a Conversation and injects secrets
+  9. Sends the user's prompt (with event context if available) and runs
+  10. On context manager exit, the workspace sends a completion callback
 
 Env vars injected by the dispatcher (read by the SDK automatically):
   OPENHANDS_API_KEY          - per-user automation API key
@@ -25,12 +26,16 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
+
+# Directory where repos are cloned by setup.sh
+REPOS_DIR = Path("/workspace/repos")
 
 # Verify dispatcher-injected env vars
 print("=== ENV VARS ===")
@@ -60,8 +65,32 @@ if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
 
 # SDK imports
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.context import AgentContext
+from openhands.sdk.skills import Skill, load_project_skills
 from openhands.tools import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
+
+
+# Load skills from cloned repos (if any)
+loaded_skills: list[Skill] = []
+if REPOS_DIR.exists():
+    print("\n=== LOADING SKILLS FROM REPOS ===")
+    for repo_dir in sorted(REPOS_DIR.iterdir()):
+        if repo_dir.is_dir():
+            try:
+                skills = load_project_skills(repo_dir)
+                loaded_skills.extend(skills)
+                print(f"  {repo_dir.name}: loaded {len(skills)} skill(s)")
+                for skill in skills:
+                    print(f"    - {skill.name}")
+            except Exception as e:
+                print(f"  {repo_dir.name}: WARNING - {e}", file=sys.stderr)
+    print(f"  Total skills loaded: {len(loaded_skills)}")
+
+# Create AgentContext with loaded skills (if any)
+agent_context = None
+if loaded_skills:
+    agent_context = AgentContext(skills=loaded_skills, load_public_skills=False)
 
 
 # Load user's prompt from file (placed during automation creation)
@@ -122,12 +151,18 @@ with OpenHandsCloudWorkspace(
     print("\n=== AGENT ===")
     agent = get_default_agent(llm=llm, cli_mode=True)
 
-    # Add MCP config using model_copy if configured
+    # Add MCP config and agent_context using model_copy if configured
+    agent_updates = {}
     if mcp_config:
-        agent = agent.model_copy(update={"mcp_config": mcp_config})
+        agent_updates["mcp_config"] = mcp_config
+    if agent_context:
+        agent_updates["agent_context"] = agent_context
+    if agent_updates:
+        agent = agent.model_copy(update=agent_updates)
 
     print(f"  tools: {[t.name for t in agent.tools]}")
     print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
     condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
     print(f"  condenser: {condenser_name}")
 
