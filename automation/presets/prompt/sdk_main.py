@@ -88,9 +88,10 @@ if REPOS_DIR.exists():
     print(f"  Total skills loaded: {len(loaded_skills)}")
 
 # Create AgentContext with loaded skills (if any)
+# Note: load_public_skills=True ensures repo skills are ADDITIVE to public skills
 agent_context = None
 if loaded_skills:
-    agent_context = AgentContext(skills=loaded_skills, load_public_skills=False)
+    agent_context = AgentContext(skills=loaded_skills, load_public_skills=True)
 
 
 # Load user's prompt from file (placed during automation creation)

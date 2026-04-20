@@ -14,16 +14,22 @@ Environment variables used:
 
 import json
 import os
+import re
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 # Configuration
 REPOS_DIR = Path("/workspace/repos")
+CLONE_TIMEOUT = 300  # 5 minutes per repo
 
 
 def get_secret(name: str) -> str | None:
-    """Fetch a secret value from the sandbox settings API."""
+    """Fetch a secret value from the sandbox settings API.
+
+    Uses stdlib urllib.request to avoid dependency on httpx.
+    """
     sandbox_id = os.environ.get("SANDBOX_ID", "")
     session_key = os.environ.get("SESSION_API_KEY", "")
     cloud_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
@@ -31,18 +37,23 @@ def get_secret(name: str) -> str | None:
     if not (sandbox_id and session_key and cloud_url):
         return None
     try:
-        import httpx
-
-        resp = httpx.get(
+        req = urllib.request.Request(
             f"{cloud_url}/api/v1/sandboxes/{sandbox_id}/settings/secrets/{name}",
             headers={"X-Session-API-Key": session_key},
-            timeout=10.0,
         )
-        if resp.status_code == 200:
-            return resp.text
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8")
     except Exception as e:
         print(f"[clone] Could not fetch secret {name}: {e}", file=sys.stderr)
     return None
+
+
+def is_commit_sha(ref: str | None) -> bool:
+    """Check if ref looks like a git commit SHA."""
+    if not ref:
+        return False
+    return bool(re.match(r"^[0-9a-f]{7,40}$", ref, re.IGNORECASE))
 
 
 def build_clone_url(
@@ -78,6 +89,17 @@ def mask_url(url: str) -> str:
     if "://" not in url:
         return url
     return url.split("://")[0] + "://" + url.split("://")[-1].split("@")[-1]
+
+
+def _mask_tokens(
+    text: str, github_token: str | None, gitlab_token: str | None
+) -> str:
+    """Mask tokens in text for safe logging."""
+    if github_token:
+        text = text.replace(github_token, "***")
+    if gitlab_token:
+        text = text.replace(gitlab_token, "***")
+    return text
 
 
 def clone_repos(config_path: Path) -> int:
@@ -123,28 +145,58 @@ def clone_repos(config_path: Path) -> int:
         display_url = mask_url(url)
 
         # Build git clone command
-        cmd = ["git", "clone", "--depth", "1"]
-        if ref:
-            cmd.extend(["--branch", ref])
-        cmd.extend([clone_url, str(dest)])
+        # Note: --depth 1 with --branch only works for branches/tags, not SHAs.
+        # For SHA refs, we do a full clone then checkout the specific commit.
+        if is_commit_sha(ref):
+            # Full clone for SHA refs (shallow clone can't fetch arbitrary commits)
+            cmd = ["git", "clone", clone_url, str(dest)]
+            needs_checkout = True
+        else:
+            # Shallow clone for branches/tags
+            cmd = ["git", "clone", "--depth", "1"]
+            if ref:
+                cmd.extend(["--branch", ref])
+            cmd.extend([clone_url, str(dest)])
+            needs_checkout = False
 
         print(f"[clone] Cloning {display_url} -> {dest}")
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # Mask tokens in error message
-            error_msg = result.stderr
-            if github_token:
-                error_msg = error_msg.replace(github_token, "***")
-            if gitlab_token:
-                error_msg = error_msg.replace(gitlab_token, "***")
-            print(
-                f"[clone] WARNING: Failed to clone {display_url}: {error_msg}",
-                file=sys.stderr,
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=CLONE_TIMEOUT
             )
-        else:
+            if result.returncode != 0:
+                error_msg = _mask_tokens(result.stderr, github_token, gitlab_token)
+                print(
+                    f"[clone] WARNING: Failed to clone {display_url}: {error_msg}",
+                    file=sys.stderr,
+                )
+                continue
+
+            # Checkout specific SHA if needed
+            if needs_checkout and ref:
+                checkout_result = subprocess.run(
+                    ["git", "-C", str(dest), "checkout", ref],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if checkout_result.returncode != 0:
+                    print(
+                        f"[clone] WARNING: Failed to checkout {ref}: "
+                        f"{checkout_result.stderr}",
+                        file=sys.stderr,
+                    )
+                    continue
+
             print(f"[clone] Successfully cloned {display_url}")
             success_count += 1
+
+        except subprocess.TimeoutExpired:
+            print(
+                f"[clone] WARNING: Clone timed out for {display_url}", file=sys.stderr
+            )
+            continue
 
     print(f"[clone] Cloned {success_count}/{len(repos)} repositories")
     return success_count
