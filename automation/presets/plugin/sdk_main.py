@@ -1,7 +1,7 @@
 """Plugin-based automation script — runs inside an OpenHands Cloud sandbox.
 
 This script is auto-generated from a plugin automation request. It:
-  1. Opens OpenHandsCloudWorkspace with local_agent_server_mode=True
+  1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
   2. Loads skills from cloned repos (if repos were configured)
   3. Fetches LLM config via workspace.get_llm()
   4. Fetches secrets via workspace.get_secrets()
@@ -11,6 +11,10 @@ This script is auto-generated from a plugin automation request. It:
   8. Creates a Conversation with all plugins and skills
   9. Sends the prompt (with event context if available) and runs
   10. On context manager exit, the workspace sends a completion callback
+
+IMPORTANT: The workspace context is entered early so that ANY exception
+(skill loading, plugin config parsing, etc.) triggers the __exit__ callback,
+avoiding silent failures that require watchdog timeout.
 
 Env vars injected by the dispatcher (read by the SDK automatically):
   OPENHANDS_API_KEY          - per-user automation API key
@@ -33,7 +37,7 @@ api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
-# Verify dispatcher-injected env vars
+# Verify dispatcher-injected env vars (must happen before workspace context)
 print("=== ENV VARS ===")
 for name, val in [
     ("OPENHANDS_API_KEY", api_key),
@@ -51,42 +55,54 @@ print(
 )
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
-# Parse event payload if present (for event-triggered automations)
-event_context = None
-if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
-    try:
-        event_context = json.loads(event_payload_json)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
-
-# SDK imports
+# SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
 from openhands.tools import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
-# Shared utility import (placed in tarball alongside this script)
-from load_skills import load_skills_from_repos
+# Enter workspace context EARLY - any exception from here on triggers callback
+print("\n=== SDK WORKSPACE ===")
+with OpenHandsCloudWorkspace(
+    local_agent_server_mode=True,
+    cloud_api_url=api_url,
+    cloud_api_key=api_key,
+) as workspace:
+    # -- All remaining setup happens inside the workspace context --
+    # This ensures failures trigger the __exit__ callback
 
-# Load skills from cloned repos (if any)
-loaded_skills, agent_context = load_skills_from_repos()
+    # Parse event payload if present (for event-triggered automations)
+    event_context = None
+    if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
+        try:
+            event_context = json.loads(event_payload_json)
+        except json.JSONDecodeError as e:
+            print(
+                f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
+            )
 
+    # Shared utility import (placed in tarball alongside this script)
+    from load_skills import load_skills_from_repos
 
-# Load configuration files
-SCRIPT_DIR = os.path.dirname(__file__)
-PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
-PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
+    # Load skills from cloned repos (if any)
+    print("\n=== LOAD SKILLS ===")
+    loaded_skills, agent_context = load_skills_from_repos()
 
-with open(PLUGINS_CONFIG_FILE) as f:
-    plugins_config = json.load(f)
+    # Load configuration files
+    SCRIPT_DIR = os.path.dirname(__file__)
+    PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
+    PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 
-with open(PROMPT_FILE) as f:
-    USER_PROMPT = f.read()
+    with open(PLUGINS_CONFIG_FILE) as f:
+        plugins_config = json.load(f)
 
-# If this is an event-triggered run, prepend event context to the prompt
-if event_context and "event" in event_context:
-    event_json = json.dumps(event_context["event"], indent=2)
-    USER_PROMPT = f"""This automation was triggered by a webhook event.
+    with open(PROMPT_FILE) as f:
+        USER_PROMPT = f.read()
+
+    # If this is an event-triggered run, prepend event context to the prompt
+    if event_context and "event" in event_context:
+        event_json = json.dumps(event_context["event"], indent=2)
+        USER_PROMPT = f"""This automation was triggered by a webhook event.
 
 ## Event Payload
 ```json
@@ -96,23 +112,16 @@ if event_context and "event" in event_context:
 ## Task
 {USER_PROMPT}"""
 
-# Deserialize plugin sources using Pydantic validation
-plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
+    # Deserialize plugin sources using Pydantic validation
+    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
 
-print("\n=== PLUGINS CONFIG ===")
-print(f"  loading {len(plugin_sources)} plugin(s):")
-for ps in plugin_sources:
-    ref_str = f"@{ps.ref}" if ps.ref else ""
-    path_str = f" ({ps.repo_path})" if ps.repo_path else ""
-    print(f"    - {ps.source}{ref_str}{path_str}")
+    print("\n=== PLUGINS CONFIG ===")
+    print(f"  loading {len(plugin_sources)} plugin(s):")
+    for ps in plugin_sources:
+        ref_str = f"@{ps.ref}" if ps.ref else ""
+        path_str = f" ({ps.repo_path})" if ps.repo_path else ""
+        print(f"    - {ps.source}{ref_str}{path_str}")
 
-
-print("\n=== SDK WORKSPACE ===")
-with OpenHandsCloudWorkspace(
-    local_agent_server_mode=True,
-    cloud_api_url=api_url,
-    cloud_api_key=api_key,
-) as workspace:
     # get_llm() — fetches LLM config from the user's SaaS account
     print("\n=== GET_LLM ===")
     llm = workspace.get_llm()
