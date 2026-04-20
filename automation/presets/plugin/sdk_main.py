@@ -26,16 +26,12 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 
 
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
-
-# Directory where repos are cloned by setup.sh
-REPOS_DIR = Path("/workspace/repos")
 
 # Verify dispatcher-injected env vars
 print("=== ENV VARS ===")
@@ -65,34 +61,15 @@ if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
 
 # SDK imports
 from openhands.sdk import Conversation, RemoteConversation
-from openhands.sdk.context import AgentContext
 from openhands.sdk.plugin import PluginSource
-from openhands.sdk.skills import Skill, load_project_skills
 from openhands.tools import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+# Shared utility import (placed in tarball alongside this script)
+from load_skills import load_skills_from_repos
 
 # Load skills from cloned repos (if any)
-loaded_skills: list[Skill] = []
-if REPOS_DIR.exists():
-    print("\n=== LOADING SKILLS FROM REPOS ===")
-    for repo_dir in sorted(REPOS_DIR.iterdir()):
-        if repo_dir.is_dir():
-            try:
-                skills = load_project_skills(repo_dir)
-                loaded_skills.extend(skills)
-                print(f"  {repo_dir.name}: loaded {len(skills)} skill(s)")
-                for skill in skills:
-                    print(f"    - {skill.name}")
-            except Exception as e:
-                print(f"  {repo_dir.name}: WARNING - {e}", file=sys.stderr)
-    print(f"  Total skills loaded: {len(loaded_skills)}")
-
-# Create AgentContext with loaded skills (if any)
-# Note: load_public_skills=True ensures repo skills are ADDITIVE to public skills
-agent_context = None
-if loaded_skills:
-    agent_context = AgentContext(skills=loaded_skills, load_public_skills=True)
+loaded_skills, agent_context = load_skills_from_repos()
 
 
 # Load configuration files

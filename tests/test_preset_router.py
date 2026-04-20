@@ -107,6 +107,7 @@ class TestGenerateTarball:
             assert "main.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
+            assert "load_skills.py" in names  # Always included
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
@@ -212,6 +213,27 @@ class TestRepoSource:
         """RepoSource accepts GitLab URLs."""
         repo = RepoSource(url="https://gitlab.com/owner/repo")
         assert repo.url == "https://gitlab.com/owner/repo"
+
+    def test_repo_source_git_ssh_url(self):
+        """RepoSource accepts git@ SSH URLs."""
+        repo = RepoSource(url="git@github.com:owner/repo.git")
+        assert repo.url == "git@github.com:owner/repo.git"
+
+    def test_repo_source_invalid_url_rejected(self):
+        """RepoSource rejects invalid URL formats."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="not-a-valid-url")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
+
+    def test_repo_source_missing_protocol_rejected(self):
+        """RepoSource rejects URLs missing protocol."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="github.com/owner/repo")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
 
 
 @requires_docker

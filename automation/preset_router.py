@@ -12,6 +12,7 @@ Currently supported presets:
 import io
 import json
 import logging
+import re
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -20,7 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -32,6 +33,9 @@ from automation.utils.tarball_validation import build_internal_url
 
 
 logger = logging.getLogger(__name__)
+
+# Regex for owner/repo format (e.g., "owner/repo", "owner/repo-name", "owner/repo.name")
+_OWNER_REPO_PATTERN = re.compile(r"^[\w-]+/[\w.-]+$")
 
 
 # --- Repository Source Model ---
@@ -66,6 +70,21 @@ class RepoSource(BaseModel):
             return {"url": data}
         return data
 
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL format to provide early feedback."""
+        # Allow owner/repo format (e.g., "owner/repo", "my-org/my-repo.git")
+        if _OWNER_REPO_PATTERN.match(v):
+            return v
+        # Allow full git URLs
+        if v.startswith(("http://", "https://", "git@")):
+            return v
+        raise ValueError(
+            "URL must be 'owner/repo' format or a valid git URL "
+            "(https://, http://, or git@)"
+        )
+
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
@@ -86,6 +105,7 @@ def _load_shared_preset_files() -> dict[str, str]:
     if _SHARED_PRESET_CACHE is None:
         _SHARED_PRESET_CACHE = {
             "clone_repos.py": (SHARED_PRESET_DIR / "clone_repos.py").read_text(),
+            "load_skills.py": (SHARED_PRESET_DIR / "load_skills.py").read_text(),
         }
     return _SHARED_PRESET_CACHE
 
@@ -190,6 +210,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
     - main.py: SDK boilerplate that loads and executes the prompt
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
+    - load_skills.py: Shared utility for loading skills from repos
     - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
 
@@ -201,16 +222,18 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
         bytes: The tarball content as bytes
     """
     preset_files = _load_prompt_preset_files()
+    shared_files = _load_shared_preset_files()
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+        # Always include load_skills.py (main.py imports it)
+        _add_file_to_tar(tar, "load_skills.py", shared_files["load_skills.py"])
 
         # Add repos config and clone script if repos specified
         if repos:
-            shared_files = _load_shared_preset_files()
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
                 tar, "repos_config.json", json.dumps(repos_config, indent=2)
@@ -410,6 +433,7 @@ def _generate_plugin_tarball(
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
+    - load_skills.py: Shared utility for loading skills from repos
     - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
 
@@ -422,6 +446,7 @@ def _generate_plugin_tarball(
         bytes: The tarball content as bytes
     """
     preset_files = _load_plugin_preset_files()
+    shared_files = _load_shared_preset_files()
 
     # Serialize plugins using Pydantic (exclude None values for cleaner JSON)
     plugins_config = [p.model_dump(exclude_none=True) for p in plugins]
@@ -434,10 +459,11 @@ def _generate_plugin_tarball(
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+        # Always include load_skills.py (main.py imports it)
+        _add_file_to_tar(tar, "load_skills.py", shared_files["load_skills.py"])
 
         # Add repos config and clone script if repos specified
         if repos:
-            shared_files = _load_shared_preset_files()
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
                 tar, "repos_config.json", json.dumps(repos_config, indent=2)

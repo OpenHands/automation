@@ -102,25 +102,25 @@ def _mask_tokens(
     return text
 
 
-def clone_repos(config_path: Path) -> int:
+def clone_repos(config_path: Path) -> tuple[int, list[str]]:
     """Clone repositories from config file.
 
     Args:
         config_path: Path to repos_config.json
 
     Returns:
-        Number of successfully cloned repositories
+        Tuple of (success_count, list of failed repo URLs for diagnostics)
     """
     if not config_path.exists():
         print("[clone] No repos_config.json found, skipping clone")
-        return 0
+        return 0, []
 
     with open(config_path) as f:
         repos = json.load(f)
 
     if not repos:
         print("[clone] Empty repos config, skipping clone")
-        return 0
+        return 0, []
 
     print(f"[clone] Cloning {len(repos)} repository(ies)...")
 
@@ -128,6 +128,7 @@ def clone_repos(config_path: Path) -> int:
     REPOS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Fetch tokens once
+    failed_repos: list[str] = []
     github_token = get_secret("github_token")
     gitlab_token = get_secret("gitlab_token")
 
@@ -171,6 +172,7 @@ def clone_repos(config_path: Path) -> int:
                     f"[clone] WARNING: Failed to clone {display_url}: {error_msg}",
                     file=sys.stderr,
                 )
+                failed_repos.append(display_url)
                 continue
 
             # Checkout specific SHA if needed
@@ -187,6 +189,7 @@ def clone_repos(config_path: Path) -> int:
                         f"{checkout_result.stderr}",
                         file=sys.stderr,
                     )
+                    failed_repos.append(display_url)
                     continue
 
             print(f"[clone] Successfully cloned {display_url}")
@@ -196,17 +199,20 @@ def clone_repos(config_path: Path) -> int:
             print(
                 f"[clone] WARNING: Clone timed out for {display_url}", file=sys.stderr
             )
+            failed_repos.append(display_url)
             continue
 
     print(f"[clone] Cloned {success_count}/{len(repos)} repositories")
-    return success_count
+    if failed_repos:
+        print(f"[clone] FAILED repos: {', '.join(failed_repos)}", file=sys.stderr)
+    return success_count, failed_repos
 
 
 def main() -> None:
     """Entry point - clone repos from config in script directory."""
     script_dir = Path(__file__).parent
     config_path = script_dir / "repos_config.json"
-    clone_repos(config_path)
+    clone_repos(config_path)  # Return value ignored in standalone mode
 
 
 if __name__ == "__main__":
