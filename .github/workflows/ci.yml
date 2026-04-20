@@ -1,6 +1,6 @@
 ---
 # .github/workflows/precommit.yml
-name: Pre-commit checks
+name: ci
 
 on:
     push:
@@ -9,7 +9,7 @@ on:
         branches: ['**']
 
 jobs:
-    pre-commit:
+    backend:
         runs-on: ubuntu-24.04
 
         steps:
@@ -29,3 +29,27 @@ jobs:
 
             - name: Run pre-commit (all files)
               run: uv run pre-commit run --all-files --show-diff-on-failure
+    frontend:
+        runs-on: ubuntu-24.04
+        defaults:
+            run:
+                working-directory: frontend
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Node
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 24
+
+            - name: npm dependencies
+              run: npm ci
+
+            - name: lint
+              run: npm run lint
+
+            - name: lint
+              run: npm run test
+
+            - name: build
+              run: npm run build
