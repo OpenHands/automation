@@ -36,21 +36,21 @@ jobs:
             run:
                 working-directory: frontend
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Setup Node
               uses: actions/setup-node@v3
               with:
                   node-version: 24
 
-            - name: npm dependencies
+            - name: NPM dependencies
               run: npm ci
 
-            - name: lint
+            - name: Lint
               run: npm run lint
 
-            - name: test
+            - name: Test
               run: npm run test
 
-            - name: build
+            - name: Build
               run: npm run build
