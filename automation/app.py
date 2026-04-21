@@ -221,9 +221,7 @@ if _frontend_dir:
         class _SPAStaticFiles(StaticFiles):
             """StaticFiles that falls back to index.html for SPA client routes."""
 
-            def lookup_path(
-                self, path: str
-            ) -> tuple[str, os.stat_result | None]:
+            def lookup_path(self, path: str) -> tuple[str, os.stat_result | None]:
                 full_path, stat_result = super().lookup_path(path)
                 if stat_result is None:
                     # Unknown path → serve index.html for client-side routing
