@@ -3,10 +3,12 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from automation.auth import create_http_client
@@ -193,4 +195,37 @@ async def readiness():
         return JSONResponse(
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Frontend static file hosting (opt-in via AUTOMATION_FRONTEND_DIR)
+# ---------------------------------------------------------------------------
+_frontend_dir = get_settings().frontend_dir
+if _frontend_dir:
+    _frontend_path = Path(_frontend_dir)
+    if not _frontend_path.is_dir():
+        logger.warning(
+            "AUTOMATION_FRONTEND_DIR=%s is not a directory — frontend hosting disabled",
+            _frontend_dir,
+        )
+    else:
+        logger.info("Serving frontend from %s at /automations", _frontend_dir)
+
+        _index_html = _frontend_path / "index.html"
+
+        class _SPAStaticFiles(StaticFiles):
+            """StaticFiles subclass that falls back to index.html for SPA routing."""
+
+            async def get_response(self, path: str, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except Exception:
+                    # File not found → serve index.html for client-side routing
+                    return FileResponse(_index_html)
+
+        app.mount(
+            "/automations",
+            _SPAStaticFiles(directory=_frontend_path, html=True),
+            name="frontend",
         )
