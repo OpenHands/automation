@@ -196,10 +196,11 @@ def load_skills_from_agent_server() -> tuple[list, object | None]:
         print(f"  Found {len(repo_dirs)} cloned repo(s): {[d.name for d in repo_dirs]}")
 
         # First call: load public/user/org skills (not repo-specific)
-        # Use first repo dir as project_dir but only load non-project skills
+        # project_dir is not used when load_project=False, but we pass PROJECT_DIR
+        # for consistency with the no-repos case
         print("  Loading public/user/org skills...")
         global_skill_dicts = _load_skills_via_agent_server(
-            project_dir=str(repo_dirs[0]),
+            project_dir=str(PROJECT_DIR),
             session_api_key=session_api_key,
             load_public=True,
             load_user=True,
