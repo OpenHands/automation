@@ -74,9 +74,7 @@ def _build_test_app(frontend_dir: str, mount_path: str = "/automations") -> Fast
             return full_path, stat_result
 
         def file_response(self, full_path, stat_result, scope, status_code=200):
-            response = super().file_response(
-                full_path, stat_result, scope, status_code
-            )
+            response = super().file_response(full_path, stat_result, scope, status_code)
             if "/assets/" in str(full_path):
                 response.headers["Cache-Control"] = (
                     "public, max-age=31536000, immutable"
@@ -112,9 +110,7 @@ def frontend_dir(tmp_path):
 def spa_client(frontend_dir):
     """AsyncClient wired to a test app with the SPA mount."""
     test_app = _build_test_app(str(frontend_dir))
-    return AsyncClient(
-        transport=ASGITransport(app=test_app), base_url="http://test"
-    )
+    return AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test")
 
 
 class TestSPAStaticFiles:
