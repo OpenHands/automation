@@ -7,9 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "[setup] Installing OpenHands SDK from PyPI"
 pip install -q --no-cache-dir \
-  openhands-sdk==1.16.1 \
-  openhands-workspace==1.16.1 \
-  openhands-tools==1.16.1
+  openhands-sdk==1.17.0 \
+  openhands-workspace==1.17.0 \
+  openhands-tools==1.17.0
 
 # Clone repos if config and clone script exist
 # Note: Repo clone failures are non-fatal - warnings printed but script exits 0
