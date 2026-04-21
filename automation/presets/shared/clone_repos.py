@@ -211,13 +211,12 @@ def clone_repos(config_path: Path) -> tuple[int, list[str]]:
 def main() -> None:
     """Entry point - clone repos from config in script directory.
 
-    Exits with code 1 if any repos fail to clone, enabling shell error handling.
+    Clone failures are non-fatal - warnings are printed but the script exits 0.
+    This allows automations to proceed even if some repos fail to clone.
     """
     script_dir = Path(__file__).parent
     config_path = script_dir / "repos_config.json"
-    _success_count, failed_repos = clone_repos(config_path)
-    if failed_repos:
-        sys.exit(1)
+    clone_repos(config_path)
 
 
 if __name__ == "__main__":

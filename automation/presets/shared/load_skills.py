@@ -257,11 +257,14 @@ def load_skills_from_agent_server() -> tuple[list, object | None]:
             source_info = f" ({skill.source})" if skill.source else ""
             print(f"    - {skill.name}{source_info}")
 
-    # Create AgentContext with loaded skills (if any)
-    agent_context = None
+    # Create AgentContext with loaded skills
+    # If we successfully loaded skills via agent-server, set load_public_skills=False
+    # to avoid duplicates. If no skills were loaded (e.g., agent-server unreachable),
+    # fall back to load_public_skills=True so automation has at least public skills.
     if loaded_skills:
-        # Note: We set load_public_skills=False since we already loaded public skills
-        # via the agent-server. Setting True would cause duplicate loading.
         agent_context = AgentContext(skills=loaded_skills, load_public_skills=False)
+    else:
+        print("  Falling back to public skills (agent-server unavailable)")
+        agent_context = AgentContext(skills=[], load_public_skills=True)
 
     return loaded_skills, agent_context
