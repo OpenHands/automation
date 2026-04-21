@@ -2,7 +2,8 @@
 
 This script is auto-generated from a plugin automation request. It:
   1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
-  2. Loads skills from cloned repos (if repos were configured)
+  2. Loads ALL skills via the agent-server /api/skills endpoint
+     (public, user, project, org skills - mirrors V1 conversation behavior)
   3. Fetches LLM config via workspace.get_llm()
   4. Fetches secrets via workspace.get_secrets()
   5. Fetches MCP config via workspace.get_mcp_config()
@@ -82,11 +83,11 @@ with OpenHandsCloudWorkspace(
             )
 
     # Shared utility import (placed in tarball alongside this script)
-    from load_skills import load_skills_from_repos
+    from load_skills import load_skills_from_agent_server
 
-    # Load skills from cloned repos (if any)
-    print("\n=== LOAD SKILLS ===")
-    loaded_skills, agent_context = load_skills_from_repos()
+    # Load ALL skills via the local agent-server (public, user, project, org)
+    # This mirrors how V1 conversations load skills in OpenHands
+    loaded_skills, agent_context = load_skills_from_agent_server()
 
     # Load configuration files
     SCRIPT_DIR = os.path.dirname(__file__)

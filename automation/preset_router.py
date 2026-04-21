@@ -210,7 +210,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
     - main.py: SDK boilerplate that loads and executes the prompt
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
-    - load_skills.py: Shared utility for loading skills from repos
+    - load_skills.py: Shared utility for loading skills via agent-server /api/skills
     - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
 
@@ -433,7 +433,7 @@ def _generate_plugin_tarball(
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
-    - load_skills.py: Shared utility for loading skills from repos
+    - load_skills.py: Shared utility for loading skills via agent-server /api/skills
     - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
 
