@@ -2,16 +2,17 @@
 
 This script is auto-generated from a plugin automation request. It:
   1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
-  2. Loads ALL skills via the agent-server /api/skills endpoint
+  2. Clones repositories if configured (via workspace.clone_repos())
+  3. Loads ALL skills via workspace.load_skills_from_agent_server()
      (public, user, project, org skills - mirrors V1 conversation behavior)
-  3. Fetches LLM config via workspace.get_llm()
-  4. Fetches secrets via workspace.get_secrets()
-  5. Fetches MCP config via workspace.get_mcp_config()
-  6. Gets default agent with tools and condenser via get_default_agent()
-  7. Loads plugins from plugins_config.json
-  8. Creates a Conversation with all plugins and skills
-  9. Sends the prompt (with event context if available) and runs
-  10. On context manager exit, the workspace sends a completion callback
+  4. Fetches LLM config via workspace.get_llm()
+  5. Fetches secrets via workspace.get_secrets()
+  6. Fetches MCP config via workspace.get_mcp_config()
+  7. Gets default agent with tools and condenser via get_default_agent()
+  8. Loads plugins from plugins_config.json
+  9. Creates a Conversation with all plugins and skills
+  10. Sends the prompt (with event context if available) and runs
+  11. On context manager exit, the workspace sends a completion callback
 
 IMPORTANT: The workspace context is entered early so that ANY exception
 (skill loading, plugin config parsing, etc.) triggers the __exit__ callback,
@@ -82,18 +83,38 @@ with OpenHandsCloudWorkspace(
                 f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
             )
 
-    # Shared utility import (placed in tarball alongside this script)
-    from load_skills import get_repos_context, load_skills_from_agent_server
+    # Clone repositories if repos_config.json exists (uses SDK workspace methods)
+    SCRIPT_DIR = os.path.dirname(__file__)
+    REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
+    clone_result = None
+    repo_dirs = []
 
-    # Load ALL skills via the local agent-server (public, user, project, org)
-    # This mirrors how V1 conversations load skills in OpenHands
-    loaded_skills, agent_context = load_skills_from_agent_server()
+    if os.path.exists(REPOS_CONFIG_FILE):
+        print("\n=== CLONE REPOS ===")
+        with open(REPOS_CONFIG_FILE) as f:
+            repos_config = json.load(f)
+        if repos_config:
+            clone_result = workspace.clone_repos(repos_config)
+            print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
+            if clone_result.failed_repos:
+                print(f"  FAILED: {', '.join(clone_result.failed_repos)}")
+            # Collect cloned repo directories for skill loading
+            repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
+
+    # Load ALL skills via workspace.load_skills_from_agent_server()
+    # If repos were cloned, project skills are loaded from EACH cloned repo
+    print("\n=== LOAD SKILLS ===")
+    loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+        project_dirs=repo_dirs if repo_dirs else None
+    )
+    print(f"  loaded {len(loaded_skills)} skills")
 
     # Get repos context (mapping of URLs to local paths)
-    repos_context = get_repos_context()
+    repos_context = ""
+    if clone_result and clone_result.repo_mappings:
+        repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
-    SCRIPT_DIR = os.path.dirname(__file__)
     PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
     PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 

@@ -107,7 +107,8 @@ class TestGenerateTarball:
             assert "main.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
-            assert "load_skills.py" in names  # Always included
+            # Note: load_skills.py and clone_repos.py are no longer needed
+            # as the SDK workspace now provides these methods directly
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
@@ -159,7 +160,7 @@ class TestGenerateTarball:
             assert "repos_config.json" not in names
 
     def test_generate_tarball_with_repos(self):
-        """Generated tarball with repos includes repos config and clone script."""
+        """Generated tarball with repos includes repos config."""
         prompt = "Test prompt"
         repos = [
             RepoSource(url="owner/repo1"),
@@ -170,7 +171,8 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "repos_config.json" in names
-            assert "clone_repos.py" in names
+            # Note: clone_repos.py is no longer included - SDK handles cloning
+            assert "clone_repos.py" not in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")
@@ -181,12 +183,6 @@ class TestGenerateTarball:
             assert "ref" not in repos_config[0]  # None excluded
             assert repos_config[1]["url"] == "owner/repo2"
             assert repos_config[1]["ref"] == "main"
-
-            # Verify clone script is included
-            clone_script = tar.extractfile("clone_repos.py")
-            assert clone_script is not None
-            clone_content = clone_script.read().decode("utf-8")
-            assert "def clone_repos" in clone_content
 
 
 class TestRepoSource:
@@ -705,7 +701,7 @@ class TestGeneratePluginTarball:
             assert "repos_config.json" not in names
 
     def test_generate_plugin_tarball_with_repos(self):
-        """Plugin tarball with repos includes repos config and clone script."""
+        """Plugin tarball with repos includes repos config."""
         plugins = [PluginSource(source="github:owner/plugin")]
         prompt = "Test prompt"
         repos = [
@@ -717,7 +713,8 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "repos_config.json" in names
-            assert "clone_repos.py" in names
+            # Note: clone_repos.py is no longer included - SDK handles cloning
+            assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
 
             # Verify repos config content
@@ -728,12 +725,6 @@ class TestGeneratePluginTarball:
             assert repos_config[0]["url"] == "owner/repo1"
             assert repos_config[1]["url"] == "https://gitlab.com/owner/repo2"
             assert repos_config[1]["ref"] == "develop"
-
-            # Verify clone script is included
-            clone_script = tar.extractfile("clone_repos.py")
-            assert clone_script is not None
-            clone_content = clone_script.read().decode("utf-8")
-            assert "def clone_repos" in clone_content
 
 
 @requires_docker

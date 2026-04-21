@@ -91,23 +91,10 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 # Preset files directories
 PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
 PLUGIN_PRESET_DIR = Path(__file__).parent / "presets" / "plugin"
-SHARED_PRESET_DIR = Path(__file__).parent / "presets" / "shared"
 
 # Preset file caches to avoid I/O on every request
 _PROMPT_PRESET_CACHE: dict[str, str] | None = None
 _PLUGIN_PRESET_CACHE: dict[str, str] | None = None
-_SHARED_PRESET_CACHE: dict[str, str] | None = None
-
-
-def _load_shared_preset_files() -> dict[str, str]:
-    """Load and cache shared preset files from disk."""
-    global _SHARED_PRESET_CACHE
-    if _SHARED_PRESET_CACHE is None:
-        _SHARED_PRESET_CACHE = {
-            "clone_repos.py": (SHARED_PRESET_DIR / "clone_repos.py").read_text(),
-            "load_skills.py": (SHARED_PRESET_DIR / "load_skills.py").read_text(),
-        }
-    return _SHARED_PRESET_CACHE
 
 
 def _load_prompt_preset_files() -> dict[str, str]:
@@ -210,9 +197,11 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
     - main.py: SDK boilerplate that loads and executes the prompt
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
-    - load_skills.py: Shared utility for loading skills via agent-server /api/skills
-    - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
+
+    Note: Clone and skill loading functionality is now provided by the SDK's
+    OpenHandsCloudWorkspace.clone_repos() and load_skills_from_agent_server()
+    methods, so separate scripts are no longer needed.
 
     Args:
         prompt: The user's prompt text
@@ -222,23 +211,19 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
         bytes: The tarball content as bytes
     """
     preset_files = _load_prompt_preset_files()
-    shared_files = _load_shared_preset_files()
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
-        # Always include load_skills.py (main.py imports it)
-        _add_file_to_tar(tar, "load_skills.py", shared_files["load_skills.py"])
 
-        # Add repos config and clone script if repos specified
+        # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
                 tar, "repos_config.json", json.dumps(repos_config, indent=2)
             )
-            _add_file_to_tar(tar, "clone_repos.py", shared_files["clone_repos.py"])
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -433,9 +418,11 @@ def _generate_plugin_tarball(
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
-    - load_skills.py: Shared utility for loading skills via agent-server /api/skills
-    - clone_repos.py: (optional) Script to clone repositories
     - repos_config.json: (optional) Repository configuration for cloning
+
+    Note: Clone and skill loading functionality is now provided by the SDK's
+    OpenHandsCloudWorkspace.clone_repos() and load_skills_from_agent_server()
+    methods, so separate scripts are no longer needed.
 
     Args:
         plugins: List of plugins to load
@@ -446,7 +433,6 @@ def _generate_plugin_tarball(
         bytes: The tarball content as bytes
     """
     preset_files = _load_plugin_preset_files()
-    shared_files = _load_shared_preset_files()
 
     # Serialize plugins using Pydantic (exclude None values for cleaner JSON)
     plugins_config = [p.model_dump(exclude_none=True) for p in plugins]
@@ -459,16 +445,13 @@ def _generate_plugin_tarball(
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
-        # Always include load_skills.py (main.py imports it)
-        _add_file_to_tar(tar, "load_skills.py", shared_files["load_skills.py"])
 
-        # Add repos config and clone script if repos specified
+        # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
                 tar, "repos_config.json", json.dumps(repos_config, indent=2)
             )
-            _add_file_to_tar(tar, "clone_repos.py", shared_files["clone_repos.py"])
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
