@@ -4,7 +4,8 @@
 This script is shared by both prompt and plugin presets. It:
 1. Reads repos_config.json from the same directory as the script
 2. Fetches git tokens from the sandbox settings API
-3. Clones each repo to /workspace/project/repo_N (agent's working directory)
+3. Clones each repo to /workspace/project/<repo-name> (using meaningful names)
+4. Writes repos_mapping.json with URL → local path mapping
 
 Environment variables used:
 - SANDBOX_ID: Sandbox identifier for settings API
@@ -23,6 +24,7 @@ from pathlib import Path
 # Configuration
 REPOS_DIR = Path("/workspace/project")  # Clone repos into agent's working directory
 CLONE_TIMEOUT = 300  # 5 minutes per repo
+REPOS_MAPPING_FILE = REPOS_DIR / "repos_mapping.json"
 
 
 def get_secret(name: str) -> str | None:
@@ -54,6 +56,63 @@ def is_commit_sha(ref: str | None) -> bool:
     if not ref:
         return False
     return bool(re.match(r"^[0-9a-f]{7,40}$", ref, re.IGNORECASE))
+
+
+def extract_repo_name(url: str) -> str:
+    """Extract repository name from URL for use as directory name.
+
+    Examples:
+        owner/repo -> repo
+        https://github.com/owner/repo.git -> repo
+        git@github.com:owner/repo.git -> repo
+    """
+    # Remove trailing .git
+    url = re.sub(r"\.git$", "", url)
+
+    # Handle git@host:owner/repo format
+    if url.startswith("git@"):
+        url = url.split(":")[-1]
+
+    # Handle https://host/owner/repo format
+    if "://" in url:
+        url = url.split("://")[-1]
+
+    # Get the last path component (repo name)
+    parts = url.rstrip("/").split("/")
+    return parts[-1] if parts else "repo"
+
+
+def sanitize_dir_name(name: str) -> str:
+    """Sanitize a string for use as a directory name.
+
+    Replaces invalid characters with underscores and ensures the name is safe.
+    """
+    # Replace characters that are problematic in file paths
+    sanitized = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", name)
+    # Remove leading/trailing dots and spaces
+    sanitized = sanitized.strip(". ")
+    # Ensure non-empty
+    return sanitized if sanitized else "repo"
+
+
+def get_unique_dir_name(base_name: str, existing_dirs: set[str]) -> str:
+    """Get a unique directory name, appending _N if needed.
+
+    Args:
+        base_name: The desired directory name
+        existing_dirs: Set of already-used directory names
+
+    Returns:
+        A unique directory name (base_name or base_name_1, base_name_2, etc.)
+    """
+    if base_name not in existing_dirs:
+        return base_name
+
+    # Find next available suffix
+    counter = 1
+    while f"{base_name}_{counter}" in existing_dirs:
+        counter += 1
+    return f"{base_name}_{counter}"
 
 
 def build_clone_url(
@@ -102,25 +161,31 @@ def _mask_tokens(
     return text
 
 
-def clone_repos(config_path: Path) -> tuple[int, list[str]]:
+def clone_repos(config_path: Path) -> tuple[int, list[str], dict[str, dict]]:
     """Clone repositories from config file.
+
+    Clones repos to meaningful directory names (e.g., 'openhands-cli' instead of 'repo_0').
+    Writes repos_mapping.json with the URL → local path mapping for agent reference.
 
     Args:
         config_path: Path to repos_config.json
 
     Returns:
-        Tuple of (success_count, list of failed repo URLs for diagnostics)
+        Tuple of (success_count, failed_repo_urls, repo_mapping)
+        repo_mapping: dict mapping original URL to {local_path, ref, dir_name}
     """
+    repo_mapping: dict[str, dict] = {}
+
     if not config_path.exists():
         print("[clone] No repos_config.json found, skipping clone")
-        return 0, []
+        return 0, [], repo_mapping
 
     with open(config_path) as f:
         repos = json.load(f)
 
     if not repos:
         print("[clone] Empty repos config, skipping clone")
-        return 0, []
+        return 0, [], repo_mapping
 
     print(f"[clone] Cloning {len(repos)} repository(ies)...")
 
@@ -132,16 +197,25 @@ def clone_repos(config_path: Path) -> tuple[int, list[str]]:
     github_token = get_secret("github_token")
     gitlab_token = get_secret("gitlab_token")
 
+    # Track used directory names to handle collisions
+    used_dir_names: set[str] = set()
+
     success_count = 0
-    for i, repo in enumerate(repos):
+    for repo in repos:
         url = repo.get("url", "")
         ref = repo.get("ref")
-        dest = REPOS_DIR / f"repo_{i}"
 
         if not url:
-            print(f"[clone] Skipping repo {i}: no URL specified", file=sys.stderr)
+            print("[clone] Skipping repo: no URL specified", file=sys.stderr)
             continue
 
+        # Determine directory name from repo URL
+        raw_name = extract_repo_name(url)
+        safe_name = sanitize_dir_name(raw_name)
+        dir_name = get_unique_dir_name(safe_name, used_dir_names)
+        used_dir_names.add(dir_name)
+
+        dest = REPOS_DIR / dir_name
         clone_url = build_clone_url(url, github_token, gitlab_token)
         display_url = mask_url(url)
 
@@ -160,7 +234,7 @@ def clone_repos(config_path: Path) -> tuple[int, list[str]]:
             cmd.extend([clone_url, str(dest)])
             needs_checkout = False
 
-        print(f"[clone] Cloning {display_url} -> {dest}")
+        print(f"[clone] Cloning {display_url} -> {dest.name}/")
 
         try:
             result = subprocess.run(
@@ -192,8 +266,15 @@ def clone_repos(config_path: Path) -> tuple[int, list[str]]:
                     failed_repos.append(display_url)
                     continue
 
-            print(f"[clone] Successfully cloned {display_url}")
+            print(f"[clone] Successfully cloned {display_url} -> {dir_name}/")
             success_count += 1
+
+            # Record mapping
+            repo_mapping[url] = {
+                "dir_name": dir_name,
+                "local_path": str(dest),
+                "ref": ref,
+            }
 
         except subprocess.TimeoutExpired:
             print(
@@ -202,10 +283,16 @@ def clone_repos(config_path: Path) -> tuple[int, list[str]]:
             failed_repos.append(display_url)
             continue
 
+    # Write mapping file for agent reference
+    if repo_mapping:
+        with open(REPOS_MAPPING_FILE, "w") as f:
+            json.dump(repo_mapping, f, indent=2)
+        print(f"[clone] Wrote repository mapping to {REPOS_MAPPING_FILE.name}")
+
     print(f"[clone] Cloned {success_count}/{len(repos)} repositories")
     if failed_repos:
         print(f"[clone] FAILED repos: {', '.join(failed_repos)}", file=sys.stderr)
-    return success_count, failed_repos
+    return success_count, failed_repos, repo_mapping
 
 
 def main() -> None:

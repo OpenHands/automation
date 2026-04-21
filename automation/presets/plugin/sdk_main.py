@@ -83,11 +83,14 @@ with OpenHandsCloudWorkspace(
             )
 
     # Shared utility import (placed in tarball alongside this script)
-    from load_skills import load_skills_from_agent_server
+    from load_skills import get_repos_context, load_skills_from_agent_server
 
     # Load ALL skills via the local agent-server (public, user, project, org)
     # This mirrors how V1 conversations load skills in OpenHands
     loaded_skills, agent_context = load_skills_from_agent_server()
+
+    # Get repos context (mapping of URLs to local paths)
+    repos_context = get_repos_context()
 
     # Load configuration files
     SCRIPT_DIR = os.path.dirname(__file__)
@@ -100,17 +103,31 @@ with OpenHandsCloudWorkspace(
     with open(PROMPT_FILE) as f:
         USER_PROMPT = f.read()
 
-    # If this is an event-triggered run, prepend event context to the prompt
+    # Build prompt with context sections
+    context_sections = []
+
+    # Add repos context if repos were cloned
+    if repos_context:
+        context_sections.append(repos_context)
+
+    # Add event context if this is an event-triggered run
     if event_context and "event" in event_context:
         event_json = json.dumps(event_context["event"], indent=2)
-        USER_PROMPT = f"""This automation was triggered by a webhook event.
+        context_sections.append(f"""## Event Payload
 
-## Event Payload
+This automation was triggered by a webhook event:
+
 ```json
 {event_json}
-```
+```""")
+
+    # Prepend context sections to the user prompt
+    if context_sections:
+        context_block = "\n\n".join(context_sections)
+        USER_PROMPT = f"""{context_block}
 
 ## Task
+
 {USER_PROMPT}"""
 
     # Deserialize plugin sources using Pydantic validation

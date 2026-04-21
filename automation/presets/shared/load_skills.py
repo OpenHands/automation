@@ -22,6 +22,9 @@ from pathlib import Path
 # Directory where repos are cloned by setup.sh (agent's working directory)
 PROJECT_DIR = Path("/workspace/project")
 
+# Mapping file written by clone_repos.py
+REPOS_MAPPING_FILE = PROJECT_DIR / "repos_mapping.json"
+
 # Agent-server port (standard port used by OpenHands agent-server)
 AGENT_SERVER_PORT = int(os.environ.get("AGENT_SERVER_PORT", "3000"))
 AGENT_SERVER_URL = f"http://localhost:{AGENT_SERVER_PORT}"
@@ -145,21 +148,71 @@ def _convert_skill_info_to_skill(skill_data: dict):
     )
 
 
-def _find_cloned_repo_dirs() -> list[Path]:
-    """Find all cloned repo directories (repo_0, repo_1, etc.).
+def load_repos_mapping() -> dict[str, dict]:
+    """Load the repository mapping from repos_mapping.json.
 
     Returns:
-        List of paths to cloned repo directories, sorted by name.
+        Dict mapping original URL to {dir_name, local_path, ref}
+        Empty dict if file doesn't exist.
     """
-    if not PROJECT_DIR.exists():
+    if not REPOS_MAPPING_FILE.exists():
+        return {}
+
+    try:
+        with open(REPOS_MAPPING_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  WARNING: Failed to read repos_mapping.json: {e}", file=sys.stderr)
+        return {}
+
+
+def _find_cloned_repo_dirs() -> list[Path]:
+    """Find all cloned repo directories using the mapping file.
+
+    Returns:
+        List of paths to cloned repo directories.
+    """
+    mapping = load_repos_mapping()
+    if not mapping:
         return []
 
     repo_dirs = []
-    for path in sorted(PROJECT_DIR.iterdir()):
-        if path.is_dir() and path.name.startswith("repo_"):
-            repo_dirs.append(path)
+    for info in mapping.values():
+        local_path = info.get("local_path")
+        if local_path:
+            path = Path(local_path)
+            if path.is_dir():
+                repo_dirs.append(path)
 
     return repo_dirs
+
+
+def get_repos_context() -> str:
+    """Generate a context string describing cloned repositories for the agent.
+
+    Returns:
+        Markdown-formatted string with repository mapping, or empty string if no repos.
+    """
+    mapping = load_repos_mapping()
+    if not mapping:
+        return ""
+
+    lines = [
+        "## Cloned Repositories",
+        "",
+        "The following repositories have been cloned to your workspace:",
+        "",
+    ]
+
+    for url, info in mapping.items():
+        dir_name = info.get("dir_name", "unknown")
+        local_path = info.get("local_path", "unknown")
+        ref = info.get("ref")
+        ref_str = f" (ref: {ref})" if ref else ""
+        lines.append(f"- `{url}`{ref_str} → `{local_path}/`")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def load_skills_from_agent_server() -> tuple[list, object | None]:
@@ -168,9 +221,10 @@ def load_skills_from_agent_server() -> tuple[list, object | None]:
     This mirrors how V1 conversations load skills in OpenHands, providing
     access to public, user, project, and potentially org-level skills.
 
-    For multiple cloned repos (repo_0, repo_1, etc.), project skills are
-    loaded from EACH repo directory separately. Skills are deduplicated
-    by name, with later repos taking precedence over earlier ones.
+    For multiple cloned repos, project skills are loaded from EACH repo
+    directory separately. Repo directories are identified via repos_mapping.json
+    (written by clone_repos.py). Skills are deduplicated by name, with later
+    repos taking precedence over earlier ones.
 
     Returns:
         Tuple of (list of loaded Skill objects, AgentContext or None)
