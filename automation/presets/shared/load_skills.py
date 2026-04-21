@@ -90,15 +90,27 @@ def _load_skills_via_agent_server(
 
     except urllib.error.HTTPError as e:
         print(
-            f"  WARNING: Agent-server HTTP error {e.code}: {e.reason}",
+            f"  ERROR: Agent-server HTTP error {e.code}: {e.reason}",
+            file=sys.stderr,
+        )
+        print(
+            "  WARNING: Automation will run WITHOUT skills (including public skills)",
             file=sys.stderr,
         )
         return []
     except urllib.error.URLError as e:
-        print(f"  WARNING: Failed to connect to agent-server: {e}", file=sys.stderr)
+        print(f"  ERROR: Failed to connect to agent-server: {e}", file=sys.stderr)
+        print(
+            "  WARNING: Automation will run WITHOUT skills (including public skills)",
+            file=sys.stderr,
+        )
         return []
     except Exception as e:
-        print(f"  WARNING: Failed to load skills via agent-server: {e}", file=sys.stderr)
+        print(f"  ERROR: Failed to load skills via agent-server: {e}", file=sys.stderr)
+        print(
+            "  WARNING: Automation will run WITHOUT skills (including public skills)",
+            file=sys.stderr,
+        )
         return []
 
 
