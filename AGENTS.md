@@ -82,6 +82,47 @@ OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
 
+## Frontend Hosting
+
+The Docker image includes the built frontend SPA and serves it from FastAPI at `/automations`.
+
+### How It Works
+
+- **Multi-stage Dockerfile**: Stage 1 (`node:22-slim`) runs `npm run build` in `frontend/`. Stage 2 copies the output to `/app/frontend-dist`.
+- **Opt-in via env var**: `AUTOMATION_FRONTEND_DIR` controls whether the app serves static files. The Dockerfile sets it to `/app/frontend-dist` by default. Set to empty string to disable (API-only mode).
+- **SPA fallback**: A `StaticFiles` subclass (`_SPAStaticFiles`) serves real files when they exist and falls back to `index.html` for client-side routes.
+- **Cache headers**: Hashed assets under `assets/` get `Cache-Control: public, max-age=31536000, immutable`. `index.html` gets `no-cache, must-revalidate`.
+- **No conflict with API routes**: API routers are mounted on `/api/automation/*`; frontend is on `/automations/*`.
+
+### Local Development
+
+Frontend hosting is **disabled** locally (env var is empty by default). Use the normal Vite dev workflow:
+
+```bash
+# Terminal 1: Backend
+uvicorn automation.app:app --reload
+
+# Terminal 2: Frontend (Vite HMR on :3002)
+cd frontend && npm run dev
+
+# Terminal 3 (optional): Unified proxy on :3000
+cd frontend && npm run dev:proxy
+```
+
+### Docker Build
+
+```bash
+# Build image (includes frontend)
+make docker-build
+# or: docker build -t ghcr.io/openhands/automation:local -f containers/Dockerfile .
+
+# Run with frontend enabled (default)
+docker run -p 8000:8000 ghcr.io/openhands/automation:local
+
+# Run API-only (disable frontend)
+docker run -p 8000:8000 -e AUTOMATION_FRONTEND_DIR="" ghcr.io/openhands/automation:local
+```
+
 ## Dispatch Pipeline
 
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:

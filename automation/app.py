@@ -219,10 +219,26 @@ if _frontend_dir:
 
             async def get_response(self, path: str, scope):
                 try:
-                    return await super().get_response(path, scope)
+                    response = await super().get_response(path, scope)
                 except Exception:
                     # File not found → serve index.html for client-side routing
-                    return FileResponse(_index_html)
+                    return FileResponse(
+                        _index_html,
+                        headers={"Cache-Control": "no-cache, must-revalidate"},
+                    )
+
+                # Hashed assets (assets/*.js, assets/*.css) are immutable —
+                # cache aggressively.  index.html must always be revalidated.
+                if path.startswith("assets/"):
+                    response.headers["Cache-Control"] = (
+                        "public, max-age=31536000, immutable"
+                    )
+                else:
+                    response.headers.setdefault(
+                        "Cache-Control", "no-cache, must-revalidate"
+                    )
+
+                return response
 
         app.mount(
             "/automations",
