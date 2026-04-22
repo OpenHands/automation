@@ -6,9 +6,9 @@ ENV PYTHONPATH='/app'
 # Datadog labels
 LABEL com.datadoghq.tags.service="automation"
 
-# Install system deps for asyncpg + uv
+# Install system deps for asyncpg + uv + git (for SDK git dependencies)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libpq-dev && \
+    apt-get install -y --no-install-recommends libpq-dev git && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir uv ddtrace
 
