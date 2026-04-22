@@ -163,8 +163,8 @@ class TestGenerateTarball:
         """Generated tarball with repos includes repos config."""
         prompt = "Test prompt"
         repos = [
-            RepoSource(url="owner/repo1"),
-            RepoSource(url="owner/repo2", ref="main"),
+            RepoSource(url="owner/repo1", provider="github"),
+            RepoSource(url="owner/repo2", ref="main", provider="github"),
         ]
         tarball_bytes = _generate_tarball(prompt, repos=repos)
 
@@ -180,6 +180,7 @@ class TestGenerateTarball:
             repos_config = json.load(repos_file)
             assert len(repos_config) == 2
             assert repos_config[0]["url"] == "owner/repo1"
+            assert repos_config[0]["provider"] == "github"
             assert "ref" not in repos_config[0]  # None excluded
             assert repos_config[1]["url"] == "owner/repo2"
             assert repos_config[1]["ref"] == "main"
@@ -188,54 +189,60 @@ class TestGenerateTarball:
 class TestRepoSource:
     """Tests for RepoSource model."""
 
-    def test_repo_source_string_normalization(self):
-        """RepoSource accepts a string and normalizes it to object."""
-        repo = RepoSource.model_validate("owner/repo")
-        assert repo.url == "owner/repo"
-        assert repo.ref is None
+    # --- Short URL format (requires provider) ---
 
-    def test_repo_source_with_ref(self):
-        """RepoSource accepts ref parameter."""
-        repo = RepoSource(url="owner/repo", ref="v1.0.0")
+    def test_repo_source_short_url_with_provider(self):
+        """RepoSource accepts short URL with explicit provider."""
+        repo = RepoSource(url="owner/repo", provider="github")
+        assert repo.url == "owner/repo"
+        assert repo.provider == "github"
+
+    def test_repo_source_short_url_with_ref_and_provider(self):
+        """RepoSource accepts short URL with ref and provider."""
+        repo = RepoSource(url="owner/repo", ref="v1.0.0", provider="github")
         assert repo.url == "owner/repo"
         assert repo.ref == "v1.0.0"
 
-    def test_repo_source_full_url(self):
-        """RepoSource accepts full URLs."""
+    def test_repo_source_short_url_without_provider_rejected(self):
+        """RepoSource rejects short URL without provider."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="owner/repo")
+        assert "requires explicit 'provider' field" in str(exc_info.value)
+
+    def test_repo_source_string_without_provider_rejected(self):
+        """RepoSource rejects string input without provider."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource.model_validate("owner/repo")
+        assert "requires explicit 'provider' field" in str(exc_info.value)
+
+    # --- Full URL format (provider auto-detected) ---
+
+    def test_repo_source_full_url_github(self):
+        """RepoSource auto-detects GitHub from full URL."""
         repo = RepoSource(url="https://github.com/owner/repo")
         assert repo.url == "https://github.com/owner/repo"
+        assert repo.provider is None  # Auto-detected, not stored
 
-    def test_repo_source_gitlab_url(self):
-        """RepoSource accepts GitLab URLs."""
+    def test_repo_source_full_url_gitlab(self):
+        """RepoSource auto-detects GitLab from full URL."""
         repo = RepoSource(url="https://gitlab.com/owner/repo")
         assert repo.url == "https://gitlab.com/owner/repo"
 
+    def test_repo_source_full_url_bitbucket(self):
+        """RepoSource auto-detects Bitbucket from full URL."""
+        repo = RepoSource(url="https://bitbucket.org/owner/repo")
+        assert repo.url == "https://bitbucket.org/owner/repo"
+
     def test_repo_source_git_ssh_url(self):
-        """RepoSource accepts git@ SSH URLs."""
+        """RepoSource accepts git@ SSH URLs (provider auto-detected)."""
         repo = RepoSource(url="git@github.com:owner/repo.git")
         assert repo.url == "git@github.com:owner/repo.git"
 
-    def test_repo_source_invalid_url_rejected(self):
-        """RepoSource rejects invalid URL formats."""
-        import pydantic
-
-        with pytest.raises(pydantic.ValidationError) as exc_info:
-            RepoSource(url="not-a-valid-url")
-        assert "URL must be 'owner/repo' format" in str(exc_info.value)
-
-    def test_repo_source_missing_protocol_rejected(self):
-        """RepoSource rejects URLs missing protocol."""
-        import pydantic
-
-        with pytest.raises(pydantic.ValidationError) as exc_info:
-            RepoSource(url="github.com/owner/repo")
-        assert "URL must be 'owner/repo' format" in str(exc_info.value)
-
-    def test_repo_source_with_provider(self):
-        """RepoSource accepts explicit provider specification."""
-        repo = RepoSource(url="owner/repo", provider="gitlab")
-        assert repo.url == "owner/repo"
-        assert repo.provider == "gitlab"
+    # --- Provider options ---
 
     def test_repo_source_provider_options(self):
         """RepoSource accepts all valid provider options."""
@@ -250,10 +257,23 @@ class TestRepoSource:
         with pytest.raises(pydantic.ValidationError):
             RepoSource(url="owner/repo", provider="invalid")
 
-    def test_repo_source_provider_none_by_default(self):
-        """RepoSource provider is None by default."""
-        repo = RepoSource(url="owner/repo")
-        assert repo.provider is None
+    # --- URL validation ---
+
+    def test_repo_source_invalid_url_rejected(self):
+        """RepoSource rejects invalid URL formats."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="not-a-valid-url", provider="github")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
+
+    def test_repo_source_missing_protocol_rejected(self):
+        """RepoSource rejects URLs missing protocol."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="github.com/owner/repo", provider="github")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
 
 
 @requires_docker
@@ -729,7 +749,7 @@ class TestGeneratePluginTarball:
         plugins = [PluginSource(source="github:owner/plugin")]
         prompt = "Test prompt"
         repos = [
-            RepoSource(url="owner/repo1"),
+            RepoSource(url="owner/repo1", provider="github"),
             RepoSource(url="https://gitlab.com/owner/repo2", ref="develop"),
         ]
         tarball_bytes = _generate_plugin_tarball(plugins, prompt, repos=repos)
@@ -747,6 +767,7 @@ class TestGeneratePluginTarball:
             repos_config = json.load(repos_file)
             assert len(repos_config) == 2
             assert repos_config[0]["url"] == "owner/repo1"
+            assert repos_config[0]["provider"] == "github"
             assert repos_config[1]["url"] == "https://gitlab.com/owner/repo2"
             assert repos_config[1]["ref"] == "develop"
 
