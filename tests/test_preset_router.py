@@ -244,18 +244,27 @@ class TestRepoSource:
 
     # --- Provider options ---
 
-    def test_repo_source_provider_options(self):
-        """RepoSource accepts all valid provider options."""
-        for provider in ["github", "gitlab", "bitbucket"]:
-            repo = RepoSource(url="owner/repo", provider=provider)
-            assert repo.provider == provider
+    def test_repo_source_provider_github(self):
+        """RepoSource accepts github provider."""
+        repo = RepoSource(url="owner/repo", provider="github")
+        assert repo.provider == "github"
+
+    def test_repo_source_provider_gitlab(self):
+        """RepoSource accepts gitlab provider."""
+        repo = RepoSource(url="owner/repo", provider="gitlab")
+        assert repo.provider == "gitlab"
+
+    def test_repo_source_provider_bitbucket(self):
+        """RepoSource accepts bitbucket provider."""
+        repo = RepoSource(url="owner/repo", provider="bitbucket")
+        assert repo.provider == "bitbucket"
 
     def test_repo_source_invalid_provider_rejected(self):
         """RepoSource rejects invalid provider values."""
         import pydantic
 
         with pytest.raises(pydantic.ValidationError):
-            RepoSource(url="owner/repo", provider="invalid")
+            RepoSource(url="owner/repo", provider="invalid")  # type: ignore[arg-type]
 
     # --- URL validation ---
 
