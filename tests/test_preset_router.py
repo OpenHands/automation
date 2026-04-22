@@ -231,6 +231,30 @@ class TestRepoSource:
             RepoSource(url="github.com/owner/repo")
         assert "URL must be 'owner/repo' format" in str(exc_info.value)
 
+    def test_repo_source_with_provider(self):
+        """RepoSource accepts explicit provider specification."""
+        repo = RepoSource(url="owner/repo", provider="gitlab")
+        assert repo.url == "owner/repo"
+        assert repo.provider == "gitlab"
+
+    def test_repo_source_provider_options(self):
+        """RepoSource accepts all valid provider options."""
+        for provider in ["github", "gitlab", "bitbucket", "azure"]:
+            repo = RepoSource(url="owner/repo", provider=provider)
+            assert repo.provider == provider
+
+    def test_repo_source_invalid_provider_rejected(self):
+        """RepoSource rejects invalid provider values."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            RepoSource(url="owner/repo", provider="invalid")
+
+    def test_repo_source_provider_none_by_default(self):
+        """RepoSource provider is None by default."""
+        repo = RepoSource(url="owner/repo")
+        assert repo.provider is None
+
 
 @requires_docker
 class TestCreateAutomationFromPrompt:

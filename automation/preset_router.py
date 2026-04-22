@@ -17,7 +17,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
@@ -46,6 +46,11 @@ class RepoSource(BaseModel):
 
     Repositories are cloned during automation setup and skills (AGENTS.md,
     .agents/skills/, etc.) are automatically loaded from each cloned repo.
+
+    The provider field specifies which git hosting service the repo belongs to,
+    which determines which authentication token to use for cloning. If not
+    specified, the provider is auto-detected from the URL (defaulting to GitHub
+    for owner/repo format).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -53,13 +58,23 @@ class RepoSource(BaseModel):
     url: str = Field(
         ...,
         description=(
-            "Repository identifier. Can be 'owner/repo' format (assumes GitHub) "
-            "or a full URL (https://github.com/owner/repo, https://gitlab.com/owner/repo)."
+            "Repository identifier. Can be 'owner/repo' format "
+            "or a full URL (https://github.com/owner/repo, "
+            "https://gitlab.com/owner/repo)."
         ),
     )
     ref: str | None = Field(
         default=None,
         description="Optional branch, tag, or commit SHA to checkout.",
+    )
+    provider: Literal["github", "gitlab", "bitbucket", "azure"] | None = Field(
+        default=None,
+        description=(
+            "Git hosting provider (github, gitlab, bitbucket, azure). "
+            "Used to determine which authentication token to use. "
+            "If not specified, auto-detected from URL "
+            "(defaults to github for owner/repo format)."
+        ),
     )
 
     @model_validator(mode="before")
