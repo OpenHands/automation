@@ -2138,7 +2138,7 @@ wheels = [
 [[package]]
 name = "openhands-agent-server"
 version = "1.18.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=feat%2Fadd-repo-cloning-and-skill-loading#60bcf28254ba566b4d3799dc9765f366520cc9b1" }
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=feat%2Fadd-repo-cloning-and-skill-loading#59d75a3d4b82022434480d81e8d317a1ce973eee" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -2232,7 +2232,7 @@ dev = [
 [[package]]
 name = "openhands-sdk"
 version = "1.18.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=feat%2Fadd-repo-cloning-and-skill-loading#60bcf28254ba566b4d3799dc9765f366520cc9b1" }
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=feat%2Fadd-repo-cloning-and-skill-loading#59d75a3d4b82022434480d81e8d317a1ce973eee" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2252,7 +2252,7 @@ dependencies = [
 [[package]]
 name = "openhands-workspace"
 version = "1.18.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=feat%2Fadd-repo-cloning-and-skill-loading#60bcf28254ba566b4d3799dc9765f366520cc9b1" }
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=feat%2Fadd-repo-cloning-and-skill-loading#59d75a3d4b82022434480d81e8d317a1ce973eee" }
 dependencies = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
