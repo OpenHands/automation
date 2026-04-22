@@ -1,0 +1,32 @@
+# Version control
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Frontend (built inside Docker via multi-stage)
+frontend/node_modules
+frontend/build
+frontend/coverage
+frontend/test-results
+frontend/playwright-report
+frontend/.react-router
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+
+# Misc
+.pr
+.stakpak
+.pre-commit-config.yaml

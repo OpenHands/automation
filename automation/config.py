@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
     cors_origins: str = ""
 
+    # Frontend static files directory.  When set, the app serves the built
+    # frontend SPA at the frontend_path.  Leave empty to disable.
+    frontend_dir: str = ""
+
     # Event-based triggers: Shared secret for verifying webhook signatures
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
@@ -75,6 +79,21 @@ class Settings(BaseSettings):
         else:
             prefix = ""
         return f"{prefix}/api/automation"
+
+    @property
+    def frontend_path(self) -> str:
+        """Route prefix for the frontend SPA, derived from base_url.
+
+        Examples:
+            base_url=""                          -> /automations
+            base_url="https://domain"            -> /automations
+            base_url="https://domain/acmecorp"   -> /acmecorp/automations
+        """
+        if self.base_url:
+            prefix = urlparse(self.base_url).path.rstrip("/")
+        else:
+            prefix = ""
+        return f"{prefix}/automations"
 
     @property
     def resolved_base_url(self) -> str:
