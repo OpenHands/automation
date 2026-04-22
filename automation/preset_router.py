@@ -67,10 +67,10 @@ class RepoSource(BaseModel):
         default=None,
         description="Optional branch, tag, or commit SHA to checkout.",
     )
-    provider: Literal["github", "gitlab", "bitbucket", "azure"] | None = Field(
+    provider: Literal["github", "gitlab", "bitbucket"] | None = Field(
         default=None,
         description=(
-            "Git hosting provider (github, gitlab, bitbucket, azure). "
+            "Git hosting provider (github, gitlab, bitbucket). "
             "Used to determine which authentication token to use. "
             "If not specified, auto-detected from URL "
             "(defaults to github for owner/repo format)."

@@ -239,7 +239,7 @@ class TestRepoSource:
 
     def test_repo_source_provider_options(self):
         """RepoSource accepts all valid provider options."""
-        for provider in ["github", "gitlab", "bitbucket", "azure"]:
+        for provider in ["github", "gitlab", "bitbucket"]:
             repo = RepoSource(url="owner/repo", provider=provider)
             assert repo.provider == provider
 
