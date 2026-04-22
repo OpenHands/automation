@@ -20,7 +20,8 @@ dependencies = [
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.16.0",
+  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@feat/add-repo-cloning-and-skill-loading#subdirectory=openhands-sdk",
+  "openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk.git@feat/add-repo-cloning-and-skill-loading#subdirectory=openhands-workspace",
   "pg8000>=1.31",
   "pydantic>=2",
   "pydantic-settings>=2",
@@ -35,6 +36,9 @@ build-backend = "hatchling.build"
 requires = [
   "hatchling",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["automation"]

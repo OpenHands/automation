@@ -10,10 +10,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 from automation.models import Automation, TarballUpload, UploadStatus
 from automation.preset_router import (
-    RepoSource,
     _generate_plugin_tarball,
     _generate_tarball,
 )

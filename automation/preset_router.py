@@ -12,16 +12,16 @@ Currently supported presets:
 import io
 import json
 import logging
-import re
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from openhands.workspace import RepoSource
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.auth import AuthenticatedUser, authenticate_request
@@ -33,73 +33,6 @@ from automation.utils.tarball_validation import build_internal_url
 
 
 logger = logging.getLogger(__name__)
-
-# Regex for owner/repo format (e.g., "owner/repo", "owner/repo-name", "owner/repo.name")
-_OWNER_REPO_PATTERN = re.compile(r"^[\w-]+/[\w.-]+$")
-
-
-# --- Repository Source Model ---
-
-
-class RepoSource(BaseModel):
-    """Repository source specification for cloning.
-
-    Repositories are cloned during automation setup and skills (AGENTS.md,
-    .agents/skills/, etc.) are automatically loaded from each cloned repo.
-
-    The provider field specifies which git hosting service the repo belongs to,
-    which determines which authentication token to use for cloning. If not
-    specified, the provider is auto-detected from the URL (defaulting to GitHub
-    for owner/repo format).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    url: str = Field(
-        ...,
-        description=(
-            "Repository identifier. Can be 'owner/repo' format "
-            "or a full URL (https://github.com/owner/repo, "
-            "https://gitlab.com/owner/repo)."
-        ),
-    )
-    ref: str | None = Field(
-        default=None,
-        description="Optional branch, tag, or commit SHA to checkout.",
-    )
-    provider: Literal["github", "gitlab", "bitbucket"] | None = Field(
-        default=None,
-        description=(
-            "Git hosting provider (github, gitlab, bitbucket). "
-            "Used to determine which authentication token to use. "
-            "If not specified, auto-detected from URL "
-            "(defaults to github for owner/repo format)."
-        ),
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_string_input(cls, data: Any) -> Any:
-        """Allow passing just a URL string instead of full object."""
-        if isinstance(data, str):
-            return {"url": data}
-        return data
-
-    @field_validator("url")
-    @classmethod
-    def validate_url(cls, v: str) -> str:
-        """Validate URL format to provide early feedback."""
-        # Allow owner/repo format (e.g., "owner/repo", "my-org/my-repo.git")
-        if _OWNER_REPO_PATTERN.match(v):
-            return v
-        # Allow full git URLs
-        if v.startswith(("http://", "https://", "git@")):
-            return v
-        raise ValueError(
-            "URL must be 'owner/repo' format or a valid git URL "
-            "(https://, http://, or git@)"
-        )
-
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
