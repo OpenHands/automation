@@ -112,4 +112,4 @@ jobs:
             head_sha: ${{ github.event.pull_request.head.sha }}
             pr_title: ${{ github.event.pull_request.title }}
         secrets:
-            ALLHANDS_BOT_GITHUB_PAT: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}
+            OPENHANDS_BOT_GITHUB_PAT_PRIVATE: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}

@@ -19,7 +19,7 @@ on:
                 required: true
                 type: string
         secrets:
-            ALLHANDS_BOT_GITHUB_PAT:
+            OPENHANDS_BOT_GITHUB_PAT_PRIVATE:
                 required: true
 
 concurrency:
