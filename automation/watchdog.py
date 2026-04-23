@@ -96,13 +96,15 @@ async def _verify_and_mark_run(
         result = await session.execute(stmt)  # type: ignore[assignment]
         return result.rowcount > 0
 
-    # Try to verify via sandbox
+    # Try to verify via sandbox / agent-server
     verification = await verify_run_status(
         api_url=settings.openhands_api_base_url,
         api_key=api_key,
         sandbox_id=sandbox_id,
         keep_alive=run.keep_alive,
         run_id=run_id,
+        agent_server_url=settings.agent_server_url,
+        agent_server_api_key=settings.agent_server_api_key,
     )
 
     if verification.verified:
@@ -190,8 +192,8 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
-    # Clean up sandbox if not keep_alive (best effort, may already be gone)
-    if not run.keep_alive and sandbox_id:
+    # Clean up sandbox if not keep_alive (Cloud mode only; no-op in agent-server mode)
+    if not settings.is_agent_server_mode and not run.keep_alive and sandbox_id:
         await cleanup_sandbox(
             api_url=settings.openhands_api_base_url,
             api_key=api_key,

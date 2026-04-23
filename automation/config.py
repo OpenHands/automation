@@ -63,7 +63,19 @@ class Settings(BaseSettings):
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
 
+    # --- Execution backend ---
+    # When set, the automation engine connects directly to this agent-server
+    # instead of provisioning Cloud sandboxes per run.
+    # This enables open source / self-hosted deployments.
+    agent_server_url: str | None = None
+    agent_server_api_key: str | None = None
+
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def is_agent_server_mode(self) -> bool:
+        """True when configured to use a persistent agent-server."""
+        return self.agent_server_url is not None
 
     @property
     def base_path(self) -> str:

@@ -198,39 +198,52 @@ async def verify_run_status(
     sandbox_id: str,
     keep_alive: bool = False,
     run_id: str | None = None,
+    agent_server_url: str | None = None,
+    agent_server_api_key: str | None = None,
 ) -> VerificationResult:
-    """Verify an automation run's status by querying its sandbox.
+    """Verify an automation run's status by querying its runtime.
 
-    Connects to the sandbox, queries the last bash command's exit code,
+    **Cloud sandbox mode** (``agent_server_url`` is ``None``):
+    Discovers the agent-server inside the sandbox, queries bash history,
     and optionally deletes the sandbox.
+
+    **Agent-server mode** (``agent_server_url`` is set):
+    Queries the configured agent-server directly.  No sandbox cleanup.
 
     Args:
         api_url: OpenHands API URL
         api_key: API key for authentication
-        sandbox_id: The sandbox to query
+        sandbox_id: The sandbox to query (Cloud mode)
         keep_alive: If True, don't delete the sandbox after verification
         run_id: Optional run ID for logging
+        agent_server_url: Direct agent-server URL (agent-server mode)
+        agent_server_api_key: API key for the agent-server
 
     Returns:
         VerificationResult with the verification outcome
     """
     api_url = api_url.rstrip("/")
     extra = _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+    is_agent_server_mode = agent_server_url is not None
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Get sandbox agent URL
-        result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
-        if result is None:
-            logger.info("Sandbox not available for verification", extra=extra)
-            return VerificationResult(
-                verified=False,
-                error="Sandbox not available",
-            )
+        # --- Resolve agent-server connection ---
+        if is_agent_server_mode:
+            agent_url = agent_server_url.rstrip("/")
+            session_key = agent_server_api_key or ""
+            logger.info("Using configured agent-server for verification", extra=extra)
+        else:
+            result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+            if result is None:
+                logger.info("Sandbox not available for verification", extra=extra)
+                return VerificationResult(
+                    verified=False,
+                    error="Sandbox not available",
+                )
+            agent_url, session_key = result
+            logger.info("Connected to sandbox for verification", extra=extra)
 
-        agent_url, session_key = result
-        logger.info("Connected to sandbox for verification", extra=extra)
-
-        # Get last bash command result
+        # --- Query bash history (shared) ---
         bash_result = await get_last_bash_command_result(client, agent_url, session_key)
 
         if not bash_result.found:
@@ -239,8 +252,7 @@ async def verify_run_status(
                 bash_result.error,
                 extra=extra,
             )
-            # Still try to clean up if needed
-            if not keep_alive:
+            if not is_agent_server_mode and not keep_alive:
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
             return VerificationResult(
                 verified=False,
@@ -262,8 +274,8 @@ async def verify_run_status(
             extra=extra,
         )
 
-        # Clean up sandbox if not keeping alive
-        if not keep_alive:
+        # Only clean up in Cloud sandbox mode
+        if not is_agent_server_mode and not keep_alive:
             logger.info("Deleting sandbox", extra=extra)
             await delete_sandbox(client, api_url, api_key, sandbox_id)
 

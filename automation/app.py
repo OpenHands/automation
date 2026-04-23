@@ -48,6 +48,13 @@ async def lifespan(app: FastAPI):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     logger.info("Starting OpenHands Automations Service")
+    if settings.is_agent_server_mode:
+        logger.info(
+            "Execution backend: agent-server mode (%s)",
+            settings.agent_server_url,
+        )
+    else:
+        logger.info("Execution backend: Cloud sandbox mode")
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()

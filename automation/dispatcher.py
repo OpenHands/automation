@@ -191,7 +191,7 @@ async def _execute_run(
         else:
             effective_timeout = MAX_RUN_DURATION_SECONDS
 
-        # 5. Dispatch to sandbox (fire-and-forget)
+        # 5. Dispatch (fire-and-forget)
         result = await dispatch_automation(
             api_url=settings.openhands_api_base_url,
             api_key=api_key,
@@ -201,6 +201,8 @@ async def _execute_run(
             timeout=effective_timeout,
             callback_url=callback_url,
             run_id=run_id,
+            agent_server_url=settings.agent_server_url,
+            agent_server_api_key=settings.agent_server_api_key,
         )
 
         sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
