@@ -1,15 +1,22 @@
 """Prompt-based automation script — runs inside an OpenHands Cloud sandbox.
 
 This script is auto-generated from a user's prompt. It:
-  1. Opens OpenHandsCloudWorkspace with local_agent_server_mode=True
-  2. Fetches LLM config via workspace.get_llm()
-  3. Fetches secrets via workspace.get_secrets()
-  4. Fetches MCP config via workspace.get_mcp_config()
-  5. Gets default agent with tools and condenser via get_default_agent()
-  6. Uses model_copy to add MCP config to the agent
-  7. Creates a Conversation and injects secrets
-  8. Sends the user's prompt (with event context if available) and runs
-  9. On context manager exit, the workspace sends a completion callback
+  1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
+  2. Clones repositories if configured (via workspace.clone_repos())
+  3. Loads ALL skills via workspace.load_skills_from_agent_server()
+     (public, user, project, org skills - mirrors V1 conversation behavior)
+  4. Fetches LLM config via workspace.get_llm()
+  5. Fetches secrets via workspace.get_secrets()
+  6. Fetches MCP config via workspace.get_mcp_config()
+  7. Gets default agent with tools and condenser via get_default_agent()
+  8. Uses model_copy to add MCP config and skills to the agent
+  9. Creates a Conversation and injects secrets
+  10. Sends the user's prompt (with event context if available) and runs
+  11. On context manager exit, the workspace sends a completion callback
+
+IMPORTANT: The workspace context is entered early so that ANY exception
+(skill loading, prompt parsing, etc.) triggers the __exit__ callback,
+avoiding silent failures that require watchdog timeout.
 
 Env vars injected by the dispatcher (read by the SDK automatically):
   OPENHANDS_API_KEY          - per-user automation API key
@@ -32,7 +39,7 @@ api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
-# Verify dispatcher-injected env vars
+# Verify dispatcher-injected env vars (must happen before workspace context)
 print("=== ENV VARS ===")
 for name, val in [
     ("OPENHANDS_API_KEY", api_key),
@@ -50,45 +57,94 @@ print(
 )
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
-# Parse event payload if present (for event-triggered automations)
-event_context = None
-if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
-    try:
-        event_context = json.loads(event_payload_json)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
-
-# SDK imports
+# SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.tools import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
-
-# Load user's prompt from file (placed during automation creation)
-PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt.txt")
-with open(PROMPT_FILE) as f:
-    USER_PROMPT = f.read()
-
-# If this is an event-triggered run, prepend event context to the prompt
-if event_context and "event" in event_context:
-    event_json = json.dumps(event_context["event"], indent=2)
-    USER_PROMPT = f"""This automation was triggered by a webhook event.
-
-## Event Payload
-```json
-{event_json}
-```
-
-## Task
-{USER_PROMPT}"""
-
-
+# Enter workspace context EARLY - any exception from here on triggers callback
 print("\n=== SDK WORKSPACE ===")
 with OpenHandsCloudWorkspace(
     local_agent_server_mode=True,
     cloud_api_url=api_url,
     cloud_api_key=api_key,
 ) as workspace:
+    # -- All remaining setup happens inside the workspace context --
+    # This ensures failures trigger the __exit__ callback
+
+    # Parse event payload if present (for event-triggered automations)
+    event_context = None
+    if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
+        try:
+            event_context = json.loads(event_payload_json)
+        except json.JSONDecodeError as e:
+            print(
+                f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
+            )
+
+    # Clone repositories if repos_config.json exists (uses SDK workspace methods)
+    SCRIPT_DIR = os.path.dirname(__file__)
+    REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
+    clone_result = None
+    repo_dirs = []
+
+    if os.path.exists(REPOS_CONFIG_FILE):
+        print("\n=== CLONE REPOS ===")
+        with open(REPOS_CONFIG_FILE) as f:
+            repos_config = json.load(f)
+        if repos_config:
+            clone_result = workspace.clone_repos(repos_config)
+            print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
+            if clone_result.failed_repos:
+                print(f"  FAILED: {', '.join(clone_result.failed_repos)}")
+            # Collect cloned repo directories for skill loading
+            repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
+
+    # Load ALL skills via workspace.load_skills_from_agent_server()
+    # If repos were cloned, project skills are loaded from EACH cloned repo
+    print("\n=== LOAD SKILLS ===")
+    loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+        project_dirs=repo_dirs if repo_dirs else None
+    )
+    print(f"  loaded {len(loaded_skills)} skills")
+
+    # Get repos context (mapping of URLs to local paths)
+    repos_context = ""
+    if clone_result and clone_result.repo_mappings:
+        repos_context = workspace.get_repos_context(clone_result.repo_mappings)
+
+    # Load user's prompt from file (placed during automation creation)
+    PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt.txt")
+    with open(PROMPT_FILE) as f:
+        USER_PROMPT = f.read()
+
+    # Build prompt with context sections
+    context_sections = []
+
+    # Add repos context if repos were cloned
+    if repos_context:
+        context_sections.append(repos_context)
+
+    # Add event context if this is an event-triggered run
+    if event_context and "event" in event_context:
+        event_json = json.dumps(event_context["event"], indent=2)
+        context_sections.append(f"""## Event Payload
+
+This automation was triggered by a webhook event:
+
+```json
+{event_json}
+```""")
+
+    # Prepend context sections to the user prompt
+    if context_sections:
+        context_block = "\n\n".join(context_sections)
+        USER_PROMPT = f"""{context_block}
+
+## Task
+
+{USER_PROMPT}"""
+
     # get_llm() — fetches LLM config from the user's SaaS account
     print("\n=== GET_LLM ===")
     llm = workspace.get_llm()
@@ -122,12 +178,18 @@ with OpenHandsCloudWorkspace(
     print("\n=== AGENT ===")
     agent = get_default_agent(llm=llm, cli_mode=True)
 
-    # Add MCP config using model_copy if configured
+    # Add MCP config and agent_context using model_copy if configured
+    agent_updates = {}
     if mcp_config:
-        agent = agent.model_copy(update={"mcp_config": mcp_config})
+        agent_updates["mcp_config"] = mcp_config
+    if agent_context:
+        agent_updates["agent_context"] = agent_context
+    if agent_updates:
+        agent = agent.model_copy(update=agent_updates)
 
     print(f"  tools: {[t.name for t in agent.tools]}")
     print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
     condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
     print(f"  condenser: {condenser_name}")
 

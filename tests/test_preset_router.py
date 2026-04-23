@@ -10,9 +10,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 from automation.models import Automation, TarballUpload, UploadStatus
-from automation.preset_router import _generate_plugin_tarball, _generate_tarball
+from automation.preset_router import (
+    _generate_plugin_tarball,
+    _generate_tarball,
+)
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -103,6 +107,8 @@ class TestGenerateTarball:
             assert "main.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
+            # Note: load_skills.py and clone_repos.py are no longer needed
+            # as the SDK workspace now provides these methods directly
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
@@ -143,6 +149,140 @@ class TestGenerateTarball:
             setup_info = tar.getmember("setup.sh")
             # Check executable bit is set (0o755 includes 0o100 for owner execute)
             assert setup_info.mode & 0o100
+
+    def test_generate_tarball_without_repos(self):
+        """Generated tarball without repos does not include repos_config.json."""
+        prompt = "Test prompt"
+        tarball_bytes = _generate_tarball(prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" not in names
+
+    def test_generate_tarball_with_repos(self):
+        """Generated tarball with repos includes repos config."""
+        prompt = "Test prompt"
+        repos = [
+            RepoSource(url="owner/repo1", provider="github"),
+            RepoSource(url="owner/repo2", ref="main", provider="github"),
+        ]
+        tarball_bytes = _generate_tarball(prompt, repos=repos)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" in names
+            # Note: clone_repos.py is no longer included - SDK handles cloning
+            assert "clone_repos.py" not in names
+
+            # Verify repos config content
+            repos_file = tar.extractfile("repos_config.json")
+            assert repos_file is not None
+            repos_config = json.load(repos_file)
+            assert len(repos_config) == 2
+            assert repos_config[0]["url"] == "owner/repo1"
+            assert repos_config[0]["provider"] == "github"
+            assert "ref" not in repos_config[0]  # None excluded
+            assert repos_config[1]["url"] == "owner/repo2"
+            assert repos_config[1]["ref"] == "main"
+
+
+class TestRepoSource:
+    """Tests for RepoSource model."""
+
+    # --- Short URL format (requires provider) ---
+
+    def test_repo_source_short_url_with_provider(self):
+        """RepoSource accepts short URL with explicit provider."""
+        repo = RepoSource(url="owner/repo", provider="github")
+        assert repo.url == "owner/repo"
+        assert repo.provider == "github"
+
+    def test_repo_source_short_url_with_ref_and_provider(self):
+        """RepoSource accepts short URL with ref and provider."""
+        repo = RepoSource(url="owner/repo", ref="v1.0.0", provider="github")
+        assert repo.url == "owner/repo"
+        assert repo.ref == "v1.0.0"
+
+    def test_repo_source_short_url_without_provider_rejected(self):
+        """RepoSource rejects short URL without provider."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="owner/repo")
+        assert "requires explicit 'provider' field" in str(exc_info.value)
+
+    def test_repo_source_string_without_provider_rejected(self):
+        """RepoSource rejects string input without provider."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource.model_validate("owner/repo")
+        assert "requires explicit 'provider' field" in str(exc_info.value)
+
+    # --- Full URL format (provider auto-detected) ---
+
+    def test_repo_source_full_url_github(self):
+        """RepoSource auto-detects GitHub from full URL."""
+        repo = RepoSource(url="https://github.com/owner/repo")
+        assert repo.url == "https://github.com/owner/repo"
+        assert repo.provider is None  # Auto-detected, not stored
+
+    def test_repo_source_full_url_gitlab(self):
+        """RepoSource auto-detects GitLab from full URL."""
+        repo = RepoSource(url="https://gitlab.com/owner/repo")
+        assert repo.url == "https://gitlab.com/owner/repo"
+
+    def test_repo_source_full_url_bitbucket(self):
+        """RepoSource auto-detects Bitbucket from full URL."""
+        repo = RepoSource(url="https://bitbucket.org/owner/repo")
+        assert repo.url == "https://bitbucket.org/owner/repo"
+
+    def test_repo_source_git_ssh_url(self):
+        """RepoSource accepts git@ SSH URLs (provider auto-detected)."""
+        repo = RepoSource(url="git@github.com:owner/repo.git")
+        assert repo.url == "git@github.com:owner/repo.git"
+
+    # --- Provider options ---
+
+    def test_repo_source_provider_github(self):
+        """RepoSource accepts github provider."""
+        repo = RepoSource(url="owner/repo", provider="github")
+        assert repo.provider == "github"
+
+    def test_repo_source_provider_gitlab(self):
+        """RepoSource accepts gitlab provider."""
+        repo = RepoSource(url="owner/repo", provider="gitlab")
+        assert repo.provider == "gitlab"
+
+    def test_repo_source_provider_bitbucket(self):
+        """RepoSource accepts bitbucket provider."""
+        repo = RepoSource(url="owner/repo", provider="bitbucket")
+        assert repo.provider == "bitbucket"
+
+    def test_repo_source_invalid_provider_rejected(self):
+        """RepoSource rejects invalid provider values."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            RepoSource(url="owner/repo", provider="invalid")  # type: ignore[arg-type]
+
+    # --- URL validation ---
+
+    def test_repo_source_invalid_url_rejected(self):
+        """RepoSource rejects invalid URL formats."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="not-a-valid-url", provider="github")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
+
+    def test_repo_source_missing_protocol_rejected(self):
+        """RepoSource rejects URLs missing protocol."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            RepoSource(url="github.com/owner/repo", provider="github")
+        assert "URL must be 'owner/repo' format" in str(exc_info.value)
 
 
 @requires_docker
@@ -602,6 +742,43 @@ class TestGeneratePluginTarball:
             # None values should be excluded
             assert "ref" not in config[0]
             assert "repo_path" not in config[0]
+
+    def test_generate_plugin_tarball_without_repos(self):
+        """Generated plugin tarball without repos does not include repos_config.json."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        prompt = "Test prompt"
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" not in names
+
+    def test_generate_plugin_tarball_with_repos(self):
+        """Plugin tarball with repos includes repos config."""
+        plugins = [PluginSource(source="github:owner/plugin")]
+        prompt = "Test prompt"
+        repos = [
+            RepoSource(url="owner/repo1", provider="github"),
+            RepoSource(url="https://gitlab.com/owner/repo2", ref="develop"),
+        ]
+        tarball_bytes = _generate_plugin_tarball(plugins, prompt, repos=repos)
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "repos_config.json" in names
+            # Note: clone_repos.py is no longer included - SDK handles cloning
+            assert "clone_repos.py" not in names
+            assert "plugins_config.json" in names  # All should be present
+
+            # Verify repos config content
+            repos_file = tar.extractfile("repos_config.json")
+            assert repos_file is not None
+            repos_config = json.load(repos_file)
+            assert len(repos_config) == 2
+            assert repos_config[0]["url"] == "owner/repo1"
+            assert repos_config[0]["provider"] == "github"
+            assert repos_config[1]["url"] == "https://gitlab.com/owner/repo2"
+            assert repos_config[1]["ref"] == "develop"
 
 
 @requires_docker

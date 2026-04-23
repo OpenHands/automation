@@ -1,11 +1,16 @@
 #!/bin/bash
-# Install the OpenHands SDK from PyPI (released versions).
-# All versions pinned to avoid potential issues due to version mismatch.
+# Install the OpenHands SDK from PyPI.
+#
+# Note: Repository cloning is handled by the SDK's
+# OpenHandsCloudWorkspace.clone_repos() method inside main.py.
 set -e
 
-echo "[setup] installing openhands SDK from PyPI"
+SDK_VERSION="1.18.1"
+
+echo "[setup] Installing OpenHands SDK (version: $SDK_VERSION)"
 pip install -q --no-cache-dir \
-  openhands-sdk==1.16.1 \
-  openhands-workspace==1.16.1 \
-  openhands-tools==1.16.1
-echo "[setup] done"
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}"
+
+echo "[setup] Done"

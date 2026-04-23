@@ -16,9 +16,11 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,6 +107,24 @@ class CreatePromptAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repository/repositories to clone. Skills (AGENTS.md, .agents/skills/) "
+            "are automatically loaded from each cloned repository. "
+            "Can be a single repo or a list of repos."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repos(cls, data: Any) -> Any:
+        """Normalize repos to always be a list if provided."""
+        if isinstance(data, dict) and "repos" in data and data["repos"] is not None:
+            repos = data["repos"]
+            if isinstance(repos, (str, dict)):
+                data["repos"] = [repos]
+        return data
 
 
 def _add_file_to_tar(
@@ -118,13 +138,22 @@ def _add_file_to_tar(
     tar.addfile(info, io.BytesIO(content_bytes))
 
 
-def _generate_tarball(prompt: str) -> bytes:
+def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> bytes:
     """Generate a tarball containing SDK code and the user's prompt.
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
+    - repos_config.json: (optional) Repository configuration for cloning
+
+    Note: Clone and skill loading functionality is now provided by the SDK's
+    OpenHandsCloudWorkspace.clone_repos() and load_skills_from_agent_server()
+    methods, so separate scripts are no longer needed.
+
+    Args:
+        prompt: The user's prompt text
+        repos: Optional list of repositories to clone
 
     Returns:
         bytes: The tarball content as bytes
@@ -136,6 +165,13 @@ def _generate_tarball(prompt: str) -> bytes:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+        # Add repos config if repos specified (SDK workspace handles cloning)
+        if repos:
+            repos_config = [r.model_dump(exclude_none=True) for r in repos]
+            _add_file_to_tar(
+                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+            )
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -167,12 +203,14 @@ async def create_automation_from_prompt(
 
     The generated automation will:
     1. Set up the OpenHands SDK environment
-    2. Create a conversation with the user's LLM settings
-    3. Execute the provided prompt
-    4. Report completion status back to the automation service
+    2. Clone any specified repositories (optional)
+    3. Load skills from cloned repositories (AGENTS.md, .agents/skills/)
+    4. Create a conversation with the user's LLM settings
+    5. Execute the provided prompt
+    6. Report completion status back to the automation service
     """
-    # 1. Generate tarball with SDK code and prompt
-    tarball_content = _generate_tarball(body.prompt)
+    # 1. Generate tarball with SDK code, prompt, and optional repos config
+    tarball_content = _generate_tarball(body.prompt, repos=body.repos)
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
@@ -289,22 +327,38 @@ class CreatePluginAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repository/repositories to clone. Skills (AGENTS.md, .agents/skills/) "
+            "are automatically loaded from each cloned repository. "
+            "Can be a single repo or a list of repos."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_plugins(cls, data: dict) -> dict:  # type: ignore[type-arg]
-        """Normalize plugins to always be a list."""
-        if isinstance(data, dict) and "plugins" in data:
-            plugins = data["plugins"]
-            if isinstance(plugins, dict):
-                # Single plugin object -> wrap in list
-                data["plugins"] = [plugins]
-            elif isinstance(plugins, list) and len(plugins) == 0:
-                raise ValueError("At least one plugin is required")
+    def normalize_plugins_and_repos(cls, data: dict) -> dict:  # type: ignore[type-arg]
+        """Normalize plugins and repos to always be lists."""
+        if isinstance(data, dict):
+            # Normalize plugins
+            if "plugins" in data:
+                plugins = data["plugins"]
+                if isinstance(plugins, dict):
+                    data["plugins"] = [plugins]
+                elif isinstance(plugins, list) and len(plugins) == 0:
+                    raise ValueError("At least one plugin is required")
+            # Normalize repos
+            if "repos" in data and data["repos"] is not None:
+                repos = data["repos"]
+                if isinstance(repos, (str, dict)):
+                    data["repos"] = [repos]
         return data
 
 
-def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
+def _generate_plugin_tarball(
+    plugins: list[PluginSource], prompt: str, repos: list[RepoSource] | None = None
+) -> bytes:
     """Generate a tarball containing SDK code, plugin config, and prompt.
 
     The tarball contains:
@@ -312,6 +366,16 @@ def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
+    - repos_config.json: (optional) Repository configuration for cloning
+
+    Note: Clone and skill loading functionality is now provided by the SDK's
+    OpenHandsCloudWorkspace.clone_repos() and load_skills_from_agent_server()
+    methods, so separate scripts are no longer needed.
+
+    Args:
+        plugins: List of plugins to load
+        prompt: The user's prompt text
+        repos: Optional list of repositories to clone
 
     Returns:
         bytes: The tarball content as bytes
@@ -329,6 +393,13 @@ def _generate_plugin_tarball(plugins: list[PluginSource], prompt: str) -> bytes:
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+        # Add repos config if repos specified (SDK workspace handles cloning)
+        if repos:
+            repos_config = [r.model_dump(exclude_none=True) for r in repos]
+            _add_file_to_tar(
+                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+            )
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
@@ -354,10 +425,12 @@ async def create_automation_from_plugin(
 
     The generated automation will:
     1. Set up the OpenHands SDK environment
-    2. Create a conversation with the user's LLM settings
-    3. Load all specified plugins (fetched at runtime from their sources)
-    4. Execute the provided prompt (which can invoke plugin commands)
-    5. Report completion status back to the automation service
+    2. Clone any specified repositories (optional)
+    3. Load skills from cloned repositories (AGENTS.md, .agents/skills/)
+    4. Create a conversation with the user's LLM settings
+    5. Load all specified plugins (fetched at runtime from their sources)
+    6. Execute the provided prompt (which can invoke plugin commands)
+    7. Report completion status back to the automation service
 
     Plugin sources can be:
     - GitHub shorthand: github:owner/repo
@@ -365,8 +438,10 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
-    # 1. Generate tarball with SDK code, plugin config, and prompt
-    tarball_content = _generate_plugin_tarball(body.plugins, body.prompt)
+    # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
+    tarball_content = _generate_plugin_tarball(
+        body.plugins, body.prompt, repos=body.repos
+    )
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
