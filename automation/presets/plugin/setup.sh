@@ -9,8 +9,8 @@ SDK_VERSION="1.18.1"
 
 echo "[setup] Installing OpenHands SDK (version: $SDK_VERSION)"
 pip install -q --no-cache-dir \
-  "openhands-sdk>=${SDK_VERSION}" \
-  "openhands-workspace>=${SDK_VERSION}" \
-  "openhands-tools>=${SDK_VERSION}"
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}"
 
 echo "[setup] Done"
