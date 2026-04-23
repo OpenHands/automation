@@ -82,6 +82,15 @@ OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
 
+## Frontend Hosting
+
+The Docker image includes the built frontend SPA and serves it via FastAPI.
+
+- **Opt-in via `AUTOMATION_FRONTEND_DIR`** — set to the directory containing built assets. Empty = disabled (default locally). Dockerfile sets it to `/app/frontend-dist`.
+- **Mount path** derived from `base_url` via `Settings.frontend_path` (same pattern as `base_path`). Defaults to `/automations`.
+- **SPA fallback** via `_SPAStaticFiles.lookup_path` — unknown paths resolve to `index.html`.
+- **Cache**: `immutable` for hashed `assets/*`, `no-cache` for everything else.
+
 ## Dispatch Pipeline
 
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:

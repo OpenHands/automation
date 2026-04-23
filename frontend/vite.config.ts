@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => {
   const FE_PORT = Number.parseInt(VITE_FRONTEND_PORT, 10);
 
   return {
-    base: "/automations",
+    base: "/automations/",
     plugins: [
       !process.env.VITEST && reactRouter(),
       viteTsconfigPaths(),
