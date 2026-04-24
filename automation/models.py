@@ -73,6 +73,9 @@ class Automation(Base):
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
+    # Whether this automation has access to the key-value store for state persistence
+    enable_kv_store: Mapped[bool] = mapped_column(default=False, nullable=False)
+
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -307,4 +310,48 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class AutomationKV(Base):
+    """Key-value store for automation state persistence.
+
+    Provides a simple Redis-like key-value store scoped to each automation.
+    All values are encrypted at the application level using JWE before storage.
+    """
+
+    __tablename__ = "automation_kv"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Encrypted JWE token containing the JSON value.
+    # The plaintext is never stored - only the encrypted blob.
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Unique constraint: one key per automation
+        Index(
+            "ix_automation_kv_automation_key",
+            "automation_id",
+            "key",
+            unique=True,
+        ),
     )

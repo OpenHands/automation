@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
 
+    # Secret key for signing KV store JWT tokens and encrypting KV values.
+    # Must be set to enable the KV store feature.
+    kv_secret: str = ""
+
     model_config = {"env_prefix": "AUTOMATION_"}
 
     @property
