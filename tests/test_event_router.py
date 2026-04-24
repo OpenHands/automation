@@ -398,3 +398,294 @@ async def test_receive_unknown_source(
 
     assert response.status_code == 404
     assert "Unknown webhook source" in response.json()["detail"]
+
+
+
+# =============================================================================
+# GitLab Event Tests
+# =============================================================================
+
+
+@pytest.fixture
+def gitlab_push_payload() -> dict:
+    """Sample GitLab push event payload."""
+    return {
+        "payload": {
+            "object_kind": "push",
+            "ref": "refs/heads/main",
+            "before": "abc123",
+            "after": "def456",
+            "commits": [
+                {
+                    "id": "def456",
+                    "message": "Test commit",
+                    "author": {"name": "Test", "email": "test@example.com"},
+                }
+            ],
+            "project": {
+                "id": 123,
+                "name": "test-repo",
+                "path_with_namespace": "org/test-repo",
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+        },
+    }
+
+
+@pytest.fixture
+def gitlab_mr_payload() -> dict:
+    """Sample GitLab merge_request event payload."""
+    return {
+        "payload": {
+            "object_kind": "merge_request",
+            "object_attributes": {
+                "id": 1,
+                "iid": 42,
+                "title": "Test MR",
+                "state": "opened",
+                "draft": False,
+                "source_branch": "feature/test",
+                "target_branch": "main",
+                "action": "open",
+            },
+            "project": {
+                "id": 123,
+                "name": "test-repo",
+                "path_with_namespace": "org/test-repo",
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+            "labels": [],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_event_no_matching_automations(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    gitlab_push_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test receiving GitLab event with no matching automations."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    signature, body = sign_payload(gitlab_push_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 0
+    assert data["runs_created"] == []
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_event_with_matching_automation(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    gitlab_push_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving GitLab event that matches an automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    # Create an event-triggered automation for GitLab
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test GitLab Push Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "gitlab",
+            "on": "push",  # Match push events
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(gitlab_push_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_merge_request_event(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    gitlab_mr_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving GitLab merge_request event."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    # Create an event-triggered automation for GitLab MRs
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test GitLab MR Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "gitlab",
+            "on": "merge_request.open",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(gitlab_mr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_event_invalid_signature(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    gitlab_push_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that invalid signature is rejected for GitLab events."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    _, body = sign_payload(gitlab_push_payload, "test-secret")
+
+    # Wrong signature
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": "sha256=invalid",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 401
+    assert "Invalid signature" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_event_filter_mismatch(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    gitlab_push_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test that GitLab events not matching filters don't create runs."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    # Create automation that filters on different project (using JMESPath filter)
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test GitLab Push Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "gitlab",
+            "on": "push",
+            "filter": "project.path_with_namespace == 'different/repo'",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(gitlab_push_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 0  # No match due to filter
+
+
+@pytest.mark.asyncio
+async def test_receive_gitlab_event_unknown_event_type(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that unknown GitLab event type returns 400."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    payload = {
+        "payload": {
+            "object_kind": "unknown_gitlab_event",
+            "project": {
+                "id": 123,
+                "name": "test-repo",
+                "path_with_namespace": "org/test-repo",
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+        },
+    }
+    signature, body = sign_payload(payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/gitlab",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Cannot detect gitlab event type" in response.json()["detail"]

@@ -17,6 +17,17 @@ from automation.event_schemas.github import (
     detect_github_event_type,
     parse_github_event_auto,
 )
+from automation.event_schemas.gitlab import (
+    GITLAB_DETECTION_RULES,
+    IssuePayload as GitLabIssuePayload,
+    MergeRequestPayload,
+    NotePayload,
+    PipelinePayload,
+    PushPayload as GitLabPushPayload,
+    TagPushPayload,
+    detect_gitlab_event_type,
+    parse_gitlab_event_auto,
+)
 from automation.schemas import EventTrigger
 from automation.trigger_matcher import matches_trigger
 
@@ -894,3 +905,454 @@ class TestGitHubDetectionRules:
         assert "issue_comment" in supported
         assert "push" in supported
         assert "release" in supported
+
+
+
+# =============================================================================
+# GitLab Event Tests
+# =============================================================================
+
+
+class TestGitLabEventParsing:
+    """Tests for GitLab event parsing with auto-detection."""
+
+    def _base_payload(self) -> dict:
+        """Base payload with required GitLab fields."""
+        return {
+            "project": {
+                "id": 123,
+                "name": "test-repo",
+                "path_with_namespace": "org/test-repo",
+                "default_branch": "main",
+                "visibility_level": 0,
+            },
+            "user": {
+                "id": 1,
+                "username": "testuser",
+                "name": "Test User",
+            },
+        }
+
+    def test_parse_merge_request_open(self):
+        """Parse merge_request.open event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "merge_request",
+            "object_attributes": {
+                "id": 1,
+                "iid": 42,
+                "title": "Test MR",
+                "state": "opened",
+                "draft": False,
+                "source_branch": "feature/test",
+                "target_branch": "main",
+                "action": "open",
+            },
+            "labels": [],
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, MergeRequestPayload)
+        assert event.event_key == "merge_request.open"
+        assert event.source == "gitlab"
+        assert event.object_attributes.iid == 42
+
+    def test_parse_push_event(self):
+        """Parse push event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "push",
+            "ref": "refs/heads/main",
+            "before": "abc123",
+            "after": "def456",
+            "commits": [
+                {
+                    "id": "def456",
+                    "message": "Test commit",
+                    "author": {"name": "Test", "email": "test@example.com"},
+                }
+            ],
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, GitLabPushPayload)
+        assert event.event_key == "push"
+        assert event.ref == "refs/heads/main"
+        assert event.branch == "main"
+
+    def test_parse_tag_push_event(self):
+        """Parse tag_push event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "tag_push",
+            "ref": "refs/tags/v1.0.0",
+            "before": "0" * 40,
+            "after": "def456",
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, TagPushPayload)
+        assert event.event_key == "tag_push"
+        assert event.tag_name == "v1.0.0"
+        assert event.is_create is True
+
+    def test_parse_issue_event(self):
+        """Parse issue.open event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "issue",
+            "object_attributes": {
+                "id": 1,
+                "iid": 10,
+                "title": "Bug report",
+                "state": "opened",
+                "action": "open",
+            },
+            "labels": [],
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, GitLabIssuePayload)
+        assert event.event_key == "issue.open"
+        assert event.object_attributes.iid == 10
+
+    def test_parse_note_event(self):
+        """Parse note event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "note",
+            "object_attributes": {
+                "id": 1,
+                "note": "Test comment @openhands help",
+                "noteable_type": "MergeRequest",
+            },
+            "merge_request": {
+                "id": 42,
+                "iid": 5,
+                "title": "Test MR",
+            },
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, NotePayload)
+        assert event.event_key == "note"
+        assert event.object_attributes.note == "Test comment @openhands help"
+        assert event.object_attributes.noteable_type == "MergeRequest"
+
+    def test_parse_pipeline_event(self):
+        """Parse pipeline.success event via auto-detection."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "pipeline",
+            "object_attributes": {
+                "id": 1,
+                "status": "success",
+                "ref": "main",
+                "source": "push",
+            },
+        }
+
+        event = parse_event("gitlab", payload)
+
+        assert isinstance(event, PipelinePayload)
+        assert event.event_key == "pipeline.success"
+        assert event.object_attributes.status == "success"
+
+    def test_parse_unknown_payload_raises(self):
+        """Unknown payload structure should raise ValueError."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "unknown_event",
+        }
+
+        with pytest.raises(ValueError, match="Cannot detect gitlab event type"):
+            parse_event("gitlab", payload)
+
+
+class TestGitLabAutoDetection:
+    """Tests for GitLab event type auto-detection."""
+
+    def _base_payload(self) -> dict:
+        """Base payload with required fields."""
+        return {
+            "project": {
+                "id": 123,
+                "name": "test-repo",
+                "path_with_namespace": "org/test-repo",
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+        }
+
+    def test_detect_merge_request(self):
+        """Detect merge_request event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "merge_request",
+            "object_attributes": {
+                "id": 1,
+                "iid": 42,
+                "title": "Test MR",
+                "state": "opened",
+                "source_branch": "feature",
+                "target_branch": "main",
+                "action": "open",
+            },
+        }
+
+        assert detect_gitlab_event_type(payload) == "merge_request"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, MergeRequestPayload)
+        assert event.event_key == "merge_request.open"
+
+    def test_detect_push(self):
+        """Detect push event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "push",
+            "ref": "refs/heads/main",
+            "before": "abc123",
+            "after": "def456",
+            "commits": [],
+        }
+
+        assert detect_gitlab_event_type(payload) == "push"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, GitLabPushPayload)
+        assert event.event_key == "push"
+
+    def test_detect_tag_push(self):
+        """Detect tag_push event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "tag_push",
+            "ref": "refs/tags/v1.0.0",
+            "before": "0" * 40,
+            "after": "def456",
+        }
+
+        assert detect_gitlab_event_type(payload) == "tag_push"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, TagPushPayload)
+        assert event.event_key == "tag_push"
+
+    def test_detect_issue(self):
+        """Detect issue event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "issue",
+            "object_attributes": {
+                "id": 1,
+                "iid": 10,
+                "title": "Test issue",
+                "state": "opened",
+                "action": "open",
+            },
+        }
+
+        assert detect_gitlab_event_type(payload) == "issue"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, GitLabIssuePayload)
+        assert event.event_key == "issue.open"
+
+    def test_detect_note(self):
+        """Detect note event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "note",
+            "object_attributes": {
+                "id": 1,
+                "note": "Test comment",
+                "noteable_type": "Issue",
+            },
+        }
+
+        assert detect_gitlab_event_type(payload) == "note"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, NotePayload)
+        assert event.event_key == "note"
+
+    def test_detect_pipeline(self):
+        """Detect pipeline event."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "pipeline",
+            "object_attributes": {
+                "id": 1,
+                "status": "failed",
+                "ref": "main",
+                "source": "push",
+            },
+        }
+
+        assert detect_gitlab_event_type(payload) == "pipeline"
+
+        event = parse_gitlab_event_auto(payload)
+        assert isinstance(event, PipelinePayload)
+        assert event.event_key == "pipeline.failed"
+
+    def test_detect_unknown_raises(self):
+        """Unknown object_kind raises ValueError."""
+        payload = {
+            **self._base_payload(),
+            "object_kind": "unknown_event",
+        }
+
+        with pytest.raises(ValueError, match="Cannot detect gitlab event type"):
+            detect_gitlab_event_type(payload)
+
+
+class TestGitLabDetectionRules:
+    """Tests for GITLAB_DETECTION_RULES configuration."""
+
+    def test_rules_are_valid_jmespath(self):
+        """All detection rules should be valid JMESPath expressions."""
+        # This will raise if any expression is invalid
+        detector = EventTypeDetector(GITLAB_DETECTION_RULES, source="gitlab")
+        assert len(detector.rules) == len(GITLAB_DETECTION_RULES)
+
+    def test_rules_cover_all_payload_classes(self):
+        """Detection rules should cover common event types."""
+        detector = EventTypeDetector(GITLAB_DETECTION_RULES, source="gitlab")
+        supported = set(detector.supported_types)
+
+        # Core event types should be detectable
+        assert "merge_request" in supported
+        assert "push" in supported
+        assert "tag_push" in supported
+        assert "issue" in supported
+        assert "note" in supported
+        assert "pipeline" in supported
+
+
+class TestGitLabTriggerMatching:
+    """Tests for GitLab event trigger matching using JMESPath filters."""
+
+    def _mr_payload(
+        self,
+        action: str = "open",
+        project: str = "org/test-repo",
+        target_branch: str = "main",
+    ) -> dict:
+        """Create a merge request payload dict."""
+        return {
+            "object_kind": "merge_request",
+            "object_attributes": {
+                "id": 1,
+                "iid": 42,
+                "title": "Test MR",
+                "state": "opened",
+                "draft": False,
+                "source_branch": "feature/test",
+                "target_branch": target_branch,
+                "action": action,
+            },
+            "project": {
+                "id": 123,
+                "name": project.split("/")[1],
+                "path_with_namespace": project,
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+            "labels": [{"id": 1, "title": "bug", "color": "#ff0000"}],
+        }
+
+    def _note_payload(self, note: str, project: str = "org/test-repo") -> dict:
+        """Create a note (comment) payload dict."""
+        return {
+            "object_kind": "note",
+            "object_attributes": {
+                "id": 1,
+                "note": note,
+                "noteable_type": "MergeRequest",
+            },
+            "project": {
+                "id": 123,
+                "name": project.split("/")[1],
+                "path_with_namespace": project,
+                "default_branch": "main",
+            },
+            "user": {"id": 1, "username": "testuser", "name": "Test User"},
+            "merge_request": {"id": 42, "iid": 5, "title": "Test MR"},
+        }
+
+    def test_match_mr_open_event(self):
+        """Basic MR open event matching."""
+        payload = self._mr_payload()
+        trigger = EventTrigger(source="gitlab", on="merge_request.open")
+
+        assert matches_trigger(trigger, "gitlab", "merge_request.open", payload) is True
+
+    def test_match_mr_with_wildcard(self):
+        """Wildcard matching for any MR action."""
+        payload = self._mr_payload(action="merge")
+        trigger = EventTrigger(source="gitlab", on="merge_request.*")
+
+        assert (
+            matches_trigger(trigger, "gitlab", "merge_request.merge", payload) is True
+        )
+
+    def test_match_mr_with_project_filter(self):
+        """Filter MR by project path."""
+        payload = self._mr_payload(project="org/test-repo")
+        trigger = EventTrigger(
+            source="gitlab",
+            on="merge_request.open",
+            filter="project.path_with_namespace == 'org/test-repo'",
+        )
+
+        assert matches_trigger(trigger, "gitlab", "merge_request.open", payload) is True
+
+    def test_match_mr_with_glob_filter(self):
+        """Filter MR by project glob pattern."""
+        payload = self._mr_payload(project="org/test-repo")
+        trigger = EventTrigger(
+            source="gitlab",
+            on="merge_request.open",
+            filter="glob(project.path_with_namespace, 'org/*')",
+        )
+
+        assert matches_trigger(trigger, "gitlab", "merge_request.open", payload) is True
+
+    def test_match_note_with_icontains(self):
+        """Filter note by case-insensitive body match."""
+        payload = self._note_payload("Please @OpenHands help with this")
+        trigger = EventTrigger(
+            source="gitlab",
+            on="note",
+            filter="icontains(object_attributes.note, '@openhands')",
+        )
+
+        assert matches_trigger(trigger, "gitlab", "note", payload) is True
+
+    def test_no_match_different_source(self):
+        """GitLab trigger should not match GitHub events."""
+        payload = self._mr_payload()
+        trigger = EventTrigger(source="github", on="pull_request.opened")
+
+        assert (
+            matches_trigger(trigger, "gitlab", "merge_request.open", payload) is False
+        )
+
+    def test_no_match_filter_mismatch(self):
+        """Filter that doesn't match should not trigger."""
+        payload = self._mr_payload(project="org/test-repo")
+        trigger = EventTrigger(
+            source="gitlab",
+            on="merge_request.open",
+            filter="project.path_with_namespace == 'different/repo'",
+        )
+
+        assert (
+            matches_trigger(trigger, "gitlab", "merge_request.open", payload) is False
+        )
