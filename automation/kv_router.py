@@ -543,7 +543,7 @@ async def delete_key(
             AutomationKV.key == key,
         )
     )
-    deleted = result.rowcount > 0
+    deleted = result.rowcount > 0  # type: ignore[union-attr]
     return KVDeleteResponse(key=key, deleted=deleted)
 
 

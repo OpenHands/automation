@@ -25,7 +25,9 @@ def upgrade() -> None:
     # Add enable_kv_store column to automations table
     op.add_column(
         "automations",
-        sa.Column("enable_kv_store", sa.Boolean, nullable=False, server_default="false"),
+        sa.Column(
+            "enable_kv_store", sa.Boolean, nullable=False, server_default="false"
+        ),
     )
 
     # Create automation_kv table
