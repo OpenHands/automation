@@ -9,7 +9,7 @@ from automation.app import app
 from automation.db import get_session
 from automation.kv_router import get_automation_id_from_token
 from automation.models import Automation, AutomationKV
-from automation.utils.kv import create_kv_token, encrypt_value
+from automation.utils.kv import encrypt_value
 
 
 # Test UUIDs
@@ -47,9 +47,13 @@ async def kv_client(async_engine, async_session_factory, async_session):
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 async def automation_with_kv(async_session):
-    """Create a test automation with KV store enabled."""
+    """Create a test automation with KV store enabled.
+
+    This fixture is autouse=True so that all KV router tests
+    have a parent Automation record available for the foreign key.
+    """
     automation = Automation(
         id=TEST_AUTOMATION_ID,
         user_id=TEST_USER_ID,

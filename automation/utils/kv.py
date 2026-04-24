@@ -96,7 +96,7 @@ def _get_jwe_key(secret: str) -> jwk.JWK:
     """
     # Ensure we have exactly 32 bytes for AES-256
     key_bytes = secret.encode("utf-8")[:32].ljust(32, b"\0")
-    return jwk.JWK(kty="oct", k=jwk.base64url_encode(key_bytes))
+    return jwk.JWK(kty="oct", k=jwk.base64url_encode(key_bytes))  # type: ignore[attr-defined]
 
 
 def encrypt_value(secret: str, value: Any) -> str:
@@ -122,8 +122,8 @@ def encrypt_value(secret: str, value: Any) -> str:
         key = _get_jwe_key(secret)
         token = jwe.JWE(
             plaintext.encode("utf-8"),
-            recipient=key,
-            protected={
+            recipient=key,  # type: ignore[arg-type]
+            protected={  # type: ignore[arg-type]
                 "alg": "dir",  # Direct encryption (no key wrapping)
                 "enc": "A256GCM",  # AES-256-GCM
             },
