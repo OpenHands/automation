@@ -26,6 +26,7 @@ from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils import log_extra
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
+from automation.utils.kv import create_kv_token
 from automation.utils.run import (
     disable_automation,
     mark_run_status,
@@ -163,6 +164,17 @@ async def _execute_run(
             trigger_context["event"] = run.event_payload
 
         env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
+
+        # Generate KV token if automation has KV store enabled
+        if automation.enable_kv_store and settings.kv_secret:
+            kv_token = create_kv_token(
+                secret=settings.kv_secret,
+                automation_id=automation.id,
+                run_id=run.id,
+            )
+            env_vars["AUTOMATION_KV_TOKEN"] = kv_token
+            env_vars["AUTOMATION_ENABLE_KV_STORE"] = "true"
+            logger.debug("KV store enabled for run", extra=log_extra())
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default

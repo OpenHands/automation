@@ -1,0 +1,69 @@
+"""Add key-value store for automation state persistence.
+
+This migration adds:
+1. enable_kv_store column to automations table (opt-in flag)
+2. automation_kv table for storing encrypted key-value pairs
+
+Revision ID: 005
+Revises: 004
+Create Date: 2026-04-24
+"""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+
+revision: str = "005"
+down_revision: str = "004"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    # Add enable_kv_store column to automations table
+    op.add_column(
+        "automations",
+        sa.Column("enable_kv_store", sa.Boolean, nullable=False, server_default="false"),
+    )
+
+    # Create automation_kv table
+    op.create_table(
+        "automation_kv",
+        sa.Column("id", sa.Uuid, primary_key=True),
+        sa.Column(
+            "automation_id",
+            sa.Uuid,
+            sa.ForeignKey("automations.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("key", sa.String(255), nullable=False),
+        sa.Column("value_encrypted", sa.Text, nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
+            nullable=False,
+        ),
+    )
+
+    # Create unique index on (automation_id, key)
+    op.create_index(
+        "ix_automation_kv_automation_key",
+        "automation_kv",
+        ["automation_id", "key"],
+        unique=True,
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_automation_kv_automation_key", table_name="automation_kv")
+    op.drop_table("automation_kv")
+    op.drop_column("automations", "enable_kv_store")

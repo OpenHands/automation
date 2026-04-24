@@ -68,6 +68,7 @@ async def create_automation(
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
         timeout=body.timeout,
+        enable_kv_store=body.enable_kv_store,
     )
     session.add(auto)
     await session.flush()

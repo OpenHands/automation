@@ -269,6 +269,10 @@ class CreateAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    enable_kv_store: bool = Field(
+        default=False,
+        description="Enable key-value store for state persistence between runs",
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -312,6 +316,7 @@ class UpdateAutomationRequest(BaseModel):
     entrypoint: str | None = Field(default=None)
     timeout: int | None = Field(default=None)
     enabled: bool | None = None
+    enable_kv_store: bool | None = None
 
     @field_validator("tarball_path")
     @classmethod
@@ -562,6 +567,7 @@ class AutomationResponse(BaseModel):
     entrypoint: str
     timeout: int | None
     enabled: bool
+    enable_kv_store: bool
     last_triggered_at: datetime | None
     created_at: datetime
     updated_at: datetime
