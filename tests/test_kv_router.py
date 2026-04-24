@@ -23,8 +23,15 @@ TEST_KV_SECRET = "test-kv-secret-key-for-testing-only"
 
 
 @pytest.fixture
-async def kv_client(async_engine, async_session_factory, async_session):
+async def kv_client(async_engine, async_session_factory, async_session, monkeypatch):
     """Create an async test client with KV token auth."""
+    # Set the KV secret so encryption/decryption uses the same key
+    monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
+
+    # Clear the cached settings so the new env var is picked up
+    from automation.config import get_settings
+
+    get_settings.cache_clear()
 
     async def override_get_session():
         yield async_session
@@ -45,6 +52,7 @@ async def kv_client(async_engine, async_session_factory, async_session):
         yield client
 
     app.dependency_overrides.clear()
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

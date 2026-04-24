@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -368,7 +368,7 @@ async def get_value(
 @router.put("/{key}")
 async def set_value(
     key: str,
-    body: Any,  # Accept any JSON body directly as the value
+    body: Annotated[Any, Body()],  # Accept any JSON body directly as the value
     nx: bool = Query(default=False, description="Only set if key does not exist"),
     xx: bool = Query(default=False, description="Only set if key exists"),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
