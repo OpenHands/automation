@@ -139,6 +139,9 @@ def _build_cors_origins() -> list[str]:
 
 def _create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    # Serve OpenAPI docs under the base path so they're accessible when the app
+    # is mounted at /api/automation (e.g., /api/automation/docs).
+    base_path = get_settings().base_path
     return FastAPI(
         title="OpenHands Automations Service",
         description=(
@@ -146,6 +149,9 @@ def _create_app() -> FastAPI:
         ),
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=f"{base_path}/docs",
+        openapi_url=f"{base_path}/openapi.json",
+        redoc_url=f"{base_path}/redoc",
     )
 
 
