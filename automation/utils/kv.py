@@ -36,6 +36,25 @@ We chose option 3 because:
 - PostgreSQL TOAST handles binary data efficiently
 
 
+Why Not JSONB?
+--------------
+
+PostgreSQL's JSONB type offers efficient JSON storage with indexing and query
+capabilities. However, we can't use it because:
+
+1. We encrypt values at the application layer before storage
+2. Encrypted data is opaque binary, not valid JSON
+3. The ciphertext cannot be queried or indexed anyway
+
+If queryable JSON were needed, we'd have to either:
+- Skip encryption (unacceptable for sensitive automation state)
+- Use PostgreSQL Transparent Data Encryption (TDE) for at-rest encryption
+- Use pgcrypto for column-level encryption (but then values are still opaque)
+
+Since automation state may contain secrets, API keys, or sensitive config,
+application-level encryption is the right choice despite losing JSONB benefits.
+
+
 PostgreSQL Storage Considerations
 =================================
 
