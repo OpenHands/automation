@@ -29,7 +29,16 @@ class KVEncryptionError(Exception):
     pass
 
 
-# Token expiration: 24 hours (longer than max run time to allow for cleanup)
+# Token expiration: 24 hours
+#
+# This is intentionally longer than the max automation run time (currently 2 hours)
+# to provide margin for:
+# 1. Long-running automations that approach the timeout limit
+# 2. Any cleanup operations that need KV access after run completion
+# 3. Clock skew between services
+#
+# The token is only usable to access the specific automation's KV data,
+# so a longer validity window has minimal security impact.
 KV_TOKEN_EXPIRATION_HOURS = 24
 
 
