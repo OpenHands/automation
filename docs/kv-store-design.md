@@ -540,60 +540,89 @@ Run B: INCR counter → 7  # Correct!
 
 ## Implementation Notes
 
+### Single-Document Storage Design
+
+Each automation has exactly **ONE row** in the database containing its entire state as an encrypted JSON document. API "keys" (e.g., `/kv/config`, `/kv/counter`) are top-level fields within this single document.
+
+**Why single-document?**
+- **Eliminates deadlocks**: Only one row per automation to lock. All operations serialize through that single lock. No possibility of lock ordering issues.
+- **Simpler model**: One encryption boundary, one row to manage per automation.
+- **Acceptable trade-off**: Every operation reads/writes the entire state blob, but automation state is small and access is infrequent.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Database Row (ONE per automation)                           │
+├─────────────────────────────────────────────────────────────┤
+│ automation_id: uuid-123 (UNIQUE)                            │
+│ state_encrypted: <encrypted JSON blob>                      │
+│                                                             │
+│   Decrypted contents:                                       │
+│   {                                                         │
+│     "config": {"host": "localhost", "port": 5432},          │
+│     "counter": 42,                                          │
+│     "task-queue": [{"task_id": "abc"}]                      │
+│   }                                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ### Atomic Operations with Encryption
 
-Since values are encrypted at the application level (JWE), we **cannot** use native PostgreSQL operations like `value = value + 1`. Instead, atomic operations use row-level locking:
+Since values are encrypted at the application level, we **cannot** use native PostgreSQL operations like `value = value + 1`. Instead, atomic operations lock the single state row and perform read-modify-write:
 
 ```python
 async def incr(self, automation_id: UUID, key: str, by: int = 1) -> int:
     async with session.begin():
-        # 1. Lock the row
+        # 1. Lock the automation's state row (ONE row per automation)
         row = await session.execute(
             select(AutomationKV)
             .where(AutomationKV.automation_id == automation_id)
-            .where(AutomationKV.key == key)
-            .with_for_update()  # Row-level lock
+            .with_for_update()
         )
         kv = row.scalar_one_or_none()
         
-        # 2. Decrypt, modify, encrypt
+        # 2. Decrypt entire state, modify target key, encrypt
         if kv is None:
-            value = by  # Initialize if not exists
-            kv = AutomationKV(automation_id=automation_id, key=key)
+            state = {key: by}
+            kv = AutomationKV(automation_id=automation_id)
             session.add(kv)
         else:
-            value = decrypt_value(kv.value_encrypted)
-            if not isinstance(value, (int, float)):
-                raise TypeError("Cannot increment non-numeric value")
-            value += by
+            state = decrypt_value(kv.state_encrypted)
+            if key not in state:
+                state[key] = by
+            else:
+                value = state[key]
+                if not isinstance(value, int):
+                    raise TypeError("Cannot increment non-integer value")
+                state[key] = value + by
         
-        # 3. Update with encrypted value
-        kv.value_encrypted = encrypt_value(value)
+        # 3. Update with encrypted state
+        kv.state_encrypted = encrypt_value(state)
         
         # 4. Commit releases lock
-        return value
+        return state[key]
 ```
 
 **Concurrency model:**
-- Each key is a row → row-level locking per key
-- Two operations on different keys → no contention
-- Two operations on same key → serialized (one waits)
-- Different automations → completely isolated
+- Each automation has ONE row → all operations serialize through one lock
+- No deadlock risk between keys (there's only one lock to acquire)
+- Different automations → completely isolated (different rows)
 
 This is acceptable for our use case (automations doing 5-10 KV ops per run). The brief lock during decrypt-modify-encrypt is negligible.
 
 ### SETNX (Set If Not Exists)
 
-This can use native PostgreSQL upsert:
+For conditional set operations, we lock the state row, check if the key exists in the decrypted state, and proceed accordingly:
 
-```sql
-INSERT INTO automation_kv (automation_id, key, value_encrypted, ...)
-VALUES ($1, $2, $3, ...)
-ON CONFLICT (automation_id, key) DO NOTHING
-RETURNING *;
+```python
+# Lock state row
+state = decrypt_value(kv.state_encrypted) if kv else {}
+
+if nx and key in state:
+    return 409  # Key already exists
+
+state[key] = value
+kv.state_encrypted = encrypt_value(state)
 ```
-
-If `RETURNING` returns nothing, the key already existed → return 409 Conflict.
 
 ### Path Syntax
 
@@ -607,18 +636,25 @@ For keys containing dots, use bracket notation: `config["my.key.with.dots"]`
 
 ```python
 class AutomationKV(Base):
+    """Single-document state store for automation persistence.
+    
+    Each automation has exactly ONE row containing its entire state as an
+    encrypted JSON document. The API presents a key-value interface, but
+    "keys" are top-level fields within this single document.
+    """
     __tablename__ = "automation_kv"
     
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     automation_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, 
         ForeignKey("automations.id", ondelete="CASCADE"),
-        nullable=False
+        nullable=False,
+        unique=True,  # ONE row per automation
     )
-    key: Mapped[str] = mapped_column(String(255), nullable=False)
     
-    # Encrypted JWE token containing the JSON value
-    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Encrypted JSON document containing all KV pairs
+    # Decrypted example: {"config": {...}, "counter": 42, "queue": [...]}
+    state_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     
     # Timestamps (foundation for future TTL support)
     created_at: Mapped[datetime] = mapped_column(
@@ -634,7 +670,7 @@ class AutomationKV(Base):
     )
     
     __table_args__ = (
-        Index("ix_automation_kv_automation_key", "automation_id", "key", unique=True),
+        Index("ix_automation_kv_automation_id", "automation_id", unique=True),
     )
 ```
 
@@ -801,8 +837,7 @@ This gives a clear error if someone tries to use KV outside an automation contex
 | Topic | Question | Suggested Default |
 |-------|----------|-------------------|
 | **Key length** | Max characters for key names? | 255 characters |
-| **Value size** | Max size per value? | 1 MB (encrypted) |
-| **Keys per automation** | Max number of keys? | 1,000 keys |
+| **State size** | Max total state size per automation? | 1 MB (encrypted) |
 | **Retention** | What happens when automation is deleted? | Cascade delete all KV data |
 | **TTL** | Support key expiration? | Deferred (timestamps in place for future) |
 
