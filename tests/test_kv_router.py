@@ -460,6 +460,67 @@ class TestIncrement:
         assert "type_mismatch" in response.json()["detail"]
 
 
+class TestConcurrency:
+    """Tests for concurrent atomic operations.
+
+    These tests verify that FOR UPDATE locking prevents race conditions
+    when multiple requests modify the same key simultaneously.
+    """
+
+    async def test_concurrent_increments(self, kv_client):
+        """Concurrent increments produce correct final value.
+
+        Fires N concurrent increment requests and verifies the final
+        counter value equals N, proving no increments were lost.
+        """
+        import asyncio
+
+        num_increments = 10
+
+        # Fire N concurrent increment requests
+        tasks = [
+            kv_client.post("/api/automation/v1/kv/concurrent_counter/incr")
+            for _ in range(num_increments)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+        # All requests should succeed
+        assert all(r.status_code == 200 for r in responses)
+
+        # Verify final value equals number of increments
+        get_response = await kv_client.get("/api/automation/v1/kv/concurrent_counter")
+        assert get_response.status_code == 200
+        assert get_response.json()["value"] == num_increments
+
+    async def test_concurrent_list_pushes(self, kv_client):
+        """Concurrent list pushes don't lose elements.
+
+        Fires N concurrent rpush requests and verifies the final
+        list length equals N, proving no pushes were lost.
+        """
+        import asyncio
+
+        num_pushes = 10
+
+        # Fire N concurrent rpush requests with unique values
+        tasks = [
+            kv_client.post(
+                "/api/automation/v1/kv/concurrent_list/rpush",
+                json={"value": f"item-{i}"},
+            )
+            for i in range(num_pushes)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+        # All requests should succeed
+        assert all(r.status_code == 200 for r in responses)
+
+        # Verify list length equals number of pushes
+        len_response = await kv_client.get("/api/automation/v1/kv/concurrent_list/len")
+        assert len_response.status_code == 200
+        assert len_response.json()["length"] == num_pushes
+
+
 class TestDecrement:
     """Tests for POST /kv/{key}/decr endpoint."""
 
