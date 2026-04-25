@@ -392,9 +392,7 @@ async def dispatch_automation(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
-                logger.info(
-                    "Downloading tarball in sandbox from URL", extra=_log_ctx()
-                )
+                logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
@@ -532,9 +530,7 @@ async def run_automation(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
-                logger.info(
-                    "Downloading tarball in sandbox from URL", extra=_log_ctx()
-                )
+                logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )

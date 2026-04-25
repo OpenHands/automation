@@ -160,7 +160,9 @@ class TestHttpSettings:
         assert settings.http_long_timeout == 60.0
         assert settings.auth_cache_ttl == 20.0
         assert settings.auth_cache_size == 1024
-        assert settings.max_backoff == 10.0
+        assert settings.auth_max_retries == 3
+        assert settings.auth_initial_backoff == 1.0
+        assert settings.auth_max_backoff == 10.0
 
     def test_custom_values(self):
         """Custom values are accepted."""

@@ -10,7 +10,6 @@ dispatcher transitions a run to RUNNING (see ``mark_run_status``).
 
 import asyncio
 import logging
-from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
