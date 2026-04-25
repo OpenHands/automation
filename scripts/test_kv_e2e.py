@@ -819,7 +819,7 @@ async def create_automation(
 async def delete_automation(
     client: httpx.AsyncClient, api_url: str, api_key: str, automation_id: str
 ):
-    """Delete the test automation."""
+    """Delete the test automation (best-effort cleanup)."""
     print(f"\nCleaning up automation {automation_id}...")
     resp = await client.delete(
         f"{api_url}/api/automation/v1/{automation_id}",
@@ -827,6 +827,8 @@ async def delete_automation(
     )
     if resp.status_code == 204:
         print("Automation deleted.")
+    elif resp.status_code == 403:
+        print("Note: Cleanup skipped (API key lacks manage_automations permission)")
     else:
         print(f"Warning: Failed to delete automation: {resp.status_code}")
 
