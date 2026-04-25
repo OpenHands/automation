@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    LargeBinary,
     String,
     Text,
     Uuid,
@@ -317,7 +318,14 @@ class AutomationKV(Base):
     """Key-value store for automation state persistence.
 
     Provides a simple Redis-like key-value store scoped to each automation.
-    All values are encrypted at the application level using JWE before storage.
+    All values are encrypted at the application level using AES-256-GCM.
+
+    Storage Design:
+        We store encrypted values as BYTEA (binary) rather than TEXT because:
+        - AES-GCM produces raw bytes, not text
+        - Avoids ~33% base64 encoding overhead that TEXT would require
+        - Better PostgreSQL TOAST behavior for binary data
+        - See automation/utils/kv.py for full encryption design rationale
     """
 
     __tablename__ = "automation_kv"
@@ -330,9 +338,10 @@ class AutomationKV(Base):
     )
     key: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Encrypted JWE token containing the JSON value.
-    # The plaintext is never stored - only the encrypted blob.
-    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Encrypted bytes: 12-byte nonce + ciphertext + 16-byte auth tag.
+    # Format: nonce || AES-256-GCM(plaintext) || tag
+    # See automation/utils/kv.py for encryption implementation.
+    value_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -1,20 +1,96 @@
-"""KV store utilities: JWT tokens and JWE encryption.
+"""KV store utilities: JWT tokens and AES-256-GCM encryption.
 
 This module provides:
 - JWT token generation/verification for KV store authentication
-- JWE encryption/decryption for KV values
+- AES-256-GCM encryption/decryption for KV values
 
 All KV values are encrypted at the application level before storage.
 JWT tokens are scoped per-automation run with short expiration.
+
+
+Encryption Design Decisions
+===========================
+
+We evaluated several approaches for encrypting KV store values:
+
+1. JWE (JSON Web Encryption) with TEXT column
+   - Pros: Standard format, self-describing (includes algorithm headers)
+   - Cons: Base64 encoding adds ~33% overhead, JWE headers add ~70 bytes
+   - Storage: 14-byte plaintext → 100 bytes stored (7x overhead for small values)
+
+2. AES-256-GCM with TEXT column (base64-encoded)
+   - Pros: Simpler than JWE, widely supported
+   - Cons: Still has ~33% base64 overhead
+   - Storage: 14-byte plaintext → ~60 bytes stored
+
+3. AES-256-GCM with BYTEA column (raw bytes) ← CHOSEN
+   - Pros: Minimal overhead (28 bytes fixed), efficient binary storage
+   - Cons: Not self-describing (but we only use one algorithm anyway)
+   - Storage: 14-byte plaintext → 42 bytes stored (28-byte fixed overhead)
+
+We chose option 3 because:
+- KV stores typically have many small values (counters, flags, small configs)
+- The 28-byte fixed overhead (12-byte nonce + 16-byte auth tag) is acceptable
+- For larger values, overhead approaches 0% (vs 33% for base64)
+- BYTEA is the natural PostgreSQL type for binary data
+- PostgreSQL TOAST handles binary data efficiently
+
+
+PostgreSQL Storage Considerations
+=================================
+
+PostgreSQL uses TOAST (The Oversized-Attribute Storage Technique) for large values:
+- Values < 2KB: Stored inline (optimal performance)
+- Values 2-8KB: Compressed inline (~2x slower due to compression CPU)
+- Values > 8KB: Stored in separate TOAST table (~5x slower, chunked storage)
+
+For a KV store used for automation state:
+- Most values should be small (counters, flags, configs) → under 2KB
+- Default 64KB limit allows occasional larger blobs
+- Values approaching the limit will use TOAST chunked storage
+
+
+Key Derivation
+==============
+
+The encryption key is derived from AUTOMATION_KV_SECRET by:
+1. UTF-8 encoding the secret string
+2. Taking the first 32 bytes (truncating if longer)
+3. Padding with null bytes if shorter than 32 bytes
+
+This is simple but adequate for our use case where:
+- The secret is configured by operators (not user-supplied)
+- Key rotation requires re-encryption of all values anyway
+
+For a more robust approach, consider HKDF or Argon2 key derivation.
+This is noted as a potential future improvement.
+
+
+Wire Format
+===========
+
+Encrypted values are stored as: nonce || ciphertext || tag
+
+    +------------+------------------+------------+
+    | 12 bytes   | variable length  | 16 bytes   |
+    | nonce/IV   | ciphertext       | auth tag   |
+    +------------+------------------+------------+
+
+- Nonce: Random 96-bit IV, generated fresh for each encryption
+- Ciphertext: AES-256-GCM encrypted JSON bytes
+- Auth tag: 128-bit authentication tag (integrity protection)
+
+Total overhead: 28 bytes (fixed, regardless of plaintext size)
 """
 
 import json
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
-from jwcrypto import jwe, jwk
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 class KVTokenError(Exception):
@@ -29,6 +105,17 @@ class KVEncryptionError(Exception):
     pass
 
 
+# --- Constants ---
+
+# Nonce size for AES-GCM (96 bits = 12 bytes, as recommended by NIST)
+_NONCE_SIZE = 12
+
+# Auth tag size for AES-GCM (128 bits = 16 bytes)
+_TAG_SIZE = 16
+
+# AES-256 key size (256 bits = 32 bytes)
+_KEY_SIZE = 32
+
 # Token expiration: 24 hours
 #
 # This is intentionally longer than the max automation run time (currently 2 hours)
@@ -40,6 +127,9 @@ class KVEncryptionError(Exception):
 # The token is only usable to access the specific automation's KV data,
 # so a longer validity window has minimal security impact.
 KV_TOKEN_EXPIRATION_HOURS = 24
+
+
+# --- JWT Token Functions ---
 
 
 def create_kv_token(
@@ -97,69 +187,93 @@ def verify_kv_token(secret: str, token: str) -> uuid.UUID:
         raise KVTokenError(f"Invalid automation_id format: {e}")
 
 
-def _get_jwe_key(secret: str) -> jwk.JWK:
-    """Derive a JWK symmetric key from the secret.
+# --- Encryption Functions ---
 
-    Uses the first 32 bytes of the secret (or pads if shorter)
-    as a 256-bit symmetric key for AES-256-GCM encryption.
+
+def _derive_key(secret: str) -> bytes:
+    """Derive a 256-bit AES key from the secret string.
+
+    Uses simple truncation/padding. See module docstring for rationale
+    and notes on potential HKDF improvement.
+
+    Args:
+        secret: The encryption secret (AUTOMATION_KV_SECRET)
+
+    Returns:
+        32-byte key suitable for AES-256
     """
-    # Ensure we have exactly 32 bytes for AES-256
-    key_bytes = secret.encode("utf-8")[:32].ljust(32, b"\0")
-    return jwk.JWK(kty="oct", k=jwk.base64url_encode(key_bytes))  # type: ignore[attr-defined]
+    key_bytes = secret.encode("utf-8")
+    if len(key_bytes) >= _KEY_SIZE:
+        return key_bytes[:_KEY_SIZE]
+    else:
+        return key_bytes.ljust(_KEY_SIZE, b"\0")
 
 
-def encrypt_value(secret: str, value: Any) -> str:
-    """Encrypt a value for storage using JWE.
+def encrypt_value(secret: str, value: Any) -> bytes:
+    """Encrypt a value for storage using AES-256-GCM.
 
-    The value is JSON-serialized, then encrypted with AES-256-GCM.
+    The value is JSON-serialized, then encrypted. The result is raw bytes
+    suitable for storage in a BYTEA column.
+
+    Wire format: nonce (12 bytes) || ciphertext || auth_tag (16 bytes)
 
     Args:
         secret: The encryption secret (AUTOMATION_KV_SECRET)
         value: Any JSON-serializable value
 
     Returns:
-        JWE compact serialization string
+        Encrypted bytes (nonce + ciphertext + tag)
 
     Raises:
         KVEncryptionError: If encryption fails
     """
     try:
-        # Serialize value to JSON
-        plaintext = json.dumps(value)
+        # Serialize value to JSON bytes
+        plaintext = json.dumps(value).encode("utf-8")
 
-        # Create JWE token
-        key = _get_jwe_key(secret)
-        token = jwe.JWE(
-            plaintext.encode("utf-8"),
-            recipient=key,  # type: ignore[arg-type]
-            protected={  # type: ignore[arg-type]
-                "alg": "dir",  # Direct encryption (no key wrapping)
-                "enc": "A256GCM",  # AES-256-GCM
-            },
-        )
-        return token.serialize(compact=True)
+        # Generate random nonce (critical: must be unique per encryption)
+        nonce = os.urandom(_NONCE_SIZE)
+
+        # Encrypt with AES-256-GCM
+        key = _derive_key(secret)
+        cipher = AESGCM(key)
+        ciphertext_with_tag = cipher.encrypt(nonce, plaintext, None)
+
+        # Return nonce || ciphertext || tag
+        return nonce + ciphertext_with_tag
     except Exception as e:
         raise KVEncryptionError(f"Failed to encrypt value: {e}")
 
 
-def decrypt_value(secret: str, encrypted: str) -> Any:
-    """Decrypt a JWE-encrypted value.
+def decrypt_value(secret: str, encrypted: bytes) -> Any:
+    """Decrypt an AES-256-GCM encrypted value.
 
     Args:
         secret: The encryption secret (AUTOMATION_KV_SECRET)
-        encrypted: JWE compact serialization string
+        encrypted: Encrypted bytes (nonce + ciphertext + tag)
 
     Returns:
         The decrypted JSON value
 
     Raises:
-        KVEncryptionError: If decryption fails
+        KVEncryptionError: If decryption fails (wrong key, tampered data, etc.)
     """
     try:
-        key = _get_jwe_key(secret)
-        token = jwe.JWE()
-        token.deserialize(encrypted, key)
-        plaintext = token.payload.decode("utf-8")
-        return json.loads(plaintext)
+        if len(encrypted) < _NONCE_SIZE + _TAG_SIZE:
+            raise KVEncryptionError("Encrypted data too short")
+
+        # Split nonce from ciphertext+tag
+        nonce = encrypted[:_NONCE_SIZE]
+        ciphertext_with_tag = encrypted[_NONCE_SIZE:]
+
+        # Decrypt with AES-256-GCM
+        key = _derive_key(secret)
+        cipher = AESGCM(key)
+        plaintext = cipher.decrypt(nonce, ciphertext_with_tag, None)
+
+        # Parse JSON
+        return json.loads(plaintext.decode("utf-8"))
+    except KVEncryptionError:
+        raise
     except Exception as e:
         raise KVEncryptionError(f"Failed to decrypt value: {e}")

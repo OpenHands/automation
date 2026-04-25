@@ -4,6 +4,13 @@ This migration adds:
 1. enable_kv_store column to automations table (opt-in flag)
 2. automation_kv table for storing encrypted key-value pairs
 
+Storage Design Decision:
+    We use BYTEA (LargeBinary) for encrypted values instead of TEXT because:
+    - Encrypted data is binary, not text (AES-GCM produces raw bytes)
+    - BYTEA avoids the ~33% overhead of base64 encoding
+    - Better alignment with PostgreSQL's TOAST compression for binary data
+    - See automation/utils/kv.py for full encryption design rationale
+
 Revision ID: 005
 Revises: 004
 Create Date: 2026-04-24
@@ -31,6 +38,8 @@ def upgrade() -> None:
     )
 
     # Create automation_kv table
+    # Note: value_encrypted is BYTEA (LargeBinary) for efficient binary storage.
+    # See module docstring for design rationale.
     op.create_table(
         "automation_kv",
         sa.Column("id", sa.Uuid, primary_key=True),
@@ -41,7 +50,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("key", sa.String(255), nullable=False),
-        sa.Column("value_encrypted", sa.Text, nullable=False),
+        sa.Column("value_encrypted", sa.LargeBinary, nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
