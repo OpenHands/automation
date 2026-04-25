@@ -17,13 +17,13 @@ Usage:
 """
 
 import asyncio
-import json
 import os
 import sys
 import uuid
 from pathlib import Path
 
 import httpx
+
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -260,12 +260,16 @@ def test_list_operations():
 def test_nested_path():
     """[TC-3.5/5.1] Nested path GET and PATCH."""
     print("\\n[TEST] Nested path operations")
-    
-    config = {"database": {"host": "localhost", "port": 5432}, "cache": {"enabled": True}}
+
+    config = {
+        "database": {"host": "localhost", "port": 5432},
+        "cache": {"enabled": True},
+    }
     api_call("PUT", "/config", config)
-    
+
     # PATCH nested value
-    status, resp = api_call("PATCH", "/config", {"path": "database.port", "value": 5433})
+    patch_data = {"path": "database.port", "value": 5433}
+    status, resp = api_call("PATCH", "/config", patch_data)
     print(f"  PATCH database.port=5433: {status}")
     if status != 200:
         print(f"  FAIL: {resp}")
@@ -678,8 +682,9 @@ def test_auth_missing_token():
 def test_auth_invalid_token():
     """[TC-2.2] Access with invalid token returns 401."""
     print("\\n[TEST] Auth - invalid token")
-    
-    status, _ = api_call_raw("GET", "/test", headers={"Authorization": "Bearer invalid.token.here"})
+
+    headers = {"Authorization": "Bearer invalid.token.here"}
+    status, _ = api_call_raw("GET", "/test", headers=headers)
     print(f"  GET with invalid token: {status}")
     
     if status not in (401, 403):
@@ -731,7 +736,8 @@ def main():
     print(f"Running {len(tests)} tests")
     print("=" * 60)
     print(f"API URL: {API_URL}")
-    print(f"KV Token: {'present (' + str(len(KV_TOKEN)) + ' chars)' if KV_TOKEN else 'MISSING'}")
+    token_info = f"present ({len(KV_TOKEN)} chars)" if KV_TOKEN else "MISSING"
+    print(f"KV Token: {token_info}")
     
     if not API_URL:
         print("\\nFAIL: OPENHANDS_CLOUD_API_URL not set")
