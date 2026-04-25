@@ -233,9 +233,9 @@ class TestWebhookUrlGeneration:
         monkeypatch.setenv("AUTOMATION_BASE_URL", "https://automation.example.com")
 
         # Clear cached settings
-        from automation.config import get_settings
+        from automation.config import clear_config_cache
 
-        get_settings.cache_clear()
+        clear_config_cache()
 
         org_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
         url = _build_webhook_url(org_id, "stripe")
@@ -246,7 +246,7 @@ class TestWebhookUrlGeneration:
         )
 
         # Restore cache
-        get_settings.cache_clear()
+        clear_config_cache()
 
     def test_url_fallback_to_localhost(self, monkeypatch):
         """Falls back to localhost when base_url not set."""
@@ -256,9 +256,9 @@ class TestWebhookUrlGeneration:
         monkeypatch.setenv("AUTOMATION_SERVER_PORT", "8000")
 
         # Clear cached settings
-        from automation.config import get_settings
+        from automation.config import clear_config_cache
 
-        get_settings.cache_clear()
+        clear_config_cache()
 
         org_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
         url = _build_webhook_url(org_id, "stripe")
@@ -269,7 +269,7 @@ class TestWebhookUrlGeneration:
         )
 
         # Restore cache
-        get_settings.cache_clear()
+        clear_config_cache()
 
     def test_url_trailing_slash_removed(self, monkeypatch):
         """Trailing slash in base URL should be removed."""
@@ -278,9 +278,9 @@ class TestWebhookUrlGeneration:
         monkeypatch.setenv("AUTOMATION_BASE_URL", "https://automation.example.com/")
 
         # Clear cached settings
-        from automation.config import get_settings
+        from automation.config import clear_config_cache
 
-        get_settings.cache_clear()
+        clear_config_cache()
 
         org_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
         url = _build_webhook_url(org_id, "stripe")
@@ -289,4 +289,4 @@ class TestWebhookUrlGeneration:
         assert "//" not in url.replace("https://", "")
 
         # Restore cache
-        get_settings.cache_clear()
+        clear_config_cache()

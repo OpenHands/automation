@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import logging
 import os
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import botocore.exceptions
 
-from automation.storage.file_store import FileStore
-from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from automation.storage.file_store import BUCKET_PREFIX, FileStore
+from automation.storage.google_cloud import FileSizeLimitExceeded
+
+
+if TYPE_CHECKING:
+    from automation.config import StorageSettings
 
 
 logger = logging.getLogger(__name__)
@@ -22,13 +28,10 @@ class S3FileStore(FileStore):
     S3-compatible file store implementation.
 
     Supports AWS S3, MinIO, and other S3-compatible storage services.
-    Configure via environment variables:
-    - AWS_ACCESS_KEY_ID: Access key
-    - AWS_SECRET_ACCESS_KEY: Secret key
-    - AWS_S3_ENDPOINT: Optional endpoint URL (for MinIO, LocalStack, etc.)
-    - AWS_S3_BUCKET: Default bucket name
-    - AWS_S3_SECURE: Whether to use HTTPS (default: true)
-    - AWS_S3_AUTO_CREATE_BUCKET: Whether to auto-create bucket (default: false)
+    Configuration is provided via StorageSettings (see automation/config.py).
+
+    Note: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are read directly by boto3
+    from environment variables, following AWS SDK conventions.
 
     All files are stored under the "automation/" prefix in the bucket
     to isolate automation service data from other services.
@@ -40,25 +43,28 @@ class S3FileStore(FileStore):
         upload directly or pre-staging to disk.
     """
 
-    def __init__(self, bucket_name: str | None = None):
+    def __init__(self, settings: StorageSettings):
         """
         Initialize the S3 file store.
 
         Args:
-            bucket_name: S3 bucket name. If not provided, reads from
-                         AWS_S3_BUCKET environment variable.
+            settings: StorageSettings instance with S3 configuration.
         """
-        self.bucket_name = bucket_name or os.environ.get("AWS_S3_BUCKET")
+        self.bucket_name = settings.aws_s3_bucket
+        # Defensive: StorageSettings validates, but guard against direct instantiation
         if not self.bucket_name:
-            raise ValueError(
-                "Bucket name must be provided or AWS_S3_BUCKET env var must be set"
-            )
+            raise ValueError("AWS_S3_BUCKET is required for S3 backend")
 
+        # AWS credentials: Intentionally read directly from env vars, not from
+        # StorageSettings. This follows AWS SDK conventions where boto3 also reads
+        # these env vars (plus ~/.aws/credentials, IAM roles, etc.). Putting them
+        # in StorageSettings would duplicate configuration and confuse users who
+        # expect standard AWS credential chain behavior.
         access_key = os.environ.get("AWS_ACCESS_KEY_ID")
         secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-        secure = os.environ.get("AWS_S3_SECURE", "true").lower() == "true"
-        endpoint = os.environ.get("AWS_S3_ENDPOINT")
-        auto_create = os.environ.get("AWS_S3_AUTO_CREATE_BUCKET", "false").lower()
+
+        secure = settings.aws_s3_secure
+        endpoint = settings.aws_s3_endpoint
 
         # Validate endpoint scheme matches secure flag
         if endpoint:
@@ -73,14 +79,8 @@ class S3FileStore(FileStore):
         )
 
         # Auto-create bucket if explicitly enabled
-        if auto_create == "true":
+        if settings.aws_s3_auto_create_bucket:
             self._ensure_bucket_exists()
-
-    def _prefixed_path(self, path: str) -> str:
-        """Add the automation prefix to a path."""
-        # Remove leading slash if present
-        path = path.lstrip("/")
-        return f"{BUCKET_PREFIX}/{path}"
 
     def _ensure_bucket_exists(self) -> None:
         """Create the bucket if it doesn't exist.

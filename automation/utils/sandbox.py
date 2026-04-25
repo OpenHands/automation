@@ -5,10 +5,11 @@ bash command history, and to clean up sandboxes after runs complete.
 """
 
 import logging
-from typing import Any
 
 import httpx
 from pydantic.dataclasses import dataclass
+
+from automation.utils.log_context import log_extra
 
 
 logger = logging.getLogger(__name__)
@@ -23,18 +24,6 @@ class BashCommandResult:
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
-
-
-def _log_extra(
-    run_id: str | None = None, sandbox_id: str | None = None
-) -> dict[str, Any]:
-    """Build extra dict for structured logging."""
-    extra: dict[str, Any] = {}
-    if run_id:
-        extra["run_id"] = run_id
-    if sandbox_id:
-        extra["sandbox_id"] = sandbox_id
-    return extra
 
 
 async def get_sandbox_agent_url(
@@ -165,7 +154,7 @@ async def cleanup_sandbox(
         True if sandbox was deleted successfully
     """
     api_url = api_url.rstrip("/")
-    extra = _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+    extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -215,7 +204,7 @@ async def verify_run_status(
         VerificationResult with the verification outcome
     """
     api_url = api_url.rstrip("/")
-    extra = _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+    extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Get sandbox agent URL

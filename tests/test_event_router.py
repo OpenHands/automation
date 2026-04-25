@@ -9,7 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from automation.auth import AuthenticatedUser
-from automation.config import get_settings
+from automation.config import clear_config_cache
 from automation.models import Automation
 
 
@@ -22,9 +22,9 @@ def org_id(mock_authenticated_user: AuthenticatedUser) -> uuid.UUID:
 @pytest.fixture(autouse=True)
 def clear_settings_cache():
     """Clear settings cache before and after each test."""
-    get_settings.cache_clear()
+    clear_config_cache()
     yield
-    get_settings.cache_clear()
+    clear_config_cache()
 
 
 @pytest.fixture

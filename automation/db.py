@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from automation.config import Settings, get_settings
+from automation.config import ServiceSettings, get_config
 
 
 logger = logging.getLogger("automation.db")
@@ -39,14 +39,14 @@ class EngineResult:
             await self.connector.close_async()
 
 
-async def create_engine(settings: Settings | None = None) -> EngineResult:
+async def create_engine(settings: ServiceSettings | None = None) -> EngineResult:
     """Create a new PostgreSQL database engine based on settings.
 
     Returns an EngineResult containing the engine and optional GCP connector.
     Call result.dispose() on shutdown to properly clean up resources.
     """
     if settings is None:
-        settings = get_settings()
+        settings = get_config().service
 
     if settings.gcp_db_instance:
         return await _create_gcp_engine(settings)
@@ -63,13 +63,13 @@ async def create_engine(settings: Settings | None = None) -> EngineResult:
         url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
-        pool_recycle=1800,
+        pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
     )
     return EngineResult(engine=engine)
 
 
-async def _create_gcp_engine(settings: Settings) -> EngineResult:
+async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
     """Create engine using GCP Cloud SQL connector (async).
 
     Uses create_async_connector() which auto-detects the current running
@@ -99,7 +99,7 @@ async def _create_gcp_engine(settings: Settings) -> EngineResult:
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_pre_ping=True,
-        pool_recycle=1800,
+        pool_recycle=settings.db_pool_recycle,
     )
     return EngineResult(engine=engine, connector=connector)
 

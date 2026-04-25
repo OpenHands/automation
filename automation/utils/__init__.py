@@ -6,6 +6,7 @@ from automation.utils.cron import (
     get_prev_fire_time,
     is_automation_due,
 )
+from automation.utils.log_context import log_extra
 from automation.utils.time import utcnow
 
 
@@ -15,5 +16,6 @@ __all__ = [
     "get_next_fire_time",
     "get_prev_fire_time",
     "is_automation_due",
+    "log_extra",
     "utcnow",
 ]

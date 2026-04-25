@@ -20,11 +20,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from automation.config import Settings
-from automation.constants import MAX_RUN_DURATION, MAX_RUN_DURATION_SECONDS
+from automation.config import ServiceSettings, get_config
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
+from automation.utils import log_extra
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
 from automation.utils.run import (
     disable_automation,
@@ -36,26 +36,6 @@ from automation.utils.tarball_validation import is_http_url, parse_internal_uplo
 
 
 logger = logging.getLogger("automation.dispatcher")
-
-
-def _run_extra(
-    run_id: str | None = None,
-    automation_id: str | None = None,
-    sandbox_id: str | None = None,
-) -> dict[str, Any]:
-    """Build extra dict for structured logging with run/automation/sandbox IDs."""
-    extra: dict[str, Any] = {}
-    if run_id:
-        extra["run_id"] = run_id
-    if automation_id:
-        extra["automation_id"] = automation_id
-    if sandbox_id:
-        extra["sandbox_id"] = sandbox_id
-    return extra
-
-
-DEFAULT_BATCH_SIZE = 10
-POLL_INTERVAL_SECONDS = 30
 
 
 async def _download_internal_tarball(
@@ -111,7 +91,7 @@ async def _poll_pending_runs(
 
 async def _execute_run(
     run: AutomationRun,
-    settings: Settings,
+    settings: ServiceSettings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Execute a single run in a background task (fire-and-forget).
@@ -132,9 +112,9 @@ async def _execute_run(
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
 
-    # Helper for consistent structured logging
-    def log_extra(sandbox_id: str | None = None) -> dict[str, Any]:
-        return _run_extra(
+    # Helper for consistent structured logging with run context
+    def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
+        return log_extra(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
@@ -149,7 +129,7 @@ async def _execute_run(
         if is_http_url(tarball_path):
             # HTTP(S) URL: download directly inside sandbox (untrusted/large)
             tarball_source = tarball_path
-            logger.info("HTTP URL tarball, will download in sandbox", extra=log_extra())
+            logger.info("HTTP URL tarball, will download in sandbox", extra=_log_ctx())
         else:
             # Internal (oh-internal://): download from GCS, upload to sandbox
             upload_id = parse_internal_upload_id(tarball_path)
@@ -161,7 +141,7 @@ async def _execute_run(
             logger.info(
                 "Internal tarball downloaded (%d bytes)",
                 len(tarball_source),
-                extra=log_extra(),
+                extra=_log_ctx(),
             )
 
         # 3. Build env vars for the sandbox
@@ -186,10 +166,11 @@ async def _execute_run(
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default
+        max_run_duration = get_config().sandbox.max_run_duration
         if automation.timeout is not None:
-            effective_timeout = min(automation.timeout, MAX_RUN_DURATION_SECONDS)
+            effective_timeout = min(automation.timeout, max_run_duration)
         else:
-            effective_timeout = MAX_RUN_DURATION_SECONDS
+            effective_timeout = max_run_duration
 
         # 5. Dispatch to sandbox (fire-and-forget)
         result = await dispatch_automation(
@@ -203,7 +184,7 @@ async def _execute_run(
             run_id=run_id,
         )
 
-        sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
+        sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
         if result.success:
             # Store sandbox_id for later verification by the watchdog
             if result.sandbox_id:
@@ -229,7 +210,7 @@ async def _execute_run(
             "Permanent dispatch error, disabling automation: %s",
             exc,
             exc_info=True,
-            extra=log_extra(),
+            extra=_log_ctx(),
         )
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, str(exc)
@@ -237,12 +218,12 @@ async def _execute_run(
         await disable_automation(session_factory, automation.id, str(exc))
 
     except (APIKeyError, ValueError) as exc:
-        logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
+        logger.error("Dispatch error: %s", exc, exc_info=True, extra=_log_ctx())
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, str(exc)
         )
     except Exception:
-        logger.exception("Background execution failed", extra=log_extra())
+        logger.exception("Background execution failed", extra=_log_ctx())
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, "Internal error"
         )
@@ -250,14 +231,29 @@ async def _execute_run(
 
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    settings: ServiceSettings,
+    batch_size: int | None = None,
+    max_run_duration: timedelta | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
     Each run is dispatched as an ``asyncio.create_task`` so the
     dispatcher loop is not blocked by long-running automations.
+
+    Args:
+        session_factory: Database session factory
+        settings: Service settings for API access
+        batch_size: Number of pending runs to fetch per poll (from config if None)
+        max_run_duration: Default max duration for runs without custom timeout
     """
+    # Use config defaults if not provided
+    if batch_size is None or max_run_duration is None:
+        config = get_config()
+        if batch_size is None:
+            batch_size = config.service.dispatcher_batch_size
+        if max_run_duration is None:
+            max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
 
@@ -265,17 +261,20 @@ async def dispatch_pending_runs(
         for run in pending_runs:
             run_id = str(run.id)
             automation_id = str(run.automation_id) if run.automation_id else None
-            extra = _run_extra(run_id=run_id, automation_id=automation_id)
+            extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
                 # Use automation's custom timeout if set, otherwise use default
-                max_duration = (
+                run_max_duration = (
                     timedelta(seconds=run.automation.timeout)
                     if run.automation and run.automation.timeout
-                    else MAX_RUN_DURATION
+                    else max_run_duration
                 )
                 await mark_run_status(
-                    session, run, AutomationRunStatus.RUNNING, max_duration=max_duration
+                    session,
+                    run,
+                    AutomationRunStatus.RUNNING,
+                    max_duration=run_max_duration,
                 )
                 dispatched_runs.append(run)
             except Exception:
@@ -294,7 +293,7 @@ async def dispatch_pending_runs(
 
 async def _execute_run_safe(
     run: AutomationRun,
-    settings: Settings,
+    settings: ServiceSettings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Wrapper around ``_execute_run`` that never lets exceptions escape.
@@ -305,7 +304,7 @@ async def _execute_run_safe(
     """
     run_id = str(run.id)
     automation_id = str(run.automation_id) if run.automation_id else None
-    extra = _run_extra(run_id=run_id, automation_id=automation_id)
+    extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory)
     except Exception:
@@ -317,12 +316,20 @@ async def _execute_run_safe(
 
 async def dispatcher_loop(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    interval_seconds: int = POLL_INTERVAL_SECONDS,
+    settings: ServiceSettings,
+    interval_seconds: int | None = None,
     shutdown_event: asyncio.Event | None = None,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> None:
     """Main dispatcher loop — polls for pending runs and dispatches them."""
+    # Load config once at loop start - all iterations use these values
+    config = get_config()
+    if interval_seconds is None:
+        interval_seconds = config.service.dispatcher_interval_seconds
+    if batch_size is None:
+        batch_size = config.service.dispatcher_batch_size
+    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+
     logger.info(
         "Dispatcher started, polling every %d seconds (batch_size=%d)",
         interval_seconds,
@@ -336,7 +343,10 @@ async def dispatcher_loop(
 
         try:
             dispatched = await dispatch_pending_runs(
-                session_factory, settings=settings, batch_size=batch_size
+                session_factory,
+                settings=settings,
+                batch_size=batch_size,
+                max_run_duration=max_run_duration,
             )
             if dispatched:
                 logger.info("Dispatched %d run(s)", len(dispatched))
