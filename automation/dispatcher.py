@@ -24,6 +24,7 @@ from automation.config import ServiceSettings, get_config
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
+from automation.utils import log_extra
 from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
 from automation.utils.run import (
     disable_automation,
@@ -35,22 +36,6 @@ from automation.utils.tarball_validation import is_http_url, parse_internal_uplo
 
 
 logger = logging.getLogger("automation.dispatcher")
-
-
-def _run_extra(
-    run_id: str | None = None,
-    automation_id: str | None = None,
-    sandbox_id: str | None = None,
-) -> dict[str, Any]:
-    """Build extra dict for structured logging with run/automation/sandbox IDs."""
-    extra: dict[str, Any] = {}
-    if run_id:
-        extra["run_id"] = run_id
-    if automation_id:
-        extra["automation_id"] = automation_id
-    if sandbox_id:
-        extra["sandbox_id"] = sandbox_id
-    return extra
 
 
 async def _download_internal_tarball(
@@ -127,9 +112,9 @@ async def _execute_run(
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
 
-    # Helper for consistent structured logging
-    def log_extra(sandbox_id: str | None = None) -> dict[str, Any]:
-        return _run_extra(
+    # Helper for consistent structured logging with run context
+    def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
+        return log_extra(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
@@ -144,7 +129,7 @@ async def _execute_run(
         if is_http_url(tarball_path):
             # HTTP(S) URL: download directly inside sandbox (untrusted/large)
             tarball_source = tarball_path
-            logger.info("HTTP URL tarball, will download in sandbox", extra=log_extra())
+            logger.info("HTTP URL tarball, will download in sandbox", extra=_log_ctx())
         else:
             # Internal (oh-internal://): download from GCS, upload to sandbox
             upload_id = parse_internal_upload_id(tarball_path)
@@ -156,7 +141,7 @@ async def _execute_run(
             logger.info(
                 "Internal tarball downloaded (%d bytes)",
                 len(tarball_source),
-                extra=log_extra(),
+                extra=_log_ctx(),
             )
 
         # 3. Build env vars for the sandbox
@@ -199,7 +184,7 @@ async def _execute_run(
             run_id=run_id,
         )
 
-        sandbox_extra = log_extra(sandbox_id=result.sandbox_id)
+        sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
         if result.success:
             # Store sandbox_id for later verification by the watchdog
             if result.sandbox_id:
@@ -225,7 +210,7 @@ async def _execute_run(
             "Permanent dispatch error, disabling automation: %s",
             exc,
             exc_info=True,
-            extra=log_extra(),
+            extra=_log_ctx(),
         )
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, str(exc)
@@ -233,12 +218,12 @@ async def _execute_run(
         await disable_automation(session_factory, automation.id, str(exc))
 
     except (APIKeyError, ValueError) as exc:
-        logger.error("Dispatch error: %s", exc, exc_info=True, extra=log_extra())
+        logger.error("Dispatch error: %s", exc, exc_info=True, extra=_log_ctx())
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, str(exc)
         )
     except Exception:
-        logger.exception("Background execution failed", extra=log_extra())
+        logger.exception("Background execution failed", extra=_log_ctx())
         await mark_run_terminal(
             session_factory, run, AutomationRunStatus.FAILED, "Internal error"
         )
@@ -276,7 +261,7 @@ async def dispatch_pending_runs(
         for run in pending_runs:
             run_id = str(run.id)
             automation_id = str(run.automation_id) if run.automation_id else None
-            extra = _run_extra(run_id=run_id, automation_id=automation_id)
+            extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
                 # Use automation's custom timeout if set, otherwise use default
@@ -319,7 +304,7 @@ async def _execute_run_safe(
     """
     run_id = str(run.id)
     automation_id = str(run.automation_id) if run.automation_id else None
-    extra = _run_extra(run_id=run_id, automation_id=automation_id)
+    extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory)
     except Exception:

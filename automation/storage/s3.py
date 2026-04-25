@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 import boto3
 import botocore.exceptions
 
-from automation.storage.file_store import FileStore
-from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from automation.storage.file_store import BUCKET_PREFIX, FileStore
+from automation.storage.google_cloud import FileSizeLimitExceeded
 
 
 if TYPE_CHECKING:
@@ -81,12 +81,6 @@ class S3FileStore(FileStore):
         # Auto-create bucket if explicitly enabled
         if settings.aws_s3_auto_create_bucket:
             self._ensure_bucket_exists()
-
-    def _prefixed_path(self, path: str) -> str:
-        """Add the automation prefix to a path."""
-        # Remove leading slash if present
-        path = path.lstrip("/")
-        return f"{BUCKET_PREFIX}/{path}"
 
     def _ensure_bucket_exists(self) -> None:
         """Create the bucket if it doesn't exist.

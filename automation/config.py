@@ -6,7 +6,9 @@ service. Configuration is organized into a composed AppConfig with typed section
     AppConfig
     ├── service: ServiceSettings    # Core service (AUTOMATION_ prefix)
     ├── storage: StorageSettings    # File storage (no prefix, SDK conventions)
-    └── log: LogSettings            # Logging (no prefix)
+    ├── log: LogSettings            # Logging (no prefix)
+    ├── http: HttpSettings          # HTTP client (AUTOMATION_ prefix)
+    └── sandbox: SandboxSettings    # Sandbox execution (AUTOMATION_ prefix)
 
 Usage (preferred):
     from automation.config import get_config
@@ -22,6 +24,19 @@ Legacy usage (backward compatible, emits deprecation warnings):
     settings = get_settings()        # Returns config.service
     storage = get_storage_settings() # Returns config.storage
     log = get_log_settings()         # Returns config.log
+
+WARNING: FROZEN CONFIG VALUES
+-----------------------------
+Some configuration values are read at module import time and frozen for the
+process lifetime. These cannot be changed at runtime even if you call
+clear_config_cache():
+
+- Retry decorators (auth.py, execution.py): tenacity retry/backoff settings
+- Logging configuration (logger.py): log level, format settings
+
+This design is intentional for performance - these values are used in hot paths
+where repeated config lookups would add overhead. If you need to test with
+different values, use monkeypatching or reload the affected modules.
 """
 
 import warnings
@@ -149,14 +164,18 @@ class HttpSettings(BaseSettings):
         AUTOMATION_HTTP_LONG_TIMEOUT: Timeout for long operations (default: 60.0)
         AUTOMATION_AUTH_CACHE_TTL: Auth token cache TTL in seconds (default: 20.0)
         AUTOMATION_AUTH_CACHE_SIZE: Max entries in auth cache (default: 1024)
-        AUTOMATION_MAX_BACKOFF: Max backoff for retries in seconds (default: 10.0)
+        AUTOMATION_AUTH_MAX_RETRIES: Max auth retry attempts (default: 3)
+        AUTOMATION_AUTH_INITIAL_BACKOFF: Initial backoff in seconds (default: 1.0)
+        AUTOMATION_AUTH_MAX_BACKOFF: Max backoff for retries in seconds (default: 10.0)
     """
 
     http_timeout: float = 10.0
     http_long_timeout: float = 60.0
     auth_cache_ttl: float = 20.0
     auth_cache_size: int = 1024
-    max_backoff: float = 10.0
+    auth_max_retries: int = 3
+    auth_initial_backoff: float = 1.0
+    auth_max_backoff: float = 10.0
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from google.cloud import storage
 from google.cloud.exceptions import NotFound
 
-from automation.storage.file_store import FileStore
+from automation.storage.file_store import BUCKET_PREFIX, FileStore
 
 
 if TYPE_CHECKING:
@@ -22,10 +22,6 @@ class FileSizeLimitExceeded(Exception):
         super().__init__(
             f"File size {actual_size} bytes exceeds limit of {max_size} bytes"
         )
-
-
-# All files are stored under this prefix in the bucket
-BUCKET_PREFIX = "automation"
 
 
 class GoogleCloudFileStore(FileStore):
@@ -61,12 +57,6 @@ class GoogleCloudFileStore(FileStore):
         # For emulator: ensure bucket exists
         if settings.storage_emulator_host:
             self._ensure_bucket_exists()
-
-    def _prefixed_path(self, path: str) -> str:
-        """Add the automation prefix to a path."""
-        # Remove leading slash if present
-        path = path.lstrip("/")
-        return f"{BUCKET_PREFIX}/{path}"
 
     def _ensure_bucket_exists(self) -> None:
         """Create the bucket if it doesn't exist (for emulator only)."""

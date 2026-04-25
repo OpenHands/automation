@@ -31,11 +31,6 @@ from automation.config import get_config
 
 logger = logging.getLogger("automation.auth")
 
-# Retry configuration for rate limiting
-MAX_RETRIES = 3
-INITIAL_BACKOFF_SECONDS = 1.0
-MAX_BACKOFF_SECONDS = 10.0  # Default, can be overridden by config
-
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
 
@@ -129,13 +124,14 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
 
 
 # Module-level retry decorator for auth requests.
-# Config is cached at startup, so this uses stable values.
+# Config is read at import time and frozen for the process lifetime.
+_http_config = get_config().http
 _auth_retry = retry(
     retry=retry_if_result(_is_rate_limited),
-    stop=stop_after_attempt(MAX_RETRIES + 1),
+    stop=stop_after_attempt(_http_config.auth_max_retries + 1),
     wait=wait_exponential(
-        multiplier=INITIAL_BACKOFF_SECONDS,
-        max=MAX_BACKOFF_SECONDS,
+        multiplier=_http_config.auth_initial_backoff,
+        max=_http_config.auth_max_backoff,
     ),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     retry_error_callback=_return_last_response,

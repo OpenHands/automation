@@ -1,4 +1,4 @@
-from automation.config import get_storage_settings
+from automation.config import get_config
 from automation.storage.file_store import FileStore
 
 
@@ -14,7 +14,7 @@ def get_file_store() -> FileStore:
     Returns:
         A FileStore instance configured for the selected backend.
     """
-    storage = get_storage_settings()
+    storage = get_config().storage
 
     if storage.file_store == "gcs":
         from automation.storage.google_cloud import GoogleCloudFileStore
