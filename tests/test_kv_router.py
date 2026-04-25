@@ -465,9 +465,48 @@ class TestConcurrency:
 
     These tests verify that FOR UPDATE locking prevents race conditions
     when multiple requests modify the same key simultaneously.
+
+    Note: These tests require a separate fixture that uses the session factory
+    instead of a shared session, to allow true concurrent database connections.
     """
 
-    async def test_concurrent_increments(self, kv_client):
+    @pytest.fixture
+    async def concurrent_kv_client(
+        self, async_engine, async_session_factory, async_session, monkeypatch
+    ):
+        """Client for concurrency tests that uses session factory (not shared session).
+
+        Unlike kv_client, this doesn't override get_session, allowing each request
+        to get its own session from the factory. This enables true concurrent
+        database operations with separate connections.
+        """
+        monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
+
+        from automation.config import get_settings
+
+        get_settings.cache_clear()
+
+        async def override_get_automation_id():
+            return TEST_AUTOMATION_ID
+
+        # Only override auth, NOT the session - let each request get its own
+        app.dependency_overrides[get_automation_id_from_token] = (
+            override_get_automation_id
+        )
+
+        app.state.engine = async_engine
+        app.state.session_factory = async_session_factory
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            yield client
+
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    async def test_concurrent_increments(self, concurrent_kv_client):
         """Concurrent increments produce correct final value.
 
         Fires N concurrent increment requests and verifies the final
@@ -479,7 +518,7 @@ class TestConcurrency:
 
         # Fire N concurrent increment requests
         tasks = [
-            kv_client.post("/api/automation/v1/kv/concurrent_counter/incr")
+            concurrent_kv_client.post("/api/automation/v1/kv/concurrent_counter/incr")
             for _ in range(num_increments)
         ]
         responses = await asyncio.gather(*tasks)
@@ -488,11 +527,13 @@ class TestConcurrency:
         assert all(r.status_code == 200 for r in responses)
 
         # Verify final value equals number of increments
-        get_response = await kv_client.get("/api/automation/v1/kv/concurrent_counter")
+        get_response = await concurrent_kv_client.get(
+            "/api/automation/v1/kv/concurrent_counter"
+        )
         assert get_response.status_code == 200
         assert get_response.json()["value"] == num_increments
 
-    async def test_concurrent_list_pushes(self, kv_client):
+    async def test_concurrent_list_pushes(self, concurrent_kv_client):
         """Concurrent list pushes don't lose elements.
 
         Fires N concurrent rpush requests and verifies the final
@@ -504,7 +545,7 @@ class TestConcurrency:
 
         # Fire N concurrent rpush requests with unique values
         tasks = [
-            kv_client.post(
+            concurrent_kv_client.post(
                 "/api/automation/v1/kv/concurrent_list/rpush",
                 json={"value": f"item-{i}"},
             )
@@ -516,7 +557,9 @@ class TestConcurrency:
         assert all(r.status_code == 200 for r in responses)
 
         # Verify list length equals number of pushes
-        len_response = await kv_client.get("/api/automation/v1/kv/concurrent_list/len")
+        len_response = await concurrent_kv_client.get(
+            "/api/automation/v1/kv/concurrent_list/len"
+        )
         assert len_response.status_code == 200
         assert len_response.json()["length"] == num_pushes
 
