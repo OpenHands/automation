@@ -8,7 +8,6 @@ from automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
-    ServiceSettings,
     Settings,
     clear_config_cache,
     get_config,
@@ -233,7 +232,7 @@ class TestAuthCacheReset:
 
     def test_auth_cache_reset_on_clear_config(self):
         """Auth cache is reset when clear_config_cache is called."""
-        from automation.auth import _auth_cache, _get_auth_cache, _reset_auth_cache
+        from automation.auth import _get_auth_cache
 
         # Ensure cache exists
         cache1 = _get_auth_cache()
