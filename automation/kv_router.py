@@ -20,7 +20,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -461,7 +461,11 @@ async def set_value(
             updated_at=kv.updated_at.isoformat(),
         )
 
-    # Normal upsert
+    # Check if key exists first to determine insert vs update
+    existing = await _get_kv_row(session, automation_id, key)
+    created = existing is None
+
+    # Normal upsert - use func.now() to properly update the timestamp
     stmt = (
         pg_insert(AutomationKV)
         .values(
@@ -471,15 +475,12 @@ async def set_value(
         )
         .on_conflict_do_update(
             index_elements=["automation_id", "key"],
-            set_={"value_encrypted": encrypted, "updated_at": AutomationKV.updated_at},
+            set_={"value_encrypted": encrypted, "updated_at": func.now()},
         )
-        .returning(AutomationKV.created_at, AutomationKV.updated_at)
+        .returning(AutomationKV.updated_at)
     )
     result = await session.execute(stmt)
     row = result.first()
-
-    # Check if this was an insert or update by comparing timestamps
-    created = row is not None and row.created_at == row.updated_at
 
     # Return 201 for new keys, 200 for updates
     if created:
