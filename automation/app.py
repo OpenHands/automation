@@ -48,13 +48,9 @@ async def lifespan(app: FastAPI):
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-    logger.info("Starting OpenHands Automations Service")
     logger.info(
-        "KV store configuration",
-        extra={
-            "kv_secret_present": bool(settings.kv_secret),
-            "kv_secret_len": len(settings.kv_secret) if settings.kv_secret else 0,
-        },
+        "Starting OpenHands Automations Service",
+        extra={"kv_store_configured": bool(settings.kv_secret)},
     )
 
     # Create shared httpx client for auth (stored in app.state for DI)

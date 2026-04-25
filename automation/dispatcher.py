@@ -166,14 +166,6 @@ async def _execute_run(
         env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
 
         # Generate KV token if automation has KV store enabled
-        logger.info(
-            "KV store check",
-            extra=log_extra(
-                enable_kv_store=automation.enable_kv_store,
-                kv_secret_present=bool(settings.kv_secret),
-                kv_secret_len=len(settings.kv_secret) if settings.kv_secret else 0,
-            ),
-        )
         if automation.enable_kv_store and settings.kv_secret:
             kv_token = create_kv_token(
                 secret=settings.kv_secret,
@@ -182,7 +174,7 @@ async def _execute_run(
             )
             env_vars["AUTOMATION_KV_TOKEN"] = kv_token
             env_vars["AUTOMATION_ENABLE_KV_STORE"] = "true"
-            logger.info("KV store enabled, token generated", extra=log_extra())
+            logger.debug("KV store enabled for this run", extra=log_extra())
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default
