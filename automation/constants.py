@@ -50,9 +50,7 @@ def __getattr__(name: str):
 
     # Map old constant names to new config paths
     deprecated_map = {
-        "MAX_RUN_DURATION": lambda: timedelta(
-            seconds=config.sandbox.max_run_duration
-        ),
+        "MAX_RUN_DURATION": lambda: timedelta(seconds=config.sandbox.max_run_duration),
         "MAX_RUN_DURATION_SECONDS": lambda: config.sandbox.max_run_duration,
         "SANDBOX_POLL_INTERVAL": lambda: config.sandbox.sandbox_poll_interval,
         "SANDBOX_READY_TIMEOUT": lambda: config.sandbox.sandbox_ready_timeout,

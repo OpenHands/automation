@@ -51,7 +51,7 @@ class S3FileStore(FileStore):
             settings: StorageSettings instance with S3 configuration.
         """
         self.bucket_name = settings.aws_s3_bucket
-        # Defensive check (StorageSettings validates this, but guard against direct instantiation)
+        # Defensive: StorageSettings validates, but guard against direct instantiation
         if not self.bucket_name:
             raise ValueError("AWS_S3_BUCKET is required for S3 backend")
 
