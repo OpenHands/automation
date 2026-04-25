@@ -38,9 +38,15 @@ TARBALL_PATH = "/tmp/automation.tar.gz"
 # Kept as imports for backward compatibility with code that references them.
 # TODO: Remove after migrating all consumers to use config.
 
+# Track which constants have already been warned about to avoid log spam
+_warned_constants: set[str] = set()
+
 
 def __getattr__(name: str):
-    """Lazy attribute access for deprecated constants."""
+    """Lazy attribute access for deprecated constants.
+
+    Emits a DeprecationWarning once per constant name to avoid log spam.
+    """
     # Import here to avoid circular import at module load time
     from datetime import timedelta
 
@@ -62,13 +68,16 @@ def __getattr__(name: str):
     }
 
     if name in deprecated_map:
-        import warnings
+        # Only warn once per constant to avoid log spam in hot paths
+        if name not in _warned_constants:
+            import warnings
 
-        msg = (
-            f"constants.{name} is deprecated. "
-            f"Use get_config().sandbox.{name.lower()} instead."
-        )
-        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            msg = (
+                f"constants.{name} is deprecated. "
+                f"Use get_config().sandbox.{name.lower()} instead."
+            )
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            _warned_constants.add(name)
         return deprecated_map[name]()
 
     raise AttributeError(f"module 'automation.constants' has no attribute {name!r}")

@@ -24,7 +24,7 @@ Legacy usage (backward compatible):
     log = get_log_settings()         # Returns config.log
 """
 
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -56,15 +56,19 @@ class LogSettings(BaseSettings):
 
     model_config = {"env_prefix": ""}
 
-    @model_validator(mode="after")
-    def apply_debug_override(self) -> "LogSettings":
-        """DEBUG=true overrides both log levels to DEBUG."""
+    @property
+    def effective_log_level(self) -> str:
+        """Get the effective log level, accounting for DEBUG override."""
         if self.debug:
-            object.__setattr__(self, "log_level", "DEBUG")
-            object.__setattr__(self, "automation_log_level", "DEBUG")
-        if self.automation_log_level is None:
-            object.__setattr__(self, "automation_log_level", self.log_level)
-        return self
+            return "DEBUG"
+        return self.log_level
+
+    @property
+    def effective_automation_log_level(self) -> str:
+        """Get the effective automation log level, accounting for DEBUG override."""
+        if self.debug:
+            return "DEBUG"
+        return self.automation_log_level or self.log_level
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +350,7 @@ class AppConfig:
     """Root configuration composing all settings sections.
 
     This class provides a single entry point for all configuration. Settings
-    are loaded lazily on first access and cached.
+    are loaded lazily on first access and cached using @cached_property.
 
     Attributes:
         service: Core service settings (database, API, workers)
@@ -363,48 +367,30 @@ class AppConfig:
         print(config.sandbox.max_run_duration)
     """
 
-    def __init__(self) -> None:
-        """Initialize with empty caches for lazy loading."""
-        self._service: ServiceSettings | None = None
-        self._storage: StorageSettings | None = None
-        self._log: LogSettings | None = None
-        self._http: HttpSettings | None = None
-        self._sandbox: SandboxSettings | None = None
-
-    @property
+    @cached_property
     def service(self) -> ServiceSettings:
         """Core service configuration (AUTOMATION_ prefix)."""
-        if self._service is None:
-            self._service = ServiceSettings()
-        return self._service
+        return ServiceSettings()
 
-    @property
+    @cached_property
     def storage(self) -> StorageSettings:
         """File storage configuration (no prefix)."""
-        if self._storage is None:
-            self._storage = StorageSettings()
-        return self._storage
+        return StorageSettings()
 
-    @property
+    @cached_property
     def log(self) -> LogSettings:
         """Logging configuration (no prefix)."""
-        if self._log is None:
-            self._log = LogSettings()
-        return self._log
+        return LogSettings()
 
-    @property
+    @cached_property
     def http(self) -> HttpSettings:
         """HTTP client configuration (AUTOMATION_ prefix)."""
-        if self._http is None:
-            self._http = HttpSettings()
-        return self._http
+        return HttpSettings()
 
-    @property
+    @cached_property
     def sandbox(self) -> SandboxSettings:
         """Sandbox execution configuration (AUTOMATION_ prefix)."""
-        if self._sandbox is None:
-            self._sandbox = SandboxSettings()
-        return self._sandbox
+        return SandboxSettings()
 
 
 @lru_cache

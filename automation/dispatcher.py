@@ -247,17 +247,20 @@ async def _execute_run(
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
     settings: ServiceSettings,
-    batch_size: int | None = None,
+    batch_size: int,
+    max_run_duration: timedelta,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
     Each run is dispatched as an ``asyncio.create_task`` so the
     dispatcher loop is not blocked by long-running automations.
+
+    Args:
+        session_factory: Database session factory
+        settings: Service settings for API access
+        batch_size: Number of pending runs to fetch per poll
+        max_run_duration: Default max duration for runs without custom timeout
     """
-    config = get_config()
-    if batch_size is None:
-        batch_size = config.service.dispatcher_batch_size
-    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
 
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
@@ -327,11 +330,13 @@ async def dispatcher_loop(
     batch_size: int | None = None,
 ) -> None:
     """Main dispatcher loop — polls for pending runs and dispatches them."""
+    # Load config once at loop start - all iterations use these values
     config = get_config()
     if interval_seconds is None:
         interval_seconds = config.service.dispatcher_interval_seconds
     if batch_size is None:
         batch_size = config.service.dispatcher_batch_size
+    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
 
     logger.info(
         "Dispatcher started, polling every %d seconds (batch_size=%d)",
@@ -346,7 +351,10 @@ async def dispatcher_loop(
 
         try:
             dispatched = await dispatch_pending_runs(
-                session_factory, settings=settings, batch_size=batch_size
+                session_factory,
+                settings=settings,
+                batch_size=batch_size,
+                max_run_duration=max_run_duration,
             )
             if dispatched:
                 logger.info("Dispatched %d run(s)", len(dispatched))

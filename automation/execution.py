@@ -49,8 +49,11 @@ def _log_extra(
     return extra
 
 
-def _get_retry_on_rate_limit():
-    """Build tenacity retry decorator with current config values."""
+def _get_retry_decorator():
+    """Build tenacity retry decorator with current config values.
+
+    Config values are read at call time, so changes to settings take effect.
+    """
     sandbox_config = get_config().sandbox
     return retry(
         retry=retry_if_exception(_is_rate_limit_error),
@@ -62,11 +65,6 @@ def _get_retry_on_rate_limit():
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-
-
-# Module-level decorator for backward compatibility.
-# Note: Uses config values at import time.
-_retry_on_rate_limit = _get_retry_on_rate_limit()
 
 
 def build_tarball(files: dict[str, str | bytes]) -> bytes:
@@ -92,31 +90,39 @@ def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
     return None
 
 
-@_retry_on_rate_limit
 async def _create_sandbox(
     client: httpx.AsyncClient, api_url: str, headers: dict[str, str]
 ) -> str:
     """Create a sandbox and return its ID. Retries on rate limit."""
-    resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
-    resp.raise_for_status()
-    return resp.json()["id"]
+
+    @_get_retry_decorator()
+    async def _do_create():
+        resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+    return await _do_create()
 
 
-@_retry_on_rate_limit
 async def _poll_sandbox(
     client: httpx.AsyncClient, api_url: str, sandbox_id: str, headers: dict[str, str]
 ) -> dict[str, Any]:
     """Poll sandbox status. Retries on rate limit."""
-    resp = await client.get(
-        f"{api_url}/api/v1/sandboxes",
-        params={"id": sandbox_id},
-        headers=headers,
-    )
-    resp.raise_for_status()
-    items = resp.json()
-    if not items:
-        raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
-    return items[0]
+
+    @_get_retry_decorator()
+    async def _do_poll():
+        resp = await client.get(
+            f"{api_url}/api/v1/sandboxes",
+            params={"id": sandbox_id},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        items = resp.json()
+        if not items:
+            raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
+        return items[0]
+
+    return await _do_poll()
 
 
 async def _create_and_wait(

@@ -55,8 +55,11 @@ class S3FileStore(FileStore):
         if not self.bucket_name:
             raise ValueError("AWS_S3_BUCKET is required for S3 backend")
 
-        # AWS credentials are read by boto3 from environment variables
-        # (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) following SDK conventions
+        # AWS credentials: Intentionally read directly from env vars, not from
+        # StorageSettings. This follows AWS SDK conventions where boto3 also reads
+        # these env vars (plus ~/.aws/credentials, IAM roles, etc.). Putting them
+        # in StorageSettings would duplicate configuration and confuse users who
+        # expect standard AWS credential chain behavior.
         access_key = os.environ.get("AWS_ACCESS_KEY_ID")
         secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
 

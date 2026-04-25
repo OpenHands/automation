@@ -117,26 +117,6 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
     return retry_state.outcome.result()
 
 
-def _get_auth_retry_decorator():
-    """Build retry decorator with current config values."""
-    http_config = get_config().http
-    return retry(
-        retry=retry_if_result(_is_rate_limited),
-        stop=stop_after_attempt(MAX_RETRIES + 1),
-        wait=wait_exponential(
-            multiplier=INITIAL_BACKOFF_SECONDS,
-            max=http_config.max_backoff,
-        ),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry_error_callback=_return_last_response,
-    )
-
-
-# Module-level decorator (uses config at import time)
-_auth_retry = _get_auth_retry_decorator()
-
-
-@_auth_retry
 async def _make_auth_request_with_retry(
     client: httpx.AsyncClient,
     url: str,
@@ -144,7 +124,8 @@ async def _make_auth_request_with_retry(
 ) -> httpx.Response:
     """Make an auth request with exponential backoff retry on 429 responses.
 
-    Uses tenacity for retry logic with exponential backoff.
+    Uses tenacity for retry logic with exponential backoff. Config values are
+    read at call time, so changes to settings take effect on next call.
 
     Args:
         client: The httpx client to use for requests
@@ -157,7 +138,24 @@ async def _make_auth_request_with_retry(
     Raises:
         httpx.RequestError: If there's a network/connection error
     """
-    return await client.get(url, headers=headers)
+    # Build decorator at call time to use current config values
+    http_config = get_config().http
+    decorator = retry(
+        retry=retry_if_result(_is_rate_limited),
+        stop=stop_after_attempt(MAX_RETRIES + 1),
+        wait=wait_exponential(
+            multiplier=INITIAL_BACKOFF_SECONDS,
+            max=http_config.max_backoff,
+        ),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        retry_error_callback=_return_last_response,
+    )
+
+    @decorator
+    async def _do_request():
+        return await client.get(url, headers=headers)
+
+    return await _do_request()
 
 
 def require_permission(permission: str):
