@@ -169,11 +169,16 @@ async def _upload(
 ) -> None:
     """Upload bytes to the sandbox via the agent-server file API.
 
-    The agent-server expects the absolute path in the URL, e.g.
-    ``POST /api/file/upload//tmp/file.tar.gz`` (double-slash is correct).
+    Uses query parameter for the path to avoid URL normalization issues
+    with proxies that collapse double-slashes (e.g. //tmp -> /tmp).
+    See: https://github.com/All-Hands-AI/OpenHands/commit/a14158e
     """
+    # Use query param instead of path param to avoid double-slash normalization
+    from urllib.parse import urlencode
+
+    params = urlencode({"path": dest})
     resp = await client.post(
-        f"{agent_url}/api/file/upload/{dest}",
+        f"{agent_url}/api/file/upload?{params}",
         files={"file": ("upload", data)},
         headers={"X-Session-API-Key": session_key},
     )

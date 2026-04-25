@@ -7,7 +7,7 @@ scripts/test_automation.py.
 
 import io
 import tarfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from automation.execution import (
     AutomationResult,
     DispatchResult,
     _shell_quote,
+    _upload,
     build_tarball,
     dispatch_automation,
 )
@@ -142,6 +143,71 @@ class TestExternalDownloadConstants:
         """Max filesize should be reasonable (10MB - 500MB)."""
         max_filesize = get_config().sandbox.external_max_filesize
         assert 10 * 1024 * 1024 <= max_filesize <= 500 * 1024 * 1024
+
+
+class TestUploadUsesQueryParams:
+    """Tests for _upload using query parameters instead of path parameters.
+
+    This prevents URL normalization issues with proxies (e.g., Traefik) that
+    collapse double-slashes in paths. See:
+    - https://github.com/All-Hands-AI/OpenHands/commit/a14158e
+    - https://github.com/OpenHands/software-agent-sdk/pull/2404
+    """
+
+    @pytest.mark.asyncio
+    async def test_upload_uses_query_param_for_path(self):
+        """_upload should use ?path= query param, not path in URL."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        await _upload(
+            client=mock_client,
+            agent_url="https://agent.example.com",
+            session_key="test-session-key",
+            data=b"test data",
+            dest="/tmp/automation.tar.gz",
+        )
+
+        # Verify post was called with query param, not path param
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
+
+        url = call_args[0][0]
+        # URL should use query param format
+        assert "?path=" in url, f"Expected query param in URL, got: {url}"
+        assert "/tmp/automation.tar.gz" not in url.split("?")[0], (
+            f"Path should not be in URL path segment: {url}"
+        )
+        # Verify the path is properly encoded in query string
+        assert (
+            "path=%2Ftmp%2Fautomation.tar.gz" in url
+            or "path=/tmp/automation.tar.gz" in url
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_preserves_absolute_path(self):
+        """_upload should preserve leading slash in path via query param."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        await _upload(
+            client=mock_client,
+            agent_url="https://agent.example.com",
+            session_key="test-session-key",
+            data=b"test data",
+            dest="/workspace/file.txt",
+        )
+
+        url = mock_client.post.call_args[0][0]
+        # The path in query param should preserve the leading slash
+        # (either URL-encoded as %2F or literal /)
+        assert "%2Fworkspace" in url or "/workspace" in url.split("?")[1]
 
 
 class TestDispatchAutomationPermanentErrors:
