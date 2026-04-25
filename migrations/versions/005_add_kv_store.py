@@ -123,7 +123,7 @@ def upgrade() -> None:
         "COMMENT ON COLUMN automation_kv.state_encrypted IS "
         "'AES-256-GCM encrypted JSON document containing all KV pairs. "
         "Format: 12-byte nonce || ciphertext || 16-byte auth tag. "
-        "Decrypted example: {\"config\": {...}, \"counter\": 42, \"queue\": [...]}. "
+        'Decrypted example: {"config": {...}, "counter": 42, "queue": [...]}. '
         "STORAGE EXTERNAL: skip compression (ciphertext is incompressible).'"
     )
 

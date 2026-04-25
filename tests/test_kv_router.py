@@ -39,7 +39,7 @@ from automation.app import app
 from automation.db import get_session
 from automation.kv_router import get_automation_id_from_token
 from automation.models import Automation, AutomationKV
-from automation.utils.kv import encrypt_value, decrypt_value
+from automation.utils.kv import decrypt_value, encrypt_value
 
 
 # Test UUIDs
@@ -107,6 +107,7 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
     monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
 
     from automation.config import get_settings
+
     get_settings.cache_clear()
 
     async def override_get_session():
@@ -259,7 +260,9 @@ class TestGetValue:
         await create_test_state(async_session, TEST_AUTOMATION_ID, {"config": value})
         await async_session.commit()
 
-        response = await kv_client.get("/api/automation/v1/kv/config?path=database.host")
+        response = await kv_client.get(
+            "/api/automation/v1/kv/config?path=database.host"
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -519,13 +522,12 @@ class TestListOperations:
 
         # Verify order
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         assert state["queue"] == ["first", "second"]
 
     async def test_rpush_appends(self, kv_client, async_session):
         """RPUSH appends to existing list."""
-        await create_test_state(
-            async_session, TEST_AUTOMATION_ID, {"queue": ["first"]}
-        )
+        await create_test_state(async_session, TEST_AUTOMATION_ID, {"queue": ["first"]})
         await async_session.commit()
 
         response = await kv_client.post(
@@ -538,6 +540,7 @@ class TestListOperations:
 
         # Verify order
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         assert state["queue"] == ["first", "second"]
 
     async def test_lpop_returns_first(self, kv_client, async_session):
@@ -554,6 +557,7 @@ class TestListOperations:
 
         # Verify remaining
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         assert state["queue"] == ["second", "third"]
 
     async def test_rpop_returns_last(self, kv_client, async_session):
@@ -570,6 +574,7 @@ class TestListOperations:
 
         # Verify remaining
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         assert state["queue"] == ["first", "second"]
 
     async def test_lpop_empty_returns_null(self, kv_client, async_session):
@@ -659,9 +664,7 @@ class TestSingleDocumentIsolation:
 
         # Verify only ONE row exists in the database
         result = await async_session.execute(
-            select(AutomationKV).where(
-                AutomationKV.automation_id == TEST_AUTOMATION_ID
-            )
+            select(AutomationKV).where(AutomationKV.automation_id == TEST_AUTOMATION_ID)
         )
         rows = result.scalars().all()
         assert len(rows) == 1
@@ -676,9 +679,7 @@ class TestSingleDocumentIsolation:
 
         # Verify row is gone
         result = await async_session.execute(
-            select(AutomationKV).where(
-                AutomationKV.automation_id == TEST_AUTOMATION_ID
-            )
+            select(AutomationKV).where(AutomationKV.automation_id == TEST_AUTOMATION_ID)
         )
         rows = result.scalars().all()
         assert len(rows) == 0
@@ -698,6 +699,7 @@ class TestSingleDocumentIsolation:
 
         # Verify other keys are unchanged
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         assert state["counter"] == 11
         assert state["config"] == {"setting": True}
         assert state["queue"] == ["item"]

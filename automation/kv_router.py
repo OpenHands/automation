@@ -345,7 +345,9 @@ async def set_value(
     _check_state_size(state, settings)
 
     # Save
-    saved_row = await _save_state(session, automation_id, state, settings.kv_secret, row)
+    saved_row = await _save_state(
+        session, automation_id, state, settings.kv_secret, row
+    )
 
     created = not key_exists
     if created:
