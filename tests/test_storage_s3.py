@@ -7,53 +7,64 @@ For integration tests, a MinIO container would be needed (similar to
 test_storage_integration.py using fake-gcs-server for GCS).
 """
 
-import os
 from unittest.mock import MagicMock, patch
 
 import botocore.exceptions
 import pytest
 
+from automation.config import StorageSettings
 from automation.storage import S3FileStore
 from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+
+
+def make_s3_settings(
+    bucket_name: str = "test-bucket",
+    endpoint: str | None = None,
+    secure: bool = True,
+    auto_create_bucket: bool = False,
+) -> StorageSettings:
+    """Create StorageSettings for S3 backend."""
+    return StorageSettings(
+        file_store="s3",
+        aws_s3_bucket=bucket_name,
+        aws_s3_endpoint=endpoint,
+        aws_s3_secure=secure,
+        aws_s3_auto_create_bucket=auto_create_bucket,
+    )
 
 
 class TestS3FileStore:
     """Unit tests for S3FileStore using mocks."""
 
-    def test_init_with_bucket_name(self):
-        """Initialize with explicit bucket name."""
+    def test_init_with_settings(self):
+        """Initialize with StorageSettings."""
+        settings = make_s3_settings(bucket_name="test-bucket")
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             assert store.bucket_name == "test-bucket"
 
-    def test_init_from_env_var(self):
-        """Initialize with bucket name from environment variable."""
-        with patch.dict(os.environ, {"AWS_S3_BUCKET": "env-bucket"}):
-            with patch("automation.storage.s3.boto3"):
-                store = S3FileStore()
-                assert store.bucket_name == "env-bucket"
-
     def test_init_raises_without_bucket_name(self):
-        """Raise error when no bucket name provided."""
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("AWS_S3_BUCKET", None)
-            with pytest.raises(ValueError, match="Bucket name must be provided"):
-                S3FileStore()
+        """Raise error when no bucket name provided in settings."""
+        # StorageSettings validation should catch this
+        with pytest.raises(ValueError, match="AWS_S3_BUCKET is required"):
+            StorageSettings(file_store="s3", aws_s3_bucket=None)
 
     def test_prefixed_path(self):
         """Paths are prefixed with automation/."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             assert store._prefixed_path("test/path.txt") == "automation/test/path.txt"
             assert store._prefixed_path("/test/path.txt") == "automation/test/path.txt"
 
     def test_write_string(self):
         """Write string content to storage with automation prefix."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             store.write("test/path.txt", "hello world")
 
             mock_client.put_object.assert_called_once_with(
@@ -65,11 +76,12 @@ class TestS3FileStore:
 
     def test_write_bytes(self):
         """Write bytes content to storage with automation prefix."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             store.write("test/path.bin", b"binary data")
 
             mock_client.put_object.assert_called_once_with(
@@ -81,6 +93,7 @@ class TestS3FileStore:
 
     def test_read_returns_bytes(self):
         """Read returns bytes content."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_body = MagicMock()
@@ -88,7 +101,7 @@ class TestS3FileStore:
             mock_client.get_object.return_value = {"Body": mock_body}
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store.read("test/path.txt")
 
             assert result == b"file content"
@@ -98,6 +111,7 @@ class TestS3FileStore:
 
     def test_read_not_found(self):
         """Read raises FileNotFoundError when key doesn't exist."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             error_response = {"Error": {"Code": "NoSuchKey"}}
@@ -106,12 +120,13 @@ class TestS3FileStore:
             )
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             with pytest.raises(FileNotFoundError, match="File not found"):
                 store.read("test/nonexistent.txt")
 
     def test_list(self):
         """List files under a prefix, with automation prefix added and stripped."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_client.list_objects_v2.return_value = {
@@ -122,7 +137,7 @@ class TestS3FileStore:
             }
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store.list("users/")
 
             assert result == ["users/file1.txt", "users/file2.txt"]
@@ -132,23 +147,25 @@ class TestS3FileStore:
 
     def test_list_empty(self):
         """List returns empty list when no files match."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_client.list_objects_v2.return_value = {}
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store.list("empty/")
 
             assert result == []
 
     def test_delete(self):
         """Delete a file from storage with automation prefix."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             store.delete("test/path.txt")
 
             mock_client.head_object.assert_called_once_with(
@@ -160,6 +177,7 @@ class TestS3FileStore:
 
     def test_delete_not_found(self):
         """Delete raises FileNotFoundError when key doesn't exist."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             error_response = {"Error": {"Code": "404"}}
@@ -168,88 +186,91 @@ class TestS3FileStore:
             )
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             with pytest.raises(FileNotFoundError, match="File not found"):
                 store.delete("test/nonexistent.txt")
 
     def test_endpoint_creates_bucket_when_auto_create_enabled(self):
-        """Bucket is created when AWS_S3_AUTO_CREATE_BUCKET=true."""
-        env = {
-            "AWS_S3_ENDPOINT": "http://localhost:9000",
-            "AWS_S3_SECURE": "false",
-            "AWS_S3_AUTO_CREATE_BUCKET": "true",
-        }
-        with patch.dict(os.environ, env):
-            with patch("automation.storage.s3.boto3") as mock_boto3:
-                mock_client = MagicMock()
-                error_response = {"Error": {"Code": "404"}}
-                mock_client.head_bucket.side_effect = botocore.exceptions.ClientError(
-                    error_response, "HeadBucket"
-                )
-                mock_boto3.client.return_value = mock_client
+        """Bucket is created when auto_create_bucket=True in settings."""
+        settings = make_s3_settings(
+            endpoint="http://localhost:9000",
+            secure=False,
+            auto_create_bucket=True,
+        )
+        with patch("automation.storage.s3.boto3") as mock_boto3:
+            mock_client = MagicMock()
+            error_response = {"Error": {"Code": "404"}}
+            mock_client.head_bucket.side_effect = botocore.exceptions.ClientError(
+                error_response, "HeadBucket"
+            )
+            mock_boto3.client.return_value = mock_client
 
-                S3FileStore(bucket_name="test-bucket")
+            S3FileStore(settings)
 
-                mock_client.create_bucket.assert_called_once_with(Bucket="test-bucket")
+            mock_client.create_bucket.assert_called_once_with(Bucket="test-bucket")
 
     def test_endpoint_no_bucket_creation_by_default(self):
-        """Bucket is NOT created when AWS_S3_AUTO_CREATE_BUCKET is not set."""
-        env = {
-            "AWS_S3_ENDPOINT": "http://localhost:9000",
-            "AWS_S3_SECURE": "false",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            # Ensure auto-create is not set
-            os.environ.pop("AWS_S3_AUTO_CREATE_BUCKET", None)
-            with patch("automation.storage.s3.boto3") as mock_boto3:
-                mock_client = MagicMock()
-                mock_boto3.client.return_value = mock_client
+        """Bucket is NOT created when auto_create_bucket=False (default)."""
+        settings = make_s3_settings(
+            endpoint="http://localhost:9000",
+            secure=False,
+            auto_create_bucket=False,
+        )
+        with patch("automation.storage.s3.boto3") as mock_boto3:
+            mock_client = MagicMock()
+            mock_boto3.client.return_value = mock_client
 
-                S3FileStore(bucket_name="test-bucket")
+            S3FileStore(settings)
 
-                # head_bucket and create_bucket should NOT be called
-                mock_client.head_bucket.assert_not_called()
-                mock_client.create_bucket.assert_not_called()
+            # head_bucket and create_bucket should NOT be called
+            mock_client.head_bucket.assert_not_called()
+            mock_client.create_bucket.assert_not_called()
 
     def test_validate_endpoint_scheme_adds_https(self):
         """URL without scheme gets https:// added when secure=True."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store._validate_endpoint_scheme(True, "example.com")
             assert result == "https://example.com"
 
     def test_validate_endpoint_scheme_adds_http(self):
         """URL without scheme gets http:// added when secure=False."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store._validate_endpoint_scheme(False, "example.com")
             assert result == "http://example.com"
 
     def test_validate_endpoint_scheme_accepts_matching_https(self):
         """HTTPS URL is accepted when secure=True."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store._validate_endpoint_scheme(True, "https://example.com")
             assert result == "https://example.com"
 
     def test_validate_endpoint_scheme_accepts_matching_http(self):
         """HTTP URL is accepted when secure=False."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             result = store._validate_endpoint_scheme(False, "http://example.com")
             assert result == "http://example.com"
 
     def test_validate_endpoint_scheme_rejects_http_when_secure(self):
         """HTTP URL raises error when secure=True."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             with pytest.raises(ValueError, match="conflicts with AWS_S3_SECURE=true"):
                 store._validate_endpoint_scheme(True, "http://example.com")
 
     def test_validate_endpoint_scheme_rejects_https_when_insecure(self):
         """HTTPS URL raises error when secure=False."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3"):
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
             with pytest.raises(ValueError, match="conflicts with AWS_S3_SECURE=false"):
                 store._validate_endpoint_scheme(False, "https://example.com")
 
@@ -264,11 +285,12 @@ class TestS3FileStoreWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_success(self):
         """Stream upload completes successfully."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
 
             async def mock_stream():
                 yield b"chunk1"
@@ -293,11 +315,12 @@ class TestS3FileStoreWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_exceeds_limit(self):
         """Stream upload raises FileSizeLimitExceeded when limit exceeded."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
 
             async def large_stream():
                 yield b"a" * 500
@@ -319,11 +342,12 @@ class TestS3FileStoreWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_default_limit(self):
         """Stream upload uses default 100MB limit when max_size=None."""
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
 
             async def mock_stream():
                 for i in range(10):
@@ -342,12 +366,12 @@ class TestS3FileStoreWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_default_limit_exceeded(self):
         """Stream upload enforces default 100MB limit."""
-
+        settings = make_s3_settings()
         with patch("automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
             mock_boto3.client.return_value = mock_client
 
-            store = S3FileStore(bucket_name="test-bucket")
+            store = S3FileStore(settings)
 
             # Temporarily lower the default for testing
             import automation.storage.s3 as s3_module

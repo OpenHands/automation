@@ -1,27 +1,71 @@
-"""Constants for the automation service."""
+"""Protocol constants for the automation service.
 
-from datetime import timedelta
+This module contains ONLY values that are baked into the system design and
+CANNOT be safely changed without breaking compatibility. These are NOT
+tunable operational parameters.
 
+For tunable settings (timeouts, limits, batch sizes), see config.py which
+exposes them as environment variables for Helm chart configuration.
 
-# Maximum allowed timeout for automation runs (10 minutes)
-# Used for:
-# - Validation in API requests (timeout field)
-# - Default timeout passed to sandbox execution
-# - Watchdog staleness detection
-MAX_RUN_DURATION = timedelta(minutes=10)
-MAX_RUN_DURATION_SECONDS = int(MAX_RUN_DURATION.total_seconds())
+WARNING: Changing any value here requires careful analysis of:
+- Database migrations (if stored in DB)
+- API compatibility (if exposed to clients)
+- Sandbox conventions (if expected by SDK/runtime)
+"""
 
-# Sandbox execution constants
-SANDBOX_POLL_INTERVAL = 5  # seconds between status checks
-SANDBOX_READY_TIMEOUT = 300  # max wait for sandbox to become ready
-WORK_DIR = "/workspace/project"  # Agent's working directory; repos cloned here too
+# ---------------------------------------------------------------------------
+# Sandbox protocol conventions
+# ---------------------------------------------------------------------------
+
+# Agent's working directory inside the sandbox. This path is:
+# - Expected by the OpenHands SDK
+# - Used by clone_repos() for repository placement
+# - Referenced in automation scripts (sdk_main.py)
+# DO NOT CHANGE: Would break all existing automations and SDK integration.
+WORK_DIR = "/workspace/project"
+
+# Path where tarballs are extracted inside the sandbox. This is:
+# - Written by the sandbox initialization script
+# - Read by the automation entrypoint
+# DO NOT CHANGE: Would break tarball extraction in running sandboxes.
 TARBALL_PATH = "/tmp/automation.tar.gz"
 
-# Limits for external tarball downloads (in sandbox)
-EXTERNAL_DOWNLOAD_TIMEOUT = 120  # seconds
-EXTERNAL_MAX_FILESIZE = 100 * 1024 * 1024  # 100 MB
 
-# Rate limit retry settings
-RATE_LIMIT_MIN_WAIT = 10  # initial wait after a 429
-RATE_LIMIT_MAX_WAIT = 60  # max wait between retries
-RATE_LIMIT_MAX_RETRIES = 5
+# ---------------------------------------------------------------------------
+# Backward compatibility aliases (DEPRECATED)
+# ---------------------------------------------------------------------------
+# These previously lived here but are now configurable via config.py.
+# Kept as imports for backward compatibility with code that references them.
+# TODO: Remove after migrating all consumers to use config.
+
+
+def __getattr__(name: str):
+    """Lazy attribute access for deprecated constants."""
+    # Import here to avoid circular import at module load time
+    from automation.config import get_config
+
+    config = get_config()
+
+    # Map old constant names to new config paths
+    deprecated_map = {
+        "MAX_RUN_DURATION_SECONDS": lambda: config.sandbox.max_run_duration,
+        "SANDBOX_POLL_INTERVAL": lambda: config.sandbox.sandbox_poll_interval,
+        "SANDBOX_READY_TIMEOUT": lambda: config.sandbox.sandbox_ready_timeout,
+        "EXTERNAL_DOWNLOAD_TIMEOUT": lambda: config.sandbox.external_download_timeout,
+        "EXTERNAL_MAX_FILESIZE": lambda: config.sandbox.external_max_filesize,
+        "RATE_LIMIT_MIN_WAIT": lambda: config.sandbox.rate_limit_min_wait,
+        "RATE_LIMIT_MAX_WAIT": lambda: config.sandbox.rate_limit_max_wait,
+        "RATE_LIMIT_MAX_RETRIES": lambda: config.sandbox.rate_limit_max_retries,
+    }
+
+    if name in deprecated_map:
+        import warnings
+
+        msg = (
+            f"constants.{name} is deprecated. "
+            f"Use get_config().sandbox.{name.lower()} instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return deprecated_map[name]()
+
+    raise AttributeError(f"module 'automation.constants' has no attribute {name!r}")

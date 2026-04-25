@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
-from automation.constants import MAX_RUN_DURATION_SECONDS
+from automation.config import get_config
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -283,10 +283,9 @@ class CreateAutomationRequest(BaseModel):
             return v
         if v <= 0:
             raise ValueError("timeout must be a positive number")
-        if v > MAX_RUN_DURATION_SECONDS:
-            raise ValueError(
-                f"timeout must not exceed {MAX_RUN_DURATION_SECONDS} seconds"
-            )
+        max_duration = get_config().sandbox.max_run_duration
+        if v > max_duration:
+            raise ValueError(f"timeout must not exceed {max_duration} seconds")
         return v
 
 
@@ -332,10 +331,9 @@ class UpdateAutomationRequest(BaseModel):
             return v
         if v <= 0:
             raise ValueError("timeout must be a positive number")
-        if v > MAX_RUN_DURATION_SECONDS:
-            raise ValueError(
-                f"timeout must not exceed {MAX_RUN_DURATION_SECONDS} seconds"
-            )
+        max_duration = get_config().sandbox.max_run_duration
+        if v > max_duration:
+            raise ValueError(f"timeout must not exceed {max_duration} seconds")
         return v
 
 

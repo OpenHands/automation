@@ -2,7 +2,7 @@
 
 Follows the same JSON structured-logging convention used by data_platform/logger.py:
 - JSON output via python-json-logger for production / Google Cloud
-- Configurable via environment variables (LOG_JSON, LOG_LEVEL, DEBUG)
+- Configurable via LogSettings in automation/config.py
 - ``severity`` field for GCP Cloud Logging compatibility
 """
 
@@ -16,20 +16,21 @@ from typing import TextIO
 
 from pythonjsonlogger.json import JsonFormatter
 
+from automation.config import get_log_settings
 
-LOG_JSON = os.getenv("LOG_JSON", "1") == "1"
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-AUTOMATION_LOG_LEVEL = os.getenv("AUTOMATION_LOG_LEVEL", LOG_LEVEL).upper()
-DEBUG = os.getenv("DEBUG", "False").lower() in ["true", "1", "yes"]
-if DEBUG:
-    LOG_LEVEL = "DEBUG"
-    AUTOMATION_LOG_LEVEL = "DEBUG"
+
+# Load settings once at module level
+_log_settings = get_log_settings()
+
+LOG_JSON = _log_settings.log_json
+LOG_LEVEL = _log_settings.log_level.upper()
+AUTOMATION_LOG_LEVEL = _log_settings.automation_log_level.upper()  # type: ignore[union-attr]
 
 FILE_PREFIX = 'File "'
 CWD_PREFIX = FILE_PREFIX + str(Path(os.getcwd()).parent) + "/"
 _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
 SITE_PACKAGES_PREFIX = CWD_PREFIX + f".venv/lib/python{_pyver}/site-packages/"
-LOG_JSON_FOR_CONSOLE = int(os.getenv("LOG_JSON_FOR_CONSOLE", "0"))
+LOG_JSON_FOR_CONSOLE = _log_settings.log_json_for_console
 
 
 def format_stack(stack: str) -> list[str]:

@@ -26,26 +26,29 @@ from tenacity import (
     wait_exponential,
 )
 
-from automation.config import get_settings
+from automation.config import get_config
 
 
 logger = logging.getLogger("automation.auth")
 
-# Cache TTL in seconds
-AUTH_CACHE_TTL_SECONDS = 20.0
-
-# In-memory cache for authenticated users with 20 second TTL
-_auth_cache: TTLCache[str, "AuthenticatedUser"] = TTLCache(
-    maxsize=1024, ttl=AUTH_CACHE_TTL_SECONDS
-)
-
-# Default timeout for HTTP client
-HTTP_CLIENT_TIMEOUT = 10.0
-
 # Retry configuration for rate limiting
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
-MAX_BACKOFF_SECONDS = 10.0
+
+# Auth cache - initialized lazily to use config values
+_auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
+
+
+def _get_auth_cache() -> TTLCache[str, "AuthenticatedUser"]:
+    """Get or create the auth cache with config-based settings."""
+    global _auth_cache
+    if _auth_cache is None:
+        http_config = get_config().http
+        _auth_cache = TTLCache(
+            maxsize=http_config.auth_cache_size,
+            ttl=http_config.auth_cache_ttl,
+        )
+    return _auth_cache
 
 
 class AuthMethod(StrEnum):
@@ -57,7 +60,7 @@ class AuthMethod(StrEnum):
 
 def create_http_client() -> httpx.AsyncClient:
     """Create a new httpx client for auth requests."""
-    return httpx.AsyncClient(timeout=HTTP_CLIENT_TIMEOUT)
+    return httpx.AsyncClient(timeout=get_config().http.http_timeout)
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient:
@@ -88,7 +91,7 @@ class AuthenticatedUser:
 
 def clear_auth_cache() -> None:
     """Clear all cached authentication data. Useful for testing."""
-    _auth_cache.clear()
+    _get_auth_cache().clear()
 
 
 def _credential_cache_key(credential: str) -> str:
@@ -114,16 +117,26 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
     return retry_state.outcome.result()
 
 
-@retry(
-    retry=retry_if_result(_is_rate_limited),
-    stop=stop_after_attempt(MAX_RETRIES + 1),
-    wait=wait_exponential(
-        multiplier=INITIAL_BACKOFF_SECONDS,
-        max=MAX_BACKOFF_SECONDS,
-    ),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    retry_error_callback=_return_last_response,
-)
+def _get_auth_retry_decorator():
+    """Build retry decorator with current config values."""
+    http_config = get_config().http
+    return retry(
+        retry=retry_if_result(_is_rate_limited),
+        stop=stop_after_attempt(MAX_RETRIES + 1),
+        wait=wait_exponential(
+            multiplier=INITIAL_BACKOFF_SECONDS,
+            max=http_config.max_backoff,
+        ),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        retry_error_callback=_return_last_response,
+    )
+
+
+# Module-level decorator (uses config at import time)
+_auth_retry = _get_auth_retry_decorator()
+
+
+@_auth_retry
 async def _make_auth_request_with_retry(
     client: httpx.AsyncClient,
     url: str,
@@ -212,7 +225,8 @@ async def authenticate_request(
 
     # Check cache first
     cache_key = _credential_cache_key(credential)
-    cached_user = _auth_cache.get(cache_key)
+    auth_cache = _get_auth_cache()
+    cached_user = auth_cache.get(cache_key)
     if cached_user is not None:
         logger.debug("Auth cache hit for user %s", cached_user.user_id)
         return cached_user
@@ -220,7 +234,7 @@ async def authenticate_request(
     logger.debug("Auth cache miss, validating with OpenHands API")
 
     # Build outbound headers based on auth method
-    settings = get_settings()
+    settings = get_config().service
     if auth_method == AuthMethod.API_KEY:
         outbound_headers = {"Authorization": f"Bearer {credential}"}
     else:
@@ -294,5 +308,5 @@ async def authenticate_request(
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
     )
-    _auth_cache[cache_key] = user
+    auth_cache[cache_key] = user
     return user

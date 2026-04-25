@@ -7,7 +7,7 @@ from datetime import timedelta
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from automation.constants import MAX_RUN_DURATION
+from automation.config import get_config
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils.time import utcnow
 
@@ -119,7 +119,7 @@ async def mark_run_status(
     run: AutomationRun,
     status: AutomationRunStatus,
     error_detail: str | None = None,
-    max_duration: timedelta = MAX_RUN_DURATION,
+    max_duration: timedelta | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -134,6 +134,9 @@ async def mark_run_status(
         error_detail: Optional error message (only used for FAILED status)
         max_duration: Maximum run duration for computing timeout_at
     """
+    if max_duration is None:
+        max_duration = timedelta(seconds=get_config().sandbox.max_run_duration)
+
     now = utcnow()
 
     values: dict = {"status": status}

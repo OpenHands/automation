@@ -1,10 +1,16 @@
-import os
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from google.cloud import storage
 from google.cloud.exceptions import NotFound
 
 from automation.storage.file_store import FileStore
+
+
+if TYPE_CHECKING:
+    from automation.config import StorageSettings
 
 
 class FileSizeLimitExceeded(Exception):
@@ -27,26 +33,24 @@ class GoogleCloudFileStore(FileStore):
     Google Cloud Storage file store implementation.
 
     Supports both real GCS and fake-gcs-server emulator.
-    When STORAGE_EMULATOR_HOST environment variable is set, the client
+    When STORAGE_EMULATOR_HOST is set in StorageSettings, the client
     automatically connects to the emulator instead of real GCS.
 
     All files are stored under the "automation/" prefix in the bucket
     to isolate automation service data from other services.
     """
 
-    def __init__(self, bucket_name: str | None = None):
+    def __init__(self, settings: StorageSettings):
         """
         Initialize the Google Cloud file store.
 
         Args:
-            bucket_name: GCS bucket name. If not provided, reads from
-                         GCS_BUCKET_NAME environment variable.
+            settings: StorageSettings instance with GCS configuration.
         """
-        self.bucket_name = bucket_name or os.environ.get("GCS_BUCKET_NAME")
+        self.bucket_name = settings.gcs_bucket_name
+        # This should already be validated by StorageSettings, but defensive check
         if not self.bucket_name:
-            raise ValueError(
-                "Bucket name must be provided or GCS_BUCKET_NAME env var must be set"
-            )
+            raise ValueError("GCS_BUCKET_NAME is required for GCS backend")
 
         # Initialize client and bucket eagerly
         # When STORAGE_EMULATOR_HOST is set, the client automatically
@@ -55,7 +59,7 @@ class GoogleCloudFileStore(FileStore):
         self.bucket = self.client.bucket(self.bucket_name)
 
         # For emulator: ensure bucket exists
-        if os.environ.get("STORAGE_EMULATOR_HOST"):
+        if settings.storage_emulator_host:
             self._ensure_bucket_exists()
 
     def _prefixed_path(self, path: str) -> str:

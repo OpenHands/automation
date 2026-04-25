@@ -20,8 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from automation.config import Settings
-from automation.constants import MAX_RUN_DURATION, MAX_RUN_DURATION_SECONDS
+from automation.config import ServiceSettings, get_config
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
@@ -52,10 +51,6 @@ def _run_extra(
     if sandbox_id:
         extra["sandbox_id"] = sandbox_id
     return extra
-
-
-DEFAULT_BATCH_SIZE = 10
-POLL_INTERVAL_SECONDS = 30
 
 
 async def _download_internal_tarball(
@@ -111,7 +106,7 @@ async def _poll_pending_runs(
 
 async def _execute_run(
     run: AutomationRun,
-    settings: Settings,
+    settings: ServiceSettings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Execute a single run in a background task (fire-and-forget).
@@ -186,10 +181,11 @@ async def _execute_run(
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default
+        max_run_duration = get_config().sandbox.max_run_duration
         if automation.timeout is not None:
-            effective_timeout = min(automation.timeout, MAX_RUN_DURATION_SECONDS)
+            effective_timeout = min(automation.timeout, max_run_duration)
         else:
-            effective_timeout = MAX_RUN_DURATION_SECONDS
+            effective_timeout = max_run_duration
 
         # 5. Dispatch to sandbox (fire-and-forget)
         result = await dispatch_automation(
@@ -250,14 +246,19 @@ async def _execute_run(
 
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    settings: ServiceSettings,
+    batch_size: int | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
     Each run is dispatched as an ``asyncio.create_task`` so the
     dispatcher loop is not blocked by long-running automations.
     """
+    config = get_config()
+    if batch_size is None:
+        batch_size = config.service.dispatcher_batch_size
+    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
 
@@ -269,13 +270,16 @@ async def dispatch_pending_runs(
             try:
                 logger.info("Dispatching automation run", extra=extra)
                 # Use automation's custom timeout if set, otherwise use default
-                max_duration = (
+                run_max_duration = (
                     timedelta(seconds=run.automation.timeout)
                     if run.automation and run.automation.timeout
-                    else MAX_RUN_DURATION
+                    else max_run_duration
                 )
                 await mark_run_status(
-                    session, run, AutomationRunStatus.RUNNING, max_duration=max_duration
+                    session,
+                    run,
+                    AutomationRunStatus.RUNNING,
+                    max_duration=run_max_duration,
                 )
                 dispatched_runs.append(run)
             except Exception:
@@ -294,7 +298,7 @@ async def dispatch_pending_runs(
 
 async def _execute_run_safe(
     run: AutomationRun,
-    settings: Settings,
+    settings: ServiceSettings,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Wrapper around ``_execute_run`` that never lets exceptions escape.
@@ -317,12 +321,18 @@ async def _execute_run_safe(
 
 async def dispatcher_loop(
     session_factory: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    interval_seconds: int = POLL_INTERVAL_SECONDS,
+    settings: ServiceSettings,
+    interval_seconds: int | None = None,
     shutdown_event: asyncio.Event | None = None,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> None:
     """Main dispatcher loop — polls for pending runs and dispatches them."""
+    config = get_config()
+    if interval_seconds is None:
+        interval_seconds = config.service.dispatcher_interval_seconds
+    if batch_size is None:
+        batch_size = config.service.dispatcher_batch_size
+
     logger.info(
         "Dispatcher started, polling every %d seconds (batch_size=%d)",
         interval_seconds,

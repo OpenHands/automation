@@ -21,18 +21,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from automation.constants import (
-    EXTERNAL_DOWNLOAD_TIMEOUT,
-    EXTERNAL_MAX_FILESIZE,
-    MAX_RUN_DURATION_SECONDS,
-    RATE_LIMIT_MAX_RETRIES,
-    RATE_LIMIT_MAX_WAIT,
-    RATE_LIMIT_MIN_WAIT,
-    SANDBOX_POLL_INTERVAL,
-    SANDBOX_READY_TIMEOUT,
-    TARBALL_PATH,
-    WORK_DIR,
-)
+from automation.config import get_config
+from automation.constants import TARBALL_PATH, WORK_DIR
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.utils.sandbox import delete_sandbox
 
@@ -59,14 +49,24 @@ def _log_extra(
     return extra
 
 
-# Tenacity retry decorator for rate limit handling
-_retry_on_rate_limit = retry(
-    retry=retry_if_exception(_is_rate_limit_error),
-    stop=stop_after_attempt(RATE_LIMIT_MAX_RETRIES),
-    wait=wait_exponential(min=RATE_LIMIT_MIN_WAIT, max=RATE_LIMIT_MAX_WAIT),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
+def _get_retry_on_rate_limit():
+    """Build tenacity retry decorator with current config values."""
+    sandbox_config = get_config().sandbox
+    return retry(
+        retry=retry_if_exception(_is_rate_limit_error),
+        stop=stop_after_attempt(sandbox_config.rate_limit_max_retries),
+        wait=wait_exponential(
+            min=sandbox_config.rate_limit_min_wait,
+            max=sandbox_config.rate_limit_max_wait,
+        ),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+
+
+# Module-level decorator for backward compatibility.
+# Note: Uses config values at import time.
+_retry_on_rate_limit = _get_retry_on_rate_limit()
 
 
 def build_tarball(files: dict[str, str | bytes]) -> bytes:
@@ -123,13 +123,18 @@ async def _create_and_wait(
     client: httpx.AsyncClient,
     api_url: str,
     api_key: str,
-    ready_timeout: float = SANDBOX_READY_TIMEOUT,
+    ready_timeout: float | None = None,
 ) -> tuple[str, str, str]:
     """Create a sandbox and poll until RUNNING.
 
     Returns ``(sandbox_id, session_api_key, agent_server_url)``.
     Handles 429 rate limits via tenacity retry.
     """
+    sandbox_config = get_config().sandbox
+    if ready_timeout is None:
+        ready_timeout = sandbox_config.sandbox_ready_timeout
+    poll_interval = sandbox_config.sandbox_poll_interval
+
     headers = {"Authorization": f"Bearer {api_key}"}
 
     sandbox_id = await _create_sandbox(client, api_url, headers)
@@ -157,8 +162,8 @@ async def _create_and_wait(
                 error_detail += f", error_message={error_message}"
             raise RuntimeError(f"Sandbox {sandbox_id} failed: {error_detail}")
 
-        await asyncio.sleep(SANDBOX_POLL_INTERVAL)
-        elapsed += SANDBOX_POLL_INTERVAL
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
 
     raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
 
@@ -188,9 +193,11 @@ async def _bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
     resp = await client.post(
         f"{agent_url}/api/bash/execute_bash_command",
         json={"command": command, "timeout": timeout},
@@ -207,14 +214,17 @@ async def _start_bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_timeout
     resp = await client.post(
         f"{agent_url}/api/bash/start_bash_command",
         json={"command": command, "timeout": timeout},
         headers={"X-Session-API-Key": session_key},
-        timeout=30.0,
+        timeout=http_timeout,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -245,8 +255,8 @@ async def _download_in_sandbox(
     session_key: str,
     tarball_url: str,
     dest: str,
-    timeout: int = EXTERNAL_DOWNLOAD_TIMEOUT,
-    max_filesize: int = EXTERNAL_MAX_FILESIZE,
+    timeout: int | None = None,
+    max_filesize: int | None = None,
 ) -> None:
     """Download a tarball directly inside the sandbox using curl.
 
@@ -258,6 +268,12 @@ async def _download_in_sandbox(
             This indicates the URL is wrong or inaccessible.
         RuntimeError: For other download failures (transient).
     """
+    sandbox_config = get_config().sandbox
+    if timeout is None:
+        timeout = sandbox_config.external_download_timeout
+    if max_filesize is None:
+        max_filesize = sandbox_config.external_max_filesize
+
     # Use curl with safety limits:
     # -f: fail silently on HTTP errors (returns exit code 22)
     # -s: silent mode (no progress)
@@ -312,7 +328,7 @@ async def dispatch_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
     callback_url: str | None = None,
     run_id: str | None = None,
 ) -> DispatchResult:
@@ -337,6 +353,10 @@ async def dispatch_automation(
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
     """
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_long_timeout
+
     env_vars = dict(env_vars) if env_vars else {}
     if callback_url:
         env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
@@ -351,7 +371,7 @@ async def dispatch_automation(
 
     logger.info("Dispatching automation to sandbox", extra=log_extra())
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
         try:
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key
@@ -446,7 +466,7 @@ async def run_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
     callback_url: str | None = None,
     run_id: str | None = None,
     keep_sandbox: bool = False,
@@ -473,6 +493,10 @@ async def run_automation(
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
     """
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_long_timeout
+
     env_vars = dict(env_vars) if env_vars else {}
     if callback_url:
         env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
@@ -487,7 +511,7 @@ async def run_automation(
 
     logger.info("Starting automation execution", extra=log_extra())
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
         try:
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key

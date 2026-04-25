@@ -11,7 +11,6 @@ from httpx import ASGITransport, AsyncClient
 
 from automation.app import app
 from automation.auth import (
-    AUTH_CACHE_TTL_SECONDS,
     AuthenticatedUser,
     AuthMethod,
     _make_auth_request_with_retry,
@@ -19,6 +18,7 @@ from automation.auth import (
     clear_auth_cache,
     require_permission,
 )
+from automation.config import get_config
 from automation.db import get_session
 
 
@@ -555,7 +555,7 @@ class TestAuthCache:
 
     def test_cache_ttl_is_20_seconds(self):
         """Verify the cache TTL is set to 20 seconds."""
-        assert AUTH_CACHE_TTL_SECONDS == 20.0
+        assert get_config().http.auth_cache_ttl == 20.0
 
 
 class TestRetryMechanism:
