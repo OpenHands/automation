@@ -96,8 +96,7 @@ def upgrade() -> None:
     # compression attempt that EXTENDED (the default) would perform.
     # EXTERNAL = store out-of-line without compression.
     op.execute(
-        "ALTER TABLE automation_kv "
-        "ALTER COLUMN value_encrypted SET STORAGE EXTERNAL"
+        "ALTER TABLE automation_kv ALTER COLUMN value_encrypted SET STORAGE EXTERNAL"
     )
 
     # Add schema-level documentation for the table and key columns.

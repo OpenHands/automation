@@ -30,7 +30,6 @@ from automation.kv_helpers import (
     require_dict,
     require_int,
     require_list,
-    require_numeric,
     safe_decrypt,
     safe_encrypt,
     set_nested_value,

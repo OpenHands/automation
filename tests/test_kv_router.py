@@ -931,7 +931,6 @@ class TestValueSizeLimit:
         assert "exceeds limit" in response.json()["detail"]
 
 
-
 class TestJSONValidation:
     """Tests for strict JSON validation.
 
@@ -973,11 +972,13 @@ class TestJSONValidation:
 
     async def test_deeply_nested_rejected(self, kv_client):
         """Deeply nested structures exceeding max depth are rejected."""
+        from typing import Any
+
         from automation.utils.kv import KVValueError, _validate_json_value
 
         # Create a structure deeper than _MAX_NESTING_DEPTH (32)
-        deep = {"level": 0}
-        current = deep
+        deep: dict[str, Any] = {"level": 0}
+        current: dict[str, Any] = deep
         for i in range(35):
             current["nested"] = {"level": i + 1}
             current = current["nested"]
@@ -988,11 +989,13 @@ class TestJSONValidation:
 
     async def test_valid_nested_accepted(self, kv_client):
         """Reasonably nested structures are accepted."""
+        from typing import Any
+
         from automation.utils.kv import _validate_json_value
 
         # Create a structure within limits (10 levels)
-        nested = {"level": 0}
-        current = nested
+        nested: dict[str, Any] = {"level": 0}
+        current: dict[str, Any] = nested
         for i in range(10):
             current["nested"] = {"level": i + 1}
             current = current["nested"]

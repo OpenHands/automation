@@ -63,10 +63,8 @@ def validate_key(key: str) -> str:
         )
 
     if len(key) > _MAX_KEY_LENGTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid_key: key exceeds {_MAX_KEY_LENGTH} characters ({len(key)} given)",
-        )
+        msg = f"invalid_key: key exceeds {_MAX_KEY_LENGTH} chars ({len(key)} given)"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
 
     # Check for control characters (ASCII 0-31 and 127)
     # These can cause issues in logging, URLs, and debugging
@@ -76,7 +74,7 @@ def validate_key(key: str) -> str:
             char_repr = f"\\x{code:02x}" if code < 32 else "\\x7f"
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"invalid_key: key contains control character {char_repr} at position {i}",
+                detail=f"invalid_key: control character {char_repr} at position {i}",
             )
 
     return key
@@ -250,7 +248,7 @@ def require_int(value: Any) -> int:
         if isinstance(value, float):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="type_mismatch: value is float, not integer (use integer for incr/decr)",
+                detail="type_mismatch: value is float, not integer (integer required)",
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
