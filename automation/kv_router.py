@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -369,6 +369,7 @@ async def get_value(
 async def set_value(
     key: str,
     body: Annotated[Any, Body()],  # Accept any JSON body directly as the value
+    response: Response,
     nx: bool = Query(default=False, description="Only set if key does not exist"),
     xx: bool = Query(default=False, description="Only set if key exists"),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
@@ -381,6 +382,11 @@ async def set_value(
     Query params:
     - nx=true: Only set if key does NOT exist (like Redis SETNX)
     - xx=true: Only set if key DOES exist
+
+    Returns:
+    - 200: Key updated (existing key)
+    - 201: Key created (new key, or nx=true success)
+    - 409: Conflict (nx=true but key exists, or xx=true but key doesn't exist)
     """
     settings = get_settings()
 
@@ -415,9 +421,12 @@ async def set_value(
         row = result.scalars().first()
 
         if row is None:
-            # Key already existed
+            # Key already existed - return 409 Conflict
+            response.status_code = status.HTTP_409_CONFLICT
             return KVConflictResponse(key=key, created=False, error="key_exists")
 
+        # Key was created - return 201 Created
+        response.status_code = status.HTTP_201_CREATED
         return KVSetResponse(
             key=key,
             value=body,
@@ -462,6 +471,10 @@ async def set_value(
 
     # Check if this was an insert or update by comparing timestamps
     created = row is not None and row.created_at == row.updated_at
+
+    # Return 201 for new keys, 200 for updates
+    if created:
+        response.status_code = status.HTTP_201_CREATED
 
     return KVSetResponse(
         key=key,
