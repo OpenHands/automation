@@ -1,8 +1,29 @@
 """FastAPI router for the automation KV store API.
 
 Provides a Redis-like key-value store scoped per-automation for state persistence.
-All values are encrypted at the application level using JWE.
+All values are encrypted at the application level using AES-256-GCM.
 Authentication is via per-run JWT tokens (AUTOMATION_KV_TOKEN).
+
+Single-Document Backend Design
+==============================
+
+While the API presents a multi-key interface (GET /kv/{key}, PUT /kv/{key}, etc.),
+the backend stores all state in a SINGLE encrypted JSON document per automation.
+
+    API "keys" → top-level fields in the state document
+
+Example:
+    PUT /kv/config   → state["config"] = value
+    PUT /kv/counter  → state["counter"] = value
+    GET /kv/config   → return state["config"]
+
+This design eliminates deadlock risk:
+- Only ONE row per automation to lock
+- All operations serialize through that single lock
+- No multi-key ordering issues possible
+
+Trade-off: Every operation reads/writes the entire state blob. This is acceptable
+because automation state is intended to be small and access is infrequent.
 """
 
 import logging
@@ -19,8 +40,7 @@ from fastapi import (
     Response,
     status,
 )
-from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
@@ -107,15 +127,15 @@ async def get_automation_id_from_token(
 ValidatedKey = Annotated[str, Depends(lambda key: validate_key(key))]
 
 
-def _check_value_size(value: Any, settings=None) -> None:
-    """Validate that a value doesn't exceed the configured size limit.
+def _check_state_size(state: dict[str, Any], settings=None) -> None:
+    """Validate that the entire state document doesn't exceed the configured size limit.
 
     Args:
-        value: The value to check (will be JSON-serialized to measure size)
+        state: The state dict to check (will be JSON-serialized to measure size)
         settings: Optional settings object (fetched if not provided)
 
     Raises:
-        HTTPException: 413 Payload Too Large if value exceeds limit
+        HTTPException: 413 Payload Too Large if state exceeds limit
     """
     import json
 
@@ -128,7 +148,7 @@ def _check_value_size(value: Any, settings=None) -> None:
 
     # Measure the JSON-serialized size (this is what gets encrypted/stored)
     try:
-        serialized = json.dumps(value)
+        serialized = json.dumps(state)
     except (TypeError, ValueError):
         # If we can't serialize it, the encrypt step will fail anyway
         return
@@ -137,43 +157,73 @@ def _check_value_size(value: Any, settings=None) -> None:
     if actual_size > max_size:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Value size ({actual_size} bytes) exceeds limit ({max_size} bytes)",
+            detail=f"State size ({actual_size} bytes) exceeds limit ({max_size} bytes)",
         )
 
 
 # --- Database Helpers ---
 
 
-async def _get_kv_row(
+async def _get_state_row(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    key: ValidatedKey,
 ) -> AutomationKV | None:
-    """Get a KV row by automation_id and key."""
+    """Get the state row for an automation (no lock)."""
     result = await session.execute(
-        select(AutomationKV).where(
-            AutomationKV.automation_id == automation_id,
-            AutomationKV.key == key,
-        )
+        select(AutomationKV).where(AutomationKV.automation_id == automation_id)
     )
     return result.scalars().first()
 
 
-async def _get_kv_row_for_update(
+async def _get_state_row_for_update(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    key: ValidatedKey,
 ) -> AutomationKV | None:
-    """Get a KV row with FOR UPDATE lock."""
+    """Get the state row with FOR UPDATE lock.
+
+    Since there's only ONE row per automation, this is the single lock point.
+    All concurrent operations on this automation's state will serialize here.
+    """
     result = await session.execute(
         select(AutomationKV)
-        .where(
-            AutomationKV.automation_id == automation_id,
-            AutomationKV.key == key,
-        )
+        .where(AutomationKV.automation_id == automation_id)
         .with_for_update()
     )
     return result.scalars().first()
+
+
+def _decrypt_state(secret: str, row: AutomationKV | None) -> dict[str, Any]:
+    """Decrypt the state document from a row, returning empty dict if no row."""
+    if row is None:
+        return {}
+    return safe_decrypt(secret, row.state_encrypted)
+
+
+async def _save_state(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    state: dict[str, Any],
+    secret: str,
+    existing_row: AutomationKV | None,
+) -> AutomationKV:
+    """Save the state document, creating or updating the row as needed."""
+    encrypted = safe_encrypt(secret, state)
+
+    if existing_row is None:
+        # Create new row
+        row = AutomationKV(
+            automation_id=automation_id,
+            state_encrypted=encrypted,
+        )
+        session.add(row)
+    else:
+        # Update existing row
+        existing_row.state_encrypted = encrypted
+        row = existing_row
+
+    await session.flush()
+    await session.refresh(row)
+    return row
 
 
 # --- Endpoints ---
@@ -185,10 +235,12 @@ async def list_keys(
     session: AsyncSession = Depends(get_session),
 ) -> KVListKeysResponse:
     """List all keys for this automation."""
-    result = await session.execute(
-        select(AutomationKV.key).where(AutomationKV.automation_id == automation_id)
-    )
-    keys = [row[0] for row in result.all()]
+    settings = get_settings()
+
+    row = await _get_state_row(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
+
+    keys = list(state.keys())
     return KVListKeysResponse(keys=keys, count=len(keys))
 
 
@@ -203,14 +255,16 @@ async def get_value(
     """Get a value by key, optionally at a nested path."""
     settings = get_settings()
 
-    kv = await _get_kv_row(session, automation_id, key)
-    if kv is None:
+    row = await _get_state_row(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
+
+    if key not in state:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="key_not_found",
         )
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
+    value = state[key]
 
     if path:
         try:
@@ -223,11 +277,16 @@ async def get_value(
         return KVKeyPathResponse(key=key, path=path, value=value)
 
     if meta:
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="key_not_found",
+            )
         return KVKeyMetaResponse(
             key=key,
             value=value,
-            created_at=kv.created_at.isoformat(),
-            updated_at=kv.updated_at.isoformat(),
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
         )
 
     return KVKeyResponse(key=key, value=value)
@@ -255,7 +314,7 @@ async def set_value(
     - 200: Key updated (existing key)
     - 201: Key created (new key, or nx=true success)
     - 409: Conflict (nx=true but key exists, or xx=true but key doesn't exist)
-    - 413: Payload too large (value exceeds size limit)
+    - 413: Payload too large (state exceeds size limit)
     """
     settings = get_settings()
 
@@ -265,79 +324,30 @@ async def set_value(
             detail="Cannot use both nx and xx",
         )
 
-    _check_value_size(body, settings)
+    # Lock the state row for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    encrypted = safe_encrypt(settings.kv_secret, body)
+    key_exists = key in state
 
-    if nx:
-        # SETNX: only set if key doesn't exist
-        stmt = (
-            pg_insert(AutomationKV)
-            .values(
-                automation_id=automation_id,
-                key=key,
-                value_encrypted=encrypted,
-            )
-            .on_conflict_do_nothing(index_elements=["automation_id", "key"])
-            .returning(AutomationKV)
-        )
-        result = await session.execute(stmt)
-        row = result.scalars().first()
+    if nx and key_exists:
+        response.status_code = status.HTTP_409_CONFLICT
+        return KVConflictResponse(key=key, created=False, error="key_exists")
 
-        if row is None:
-            # Key already existed - return 409 Conflict
-            response.status_code = status.HTTP_409_CONFLICT
-            return KVConflictResponse(key=key, created=False, error="key_exists")
-
-        # Key was created - return 201 Created
-        response.status_code = status.HTTP_201_CREATED
-        return KVSetResponse(
-            key=key,
-            value=body,
-            created=True,
-            updated_at=row.updated_at.isoformat(),
+    if xx and not key_exists:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="key_not_exists",
         )
 
-    if xx:
-        # Only set if key exists
-        kv = await _get_kv_row(session, automation_id, key)
-        if kv is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="key_not_exists",
-            )
-        kv.value_encrypted = encrypted
-        await session.flush()
-        await session.refresh(kv)
-        return KVSetResponse(
-            key=key,
-            value=body,
-            created=False,
-            updated_at=kv.updated_at.isoformat(),
-        )
+    # Update state
+    state[key] = body
+    _check_state_size(state, settings)
 
-    # Check if key exists first to determine insert vs update
-    existing = await _get_kv_row(session, automation_id, key)
-    created = existing is None
+    # Save
+    saved_row = await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    # Normal upsert - use func.now() to properly update the timestamp
-    stmt = (
-        pg_insert(AutomationKV)
-        .values(
-            automation_id=automation_id,
-            key=key,
-            value_encrypted=encrypted,
-        )
-        .on_conflict_do_update(
-            index_elements=["automation_id", "key"],
-            set_={"value_encrypted": encrypted, "updated_at": func.now()},
-        )
-        .returning(AutomationKV.updated_at)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-
-    # Return 201 for new keys, 200 for updates
+    created = not key_exists
     if created:
         response.status_code = status.HTTP_201_CREATED
 
@@ -345,7 +355,7 @@ async def set_value(
         key=key,
         value=body,
         created=created,
-        updated_at=row.updated_at.isoformat() if row else "",
+        updated_at=saved_row.updated_at.isoformat(),
     )
 
 
@@ -359,15 +369,17 @@ async def patch_value(
     """Update a nested path within an existing value."""
     settings = get_settings()
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
-    if kv is None:
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
+
+    if key not in state:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="key_not_found",
         )
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
+    value = state[key]
     require_dict(value)
 
     try:
@@ -378,13 +390,10 @@ async def patch_value(
             detail=f"invalid_path: {e}",
         )
 
-    # Check size of the updated value before encrypting
-    _check_value_size(value, settings)
+    state[key] = value
+    _check_state_size(state, settings)
 
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
-
-    await session.flush()
-    await session.refresh(kv)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
     return KVKeyPathResponse(
         key=key,
@@ -400,14 +409,27 @@ async def delete_key(
     session: AsyncSession = Depends(get_session),
 ) -> KVDeleteResponse:
     """Delete a key."""
-    result = await session.execute(
-        delete(AutomationKV).where(
-            AutomationKV.automation_id == automation_id,
-            AutomationKV.key == key,
-        )
-    )
-    deleted = result.rowcount > 0  # type: ignore[union-attr]
-    return KVDeleteResponse(key=key, deleted=deleted)
+    settings = get_settings()
+
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
+
+    if key not in state:
+        return KVDeleteResponse(key=key, deleted=False)
+
+    del state[key]
+
+    if row is not None:
+        if state:
+            # Still have other keys, update the row
+            await _save_state(session, automation_id, state, settings.kv_secret, row)
+        else:
+            # No keys left, delete the row entirely
+            await session.delete(row)
+            await session.flush()
+
+    return KVDeleteResponse(key=key, deleted=True)
 
 
 @router.post("/{key}/incr")
@@ -427,31 +449,23 @@ async def increment(
     settings = get_settings()
     by = body.by if body else 1
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         # Initialize with `by`
-        encrypted = safe_encrypt(settings.kv_secret, by)
+        state[key] = by
+        new_value = by
+    else:
+        value = state[key]
+        require_int(value)
+        new_value = value + by
+        state[key] = new_value
 
-        kv = AutomationKV(
-            automation_id=automation_id,
-            key=key,
-            value_encrypted=encrypted,
-        )
-        session.add(kv)
-        await session.flush()
-        return KVIncrResponse(key=key, value=by)
+    _check_state_size(state, settings)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
-    # Require integer, not just numeric - floats would lose precision with int()
-    require_int(value)
-
-    new_value = value + by
-
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
-
-    await session.flush()
     return KVIncrResponse(key=key, value=new_value)
 
 
@@ -472,31 +486,23 @@ async def decrement(
     settings = get_settings()
     by = body.by if body else 1
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         # Initialize with `-by`
-        encrypted = safe_encrypt(settings.kv_secret, -by)
+        state[key] = -by
+        new_value = -by
+    else:
+        value = state[key]
+        require_int(value)
+        new_value = value - by
+        state[key] = new_value
 
-        kv = AutomationKV(
-            automation_id=automation_id,
-            key=key,
-            value_encrypted=encrypted,
-        )
-        session.add(kv)
-        await session.flush()
-        return KVIncrResponse(key=key, value=-by)
+    _check_state_size(state, settings)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
-    # Require integer, not just numeric - floats would lose precision
-    require_int(value)
-
-    new_value = value - by
-
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
-
-    await session.flush()
     return KVIncrResponse(key=key, value=new_value)
 
 
@@ -513,34 +519,23 @@ async def lpush(
     """
     settings = get_settings()
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         # Initialize with single-element list
-        value = [body.value]
-        _check_value_size(value, settings)
-        encrypted = safe_encrypt(settings.kv_secret, value)
+        state[key] = [body.value]
+    else:
+        value = state[key]
+        require_list(value)
+        value.insert(0, body.value)
+        state[key] = value
 
-        kv = AutomationKV(
-            automation_id=automation_id,
-            key=key,
-            value_encrypted=encrypted,
-        )
-        session.add(kv)
-        await session.flush()
-        return KVListLengthResponse(key=key, length=1)
+    _check_state_size(state, settings)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
-    require_list(value)
-
-    value.insert(0, body.value)
-    _check_value_size(value, settings)
-
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
-
-    await session.flush()
-    return KVListLengthResponse(key=key, length=len(value))
+    return KVListLengthResponse(key=key, length=len(state[key]))
 
 
 @router.post("/{key}/rpush")
@@ -556,34 +551,23 @@ async def rpush(
     """
     settings = get_settings()
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         # Initialize with single-element list
-        value = [body.value]
-        _check_value_size(value, settings)
-        encrypted = safe_encrypt(settings.kv_secret, value)
+        state[key] = [body.value]
+    else:
+        value = state[key]
+        require_list(value)
+        value.append(body.value)
+        state[key] = value
 
-        kv = AutomationKV(
-            automation_id=automation_id,
-            key=key,
-            value_encrypted=encrypted,
-        )
-        session.add(kv)
-        await session.flush()
-        return KVListLengthResponse(key=key, length=1)
+    _check_state_size(state, settings)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
-    require_list(value)
-
-    value.append(body.value)
-    _check_value_size(value, settings)
-
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
-
-    await session.flush()
-    return KVListLengthResponse(key=key, length=len(value))
+    return KVListLengthResponse(key=key, length=len(state[key]))
 
 
 @router.post("/{key}/lpop")
@@ -594,27 +578,28 @@ async def lpop(
 ) -> KVKeyResponse:
     """Pop a value from the left (front) of a list.
 
-    Returns null if list is empty.
+    Returns null if key doesn't exist or list is empty.
     """
     settings = get_settings()
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         return KVKeyResponse(key=key, value=None)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
+    value = state[key]
     require_list(value)
 
     if len(value) == 0:
         return KVKeyResponse(key=key, value=None)
 
     popped = value.pop(0)
+    state[key] = value
 
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    await session.flush()
     return KVKeyResponse(key=key, value=popped)
 
 
@@ -626,27 +611,28 @@ async def rpop(
 ) -> KVKeyResponse:
     """Pop a value from the right (back) of a list.
 
-    Returns null if list is empty.
+    Returns null if key doesn't exist or list is empty.
     """
     settings = get_settings()
 
-    kv = await _get_kv_row_for_update(session, automation_id, key)
+    # Lock for atomic read-modify-write
+    row = await _get_state_row_for_update(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         return KVKeyResponse(key=key, value=None)
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
+    value = state[key]
     require_list(value)
 
     if len(value) == 0:
         return KVKeyResponse(key=key, value=None)
 
     popped = value.pop()
+    state[key] = value
 
-    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
 
-    await session.flush()
     return KVKeyResponse(key=key, value=popped)
 
 
@@ -659,16 +645,16 @@ async def list_length(
     """Get the length of a list."""
     settings = get_settings()
 
-    kv = await _get_kv_row(session, automation_id, key)
+    row = await _get_state_row(session, automation_id)
+    state = _decrypt_state(settings.kv_secret, row)
 
-    if kv is None:
+    if key not in state:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="key_not_found",
         )
 
-    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
-
+    value = state[key]
     require_list(value)
 
     return KVListLengthResponse(key=key, length=len(value))

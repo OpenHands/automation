@@ -315,10 +315,21 @@ class CustomWebhook(Base):
 
 
 class AutomationKV(Base):
-    """Key-value store for automation state persistence.
+    """Single-document state store for automation persistence.
 
-    Provides a simple Redis-like key-value store scoped to each automation.
-    All values are encrypted at the application level using AES-256-GCM.
+    Each automation has exactly ONE row containing its entire state as an
+    encrypted JSON document. The API presents a key-value interface, but
+    "keys" are top-level fields within this single document.
+
+    Single-Document Design (Deadlock Prevention):
+        By storing all state in one row per automation, we eliminate multi-key
+        deadlock scenarios. All operations on an automation's state serialize
+        through a single row lock. There's no possibility of lock ordering
+        issues because there's only one lock to acquire.
+
+        Trade-off: Every operation reads/writes the entire state blob. This is
+        acceptable because automation state is intended to be small (cursors,
+        counters, configs) and access is infrequent (scheduled runs).
 
     Storage Design:
         We store encrypted values as BYTEA (binary) rather than TEXT because:
@@ -335,13 +346,14 @@ class AutomationKV(Base):
         Uuid,
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
+        unique=True,  # ONE row per automation
     )
-    key: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Encrypted bytes: 12-byte nonce + ciphertext + 16-byte auth tag.
-    # Format: nonce || AES-256-GCM(plaintext) || tag
-    # See automation/utils/kv.py for encryption implementation.
-    value_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Encrypted bytes containing the entire state document as JSON.
+    # Format: 12-byte nonce || AES-256-GCM(JSON) || 16-byte auth tag
+    # The decrypted JSON is a dict where keys are the "KV keys" from the API.
+    # Example decrypted: {"config": {...}, "counter": 42, "queue": [...]}
+    state_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -356,11 +368,11 @@ class AutomationKV(Base):
     )
 
     __table_args__ = (
-        # Unique constraint: one key per automation
+        # Index for efficient lookup by automation_id (unique constraint
+        # is already defined on the column, this ensures index exists)
         Index(
-            "ix_automation_kv_automation_key",
+            "ix_automation_kv_automation_id",
             "automation_id",
-            "key",
             unique=True,
         ),
     )
