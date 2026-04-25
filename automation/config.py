@@ -320,10 +320,24 @@ class ServiceSettings(BaseSettings):
     # Must be set to enable the KV store feature.
     kv_secret: str = ""
 
-    # Maximum size in bytes for KV store values. Applies to the JSON-serialized
-    # value, not the encrypted size. Default 64KB is generous for typical KV
-    # use cases (counters, state flags, small config blobs) while preventing
-    # abuse. Set to 0 to disable the limit (not recommended).
+    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    #
+    # Performance guidance - PostgreSQL TOAST behavior:
+    #
+    #   Limit     Stored Size   TOAST Chunks   Read Latency
+    #   -------   -----------   ------------   ------------
+    #   < 2 KB    inline        0              1x (optimal)
+    #   2-8 KB    compressed    0              ~2x
+    #   64 KB     ~65 KB        ~33            ~5-10x
+    #   128 KB    ~131 KB       ~66            ~10-15x
+    #   256 KB    ~262 KB       ~131           ~15-25x
+    #   512 KB    ~524 KB       ~262           ~25-40x
+    #
+    # Values > 8KB are stored in a separate TOAST table, requiring index lookups
+    # for each ~2KB chunk. The default 64KB is generous for typical KV use cases
+    # (counters, flags, small configs). For larger blobs, consider object storage.
+    #
+    # Set to 0 to disable the limit (not recommended).
     kv_max_value_size: int = 64 * 1024  # 64 KB
 
     model_config = {"env_prefix": "AUTOMATION_"}
