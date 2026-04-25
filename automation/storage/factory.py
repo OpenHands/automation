@@ -20,7 +20,10 @@ def get_file_store() -> FileStore:
         from automation.storage.google_cloud import GoogleCloudFileStore
 
         return GoogleCloudFileStore(storage)
-    else:  # s3
+    elif storage.file_store == "s3":
         from automation.storage.s3 import S3FileStore
 
         return S3FileStore(storage)
+    else:
+        # Unreachable due to Pydantic Literal validation, but explicit for safety
+        raise ValueError(f"Unsupported file_store: {storage.file_store}")

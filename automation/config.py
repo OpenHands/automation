@@ -363,11 +363,13 @@ class AppConfig:
         print(config.sandbox.max_run_duration)
     """
 
-    _service: ServiceSettings | None = None
-    _storage: StorageSettings | None = None
-    _log: LogSettings | None = None
-    _http: HttpSettings | None = None
-    _sandbox: SandboxSettings | None = None
+    def __init__(self) -> None:
+        """Initialize with empty caches for lazy loading."""
+        self._service: ServiceSettings | None = None
+        self._storage: StorageSettings | None = None
+        self._log: LogSettings | None = None
+        self._http: HttpSettings | None = None
+        self._sandbox: SandboxSettings | None = None
 
     @property
     def service(self) -> ServiceSettings:
@@ -426,6 +428,16 @@ def clear_config_cache() -> None:
 
     This clears the lru_cache for get_config(), forcing settings to be
     reloaded from environment variables on next access.
+
+    Note:
+        This does NOT reset module-level values that were captured at import
+        time, such as:
+        - Retry decorators in auth.py and execution.py (tenacity config)
+        - Logging settings in logger.py (LOG_LEVEL, LOG_JSON, etc.)
+
+        These values are intentionally frozen at import for performance.
+        If tests need to modify these behaviors, use monkeypatching or
+        reload the affected modules.
     """
     get_config.cache_clear()
 

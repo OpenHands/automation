@@ -48,7 +48,7 @@ class GoogleCloudFileStore(FileStore):
             settings: StorageSettings instance with GCS configuration.
         """
         self.bucket_name = settings.gcs_bucket_name
-        # This should already be validated by StorageSettings, but defensive check
+        # Defensive check (StorageSettings validates this, but guard against direct instantiation)
         if not self.bucket_name:
             raise ValueError("GCS_BUCKET_NAME is required for GCS backend")
 
