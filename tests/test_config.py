@@ -79,7 +79,10 @@ class TestDeprecatedConstants:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            assert constants.MAX_RUN_DURATION_SECONDS == get_config().sandbox.max_run_duration
+            assert (
+                constants.MAX_RUN_DURATION_SECONDS
+                == get_config().sandbox.max_run_duration
+            )
 
     def test_nonexistent_constant_raises_attribute_error(self):
         """Accessing nonexistent constant raises AttributeError."""

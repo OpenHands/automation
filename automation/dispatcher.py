@@ -247,8 +247,8 @@ async def _execute_run(
 async def dispatch_pending_runs(
     session_factory: async_sessionmaker[AsyncSession],
     settings: ServiceSettings,
-    batch_size: int,
-    max_run_duration: timedelta,
+    batch_size: int | None = None,
+    max_run_duration: timedelta | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
@@ -258,9 +258,16 @@ async def dispatch_pending_runs(
     Args:
         session_factory: Database session factory
         settings: Service settings for API access
-        batch_size: Number of pending runs to fetch per poll
+        batch_size: Number of pending runs to fetch per poll (from config if None)
         max_run_duration: Default max duration for runs without custom timeout
     """
+    # Use config defaults if not provided
+    if batch_size is None or max_run_duration is None:
+        config = get_config()
+        if batch_size is None:
+            batch_size = config.service.dispatcher_batch_size
+        if max_run_duration is None:
+            max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
 
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)

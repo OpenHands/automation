@@ -21,6 +21,7 @@ from pythonjsonlogger.json import JsonFormatter
 
 from automation.config import get_config
 
+
 FILE_PREFIX = 'File "'
 CWD_PREFIX = FILE_PREFIX + str(Path(os.getcwd()).parent) + "/"
 _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
