@@ -262,20 +262,20 @@ class TestSetValue:
     """Tests for PUT /kv/{key} endpoint."""
 
     async def test_set_new_value(self, kv_client):
-        """Set creates new key."""
+        """Set creates new key (returns 201 Created)."""
         response = await kv_client.put(
             "/api/automation/v1/kv/config",
             json={"setting": "value"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 201
         data = response.json()
         assert data["key"] == "config"
         assert data["value"] == {"setting": "value"}
         assert data["created"] is True
 
     async def test_set_update_existing(self, kv_client, async_session):
-        """Set updates existing key."""
+        """Set updates existing key (returns 200 OK)."""
         kv = AutomationKV(
             automation_id=TEST_AUTOMATION_ID,
             key="config",
@@ -292,20 +292,21 @@ class TestSetValue:
         assert response.status_code == 200
         data = response.json()
         assert data["value"] == "new"
+        assert data["created"] is False
 
     async def test_set_nx_creates_new(self, kv_client):
-        """Set with nx=true creates new key."""
+        """Set with nx=true creates new key (returns 201 Created)."""
         response = await kv_client.put(
             "/api/automation/v1/kv/lock?nx=true",
             json={"owner": "run-123"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 201
         data = response.json()
         assert data["created"] is True
 
     async def test_set_nx_fails_if_exists(self, kv_client, async_session):
-        """Set with nx=true fails if key exists."""
+        """Set with nx=true fails if key exists (returns 409 Conflict)."""
         kv = AutomationKV(
             automation_id=TEST_AUTOMATION_ID,
             key="lock",
@@ -319,7 +320,7 @@ class TestSetValue:
             json={"owner": "run-123"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 409
         data = response.json()
         assert data["created"] is False
         assert data["error"] == "key_exists"

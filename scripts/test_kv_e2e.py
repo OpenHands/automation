@@ -778,10 +778,12 @@ KV_TEST_SCRIPT_QUICK = KV_TEST_SCRIPT.replace('mode = "quick"', 'mode = "quick"'
 KV_TEST_SCRIPT_THOROUGH = KV_TEST_SCRIPT.replace('mode = "quick"', 'mode = "thorough"')
 
 
-async def create_automation(client: httpx.AsyncClient, api_url: str, api_key: str) -> str:
+async def create_automation(
+    client: httpx.AsyncClient, api_url: str, api_key: str
+) -> str:
     """Create a test automation with KV store enabled. Returns automation_id."""
     print("Creating automation with enable_kv_store=true...")
-    
+
     resp = await client.post(
         f"{api_url}/api/automation/v1/preset/prompt",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -796,19 +798,21 @@ async def create_automation(client: httpx.AsyncClient, api_url: str, api_key: st
             "enable_kv_store": True,
         },
     )
-    
+
     if resp.status_code != 201:
         print(f"Failed to create automation: {resp.status_code}")
         print(resp.text)
         sys.exit(1)
-    
+
     data = resp.json()
     automation_id = data["id"]
     print(f"Created automation: {automation_id}")
     return automation_id
 
 
-async def delete_automation(client: httpx.AsyncClient, api_url: str, api_key: str, automation_id: str):
+async def delete_automation(
+    client: httpx.AsyncClient, api_url: str, api_key: str, automation_id: str
+):
     """Delete the test automation."""
     print(f"\nCleaning up automation {automation_id}...")
     resp = await client.delete(
@@ -825,13 +829,15 @@ async def main():
     # --- Configuration ---
     api_key = os.environ.get("OPENHANDS_API_KEY")
     kv_secret = os.environ.get("AUTOMATION_KV_SECRET")
-    api_url = os.environ.get("OPENHANDS_API_URL", "https://staging.all-hands.dev").rstrip("/")
-    
+    api_url = os.environ.get(
+        "OPENHANDS_API_URL", "https://staging.all-hands.dev"
+    ).rstrip("/")
+
     # Parse mode from command line
     mode = "quick"
     if "--thorough" in sys.argv:
         mode = "thorough"
-    
+
     print("=" * 70)
     print(f"KV STORE E2E TEST RUNNER ({mode.upper()} MODE)")
     print("=" * 70)
@@ -839,27 +845,27 @@ async def main():
     print(f"API Key: {'present' if api_key else 'MISSING'}")
     print(f"KV Secret: {'present' if kv_secret else 'MISSING'}")
     print()
-    
+
     if not api_key:
         print("ERROR: Set OPENHANDS_API_KEY environment variable")
         sys.exit(1)
-    
+
     if not kv_secret:
         print("ERROR: Set AUTOMATION_KV_SECRET environment variable")
         print("       (Must match the secret configured in staging)")
         sys.exit(1)
-    
+
     # Select test script based on mode
     test_script = KV_TEST_SCRIPT
     entrypoint = f"python main.py --{mode}"
-    
+
     # --- Create automation via API ---
     automation_id = None
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             automation_id = await create_automation(client, api_url, api_key)
             automation_uuid = uuid.UUID(automation_id)
-            
+
             # --- Generate KV token ---
             run_id = uuid.uuid4()
             kv_token = create_kv_token(
@@ -868,19 +874,21 @@ async def main():
                 run_id=run_id,
             )
             print(f"Generated KV token for run_id={run_id}")
-            
+
             # --- Build tarball ---
             print("\nBuilding test tarball...")
-            tarball = build_tarball({
-                "main.py": test_script,
-            })
+            tarball = build_tarball(
+                {
+                    "main.py": test_script,
+                }
+            )
             print(f"Tarball size: {len(tarball)} bytes")
-            
+
             # --- Run automation ---
             print("\n" + "-" * 70)
             print(f"EXECUTING IN SANDBOX ({mode.upper()} MODE)")
             print("-" * 70)
-            
+
             result = await run_automation(
                 api_url=api_url,
                 api_key=api_key,
@@ -895,7 +903,7 @@ async def main():
                 timeout=600 if mode == "thorough" else 300,
                 keep_sandbox=False,
             )
-            
+
             # --- Display results ---
             print("\n" + "=" * 70)
             print("EXECUTION RESULT")
@@ -903,25 +911,25 @@ async def main():
             print(f"Success: {result.success}")
             print(f"Exit code: {result.exit_code}")
             print(f"Sandbox ID: {result.sandbox_id}")
-            
+
             if result.stdout:
                 print("\n" + "-" * 70)
                 print("STDOUT")
                 print("-" * 70)
                 print(result.stdout)
-            
+
             if result.stderr:
                 print("\n" + "-" * 70)
                 print("STDERR (last 3000 chars)")
                 print("-" * 70)
                 print(result.stderr[-3000:])
-            
+
             if result.error:
                 print("\n" + "-" * 70)
                 print("ERROR")
                 print("-" * 70)
                 print(result.error)
-            
+
             # --- Final verdict ---
             print("\n" + "=" * 70)
             if result.success and "KV_STORE_ALL_TESTS_PASSED" in result.stdout:
@@ -932,7 +940,7 @@ async def main():
                 print(f"❌ KV STORE E2E TEST FAILED ({mode.upper()} MODE)")
                 print("=" * 70)
                 return 1
-                
+
         finally:
             # --- Cleanup ---
             if automation_id:
