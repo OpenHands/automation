@@ -345,8 +345,8 @@ class TestBatchRequest:
     def test_valid_batch(self):
         req = KVBatchRequest(
             operations=[
-                {"op": "set", "key": "a", "value": 1},
-                {"op": "incr", "key": "b"},
+                KVBatchOpSet(op="set", key="a", value=1),
+                KVBatchOpIncr(op="incr", key="b"),
             ]
         )
         assert len(req.operations) == 2
@@ -354,7 +354,7 @@ class TestBatchRequest:
     def test_batch_with_version(self):
         req = KVBatchRequest(
             if_version=5,
-            operations=[{"op": "set", "key": "a", "value": 1}],
+            operations=[KVBatchOpSet(op="set", key="a", value=1)],
         )
         assert req.if_version == 5
 
@@ -363,7 +363,7 @@ class TestBatchRequest:
             KVBatchRequest(operations=[])
 
     def test_too_many_operations_rejected(self):
-        ops = [{"op": "incr", "key": f"k{i}"} for i in range(101)]
+        ops: list = [KVBatchOpIncr(op="incr", key=f"k{i}") for i in range(101)]
         with pytest.raises(ValueError):
             KVBatchRequest(operations=ops)
 

@@ -374,6 +374,10 @@ async def set_value(
     response: Response,
     nx: bool = Query(default=False, description="Only set if key does not exist"),
     xx: bool = Query(default=False, description="Only set if key exists"),
+    if_version: int | None = Query(
+        default=None,
+        description="Only set if current state version matches (optimistic lock)",
+    ),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVSetResponse | KVConflictResponse:
@@ -384,11 +388,12 @@ async def set_value(
     Query params:
     - nx=true: Only set if key does NOT exist (like Redis SETNX)
     - xx=true: Only set if key DOES exist
+    - if_version=N: Only set if current $version equals N (optimistic concurrency)
 
     Returns:
     - 200: Key updated (existing key)
     - 201: Key created (new key, or nx=true success)
-    - 409: Conflict (nx=true but key exists, or xx=true but key doesn't exist)
+    - 409: Conflict (nx/xx/if_version check failed)
     - 413: Payload too large (state exceeds size limit)
     """
     settings = get_settings()
@@ -407,6 +412,19 @@ async def set_value(
             _raise_lock_conflict()
         raise
     state = _decrypt_state(settings.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "version_mismatch",
+                    "expected_version": if_version,
+                    "actual_version": current_version,
+                },
+            )
 
     key_exists = key in state
 
@@ -445,10 +463,18 @@ async def set_value(
 async def patch_value(
     key: ValidatedKey,
     body: KVPatchRequest,
+    if_version: int | None = Query(
+        default=None,
+        description="Only patch if current state version matches (optimistic lock)",
+    ),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyPathResponse:
-    """Update a nested path within an existing value."""
+    """Update a nested path within an existing value.
+
+    Query params:
+    - if_version=N: Only patch if current $version equals N (optimistic concurrency)
+    """
     settings = get_settings()
 
     # Lock for atomic read-modify-write
@@ -459,6 +485,19 @@ async def patch_value(
             _raise_lock_conflict()
         raise
     state = _decrypt_state(settings.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "version_mismatch",
+                    "expected_version": if_version,
+                    "actual_version": current_version,
+                },
+            )
 
     if key not in state:
         raise HTTPException(
@@ -497,10 +536,18 @@ def _has_user_keys(state: dict[str, Any]) -> bool:
 @router.delete("/{key}")
 async def delete_key(
     key: ValidatedKey,
+    if_version: int | None = Query(
+        default=None,
+        description="Only delete if current state version matches (optimistic lock)",
+    ),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVDeleteResponse:
-    """Delete a key."""
+    """Delete a key.
+
+    Query params:
+    - if_version=N: Only delete if current $version equals N (optimistic concurrency)
+    """
     settings = get_settings()
 
     # Lock for atomic read-modify-write
@@ -511,6 +558,19 @@ async def delete_key(
             _raise_lock_conflict()
         raise
     state = _decrypt_state(settings.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "version_mismatch",
+                    "expected_version": if_version,
+                    "actual_version": current_version,
+                },
+            )
 
     if key not in state:
         return KVDeleteResponse(key=key, deleted=False)

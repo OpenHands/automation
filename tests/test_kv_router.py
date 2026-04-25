@@ -660,6 +660,7 @@ class TestSingleDocumentIsolation:
 
         # Verify all keys are in one state document
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
+        assert state is not None
         # Filter out system keys ($version) for comparison
         user_keys = {k: v for k, v in state.items() if not k.startswith("$")}
         assert user_keys == {"key1": "value1", "key2": "value2", "key3": "value3"}
@@ -707,3 +708,122 @@ class TestSingleDocumentIsolation:
         assert state["counter"] == 11
         assert state["config"] == {"setting": True}
         assert state["queue"] == ["item"]
+
+
+# =============================================================================
+# Tests for if_version on individual endpoints
+# =============================================================================
+
+
+class TestIfVersionOnIndividualEndpoints:
+    """Test if_version query parameter for optimistic concurrency."""
+
+    async def test_set_with_matching_version_succeeds(self, kv_client, async_session):
+        """PUT with matching if_version succeeds."""
+        # Create initial key (version becomes 1)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="bar")
+        assert resp.status_code == 201
+
+        # Update with correct version
+        resp = await kv_client.put("/api/automation/v1/kv/foo?if_version=1", json="baz")
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "baz"
+
+    async def test_set_with_mismatched_version_fails(self, kv_client, async_session):
+        """PUT with wrong if_version returns 409."""
+        # Create initial key (version becomes 1)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="bar")
+        assert resp.status_code == 201
+
+        # Try to update with wrong version
+        resp = await kv_client.put(
+            "/api/automation/v1/kv/foo?if_version=99", json="baz"
+        )
+        assert resp.status_code == 409
+        data = resp.json()["detail"]
+        assert data["error"] == "version_mismatch"
+        assert data["expected_version"] == 99
+        assert data["actual_version"] == 1
+
+    async def test_patch_with_matching_version_succeeds(self, kv_client, async_session):
+        """PATCH with matching if_version succeeds."""
+        # Create initial key with dict value (version becomes 1)
+        resp = await kv_client.put(
+            "/api/automation/v1/kv/config", json={"host": "localhost"}
+        )
+        assert resp.status_code == 201
+
+        # Patch with correct version
+        resp = await kv_client.patch(
+            "/api/automation/v1/kv/config?if_version=1",
+            json={"path": "port", "value": 5432},
+        )
+        assert resp.status_code == 200
+
+    async def test_patch_with_mismatched_version_fails(self, kv_client, async_session):
+        """PATCH with wrong if_version returns 409."""
+        # Create initial key (version becomes 1)
+        resp = await kv_client.put(
+            "/api/automation/v1/kv/config", json={"host": "localhost"}
+        )
+        assert resp.status_code == 201
+
+        # Try to patch with wrong version
+        resp = await kv_client.patch(
+            "/api/automation/v1/kv/config?if_version=99",
+            json={"path": "port", "value": 5432},
+        )
+        assert resp.status_code == 409
+        data = resp.json()["detail"]
+        assert data["error"] == "version_mismatch"
+
+    async def test_delete_with_matching_version_succeeds(
+        self, kv_client, async_session
+    ):
+        """DELETE with matching if_version succeeds."""
+        # Create initial key (version becomes 1)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="bar")
+        assert resp.status_code == 201
+
+        # Delete with correct version
+        resp = await kv_client.delete("/api/automation/v1/kv/foo?if_version=1")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+
+    async def test_delete_with_mismatched_version_fails(self, kv_client, async_session):
+        """DELETE with wrong if_version returns 409."""
+        # Create initial key (version becomes 1)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="bar")
+        assert resp.status_code == 201
+
+        # Try to delete with wrong version
+        resp = await kv_client.delete("/api/automation/v1/kv/foo?if_version=99")
+        assert resp.status_code == 409
+        data = resp.json()["detail"]
+        assert data["error"] == "version_mismatch"
+        assert data["expected_version"] == 99
+        assert data["actual_version"] == 1
+
+    async def test_version_increments_across_operations(self, kv_client, async_session):
+        """Version increments consistently across different operations."""
+        # Create (v=1)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="bar")
+        assert resp.status_code == 201
+
+        # Update (v=2)
+        resp = await kv_client.put("/api/automation/v1/kv/foo", json="baz")
+        assert resp.status_code == 200
+
+        # Incr new key (v=3)
+        resp = await kv_client.post("/api/automation/v1/kv/counter/incr")
+        assert resp.status_code == 200
+
+        # Get with meta to check version
+        resp = await kv_client.get("/api/automation/v1/kv/foo?meta=true")
+        assert resp.status_code == 200
+        assert resp.json()["version"] == 3
+
+        # Delete with version check should work
+        resp = await kv_client.delete("/api/automation/v1/kv/foo?if_version=3")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
