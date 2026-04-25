@@ -929,3 +929,94 @@ class TestValueSizeLimit:
 
         assert response.status_code == 413
         assert "exceeds limit" in response.json()["detail"]
+
+
+
+class TestJSONValidation:
+    """Tests for strict JSON validation.
+
+    The KV store enforces strict JSON compliance:
+    - NaN, Infinity, -Infinity are rejected (not valid JSON per RFC 8259)
+    - Maximum nesting depth is enforced (32 levels, prevents DoS)
+    - Non-serializable types are rejected
+
+    These tests verify the validation returns 400 Bad Request with
+    descriptive error messages.
+    """
+
+    async def test_nan_rejected(self, kv_client):
+        """NaN values are rejected as invalid JSON."""
+        # Note: Python's json module accepts NaN by default, but our
+        # strict validation rejects it. We can't send literal NaN via
+        # HTTP JSON, but we test the validation logic directly.
+        from automation.utils.kv import KVValueError, _validate_json_value
+
+        with pytest.raises(KVValueError) as exc_info:
+            _validate_json_value(float("nan"))
+        assert "non-JSON-compliant" in str(exc_info.value)
+
+    async def test_infinity_rejected(self, kv_client):
+        """Infinity values are rejected as invalid JSON."""
+        from automation.utils.kv import KVValueError, _validate_json_value
+
+        with pytest.raises(KVValueError) as exc_info:
+            _validate_json_value(float("inf"))
+        assert "non-JSON-compliant" in str(exc_info.value)
+
+    async def test_negative_infinity_rejected(self, kv_client):
+        """Negative infinity values are rejected as invalid JSON."""
+        from automation.utils.kv import KVValueError, _validate_json_value
+
+        with pytest.raises(KVValueError) as exc_info:
+            _validate_json_value(float("-inf"))
+        assert "non-JSON-compliant" in str(exc_info.value)
+
+    async def test_deeply_nested_rejected(self, kv_client):
+        """Deeply nested structures exceeding max depth are rejected."""
+        from automation.utils.kv import KVValueError, _validate_json_value
+
+        # Create a structure deeper than _MAX_NESTING_DEPTH (32)
+        deep = {"level": 0}
+        current = deep
+        for i in range(35):
+            current["nested"] = {"level": i + 1}
+            current = current["nested"]
+
+        with pytest.raises(KVValueError) as exc_info:
+            _validate_json_value(deep)
+        assert "nesting depth" in str(exc_info.value)
+
+    async def test_valid_nested_accepted(self, kv_client):
+        """Reasonably nested structures are accepted."""
+        from automation.utils.kv import _validate_json_value
+
+        # Create a structure within limits (10 levels)
+        nested = {"level": 0}
+        current = nested
+        for i in range(10):
+            current["nested"] = {"level": i + 1}
+            current = current["nested"]
+
+        # Should not raise
+        result = _validate_json_value(nested)
+        assert '"level"' in result
+
+    async def test_valid_json_types_accepted(self, kv_client):
+        """All standard JSON types are accepted."""
+        from automation.utils.kv import _validate_json_value
+
+        test_values = [
+            None,
+            True,
+            False,
+            42,
+            3.14,
+            "hello",
+            [1, 2, 3],
+            {"key": "value"},
+            {"nested": {"list": [1, {"deep": True}]}},
+        ]
+
+        for value in test_values:
+            # Should not raise
+            _validate_json_value(value)

@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
 from automation.db import get_session
-from automation.kv_helpers import get_nested_value, set_nested_value
+from automation.kv_helpers import get_nested_value, safe_encrypt, set_nested_value
 from automation.kv_schemas import (
     KVConflictResponse,
     KVDeleteResponse,
@@ -45,7 +45,6 @@ from automation.utils.kv import (
     KVEncryptionError,
     KVTokenError,
     decrypt_value,
-    encrypt_value,
     verify_kv_token,
 )
 
@@ -266,14 +265,7 @@ async def set_value(
 
     _check_value_size(body, settings)
 
-    try:
-        encrypted = encrypt_value(settings.kv_secret, body)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    encrypted = safe_encrypt(settings.kv_secret, body)
 
     if nx:
         # SETNX: only set if key doesn't exist
@@ -398,14 +390,7 @@ async def patch_value(
     # Check size of the updated value before encrypting
     _check_value_size(value, settings)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
 
     await session.flush()
     await session.refresh(kv)
@@ -452,14 +437,7 @@ async def increment(
 
     if kv is None:
         # Initialize with `by`
-        try:
-            encrypted = encrypt_value(settings.kv_secret, by)
-        except KVEncryptionError as e:
-            logger.error("Failed to encrypt KV value: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to encrypt value",
-            )
+        encrypted = safe_encrypt(settings.kv_secret, by)
 
         kv = AutomationKV(
             automation_id=automation_id,
@@ -487,14 +465,7 @@ async def increment(
 
     new_value = int(value + by)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, new_value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
 
     await session.flush()
     return KVIncrResponse(key=key, value=new_value)
@@ -518,14 +489,7 @@ async def decrement(
 
     if kv is None:
         # Initialize with `-by`
-        try:
-            encrypted = encrypt_value(settings.kv_secret, -by)
-        except KVEncryptionError as e:
-            logger.error("Failed to encrypt KV value: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to encrypt value",
-            )
+        encrypted = safe_encrypt(settings.kv_secret, -by)
 
         kv = AutomationKV(
             automation_id=automation_id,
@@ -553,14 +517,7 @@ async def decrement(
 
     new_value = int(value - by)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, new_value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
 
     await session.flush()
     return KVIncrResponse(key=key, value=new_value)
@@ -585,14 +542,7 @@ async def lpush(
         # Initialize with single-element list
         value = [body.value]
         _check_value_size(value, settings)
-        try:
-            encrypted = encrypt_value(settings.kv_secret, value)
-        except KVEncryptionError as e:
-            logger.error("Failed to encrypt KV value: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to encrypt value",
-            )
+        encrypted = safe_encrypt(settings.kv_secret, value)
 
         kv = AutomationKV(
             automation_id=automation_id,
@@ -621,14 +571,7 @@ async def lpush(
     value.insert(0, body.value)
     _check_value_size(value, settings)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
 
     await session.flush()
     return KVListLengthResponse(key=key, length=len(value))
@@ -653,14 +596,7 @@ async def rpush(
         # Initialize with single-element list
         value = [body.value]
         _check_value_size(value, settings)
-        try:
-            encrypted = encrypt_value(settings.kv_secret, value)
-        except KVEncryptionError as e:
-            logger.error("Failed to encrypt KV value: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to encrypt value",
-            )
+        encrypted = safe_encrypt(settings.kv_secret, value)
 
         kv = AutomationKV(
             automation_id=automation_id,
@@ -689,14 +625,7 @@ async def rpush(
     value.append(body.value)
     _check_value_size(value, settings)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
 
     await session.flush()
     return KVListLengthResponse(key=key, length=len(value))
@@ -739,14 +668,7 @@ async def lpop(
 
     popped = value.pop(0)
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
 
     await session.flush()
     return KVKeyResponse(key=key, value=popped)
@@ -789,14 +711,7 @@ async def rpop(
 
     popped = value.pop()
 
-    try:
-        kv.value_encrypted = encrypt_value(settings.kv_secret, value)
-    except KVEncryptionError as e:
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
+    kv.value_encrypted = safe_encrypt(settings.kv_secret, value)
 
     await session.flush()
     return KVKeyResponse(key=key, value=popped)

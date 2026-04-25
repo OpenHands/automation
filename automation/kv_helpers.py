@@ -1,9 +1,23 @@
-"""Helper functions for KV store path operations.
+"""Helper functions for KV store operations.
 
-Provides utilities for parsing and manipulating nested paths in JSON values.
+Provides utilities for:
+- Parsing and manipulating nested paths in JSON values
+- Safe encryption with proper HTTP error handling
 """
 
+import logging
 from typing import Any
+
+from fastapi import HTTPException, status
+
+from automation.utils.kv import (
+    KVEncryptionError,
+    KVValueError,
+    encrypt_value,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 def parse_path(path: str) -> list[str]:
@@ -128,3 +142,44 @@ def set_nested_value(obj: dict, path: str, value: Any) -> dict:
 
     current[parts[-1]] = value
     return obj
+
+
+def safe_encrypt(secret: str, value: Any) -> bytes:
+    """Encrypt a value with proper HTTP error handling.
+
+    Wraps encrypt_value() to convert exceptions to appropriate HTTP errors:
+    - KVValueError (invalid JSON) → 400 Bad Request
+    - KVEncryptionError (encryption failure) → 500 Internal Server Error
+
+    JSON Validation:
+        Values are validated before encryption to ensure they are strict JSON:
+        - NaN, Infinity, -Infinity are rejected (not valid JSON)
+        - Maximum nesting depth is enforced (prevents DoS)
+        - Non-serializable types are rejected
+
+    Args:
+        secret: The encryption secret
+        value: Any JSON-serializable value
+
+    Returns:
+        Encrypted bytes
+
+    Raises:
+        HTTPException: 400 for invalid values, 500 for encryption errors
+    """
+    try:
+        return encrypt_value(secret, value)
+    except KVValueError as e:
+        # Client's fault: invalid JSON value (NaN, too deep, non-serializable)
+        logger.warning("Invalid KV value rejected: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid_value: {e}",
+        )
+    except KVEncryptionError as e:
+        # Our fault: encryption failed unexpectedly
+        logger.error("Failed to encrypt KV value: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to encrypt value",
+        )

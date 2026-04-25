@@ -135,6 +135,11 @@ _TAG_SIZE = 16
 # AES-256 key size (256 bits = 32 bytes)
 _KEY_SIZE = 32
 
+# Maximum nesting depth for JSON values.
+# Prevents stack overflow from deeply nested structures and limits complexity.
+# 32 levels is generous (most real configs are <10 levels deep).
+_MAX_NESTING_DEPTH = 32
+
 # Token expiration: 24 hours
 #
 # This is intentionally longer than the max automation run time (currently 2 hours)
@@ -206,6 +211,76 @@ def verify_kv_token(secret: str, token: str) -> uuid.UUID:
         raise KVTokenError(f"Invalid automation_id format: {e}")
 
 
+# --- JSON Validation ---
+
+
+class KVValueError(Exception):
+    """Error with KV value format or content."""
+
+    pass
+
+
+def _check_nesting_depth(value: Any, current_depth: int = 0) -> None:
+    """Check that a value doesn't exceed maximum nesting depth.
+
+    Args:
+        value: The value to check
+        current_depth: Current recursion depth
+
+    Raises:
+        KVValueError: If nesting exceeds _MAX_NESTING_DEPTH
+    """
+    if current_depth > _MAX_NESTING_DEPTH:
+        raise KVValueError(
+            f"Value exceeds maximum nesting depth of {_MAX_NESTING_DEPTH}"
+        )
+
+    if isinstance(value, dict):
+        for v in value.values():
+            _check_nesting_depth(v, current_depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            _check_nesting_depth(item, current_depth + 1)
+
+
+def _validate_json_value(value: Any) -> str:
+    """Validate and serialize a value to strict JSON.
+
+    Ensures the value:
+    1. Is JSON-serializable
+    2. Contains only standard JSON types (rejects NaN, Infinity)
+    3. Doesn't exceed maximum nesting depth
+
+    Args:
+        value: Any JSON-serializable value
+
+    Returns:
+        JSON string representation
+
+    Raises:
+        KVValueError: If value is not valid strict JSON
+    """
+    # Check nesting depth first (before json.dumps which could stack overflow)
+    try:
+        _check_nesting_depth(value)
+    except RecursionError:
+        raise KVValueError(
+            f"Value exceeds maximum nesting depth of {_MAX_NESTING_DEPTH}"
+        )
+
+    # Serialize with strict settings:
+    # - allow_nan=False: Reject NaN, Infinity, -Infinity (not valid JSON)
+    # - ensure_ascii=False: Allow UTF-8 (more compact, widely supported)
+    try:
+        return json.dumps(value, allow_nan=False, ensure_ascii=False)
+    except ValueError as e:
+        # ValueError from allow_nan=False when value contains NaN/Infinity
+        raise KVValueError(f"Value contains non-JSON-compliant data: {e}")
+    except TypeError as e:
+        # TypeError when value contains non-serializable types
+        raise KVValueError(f"Value is not JSON-serializable: {e}")
+
+
 # --- Encryption Functions ---
 
 
@@ -231,8 +306,13 @@ def _derive_key(secret: str) -> bytes:
 def encrypt_value(secret: str, value: Any) -> bytes:
     """Encrypt a value for storage using AES-256-GCM.
 
-    The value is JSON-serialized, then encrypted. The result is raw bytes
-    suitable for storage in a BYTEA column.
+    The value is validated, JSON-serialized, then encrypted. The result is
+    raw bytes suitable for storage in a BYTEA column.
+
+    Validation ensures:
+    - Value is JSON-serializable
+    - No NaN, Infinity, or other non-standard JSON values
+    - Nesting depth doesn't exceed _MAX_NESTING_DEPTH (32 levels)
 
     Wire format: nonce (12 bytes) || ciphertext || auth_tag (16 bytes)
 
@@ -244,12 +324,15 @@ def encrypt_value(secret: str, value: Any) -> bytes:
         Encrypted bytes (nonce + ciphertext + tag)
 
     Raises:
+        KVValueError: If value is not valid strict JSON
         KVEncryptionError: If encryption fails
     """
-    try:
-        # Serialize value to JSON bytes
-        plaintext = json.dumps(value).encode("utf-8")
+    # Validate and serialize to strict JSON
+    # This raises KVValueError for invalid values (NaN, too deep, etc.)
+    plaintext_str = _validate_json_value(value)
+    plaintext = plaintext_str.encode("utf-8")
 
+    try:
         # Generate random nonce (critical: must be unique per encryption)
         nonce = os.urandom(_NONCE_SIZE)
 
