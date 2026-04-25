@@ -7,6 +7,7 @@ def log_extra(
     run_id: str | None = None,
     sandbox_id: str | None = None,
     automation_id: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Build extra dict for structured logging with contextual IDs.
 
@@ -14,6 +15,7 @@ def log_extra(
         run_id: The automation run ID.
         sandbox_id: The sandbox ID.
         automation_id: The automation definition ID.
+        **kwargs: Additional context fields to include.
 
     Returns:
         Dict with non-None values for use as logger extra parameter.
@@ -25,4 +27,5 @@ def log_extra(
         extra["sandbox_id"] = sandbox_id
     if automation_id:
         extra["automation_id"] = automation_id
+    extra.update(kwargs)
     return extra

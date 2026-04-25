@@ -28,8 +28,8 @@ import httpx
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from automation.execution import build_tarball, run_automation
-from automation.utils.kv import create_kv_token
+from automation.execution import build_tarball, run_automation  # noqa: E402
+from automation.utils.kv import create_kv_token  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +79,14 @@ def api_call(method, path, body=None, headers=None):
     req_headers = {"Authorization": f"Bearer {KV_TOKEN}"}
     if headers:
         req_headers.update(headers)
-    
+
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
-    
+
     req = Request(url, data=data, headers=req_headers, method=method)
-    
+
     try:
         with urlopen(req, timeout=30) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -106,7 +106,7 @@ def api_call_raw(method, path, body=None, headers=None, auth=True):
         req_headers["Authorization"] = f"Bearer {KV_TOKEN}"
     if headers:
         req_headers.update(headers)
-    
+
     data = None
     if body is not None:
         if isinstance(body, bytes):
@@ -115,9 +115,9 @@ def api_call_raw(method, path, body=None, headers=None, auth=True):
             data = json.dumps(body).encode("utf-8")
             if "Content-Type" not in req_headers:
                 req_headers["Content-Type"] = "application/json"
-    
+
     req = Request(url, data=data, headers=req_headers, method=method)
-    
+
     try:
         with urlopen(req, timeout=30) as resp:
             return resp.status, resp.read().decode("utf-8")
@@ -133,26 +133,26 @@ def api_call_raw(method, path, body=None, headers=None, auth=True):
 def test_set_get():
     """[TC-3.1/3.3] Basic SET and GET operations."""
     print("\\n[TEST] SET and GET")
-    
+
     # SET
     status, resp = api_call("PUT", "/test_key", {"message": "hello", "count": 42})
     print(f"  PUT /test_key: {status}")
     if status not in (200, 201):
         print(f"  FAIL: {resp}")
         return False
-    
+
     # GET
     status, resp = api_call("GET", "/test_key")
     print(f"  GET /test_key: {status}")
     if status != 200:
         print(f"  FAIL: {resp}")
         return False
-    
+
     expected = {"message": "hello", "count": 42}
     if resp.get("value") != expected:
         print(f"  FAIL: Expected {expected}, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -161,22 +161,22 @@ def test_set_get():
 def test_delete():
     """[TC-3.8] DELETE operation."""
     print("\\n[TEST] DELETE")
-    
+
     api_call("PUT", "/to_delete", "bye")
-    
+
     status, resp = api_call("DELETE", "/to_delete")
     print(f"  DELETE /to_delete: {status}")
     if status != 200:
         print(f"  FAIL: Expected 200, got {status}")
         return False
-    
+
     # Verify gone
     status, resp = api_call("GET", "/to_delete")
     print(f"  GET after delete: {status}")
     if status != 404:
         print(f"  FAIL: Expected 404, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -185,21 +185,21 @@ def test_delete():
 def test_incr_decr():
     """[TC-6.2/6.4] INCR and DECR on existing key."""
     print("\\n[TEST] INCR and DECR")
-    
+
     api_call("PUT", "/counter", 10)
-    
+
     status, resp = api_call("POST", "/counter/incr", {"by": 5})
     print(f"  INCR by 5: {status}, value={resp.get('value')}")
     if resp.get("value") != 15:
         print(f"  FAIL: Expected 15, got {resp.get('value')}")
         return False
-    
+
     status, resp = api_call("POST", "/counter/decr", {"by": 3})
     print(f"  DECR by 3: {status}, value={resp.get('value')}")
     if resp.get("value") != 12:
         print(f"  FAIL: Expected 12, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -208,50 +208,50 @@ def test_incr_decr():
 def test_list_operations():
     """[TC-7.1-7.6] List RPUSH, LPUSH, LPOP, RPOP, LEN."""
     print("\\n[TEST] List operations")
-    
+
     api_call("DELETE", "/my_list")
-    
+
     # RPUSH to create list
     status, resp = api_call("POST", "/my_list/rpush", {"value": "a"})
     print(f"  RPUSH 'a': {status}, length={resp.get('length')}")
     if resp.get("length") != 1:
         print(f"  FAIL: Expected length 1")
         return False
-    
+
     api_call("POST", "/my_list/rpush", {"value": "b"})
     api_call("POST", "/my_list/rpush", {"value": "c"})
-    
+
     # LPUSH
     status, resp = api_call("POST", "/my_list/lpush", {"value": "z"})
     print(f"  LPUSH 'z': {status}, length={resp.get('length')}")
-    
+
     # Verify order: [z, a, b, c]
     status, resp = api_call("GET", "/my_list")
     if resp.get("value") != ["z", "a", "b", "c"]:
         print(f"  FAIL: Expected ['z', 'a', 'b', 'c'], got {resp.get('value')}")
         return False
-    
+
     # LPOP
     status, resp = api_call("POST", "/my_list/lpop")
     print(f"  LPOP: {status}, value={resp.get('value')}")
     if resp.get("value") != "z":
         print(f"  FAIL: Expected 'z'")
         return False
-    
+
     # RPOP
     status, resp = api_call("POST", "/my_list/rpop")
     print(f"  RPOP: {status}, value={resp.get('value')}")
     if resp.get("value") != "c":
         print(f"  FAIL: Expected 'c'")
         return False
-    
+
     # LEN
     status, resp = api_call("GET", "/my_list/len")
     print(f"  LEN: {status}, length={resp.get('length')}")
     if resp.get("length") != 2:
         print(f"  FAIL: Expected 2")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -274,14 +274,14 @@ def test_nested_path():
     if status != 200:
         print(f"  FAIL: {resp}")
         return False
-    
+
     # GET with path
     status, resp = api_call("GET", "/config?path=database.port")
     print(f"  GET with path: {status}, value={resp.get('value')}")
     if resp.get("value") != 5433:
         print(f"  FAIL: Expected 5433")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -290,29 +290,29 @@ def test_nested_path():
 def test_conditional_set():
     """[TC-4.1/4.2] Conditional SET with NX flag."""
     print("\\n[TEST] Conditional SET (nx)")
-    
+
     api_call("DELETE", "/cond_key")
-    
+
     # NX when key doesn't exist - should succeed
     status, resp = api_call("PUT", "/cond_key?nx=true", "first")
     print(f"  PUT with nx=true (new): {status}")
     if status != 201:
         print(f"  FAIL: Expected 201, got {status}")
         return False
-    
+
     # NX when key exists - should fail
     status, resp = api_call("PUT", "/cond_key?nx=true", "second")
     print(f"  PUT with nx=true (exists): {status}")
     if status != 409:
         print(f"  FAIL: Expected 409, got {status}")
         return False
-    
+
     # Verify value unchanged
     status, resp = api_call("GET", "/cond_key")
     if resp.get("value") != "first":
         print(f"  FAIL: Value should be 'first'")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -321,21 +321,21 @@ def test_conditional_set():
 def test_list_keys():
     """[TC-3.10] List all keys."""
     print("\\n[TEST] List keys")
-    
+
     api_call("PUT", "/list_test_a", "a")
     api_call("PUT", "/list_test_b", "b")
-    
+
     status, resp = api_call("GET", "")
     print(f"  GET /kv: {status}, count={resp.get('count')}")
     if status != 200:
         print(f"  FAIL: {resp}")
         return False
-    
+
     keys = resp.get("keys", [])
     if "list_test_a" not in keys or "list_test_b" not in keys:
         print(f"  FAIL: Expected keys to include list_test_a and list_test_b")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -344,16 +344,16 @@ def test_list_keys():
 def test_get_with_meta():
     """[TC-3.4] GET with metadata."""
     print("\\n[TEST] GET with metadata")
-    
+
     api_call("PUT", "/meta_test", "value")
-    
+
     status, resp = api_call("GET", "/meta_test?meta=true")
     print(f"  GET with meta=true: {status}")
-    
+
     if "created_at" not in resp or "updated_at" not in resp:
         print(f"  FAIL: Missing timestamps")
         return False
-    
+
     print(f"  created_at: {resp.get('created_at')}")
     print("  PASS")
     return True
@@ -367,13 +367,13 @@ def test_get_with_meta():
 def test_get_nonexistent_key():
     """[TC-3.6] GET non-existent key returns 404."""
     print("\\n[TEST] GET non-existent key")
-    
+
     status, resp = api_call("GET", "/definitely_does_not_exist_12345")
     print(f"  GET /nonexistent: {status}")
     if status != 404:
         print(f"  FAIL: Expected 404, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -382,20 +382,20 @@ def test_get_nonexistent_key():
 def test_get_nonexistent_path():
     """[TC-3.7] GET non-existent nested path."""
     print("\\n[TEST] GET non-existent nested path")
-    
+
     api_call("PUT", "/path_test", {"a": {"b": 1}})
-    
+
     status, resp = api_call("GET", "/path_test?path=a.c.d")
     print(f"  GET with invalid path: {status}")
     # Should return 404 or null value
     if status not in (200, 404):
         print(f"  FAIL: Expected 200 or 404, got {status}")
         return False
-    
+
     if status == 200 and resp.get("value") is not None:
         print(f"  FAIL: Expected null value for missing path")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -404,19 +404,19 @@ def test_get_nonexistent_path():
 def test_delete_nonexistent():
     """[TC-3.9] DELETE non-existent key."""
     print("\\n[TEST] DELETE non-existent key")
-    
+
     status, resp = api_call("DELETE", "/never_existed_xyz")
     print(f"  DELETE /nonexistent: {status}, deleted={resp.get('deleted')}")
-    
+
     # Should succeed but indicate nothing was deleted
     if status != 200:
         print(f"  FAIL: Expected 200, got {status}")
         return False
-    
+
     if resp.get("deleted") is not False:
         print(f"  FAIL: Expected deleted=false")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -425,26 +425,26 @@ def test_delete_nonexistent():
 def test_conditional_set_xx():
     """[TC-4.3/4.4] Conditional SET with XX flag."""
     print("\\n[TEST] Conditional SET (xx)")
-    
+
     api_call("DELETE", "/xx_test")
-    
+
     # XX when key doesn't exist - should fail
     status, resp = api_call("PUT", "/xx_test?xx=true", "value")
     print(f"  PUT with xx=true (missing): {status}")
     if status not in (404, 412):  # Either 404 Not Found or 412 Precondition Failed
         print(f"  FAIL: Expected 404 or 412, got {status}")
         return False
-    
+
     # Create key first
     api_call("PUT", "/xx_test", "original")
-    
+
     # XX when key exists - should succeed
     status, resp = api_call("PUT", "/xx_test?xx=true", "updated")
     print(f"  PUT with xx=true (exists): {status}")
     if status != 200:
         print(f"  FAIL: Expected 200, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -453,13 +453,13 @@ def test_conditional_set_xx():
 def test_patch_nonexistent():
     """[TC-5.3] PATCH non-existent key returns 404."""
     print("\\n[TEST] PATCH non-existent key")
-    
+
     status, resp = api_call("PATCH", "/nonexistent_patch", {"path": "x", "value": 1})
     print(f"  PATCH /nonexistent: {status}")
     if status != 404:
         print(f"  FAIL: Expected 404, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -468,15 +468,15 @@ def test_patch_nonexistent():
 def test_incr_new_key():
     """[TC-6.1] INCR on non-existent key initializes to 1."""
     print("\\n[TEST] INCR new key")
-    
+
     api_call("DELETE", "/new_incr_counter")
-    
+
     status, resp = api_call("POST", "/new_incr_counter/incr")
     print(f"  INCR new key: {status}, value={resp.get('value')}")
     if resp.get("value") != 1:
         print(f"  FAIL: Expected 1, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -485,15 +485,15 @@ def test_incr_new_key():
 def test_decr_new_key():
     """[TC-6.5] DECR on non-existent key initializes to -1."""
     print("\\n[TEST] DECR new key")
-    
+
     api_call("DELETE", "/new_decr_counter")
-    
+
     status, resp = api_call("POST", "/new_decr_counter/decr")
     print(f"  DECR new key: {status}, value={resp.get('value')}")
     if resp.get("value") != -1:
         print(f"  FAIL: Expected -1, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -502,15 +502,15 @@ def test_decr_new_key():
 def test_incr_non_numeric():
     """[TC-6.6] INCR on non-numeric value returns error."""
     print("\\n[TEST] INCR non-numeric")
-    
+
     api_call("PUT", "/string_val", "hello")
-    
+
     status, resp = api_call("POST", "/string_val/incr")
     print(f"  INCR string value: {status}")
     if status != 400:
         print(f"  FAIL: Expected 400, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -519,15 +519,15 @@ def test_incr_non_numeric():
 def test_lpop_empty_list():
     """[TC-7.7] LPOP from empty list returns null."""
     print("\\n[TEST] LPOP empty list")
-    
+
     api_call("PUT", "/empty_list", [])
-    
+
     status, resp = api_call("POST", "/empty_list/lpop")
     print(f"  LPOP empty: {status}, value={resp.get('value')}")
     if resp.get("value") is not None:
         print(f"  FAIL: Expected null, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -536,15 +536,15 @@ def test_lpop_empty_list():
 def test_lpop_nonexistent():
     """[TC-7.7b] LPOP from non-existent key returns null."""
     print("\\n[TEST] LPOP non-existent key")
-    
+
     api_call("DELETE", "/no_such_list")
-    
+
     status, resp = api_call("POST", "/no_such_list/lpop")
     print(f"  LPOP nonexistent: {status}, value={resp.get('value')}")
     if resp.get("value") is not None:
         print(f"  FAIL: Expected null")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -553,15 +553,15 @@ def test_lpop_nonexistent():
 def test_push_to_non_list():
     """[TC-7.8] RPUSH to non-list value returns error."""
     print("\\n[TEST] RPUSH to non-list")
-    
+
     api_call("PUT", "/not_a_list", {"key": "value"})
-    
+
     status, resp = api_call("POST", "/not_a_list/rpush", {"value": "item"})
     print(f"  RPUSH to dict: {status}")
     if status != 400:
         print(f"  FAIL: Expected 400, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -570,15 +570,15 @@ def test_push_to_non_list():
 def test_len_nonexistent():
     """[TC-7.9] LEN on non-existent key returns 404."""
     print("\\n[TEST] LEN non-existent key")
-    
+
     api_call("DELETE", "/no_such_list_len")
-    
+
     status, resp = api_call("GET", "/no_such_list_len/len")
     print(f"  LEN nonexistent: {status}")
     if status != 404:
         print(f"  FAIL: Expected 404, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -587,7 +587,7 @@ def test_len_nonexistent():
 def test_special_characters_in_key():
     """[TC-8.1] Key with special characters."""
     print("\\n[TEST] Special characters in key")
-    
+
     # Test with dashes, underscores, numbers
     key = "test-key_123"
     status, resp = api_call("PUT", f"/{key}", "value")
@@ -595,12 +595,12 @@ def test_special_characters_in_key():
     if status not in (200, 201):
         print(f"  FAIL: {resp}")
         return False
-    
+
     status, resp = api_call("GET", f"/{key}")
     if resp.get("value") != "value":
         print(f"  FAIL: Value mismatch")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -609,18 +609,18 @@ def test_special_characters_in_key():
 def test_null_value():
     """[TC-8.6] Store null value."""
     print("\\n[TEST] Store null value")
-    
+
     status, resp = api_call("PUT", "/null_test", None)
     print(f"  PUT null: {status}")
     if status not in (200, 201):
         print(f"  FAIL: {resp}")
         return False
-    
+
     status, resp = api_call("GET", "/null_test")
     if resp.get("value") is not None:
         print(f"  FAIL: Expected null, got {resp.get('value')}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -629,7 +629,7 @@ def test_null_value():
 def test_various_json_types():
     """[TC-8.7] Store various JSON types."""
     print("\\n[TEST] Various JSON types")
-    
+
     test_cases = [
         ("string_type", "hello"),
         ("number_int", 42),
@@ -639,19 +639,19 @@ def test_various_json_types():
         ("array_type", [1, 2, 3]),
         ("nested_obj", {"a": {"b": {"c": 1}}}),
     ]
-    
+
     for key, value in test_cases:
         status, _ = api_call("PUT", f"/type_{key}", value)
         if status not in (200, 201):
             print(f"  FAIL: PUT {key} returned {status}")
             return False
-        
+
         status, resp = api_call("GET", f"/type_{key}")
         if resp.get("value") != value:
             print(f"  FAIL: {key} value mismatch: {resp.get('value')} != {value}")
             return False
         print(f"  {key}: OK")
-    
+
     print("  PASS")
     return True
 
@@ -660,20 +660,20 @@ def test_various_json_types():
 def test_auth_missing_token():
     """[TC-2.1] Access without token returns 401."""
     print("\\n[TEST] Auth - missing token")
-    
+
     global KV_TOKEN
     saved_token = KV_TOKEN
     KV_TOKEN = ""
-    
+
     status, _ = api_call_raw("GET", "/test", auth=False)
     print(f"  GET without token: {status}")
-    
+
     KV_TOKEN = saved_token
-    
+
     if status not in (401, 403):
         print(f"  FAIL: Expected 401 or 403, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
@@ -686,41 +686,41 @@ def test_auth_invalid_token():
     headers = {"Authorization": "Bearer invalid.token.here"}
     status, _ = api_call_raw("GET", "/test", headers=headers)
     print(f"  GET with invalid token: {status}")
-    
+
     if status not in (401, 403):
         print(f"  FAIL: Expected 401 or 403, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
 
-@thorough  
+@thorough
 def test_invalid_json_body():
     """[TC-11.1] Invalid JSON body returns 400."""
     print("\\n[TEST] Invalid JSON body")
-    
+
     status, _ = api_call_raw(
         "PUT", "/bad_json",
         body=b"not valid json {",
         headers={"Content-Type": "application/json"}
     )
     print(f"  PUT invalid JSON: {status}")
-    
+
     if status != 400 and status != 422:
         print(f"  FAIL: Expected 400 or 422, got {status}")
         return False
-    
+
     print("  PASS")
     return True
 
 
 def main():
     global API_URL, KV_TOKEN
-    
+
     API_URL = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
     KV_TOKEN = os.environ.get("AUTOMATION_KV_TOKEN", "")
-    
+
     # Parse mode from command line
     mode = "quick"
     if len(sys.argv) > 1:
@@ -728,9 +728,9 @@ def main():
             mode = "thorough"
         elif sys.argv[1] == "--quick":
             mode = "quick"
-    
+
     tests = QUICK_TESTS if mode == "quick" else THOROUGH_TESTS
-    
+
     print("=" * 60)
     print(f"KV STORE E2E TEST ({mode.upper()} MODE)")
     print(f"Running {len(tests)} tests")
@@ -738,18 +738,18 @@ def main():
     print(f"API URL: {API_URL}")
     token_info = f"present ({len(KV_TOKEN)} chars)" if KV_TOKEN else "MISSING"
     print(f"KV Token: {token_info}")
-    
+
     if not API_URL:
         print("\\nFAIL: OPENHANDS_CLOUD_API_URL not set")
         sys.exit(1)
-    
+
     if not KV_TOKEN:
         print("\\nFAIL: AUTOMATION_KV_TOKEN not set")
         sys.exit(1)
-    
+
     passed = 0
     failed = 0
-    
+
     for test in tests:
         try:
             if test():
@@ -761,11 +761,11 @@ def main():
             import traceback
             traceback.print_exc()
             failed += 1
-    
+
     print("\\n" + "=" * 60)
     print(f"RESULTS ({mode.upper()}): {passed} passed, {failed} failed")
     print("=" * 60)
-    
+
     if failed == 0:
         print("\\nKV_STORE_ALL_TESTS_PASSED")
         sys.exit(0)
