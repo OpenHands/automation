@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
 from automation.db import get_session
+from automation.kv_helpers import get_nested_value, set_nested_value
 from automation.kv_schemas import (
     KVConflictResponse,
     KVDeleteResponse,
@@ -95,101 +96,7 @@ async def get_automation_id_from_token(
         )
 
 
-# --- Helpers ---
-
-
-def _get_nested_value(obj: Any, path: str) -> Any:
-    """Get a value at a nested path using dot notation.
-
-    Supports bracket notation for keys with dots: config["my.key"]
-    """
-    if not path:
-        return obj
-
-    parts = _parse_path(path)
-    current = obj
-
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                raise KeyError(f"Path '{path}' not found")
-            current = current[part]
-        elif isinstance(current, list):
-            try:
-                idx = int(part)
-                current = current[idx]
-            except (ValueError, IndexError):
-                raise KeyError(f"Path '{path}' not found")
-        else:
-            raise KeyError(f"Path '{path}' not found")
-
-    return current
-
-
-def _set_nested_value(obj: dict, path: str, value: Any) -> dict:
-    """Set a value at a nested path using dot notation.
-
-    Creates intermediate dicts as needed.
-    """
-    parts = _parse_path(path)
-    current = obj
-
-    for part in parts[:-1]:
-        if part not in current:
-            current[part] = {}
-        current = current[part]
-        if not isinstance(current, dict):
-            raise ValueError(
-                f"Cannot set path '{path}': intermediate value is not a dict"
-            )
-
-    current[parts[-1]] = value
-    return obj
-
-
-def _parse_path(path: str) -> list[str]:
-    """Parse a path string into parts.
-
-    Supports:
-    - Dot notation: database.host
-    - Bracket notation: config["my.key.with.dots"]
-    """
-    parts = []
-    current = ""
-    i = 0
-
-    while i < len(path):
-        char = path[i]
-
-        if char == ".":
-            if current:
-                parts.append(current)
-                current = ""
-        elif char == "[":
-            if current:
-                parts.append(current)
-                current = ""
-            # Find closing bracket
-            end = path.find("]", i)
-            if end == -1:
-                raise ValueError(f"Invalid path: unclosed bracket in '{path}'")
-            # Extract key (strip quotes if present)
-            key = path[i + 1 : end]
-            if key.startswith('"') and key.endswith('"'):
-                key = key[1:-1]
-            elif key.startswith("'") and key.endswith("'"):
-                key = key[1:-1]
-            parts.append(key)
-            i = end
-        else:
-            current += char
-
-        i += 1
-
-    if current:
-        parts.append(current)
-
-    return parts
+# --- Database Helpers ---
 
 
 async def _get_kv_row(
@@ -269,7 +176,7 @@ async def get_value(
 
     if path:
         try:
-            value = _get_nested_value(value, path)
+            value = get_nested_value(value, path)
         except KeyError:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -441,7 +348,7 @@ async def patch_value(
         )
 
     try:
-        _set_nested_value(value, body.path, body.value)
+        set_nested_value(value, body.path, body.value)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
