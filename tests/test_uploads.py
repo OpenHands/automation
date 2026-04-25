@@ -108,9 +108,11 @@ class TestWriteStream:
             mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
             mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
+            from automation.config import StorageSettings
             from automation.storage import GoogleCloudFileStore
 
-            store = GoogleCloudFileStore(bucket_name="test-bucket")
+            settings = StorageSettings(gcs_bucket_name="test-bucket")
+            store = GoogleCloudFileStore(settings=settings)
 
             async def mock_stream():
                 yield b"chunk1"
@@ -144,9 +146,11 @@ class TestWriteStream:
             mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
             mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
+            from automation.config import StorageSettings
             from automation.storage import GoogleCloudFileStore
 
-            store = GoogleCloudFileStore(bucket_name="test-bucket")
+            settings = StorageSettings(gcs_bucket_name="test-bucket")
+            store = GoogleCloudFileStore(settings=settings)
 
             async def mock_stream():
                 yield b"a" * 500

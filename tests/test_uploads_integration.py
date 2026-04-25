@@ -64,11 +64,17 @@ def gcs_emulator():
 @pytest.fixture
 def file_store(gcs_emulator):
     """Create a GoogleCloudFileStore connected to the emulator."""
+    from automation.config import StorageSettings
+
     emulator_host = gcs_emulator.get_emulator_host()
     original_env = os.environ.get("STORAGE_EMULATOR_HOST")
     os.environ["STORAGE_EMULATOR_HOST"] = emulator_host
     os.environ["GCS_BUCKET_NAME"] = "test-bucket"
-    store = GoogleCloudFileStore(bucket_name="test-bucket")
+    settings = StorageSettings(
+        gcs_bucket_name="test-bucket",
+        storage_emulator_host=emulator_host,
+    )
+    store = GoogleCloudFileStore(settings=settings)
     yield store
     if original_env is not None:
         os.environ["STORAGE_EMULATOR_HOST"] = original_env

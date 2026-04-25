@@ -21,19 +21,10 @@ from tenacity import (
     wait_exponential,
 )
 
-from automation.constants import (
-    EXTERNAL_DOWNLOAD_TIMEOUT,
-    EXTERNAL_MAX_FILESIZE,
-    MAX_RUN_DURATION_SECONDS,
-    RATE_LIMIT_MAX_RETRIES,
-    RATE_LIMIT_MAX_WAIT,
-    RATE_LIMIT_MIN_WAIT,
-    SANDBOX_POLL_INTERVAL,
-    SANDBOX_READY_TIMEOUT,
-    TARBALL_PATH,
-    WORK_DIR,
-)
+from automation.config import get_config
+from automation.constants import TARBALL_PATH, WORK_DIR
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
+from automation.utils import log_extra
 from automation.utils.sandbox import delete_sandbox
 
 
@@ -47,23 +38,16 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
-def _log_extra(
-    run_id: str | None = None, sandbox_id: str | None = None
-) -> dict[str, Any]:
-    """Build extra dict for structured logging with run/sandbox IDs."""
-    extra: dict[str, Any] = {}
-    if run_id:
-        extra["run_id"] = run_id
-    if sandbox_id:
-        extra["sandbox_id"] = sandbox_id
-    return extra
-
-
-# Tenacity retry decorator for rate limit handling
-_retry_on_rate_limit = retry(
+# Module-level retry decorator for sandbox operations.
+# Config is read at import time and frozen for the process lifetime.
+_sandbox_config = get_config().sandbox
+_sandbox_retry = retry(
     retry=retry_if_exception(_is_rate_limit_error),
-    stop=stop_after_attempt(RATE_LIMIT_MAX_RETRIES),
-    wait=wait_exponential(min=RATE_LIMIT_MIN_WAIT, max=RATE_LIMIT_MAX_WAIT),
+    stop=stop_after_attempt(_sandbox_config.rate_limit_max_retries),
+    wait=wait_exponential(
+        min=_sandbox_config.rate_limit_min_wait,
+        max=_sandbox_config.rate_limit_max_wait,
+    ),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
@@ -92,44 +76,57 @@ def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
     return None
 
 
-@_retry_on_rate_limit
 async def _create_sandbox(
     client: httpx.AsyncClient, api_url: str, headers: dict[str, str]
 ) -> str:
     """Create a sandbox and return its ID. Retries on rate limit."""
-    resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
-    resp.raise_for_status()
-    return resp.json()["id"]
+
+    @_sandbox_retry
+    async def _do_create():
+        resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+    return await _do_create()
 
 
-@_retry_on_rate_limit
 async def _poll_sandbox(
     client: httpx.AsyncClient, api_url: str, sandbox_id: str, headers: dict[str, str]
 ) -> dict[str, Any]:
     """Poll sandbox status. Retries on rate limit."""
-    resp = await client.get(
-        f"{api_url}/api/v1/sandboxes",
-        params={"id": sandbox_id},
-        headers=headers,
-    )
-    resp.raise_for_status()
-    items = resp.json()
-    if not items:
-        raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
-    return items[0]
+
+    @_sandbox_retry
+    async def _do_poll():
+        resp = await client.get(
+            f"{api_url}/api/v1/sandboxes",
+            params={"id": sandbox_id},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        items = resp.json()
+        if not items:
+            raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
+        return items[0]
+
+    return await _do_poll()
 
 
 async def _create_and_wait(
     client: httpx.AsyncClient,
     api_url: str,
     api_key: str,
-    ready_timeout: float = SANDBOX_READY_TIMEOUT,
+    ready_timeout: float | None = None,
 ) -> tuple[str, str, str]:
     """Create a sandbox and poll until RUNNING.
 
     Returns ``(sandbox_id, session_api_key, agent_server_url)``.
     Handles 429 rate limits via tenacity retry.
     """
+    sandbox_config = get_config().sandbox
+    if ready_timeout is None:
+        ready_timeout = sandbox_config.sandbox_ready_timeout
+    poll_interval = sandbox_config.sandbox_poll_interval
+
     headers = {"Authorization": f"Bearer {api_key}"}
 
     sandbox_id = await _create_sandbox(client, api_url, headers)
@@ -157,8 +154,8 @@ async def _create_and_wait(
                 error_detail += f", error_message={error_message}"
             raise RuntimeError(f"Sandbox {sandbox_id} failed: {error_detail}")
 
-        await asyncio.sleep(SANDBOX_POLL_INTERVAL)
-        elapsed += SANDBOX_POLL_INTERVAL
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
 
     raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
 
@@ -193,9 +190,11 @@ async def _bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
     resp = await client.post(
         f"{agent_url}/api/bash/execute_bash_command",
         json={"command": command, "timeout": timeout},
@@ -212,14 +211,17 @@ async def _start_bash(
     agent_url: str,
     session_key: str,
     command: str,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_timeout
     resp = await client.post(
         f"{agent_url}/api/bash/start_bash_command",
         json={"command": command, "timeout": timeout},
         headers={"X-Session-API-Key": session_key},
-        timeout=30.0,
+        timeout=http_timeout,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -250,8 +252,8 @@ async def _download_in_sandbox(
     session_key: str,
     tarball_url: str,
     dest: str,
-    timeout: int = EXTERNAL_DOWNLOAD_TIMEOUT,
-    max_filesize: int = EXTERNAL_MAX_FILESIZE,
+    timeout: int | None = None,
+    max_filesize: int | None = None,
 ) -> None:
     """Download a tarball directly inside the sandbox using curl.
 
@@ -263,6 +265,12 @@ async def _download_in_sandbox(
             This indicates the URL is wrong or inaccessible.
         RuntimeError: For other download failures (transient).
     """
+    sandbox_config = get_config().sandbox
+    if timeout is None:
+        timeout = sandbox_config.external_download_timeout
+    if max_filesize is None:
+        max_filesize = sandbox_config.external_max_filesize
+
     # Use curl with safety limits:
     # -f: fail silently on HTTP errors (returns exit code 22)
     # -s: silent mode (no progress)
@@ -317,7 +325,7 @@ async def dispatch_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
     callback_url: str | None = None,
     run_id: str | None = None,
 ) -> DispatchResult:
@@ -342,6 +350,10 @@ async def dispatch_automation(
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
     """
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_long_timeout
+
     env_vars = dict(env_vars) if env_vars else {}
     if callback_url:
         env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
@@ -351,23 +363,23 @@ async def dispatch_automation(
     sandbox_id: str | None = None
 
     # Helper for consistent structured logging with run_id/sandbox_id
-    def log_extra() -> dict[str, Any]:
-        return _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+    def _log_ctx() -> dict[str, Any]:
+        return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
-    logger.info("Dispatching automation to sandbox", extra=log_extra())
+    logger.info("Dispatching automation to sandbox", extra=_log_ctx())
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
         try:
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key
             )
             logger.info(
-                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=log_extra()
+                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=_log_ctx()
             )
         except Exception as e:
             # If sandbox creation started but failed to reach RUNNING,
             # still attempt cleanup.
-            logger.exception("Sandbox creation failed", extra=log_extra())
+            logger.exception("Sandbox creation failed", extra=_log_ctx())
             if sandbox_id:
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
             return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
@@ -380,14 +392,12 @@ async def dispatch_automation(
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
-                logger.info("Uploading tarball to sandbox", extra=log_extra())
+                logger.info("Uploading tarball to sandbox", extra=_log_ctx())
                 await _upload(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
-                logger.info(
-                    "Downloading tarball in sandbox from URL", extra=log_extra()
-                )
+                logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
@@ -405,14 +415,14 @@ async def dispatch_automation(
                 f" && {exports}{entrypoint}"
             )
 
-            logger.info("Starting entrypoint: %s", entrypoint, extra=log_extra())
+            logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
             command_id = await _start_bash(
                 client, agent_url, session_key, cmd, timeout=timeout
             )
             logger.info(
                 "Entrypoint started (command_id=%s), disconnecting",
                 command_id,
-                extra=log_extra(),
+                extra=_log_ctx(),
             )
 
             return DispatchResult(success=True, sandbox_id=sandbox_id)
@@ -426,7 +436,7 @@ async def dispatch_automation(
                     logger.exception("Failed to delete sandbox during error cleanup")
             raise
         except Exception as e:
-            logger.exception("Automation dispatch failed", extra=log_extra())
+            logger.exception("Automation dispatch failed", extra=_log_ctx())
             # Delete sandbox on dispatch failure to avoid orphaned sandboxes
             if sandbox_id:
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
@@ -451,7 +461,7 @@ async def run_automation(
     entrypoint: str,
     tarball_source: bytes | str,
     env_vars: dict[str, str] | None = None,
-    timeout: int = MAX_RUN_DURATION_SECONDS,
+    timeout: int | None = None,
     callback_url: str | None = None,
     run_id: str | None = None,
     keep_sandbox: bool = False,
@@ -478,6 +488,10 @@ async def run_automation(
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
     """
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+    http_timeout = get_config().http.http_long_timeout
+
     env_vars = dict(env_vars) if env_vars else {}
     if callback_url:
         env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
@@ -487,23 +501,23 @@ async def run_automation(
     sandbox_id: str | None = None
 
     # Helper for consistent structured logging with run_id/sandbox_id
-    def log_extra() -> dict[str, Any]:
-        return _log_extra(run_id=run_id, sandbox_id=sandbox_id)
+    def _log_ctx() -> dict[str, Any]:
+        return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
-    logger.info("Starting automation execution", extra=log_extra())
+    logger.info("Starting automation execution", extra=_log_ctx())
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
         try:
             sandbox_id, session_key, agent_url = await _create_and_wait(
                 client, api_url, api_key
             )
             logger.info(
-                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=log_extra()
+                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=_log_ctx()
             )
         except Exception as e:
             # If sandbox creation started but failed to reach RUNNING,
             # still attempt cleanup.
-            logger.exception("Sandbox creation failed", extra=log_extra())
+            logger.exception("Sandbox creation failed", extra=_log_ctx())
             if sandbox_id:
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
@@ -516,14 +530,12 @@ async def run_automation(
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
-                logger.info("Uploading tarball to sandbox", extra=log_extra())
+                logger.info("Uploading tarball to sandbox", extra=_log_ctx())
                 await _upload(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
-                logger.info(
-                    "Downloading tarball in sandbox from URL", extra=log_extra()
-                )
+                logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
@@ -541,7 +553,7 @@ async def run_automation(
                 f" && {exports}{entrypoint}"
             )
 
-            logger.info("Executing entrypoint: %s", entrypoint, extra=log_extra())
+            logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
             exit_code, stdout, stderr = await _bash(
                 client, agent_url, session_key, cmd, timeout=timeout
             )
@@ -557,10 +569,10 @@ async def run_automation(
                     error_parts.append(f"stdout: {stdout[-500:]}")
                 error_msg = "\n".join(error_parts)
                 logger.warning(
-                    "Entrypoint failed with exit_code=%s", exit_code, extra=log_extra()
+                    "Entrypoint failed with exit_code=%s", exit_code, extra=_log_ctx()
                 )
             else:
-                logger.info("Entrypoint completed successfully", extra=log_extra())
+                logger.info("Entrypoint completed successfully", extra=_log_ctx())
 
             return AutomationResult(
                 success=success,
@@ -572,11 +584,11 @@ async def run_automation(
             )
 
         except Exception as e:
-            logger.exception("Automation execution failed", extra=log_extra())
+            logger.exception("Automation execution failed", extra=_log_ctx())
             return AutomationResult(success=False, sandbox_id=sandbox_id, error=str(e))
         finally:
             if not keep_sandbox:
-                logger.info("Deleting sandbox", extra=log_extra())
+                logger.info("Deleting sandbox", extra=_log_ctx())
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
 
 

@@ -10,7 +10,6 @@ dispatcher transitions a run to RUNNING (see ``mark_run_status``).
 
 import asyncio
 import logging
-from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
@@ -19,25 +18,13 @@ from sqlalchemy.orm import selectinload
 
 from automation.config import Settings
 from automation.models import AutomationRun, AutomationRunStatus
+from automation.utils import log_extra
 from automation.utils.api_key import get_api_key_for_automation_run
 from automation.utils.sandbox import cleanup_sandbox, verify_run_status
 from automation.utils.time import utcnow
 
 
 logger = logging.getLogger("automation.watchdog")
-
-
-def _run_extra(
-    run_id: str | None = None,
-    sandbox_id: str | None = None,
-) -> dict[str, Any]:
-    """Build extra dict for structured logging."""
-    extra: dict[str, Any] = {}
-    if run_id:
-        extra["run_id"] = run_id
-    if sandbox_id:
-        extra["sandbox_id"] = sandbox_id
-    return extra
 
 
 async def _verify_and_mark_run(
@@ -55,7 +42,7 @@ async def _verify_and_mark_run(
     """
     run_id = str(run.id)
     sandbox_id = run.sandbox_id
-    extra = _run_extra(run_id=run_id, sandbox_id=sandbox_id)
+    extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
 
     # If no sandbox_id, we can't verify - mark as failed
@@ -256,7 +243,7 @@ async def mark_stale_runs(
 
         for run in stale_runs:
             run_id = str(run.id)
-            extra = _run_extra(run_id=run_id, sandbox_id=run.sandbox_id)
+            extra = log_extra(run_id=run_id, sandbox_id=run.sandbox_id)
 
             logger.info(
                 "Processing stale run (timeout_at=%s, now=%s)",

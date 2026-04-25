@@ -11,10 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from automation.config import get_config
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import (
-    EXTERNAL_DOWNLOAD_TIMEOUT,
-    EXTERNAL_MAX_FILESIZE,
     AutomationResult,
     DispatchResult,
     _shell_quote,
@@ -137,11 +136,13 @@ class TestExternalDownloadConstants:
 
     def test_timeout_is_reasonable(self):
         """External download timeout should be reasonable (60-300s)."""
-        assert 60 <= EXTERNAL_DOWNLOAD_TIMEOUT <= 300
+        timeout = get_config().sandbox.external_download_timeout
+        assert 60 <= timeout <= 300
 
     def test_max_filesize_is_reasonable(self):
         """Max filesize should be reasonable (10MB - 500MB)."""
-        assert 10 * 1024 * 1024 <= EXTERNAL_MAX_FILESIZE <= 500 * 1024 * 1024
+        max_filesize = get_config().sandbox.external_max_filesize
+        assert 10 * 1024 * 1024 <= max_filesize <= 500 * 1024 * 1024
 
 
 class TestUploadUsesQueryParams:

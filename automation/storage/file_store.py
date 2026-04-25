@@ -2,8 +2,18 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
 
+# All files are stored under this prefix in the bucket to isolate
+# automation service data from other services.
+BUCKET_PREFIX = "automation"
+
+
 class FileStore(ABC):
     """Abstract base class for file storage operations."""
+
+    def _prefixed_path(self, path: str) -> str:
+        """Add the automation prefix to a path."""
+        path = path.lstrip("/")
+        return f"{BUCKET_PREFIX}/{path}"
 
     @abstractmethod
     def write(self, path: str, contents: str | bytes) -> None:

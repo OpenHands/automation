@@ -64,11 +64,17 @@ def gcs_emulator():
 @pytest.fixture
 def file_store(gcs_emulator):
     """Create a GoogleCloudFileStore connected to the emulator."""
+    from automation.config import StorageSettings
+
     emulator_host = gcs_emulator.get_emulator_host()
     # Set the emulator host environment variable
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("STORAGE_EMULATOR_HOST", emulator_host)
-        store = GoogleCloudFileStore(bucket_name="test-bucket")
+        settings = StorageSettings(
+            gcs_bucket_name="test-bucket",
+            storage_emulator_host=emulator_host,
+        )
+        store = GoogleCloudFileStore(settings=settings)
         yield store
 
 
@@ -225,11 +231,17 @@ class TestGoogleCloudFileStoreIntegration:
 
     def test_bucket_created_automatically_for_emulator(self, gcs_emulator):
         """Verify bucket is created automatically when using emulator."""
+        from automation.config import StorageSettings
+
         emulator_host = gcs_emulator.get_emulator_host()
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("STORAGE_EMULATOR_HOST", emulator_host)
             # Use a new bucket name
-            store = GoogleCloudFileStore(bucket_name="auto-created-bucket")
+            settings = StorageSettings(
+                gcs_bucket_name="auto-created-bucket",
+                storage_emulator_host=emulator_host,
+            )
+            store = GoogleCloudFileStore(settings=settings)
             # Write should work without explicit bucket creation
             store.write("test.txt", "hello")
             # Verify via blob directly
