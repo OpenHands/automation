@@ -28,11 +28,13 @@ from automation.db import get_session
 from automation.kv_helpers import (
     get_nested_value,
     require_dict,
+    require_int,
     require_list,
     require_numeric,
     safe_decrypt,
     safe_encrypt,
     set_nested_value,
+    validate_key,
 )
 from automation.kv_schemas import (
     KVConflictResponse,
@@ -101,6 +103,11 @@ async def get_automation_id_from_token(
 # --- Validation Helpers ---
 
 
+# Type alias for validated KV keys - ensures key validation is applied
+# Use this as a FastAPI path parameter annotation: key: ValidatedKey
+ValidatedKey = Annotated[str, Depends(lambda key: validate_key(key))]
+
+
 def _check_value_size(value: Any, settings=None) -> None:
     """Validate that a value doesn't exceed the configured size limit.
 
@@ -141,7 +148,7 @@ def _check_value_size(value: Any, settings=None) -> None:
 async def _get_kv_row(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    key: str,
+    key: ValidatedKey,
 ) -> AutomationKV | None:
     """Get a KV row by automation_id and key."""
     result = await session.execute(
@@ -156,7 +163,7 @@ async def _get_kv_row(
 async def _get_kv_row_for_update(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    key: str,
+    key: ValidatedKey,
 ) -> AutomationKV | None:
     """Get a KV row with FOR UPDATE lock."""
     result = await session.execute(
@@ -188,7 +195,7 @@ async def list_keys(
 
 @router.get("/{key}")
 async def get_value(
-    key: str,
+    key: ValidatedKey,
     path: str | None = Query(default=None, description="Nested path (dot notation)"),
     meta: bool = Query(default=False, description="Include metadata"),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
@@ -229,7 +236,7 @@ async def get_value(
 
 @router.put("/{key}")
 async def set_value(
-    key: str,
+    key: ValidatedKey,
     body: Annotated[Any, Body()],  # Accept any JSON body directly as the value
     response: Response,
     nx: bool = Query(default=False, description="Only set if key does not exist"),
@@ -345,7 +352,7 @@ async def set_value(
 
 @router.patch("/{key}")
 async def patch_value(
-    key: str,
+    key: ValidatedKey,
     body: KVPatchRequest,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
@@ -389,7 +396,7 @@ async def patch_value(
 
 @router.delete("/{key}")
 async def delete_key(
-    key: str,
+    key: ValidatedKey,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVDeleteResponse:
@@ -406,14 +413,17 @@ async def delete_key(
 
 @router.post("/{key}/incr")
 async def increment(
-    key: str,
+    key: ValidatedKey,
     body: KVIncrRequest | None = None,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
-    """Atomically increment a numeric value.
+    """Atomically increment an integer value.
 
     If the key doesn't exist, initializes it to `by` (default 1).
+
+    Note: The stored value must be an integer. Float values are rejected
+    because integer arithmetic on floats can cause precision loss.
     """
     settings = get_settings()
     by = body.by if body else 1
@@ -435,9 +445,10 @@ async def increment(
 
     value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    require_numeric(value)
+    # Require integer, not just numeric - floats would lose precision with int()
+    require_int(value)
 
-    new_value = int(value + by)
+    new_value = value + by
 
     kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
 
@@ -447,14 +458,17 @@ async def increment(
 
 @router.post("/{key}/decr")
 async def decrement(
-    key: str,
+    key: ValidatedKey,
     body: KVIncrRequest | None = None,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
-    """Atomically decrement a numeric value.
+    """Atomically decrement an integer value.
 
     If the key doesn't exist, initializes it to `-by` (default -1).
+
+    Note: The stored value must be an integer. Float values are rejected
+    because integer arithmetic on floats can cause precision loss.
     """
     settings = get_settings()
     by = body.by if body else 1
@@ -476,9 +490,10 @@ async def decrement(
 
     value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    require_numeric(value)
+    # Require integer, not just numeric - floats would lose precision
+    require_int(value)
 
-    new_value = int(value - by)
+    new_value = value - by
 
     kv.value_encrypted = safe_encrypt(settings.kv_secret, new_value)
 
@@ -488,7 +503,7 @@ async def decrement(
 
 @router.post("/{key}/lpush")
 async def lpush(
-    key: str,
+    key: ValidatedKey,
     body: KVListPushRequest,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
@@ -531,7 +546,7 @@ async def lpush(
 
 @router.post("/{key}/rpush")
 async def rpush(
-    key: str,
+    key: ValidatedKey,
     body: KVListPushRequest,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
@@ -574,7 +589,7 @@ async def rpush(
 
 @router.post("/{key}/lpop")
 async def lpop(
-    key: str,
+    key: ValidatedKey,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
@@ -606,7 +621,7 @@ async def lpop(
 
 @router.post("/{key}/rpop")
 async def rpop(
-    key: str,
+    key: ValidatedKey,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
@@ -638,7 +653,7 @@ async def rpop(
 
 @router.get("/{key}/len")
 async def list_length(
-    key: str,
+    key: ValidatedKey,
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:

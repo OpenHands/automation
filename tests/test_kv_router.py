@@ -1020,3 +1020,151 @@ class TestJSONValidation:
         for value in test_values:
             # Should not raise
             _validate_json_value(value)
+
+
+class TestKeyValidation:
+    """Tests for key name validation at the API level.
+
+    Verifies that invalid key names are rejected by the router.
+    These tests complement the unit tests in test_kv_helpers.py.
+    """
+
+    async def test_valid_key_accepted(self, kv_client):
+        """Normal key names work correctly."""
+        response = await kv_client.put(
+            "/api/automation/v1/kv/valid_key",
+            json={"value": "test"},
+        )
+        assert response.status_code == 201
+
+    async def test_key_with_unicode_accepted(self, kv_client):
+        """Unicode key names are accepted."""
+        response = await kv_client.put(
+            "/api/automation/v1/kv/日本語キー",
+            json={"value": "test"},
+        )
+        assert response.status_code == 201
+
+    async def test_very_long_key_rejected(self, kv_client):
+        """Key exceeding max length is rejected."""
+        long_key = "x" * 300
+        response = await kv_client.put(
+            f"/api/automation/v1/kv/{long_key}",
+            json={"value": "test"},
+        )
+        assert response.status_code == 400
+        assert "exceeds" in response.json()["detail"]
+
+
+class TestIncrIntegerOnly:
+    """Tests for incr/decr integer-only behavior.
+
+    Verifies that incr/decr operations reject non-integer values
+    to prevent silent precision loss.
+    """
+
+    async def test_incr_on_integer_succeeds(self, kv_client, async_session):
+        """Incrementing an integer value works."""
+        # Set up an integer value
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="counter",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, 10),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        response = await kv_client.post(
+            "/api/automation/v1/kv/counter/incr",
+            json={"by": 5},
+        )
+        assert response.status_code == 200
+        assert response.json()["value"] == 15
+
+    async def test_incr_on_float_rejected(self, kv_client, async_session):
+        """Incrementing a float value is rejected."""
+        # Set up a float value
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="float_val",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, 3.14),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        response = await kv_client.post(
+            "/api/automation/v1/kv/float_val/incr",
+            json={"by": 1},
+        )
+        assert response.status_code == 400
+        assert "float" in response.json()["detail"]
+
+    async def test_incr_on_boolean_rejected(self, kv_client, async_session):
+        """Incrementing a boolean value is rejected."""
+        # Set up a boolean value
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="bool_val",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, True),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        response = await kv_client.post(
+            "/api/automation/v1/kv/bool_val/incr",
+        )
+        assert response.status_code == 400
+        assert "boolean" in response.json()["detail"]
+
+    async def test_decr_on_float_rejected(self, kv_client, async_session):
+        """Decrementing a float value is rejected."""
+        # Set up a float value
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="float_decr",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, 5.5),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        response = await kv_client.post(
+            "/api/automation/v1/kv/float_decr/decr",
+        )
+        assert response.status_code == 400
+        assert "float" in response.json()["detail"]
+
+    async def test_incr_creates_integer(self, kv_client):
+        """Incrementing non-existent key creates an integer value."""
+        response = await kv_client.post(
+            "/api/automation/v1/kv/new_counter/incr",
+            json={"by": 5},
+        )
+        assert response.status_code == 200
+        assert response.json()["value"] == 5
+
+        # Verify it's an integer by checking we can increment again
+        response = await kv_client.post(
+            "/api/automation/v1/kv/new_counter/incr",
+        )
+        assert response.status_code == 200
+        assert response.json()["value"] == 6
+
+    async def test_incr_preserves_integer_type(self, kv_client, async_session):
+        """Incrementing preserves integer type (no float conversion)."""
+        # Set up a large integer
+        big_int = 10**20
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="big_counter",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, big_int),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        response = await kv_client.post(
+            "/api/automation/v1/kv/big_counter/incr",
+            json={"by": 1},
+        )
+        assert response.status_code == 200
+        # Verify exact integer math (no float precision loss)
+        assert response.json()["value"] == big_int + 1

@@ -4,6 +4,7 @@ Provides utilities for:
 - Parsing and manipulating nested paths in JSON values
 - Safe encryption/decryption with proper HTTP error handling
 - Type validation helpers for KV values
+- Key name validation
 """
 
 import logging
@@ -20,6 +21,65 @@ from automation.utils.kv import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# Maximum key length (matches database column constraint)
+_MAX_KEY_LENGTH = 255
+
+# Maximum path depth (matches value nesting depth limit)
+_MAX_PATH_DEPTH = 32
+
+
+# --- Key Validation ---
+
+
+def validate_key(key: str) -> str:
+    """Validate a KV key name for safe storage and retrieval.
+
+    Keys are validated to ensure they:
+    - Are not empty or whitespace-only
+    - Don't exceed the database column length limit (255 chars)
+    - Don't contain control characters (which could cause issues in logs, URLs, etc.)
+
+    Args:
+        key: The key name to validate
+
+    Returns:
+        The validated key (unmodified if valid)
+
+    Raises:
+        HTTPException: 400 Bad Request with descriptive error if validation fails
+    """
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_key: key cannot be empty",
+        )
+
+    if not key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_key: key cannot be whitespace-only",
+        )
+
+    if len(key) > _MAX_KEY_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid_key: key exceeds {_MAX_KEY_LENGTH} characters ({len(key)} given)",
+        )
+
+    # Check for control characters (ASCII 0-31 and 127)
+    # These can cause issues in logging, URLs, and debugging
+    for i, char in enumerate(key):
+        code = ord(char)
+        if code < 32 or code == 127:
+            char_repr = f"\\x{code:02x}" if code < 32 else "\\x7f"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid_key: key contains control character {char_repr} at position {i}",
+            )
+
+    return key
 
 
 # --- HTTP Error Helpers ---
@@ -135,6 +195,9 @@ def require_list(value: Any) -> list:
 def require_numeric(value: Any) -> int | float:
     """Validate that a value is numeric (int or float), raising HTTP 400 if not.
 
+    Note: Booleans are explicitly rejected even though bool is a subclass of int
+    in Python. This prevents confusing behavior where True becomes 2 after increment.
+
     Args:
         value: The value to check
 
@@ -142,12 +205,56 @@ def require_numeric(value: Any) -> int | float:
         The value (for chaining)
 
     Raises:
-        HTTPException: 400 if value is not numeric
+        HTTPException: 400 if value is not numeric (or is a boolean)
     """
+    # Explicitly reject booleans (bool is subclass of int in Python)
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is boolean, not numeric",
+        )
     if not isinstance(value, (int, float)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="type_mismatch: value is not numeric",
+        )
+    return value
+
+
+def require_int(value: Any) -> int:
+    """Validate that a value is an integer, raising HTTP 400 if not.
+
+    This is stricter than require_numeric - it rejects floats.
+    Used for operations like incr/decr where float arithmetic could
+    cause unexpected precision loss.
+
+    Note: Booleans are explicitly rejected even though bool is a subclass of int
+    in Python. This prevents confusing behavior where True becomes 2 after increment.
+
+    Args:
+        value: The value to check
+
+    Returns:
+        The value (for chaining)
+
+    Raises:
+        HTTPException: 400 if value is not an integer
+    """
+    # Explicitly reject booleans (bool is subclass of int in Python)
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is boolean, not integer",
+        )
+    if not isinstance(value, int):
+        if isinstance(value, float):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="type_mismatch: value is float, not integer (use integer for incr/decr)",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is not an integer",
         )
     return value
 
@@ -169,7 +276,8 @@ def parse_path(path: str) -> list[str]:
         List of path segments.
 
     Raises:
-        ValueError: If path has invalid syntax (e.g., unclosed bracket).
+        ValueError: If path has invalid syntax (e.g., unclosed bracket) or
+                   exceeds maximum depth (_MAX_PATH_DEPTH).
     """
     parts: list[str] = []
     current = ""
@@ -205,6 +313,12 @@ def parse_path(path: str) -> list[str]:
 
     if current:
         parts.append(current)
+
+    # Enforce path depth limit to prevent DoS via deeply nested paths
+    if len(parts) > _MAX_PATH_DEPTH:
+        raise ValueError(
+            f"Path exceeds maximum depth of {_MAX_PATH_DEPTH} ({len(parts)} segments)"
+        )
 
     return parts
 
