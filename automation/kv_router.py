@@ -25,7 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
 from automation.db import get_session
-from automation.kv_helpers import get_nested_value, safe_encrypt, set_nested_value
+from automation.kv_helpers import (
+    get_nested_value,
+    require_dict,
+    require_list,
+    require_numeric,
+    safe_decrypt,
+    safe_encrypt,
+    set_nested_value,
+)
 from automation.kv_schemas import (
     KVConflictResponse,
     KVDeleteResponse,
@@ -41,12 +49,7 @@ from automation.kv_schemas import (
     KVSetResponse,
 )
 from automation.models import AutomationKV
-from automation.utils.kv import (
-    KVEncryptionError,
-    KVTokenError,
-    decrypt_value,
-    verify_kv_token,
-)
+from automation.utils.kv import KVTokenError, verify_kv_token
 
 
 logger = logging.getLogger(__name__)
@@ -201,14 +204,7 @@ async def get_value(
             detail="key_not_found",
         )
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
     if path:
         try:
@@ -364,20 +360,9 @@ async def patch_value(
             detail="key_not_found",
         )
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, dict):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not an object",
-        )
+    require_dict(value)
 
     try:
         set_nested_value(value, body.path, body.value)
@@ -448,20 +433,9 @@ async def increment(
         await session.flush()
         return KVIncrResponse(key=key, value=by)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, (int, float)):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not numeric",
-        )
+    require_numeric(value)
 
     new_value = int(value + by)
 
@@ -500,20 +474,9 @@ async def decrement(
         await session.flush()
         return KVIncrResponse(key=key, value=-by)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, (int, float)):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not numeric",
-        )
+    require_numeric(value)
 
     new_value = int(value - by)
 
@@ -553,20 +516,9 @@ async def lpush(
         await session.flush()
         return KVListLengthResponse(key=key, length=1)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not a list",
-        )
+    require_list(value)
 
     value.insert(0, body.value)
     _check_value_size(value, settings)
@@ -607,20 +559,9 @@ async def rpush(
         await session.flush()
         return KVListLengthResponse(key=key, length=1)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not a list",
-        )
+    require_list(value)
 
     value.append(body.value)
     _check_value_size(value, settings)
@@ -648,20 +589,9 @@ async def lpop(
     if kv is None:
         return KVKeyResponse(key=key, value=None)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not a list",
-        )
+    require_list(value)
 
     if len(value) == 0:
         return KVKeyResponse(key=key, value=None)
@@ -691,20 +621,9 @@ async def rpop(
     if kv is None:
         return KVKeyResponse(key=key, value=None)
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not a list",
-        )
+    require_list(value)
 
     if len(value) == 0:
         return KVKeyResponse(key=key, value=None)
@@ -734,19 +653,8 @@ async def list_length(
             detail="key_not_found",
         )
 
-    try:
-        value = decrypt_value(settings.kv_secret, kv.value_encrypted)
-    except KVEncryptionError as e:
-        logger.error("Failed to decrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to decrypt value",
-        )
+    value = safe_decrypt(settings.kv_secret, kv.value_encrypted)
 
-    if not isinstance(value, list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="type_mismatch: value is not a list",
-        )
+    require_list(value)
 
     return KVListLengthResponse(key=key, length=len(value))

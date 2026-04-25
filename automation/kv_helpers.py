@@ -2,7 +2,8 @@
 
 Provides utilities for:
 - Parsing and manipulating nested paths in JSON values
-- Safe encryption with proper HTTP error handling
+- Safe encryption/decryption with proper HTTP error handling
+- Type validation helpers for KV values
 """
 
 import logging
@@ -13,11 +14,145 @@ from fastapi import HTTPException, status
 from automation.utils.kv import (
     KVEncryptionError,
     KVValueError,
+    decrypt_value,
     encrypt_value,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+# --- HTTP Error Helpers ---
+
+
+def safe_encrypt(secret: str, value: Any) -> bytes:
+    """Encrypt a value with proper HTTP error handling.
+
+    Wraps encrypt_value() to convert exceptions to appropriate HTTP errors:
+    - KVValueError (invalid JSON) → 400 Bad Request
+    - KVEncryptionError (encryption failure) → 500 Internal Server Error
+
+    JSON Validation:
+        Values are validated before encryption to ensure they are strict JSON:
+        - NaN, Infinity, -Infinity are rejected (not valid JSON)
+        - Maximum nesting depth is enforced (prevents DoS)
+        - Non-serializable types are rejected
+
+    Args:
+        secret: The encryption secret
+        value: Any JSON-serializable value
+
+    Returns:
+        Encrypted bytes
+
+    Raises:
+        HTTPException: 400 for invalid values, 500 for encryption errors
+    """
+    try:
+        return encrypt_value(secret, value)
+    except KVValueError as e:
+        # Client's fault: invalid JSON value (NaN, too deep, non-serializable)
+        logger.warning("Invalid KV value rejected: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid_value: {e}",
+        )
+    except KVEncryptionError as e:
+        # Our fault: encryption failed unexpectedly
+        logger.error("Failed to encrypt KV value: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to encrypt value",
+        )
+
+
+def safe_decrypt(secret: str, encrypted: bytes) -> Any:
+    """Decrypt a value with proper HTTP error handling.
+
+    Wraps decrypt_value() to convert KVEncryptionError to HTTP 500.
+
+    Args:
+        secret: The encryption secret
+        encrypted: Encrypted bytes from the database
+
+    Returns:
+        The decrypted JSON value
+
+    Raises:
+        HTTPException: 500 for decryption errors
+    """
+    try:
+        return decrypt_value(secret, encrypted)
+    except KVEncryptionError as e:
+        # Our fault: decryption failed (corrupted data, wrong key, etc.)
+        logger.error("Failed to decrypt KV value: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decrypt value",
+        )
+
+
+def require_dict(value: Any) -> dict:
+    """Validate that a value is a dict, raising HTTP 400 if not.
+
+    Args:
+        value: The value to check
+
+    Returns:
+        The value (for chaining)
+
+    Raises:
+        HTTPException: 400 if value is not a dict
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is not an object",
+        )
+    return value
+
+
+def require_list(value: Any) -> list:
+    """Validate that a value is a list, raising HTTP 400 if not.
+
+    Args:
+        value: The value to check
+
+    Returns:
+        The value (for chaining)
+
+    Raises:
+        HTTPException: 400 if value is not a list
+    """
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is not a list",
+        )
+    return value
+
+
+def require_numeric(value: Any) -> int | float:
+    """Validate that a value is numeric (int or float), raising HTTP 400 if not.
+
+    Args:
+        value: The value to check
+
+    Returns:
+        The value (for chaining)
+
+    Raises:
+        HTTPException: 400 if value is not numeric
+    """
+    if not isinstance(value, (int, float)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_mismatch: value is not numeric",
+        )
+    return value
+
+
+# --- Path Operations ---
 
 
 def parse_path(path: str) -> list[str]:
@@ -142,44 +277,3 @@ def set_nested_value(obj: dict, path: str, value: Any) -> dict:
 
     current[parts[-1]] = value
     return obj
-
-
-def safe_encrypt(secret: str, value: Any) -> bytes:
-    """Encrypt a value with proper HTTP error handling.
-
-    Wraps encrypt_value() to convert exceptions to appropriate HTTP errors:
-    - KVValueError (invalid JSON) → 400 Bad Request
-    - KVEncryptionError (encryption failure) → 500 Internal Server Error
-
-    JSON Validation:
-        Values are validated before encryption to ensure they are strict JSON:
-        - NaN, Infinity, -Infinity are rejected (not valid JSON)
-        - Maximum nesting depth is enforced (prevents DoS)
-        - Non-serializable types are rejected
-
-    Args:
-        secret: The encryption secret
-        value: Any JSON-serializable value
-
-    Returns:
-        Encrypted bytes
-
-    Raises:
-        HTTPException: 400 for invalid values, 500 for encryption errors
-    """
-    try:
-        return encrypt_value(secret, value)
-    except KVValueError as e:
-        # Client's fault: invalid JSON value (NaN, too deep, non-serializable)
-        logger.warning("Invalid KV value rejected: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid_value: {e}",
-        )
-    except KVEncryptionError as e:
-        # Our fault: encryption failed unexpectedly
-        logger.error("Failed to encrypt KV value: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to encrypt value",
-        )
