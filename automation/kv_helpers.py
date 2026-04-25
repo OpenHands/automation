@@ -38,6 +38,7 @@ def validate_key(key: str) -> str:
 
     Keys are validated to ensure they:
     - Are not empty or whitespace-only
+    - Don't start with '$' (reserved for system keys like $version)
     - Don't exceed the database column length limit (255 chars)
     - Don't contain control characters (which could cause issues in logs, URLs, etc.)
 
@@ -60,6 +61,13 @@ def validate_key(key: str) -> str:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid_key: key cannot be whitespace-only",
+        )
+
+    # Reserve $ prefix for system keys ($version, future meta keys)
+    if key.startswith("$"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_key: keys starting with '$' are reserved for system use",
         )
 
     if len(key) > _MAX_KEY_LENGTH:

@@ -56,6 +56,9 @@ from automation.kv_helpers import (
     validate_key,
 )
 from automation.kv_schemas import (
+    KVBatchOperation,
+    KVBatchRequest,
+    KVBatchResponse,
     KVConflictResponse,
     KVDeleteResponse,
     KVIncrRequest,
@@ -246,8 +249,26 @@ async def _save_state(
     state: dict[str, Any],
     secret: str,
     existing_row: AutomationKV | None,
+    *,
+    bump_version: bool = True,
 ) -> AutomationKV:
-    """Save the state document, creating or updating the row as needed."""
+    """Save the state document, creating or updating the row as needed.
+
+    Args:
+        session: Database session
+        automation_id: The automation's UUID
+        state: The state dict to save (will be encrypted)
+        secret: Encryption secret
+        existing_row: Existing row to update, or None to create new
+        bump_version: If True (default), auto-increment $version
+
+    Returns:
+        The saved/updated AutomationKV row
+    """
+    # Auto-increment $version on every write (unless explicitly disabled)
+    if bump_version:
+        state["$version"] = state.get("$version", 0) + 1
+
     encrypted = safe_encrypt(secret, state)
 
     if existing_row is None:
@@ -267,6 +288,11 @@ async def _save_state(
     return row
 
 
+def _get_version(state: dict[str, Any]) -> int:
+    """Get the current $version from state, defaulting to 0."""
+    return state.get("$version", 0)
+
+
 # --- Endpoints ---
 
 
@@ -275,13 +301,17 @@ async def list_keys(
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVListKeysResponse:
-    """List all keys for this automation."""
+    """List all keys for this automation.
+
+    Note: System keys (starting with $) are filtered from the response.
+    """
     settings = get_settings()
 
     row = await _get_state_row(session, automation_id)
     state = _decrypt_state(settings.kv_secret, row)
 
-    keys = list(state.keys())
+    # Filter out system keys (e.g., $version)
+    keys = [k for k in state.keys() if not k.startswith("$")]
     return KVListKeysResponse(keys=keys, count=len(keys))
 
 
@@ -289,11 +319,14 @@ async def list_keys(
 async def get_value(
     key: ValidatedKey,
     path: str | None = Query(default=None, description="Nested path (dot notation)"),
-    meta: bool = Query(default=False, description="Include metadata"),
+    meta: bool = Query(default=False, description="Include metadata and version"),
     automation_id: uuid.UUID = Depends(get_automation_id_from_token),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse | KVKeyPathResponse | KVKeyMetaResponse:
-    """Get a value by key, optionally at a nested path."""
+    """Get a value by key, optionally at a nested path.
+
+    With meta=true, includes version for optimistic concurrency control.
+    """
     settings = get_settings()
 
     row = await _get_state_row(session, automation_id)
@@ -326,6 +359,7 @@ async def get_value(
         return KVKeyMetaResponse(
             key=key,
             value=value,
+            version=_get_version(state),
             created_at=row.created_at.isoformat(),
             updated_at=row.updated_at.isoformat(),
         )
@@ -455,6 +489,11 @@ async def patch_value(
     )
 
 
+def _has_user_keys(state: dict[str, Any]) -> bool:
+    """Check if state has any user keys (excluding system keys like $version)."""
+    return any(not k.startswith("$") for k in state.keys())
+
+
 @router.delete("/{key}")
 async def delete_key(
     key: ValidatedKey,
@@ -479,11 +518,11 @@ async def delete_key(
     del state[key]
 
     if row is not None:
-        if state:
-            # Still have other keys, update the row
+        if _has_user_keys(state):
+            # Still have user keys, update the row
             await _save_state(session, automation_id, state, settings.kv_secret, row)
         else:
-            # No keys left, delete the row entirely
+            # No user keys left, delete the row entirely
             await session.delete(row)
             await session.flush()
 
@@ -746,3 +785,225 @@ async def list_length(
     require_list(value)
 
     return KVListLengthResponse(key=key, length=len(value))
+
+
+# --- Batch Operations ---
+
+
+class KVOperationError(Exception):
+    """Raised when a batch operation fails validation."""
+
+    pass
+
+
+def _validate_batch_key(key: str) -> None:
+    """Validate a key for batch operations (same rules as validate_key).
+
+    Raises:
+        KVOperationError: If key is invalid
+    """
+    if not key:
+        raise KVOperationError("key cannot be empty")
+    if not key.strip():
+        raise KVOperationError("key cannot be whitespace-only")
+    if key.startswith("$"):
+        raise KVOperationError("keys starting with '$' are reserved for system use")
+    if len(key) > 255:
+        raise KVOperationError(f"key exceeds 255 chars ({len(key)} given)")
+
+
+def _execute_batch_operation(
+    state: dict[str, Any],
+    op: KVBatchOperation,
+) -> dict[str, Any]:
+    """Execute a single operation within a batch.
+
+    Args:
+        state: The current state dict (modified in place)
+        op: The operation to execute
+
+    Returns:
+        Result dict for this operation
+
+    Raises:
+        KVOperationError: If operation fails validation
+    """
+    _validate_batch_key(op.key)
+    key = op.key
+
+    if op.op == "set":
+        key_existed = key in state
+        # Handle nx (set if not exists)
+        if op.nx and key_existed:
+            raise KVOperationError(f"key '{key}' already exists (nx=true)")
+        # Handle xx (set if exists)
+        if op.xx and not key_existed:
+            raise KVOperationError(f"key '{key}' does not exist (xx=true)")
+        state[key] = op.value
+        return {"op": "set", "key": key, "success": True, "created": not key_existed}
+
+    elif op.op == "delete":
+        deleted = key in state
+        if deleted:
+            del state[key]
+        return {"op": "delete", "key": key, "success": True, "deleted": deleted}
+
+    elif op.op == "incr":
+        by = op.by
+        if key not in state:
+            state[key] = by
+            new_value = by
+        else:
+            value = state[key]
+            if isinstance(value, bool):
+                raise KVOperationError(f"key '{key}' is boolean, not integer")
+            if not isinstance(value, int):
+                raise KVOperationError(f"key '{key}' is not an integer")
+            new_value = value + by
+            state[key] = new_value
+        return {"op": "incr", "key": key, "success": True, "value": new_value}
+
+    elif op.op == "decr":
+        by = op.by
+        if key not in state:
+            state[key] = -by
+            new_value = -by
+        else:
+            value = state[key]
+            if isinstance(value, bool):
+                raise KVOperationError(f"key '{key}' is boolean, not integer")
+            if not isinstance(value, int):
+                raise KVOperationError(f"key '{key}' is not an integer")
+            new_value = value - by
+            state[key] = new_value
+        return {"op": "decr", "key": key, "success": True, "value": new_value}
+
+    elif op.op == "lpush":
+        if key not in state:
+            state[key] = [op.value]
+        else:
+            value = state[key]
+            if not isinstance(value, list):
+                raise KVOperationError(f"key '{key}' is not a list")
+            value.insert(0, op.value)
+        return {"op": "lpush", "key": key, "success": True, "length": len(state[key])}
+
+    elif op.op == "rpush":
+        if key not in state:
+            state[key] = [op.value]
+        else:
+            value = state[key]
+            if not isinstance(value, list):
+                raise KVOperationError(f"key '{key}' is not a list")
+            value.append(op.value)
+        return {"op": "rpush", "key": key, "success": True, "length": len(state[key])}
+
+    elif op.op == "lpop":
+        if key not in state:
+            return {"op": "lpop", "key": key, "success": True, "value": None}
+        value = state[key]
+        if not isinstance(value, list):
+            raise KVOperationError(f"key '{key}' is not a list")
+        if len(value) == 0:
+            return {"op": "lpop", "key": key, "success": True, "value": None}
+        popped = value.pop(0)
+        return {"op": "lpop", "key": key, "success": True, "value": popped}
+
+    elif op.op == "rpop":
+        if key not in state:
+            return {"op": "rpop", "key": key, "success": True, "value": None}
+        value = state[key]
+        if not isinstance(value, list):
+            raise KVOperationError(f"key '{key}' is not a list")
+        if len(value) == 0:
+            return {"op": "rpop", "key": key, "success": True, "value": None}
+        popped = value.pop()
+        return {"op": "rpop", "key": key, "success": True, "value": popped}
+
+    elif op.op == "patch":
+        if key not in state:
+            state[key] = {}
+        value = state[key]
+        if not isinstance(value, dict):
+            raise KVOperationError(f"key '{key}' is not an object")
+        try:
+            set_nested_value(value, op.path, op.value)
+        except ValueError as e:
+            raise KVOperationError(str(e))
+        return {"op": "patch", "key": key, "success": True}
+
+    else:
+        raise KVOperationError(f"unknown operation: {op.op}")
+
+
+@router.post("/batch")
+async def batch(
+    body: KVBatchRequest,
+    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    session: AsyncSession = Depends(get_session),
+) -> KVBatchResponse:
+    """Execute multiple KV operations atomically in a single transaction.
+
+    All operations succeed or none do. Use `if_version` for optimistic
+    concurrency control - the batch will be rejected if the current state
+    version doesn't match.
+
+    Operations are executed in order. The $version is incremented once
+    for the entire batch, not per operation.
+
+    Returns:
+    - 200: All operations succeeded
+    - 400: An operation failed validation (e.g., incr on a list)
+    - 409: Version mismatch (if_version specified but doesn't match)
+    - 409: Lock timeout (another operation in progress)
+    - 413: Payload too large (state exceeds size limit)
+    """
+    settings = get_settings()
+
+    # Acquire lock for atomic batch execution
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+
+    state = _decrypt_state(settings.kv_secret, row)
+    current_version = _get_version(state)
+
+    # Check version if specified
+    if body.if_version is not None and current_version != body.if_version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "version_mismatch",
+                "message": "State was modified by another process",
+                "expected_version": body.if_version,
+                "actual_version": current_version,
+            },
+        )
+
+    # Execute all operations
+    results = []
+    for i, op in enumerate(body.operations):
+        try:
+            result = _execute_batch_operation(state, op)
+            results.append(result)
+        except KVOperationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "operation_failed",
+                    "message": str(e),
+                    "operation_index": i,
+                    "operation": {"op": op.op, "key": op.key},
+                },
+            )
+
+    # Validate state size before saving
+    _check_state_size(state, settings)
+
+    # Save state (auto-increments $version)
+    await _save_state(session, automation_id, state, settings.kv_secret, row)
+
+    return KVBatchResponse(version=_get_version(state), results=results)

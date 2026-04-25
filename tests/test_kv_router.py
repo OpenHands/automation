@@ -660,7 +660,11 @@ class TestSingleDocumentIsolation:
 
         # Verify all keys are in one state document
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
-        assert state == {"key1": "value1", "key2": "value2", "key3": "value3"}
+        # Filter out system keys ($version) for comparison
+        user_keys = {k: v for k, v in state.items() if not k.startswith("$")}
+        assert user_keys == {"key1": "value1", "key2": "value2", "key3": "value3"}
+        # $version should be present and incremented (3 writes)
+        assert state.get("$version") == 3
 
         # Verify only ONE row exists in the database
         result = await async_session.execute(
@@ -670,14 +674,14 @@ class TestSingleDocumentIsolation:
         assert len(rows) == 1
 
     async def test_delete_last_key_removes_row(self, kv_client, async_session):
-        """Deleting the last key removes the state row entirely."""
+        """Deleting the last user key removes the state row entirely."""
         # Create a key
         await kv_client.put("/api/automation/v1/kv/onlykey", json="value")
 
         # Delete it
         await kv_client.delete("/api/automation/v1/kv/onlykey")
 
-        # Verify row is gone
+        # Verify row is gone (no user keys remain, so row is deleted)
         result = await async_session.execute(
             select(AutomationKV).where(AutomationKV.automation_id == TEST_AUTOMATION_ID)
         )

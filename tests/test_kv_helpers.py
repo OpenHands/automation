@@ -383,6 +383,30 @@ class TestValidateKey:
         """Slashes are allowed in keys."""
         assert validate_key("path/to/key") == "path/to/key"
 
+    # --- Invalid keys: Reserved prefix ---
+
+    def test_dollar_prefix_rejected(self):
+        """Key starting with $ is rejected (reserved for system use)."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_key("$version")
+        assert exc_info.value.status_code == 400
+        assert "reserved" in exc_info.value.detail.lower()
+
+    def test_dollar_prefix_any_name_rejected(self):
+        """Any key starting with $ is rejected."""
+        with pytest.raises(HTTPException) as exc_info:
+            validate_key("$anything")
+        assert exc_info.value.status_code == 400
+        assert "reserved" in exc_info.value.detail.lower()
+
+    def test_dollar_in_middle_allowed(self):
+        """Dollar sign in middle of key is allowed."""
+        assert validate_key("my$key") == "my$key"
+
+    def test_dollar_at_end_allowed(self):
+        """Dollar sign at end of key is allowed."""
+        assert validate_key("key$") == "key$"
+
 
 # =============================================================================
 # Type Validation Tests
