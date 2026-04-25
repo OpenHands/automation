@@ -171,10 +171,15 @@ async def _execute_run(
                 secret=settings.kv_secret,
                 automation_id=automation.id,
                 run_id=run.id,
+                lock_timeout_ms=automation.kv_lock_timeout_ms,
             )
             env_vars["AUTOMATION_KV_TOKEN"] = kv_token
             env_vars["AUTOMATION_ENABLE_KV_STORE"] = "true"
-            logger.debug("KV store enabled for this run", extra=log_extra())
+            logger.debug(
+                "KV store enabled for this run (lock_timeout=%dms)",
+                automation.kv_lock_timeout_ms,
+                extra=log_extra(),
+            )
 
         # 4. Calculate effective timeout: use automation's timeout if set,
         # capped at system maximum; otherwise use system default

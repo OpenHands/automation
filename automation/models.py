@@ -77,6 +77,14 @@ class Automation(Base):
     # Whether this automation has access to the key-value store for state persistence
     enable_kv_store: Mapped[bool] = mapped_column(default=False, nullable=False)
 
+    # Lock timeout in milliseconds for KV store operations.
+    # Controls how long to wait for the row lock before returning 409 Conflict.
+    # Default 5000ms (5s) is suitable for most cases. Lower values (e.g., 2000ms)
+    # help high-throughput event handlers fail fast. Higher values (e.g., 10000ms)
+    # may be needed for long-running batch operations.
+    # Valid range: 100ms - 30000ms (30s)
+    kv_lock_timeout_ms: Mapped[int] = mapped_column(default=5000, nullable=False)
+
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True

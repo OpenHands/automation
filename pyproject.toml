@@ -24,6 +24,7 @@ dependencies = [
   "openhands-sdk==1.18.1",
   "openhands-workspace==1.18.1",
   "pg8000>=1.31",
+  "prometheus-client>=0.19",
   "pydantic>=2",
   "pydantic-settings>=2",
   "pyjwt>=2.8",

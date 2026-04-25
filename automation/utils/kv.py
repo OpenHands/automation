@@ -155,21 +155,37 @@ KV_TOKEN_EXPIRATION_HOURS = 24
 
 # --- JWT Token Functions ---
 
+# Default lock timeout in milliseconds (matches Automation model default)
+DEFAULT_LOCK_TIMEOUT_MS = 5000
+
+
+class KVTokenClaims:
+    """Verified claims from a KV store JWT token."""
+
+    __slots__ = ("automation_id", "lock_timeout_ms")
+
+    def __init__(self, automation_id: uuid.UUID, lock_timeout_ms: int):
+        self.automation_id = automation_id
+        self.lock_timeout_ms = lock_timeout_ms
+
 
 def create_kv_token(
     secret: str,
     automation_id: uuid.UUID,
     run_id: uuid.UUID,
+    lock_timeout_ms: int = DEFAULT_LOCK_TIMEOUT_MS,
 ) -> str:
     """Create a JWT token for KV store access.
 
-    The token embeds the automation_id as a trusted claim, ensuring
-    that KV operations are scoped to the correct automation.
+    The token embeds the automation_id and lock_timeout_ms as trusted claims,
+    ensuring that KV operations are scoped to the correct automation with
+    the configured timeout.
 
     Args:
         secret: The signing secret (AUTOMATION_KV_SECRET)
         automation_id: UUID of the automation
         run_id: UUID of the current run (for audit)
+        lock_timeout_ms: Lock timeout in milliseconds (from automation config)
 
     Returns:
         Signed JWT token string
@@ -178,21 +194,22 @@ def create_kv_token(
     payload = {
         "automation_id": str(automation_id),
         "run_id": str(run_id),
+        "lock_timeout_ms": lock_timeout_ms,
         "iat": now,
         "exp": now + timedelta(hours=KV_TOKEN_EXPIRATION_HOURS),
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def verify_kv_token(secret: str, token: str) -> uuid.UUID:
-    """Verify a KV store JWT token and extract the automation_id.
+def verify_kv_token(secret: str, token: str) -> KVTokenClaims:
+    """Verify a KV store JWT token and extract claims.
 
     Args:
         secret: The signing secret (AUTOMATION_KV_SECRET)
         token: The JWT token to verify
 
     Returns:
-        The automation_id UUID from the verified token
+        KVTokenClaims with automation_id and lock_timeout_ms
 
     Raises:
         KVTokenError: If token is invalid, expired, or malformed
@@ -202,7 +219,16 @@ def verify_kv_token(secret: str, token: str) -> uuid.UUID:
         automation_id_str = payload.get("automation_id")
         if not automation_id_str:
             raise KVTokenError("Token missing automation_id claim")
-        return uuid.UUID(automation_id_str)
+
+        # lock_timeout_ms is optional for backward compatibility with old tokens
+        lock_timeout_ms = payload.get("lock_timeout_ms", DEFAULT_LOCK_TIMEOUT_MS)
+        if not isinstance(lock_timeout_ms, int) or lock_timeout_ms < 100:
+            lock_timeout_ms = DEFAULT_LOCK_TIMEOUT_MS
+
+        return KVTokenClaims(
+            automation_id=uuid.UUID(automation_id_str),
+            lock_timeout_ms=lock_timeout_ms,
+        )
     except jwt.ExpiredSignatureError:
         raise KVTokenError("Token has expired")
     except jwt.InvalidTokenError as e:

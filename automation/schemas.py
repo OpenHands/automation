@@ -273,6 +273,12 @@ class CreateAutomationRequest(BaseModel):
         default=False,
         description="Enable key-value store for state persistence between runs",
     )
+    kv_lock_timeout_ms: int = Field(
+        default=5000,
+        ge=100,
+        le=30000,
+        description="Lock timeout in ms for KV operations (100-30000, default 5000)",
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -317,6 +323,12 @@ class UpdateAutomationRequest(BaseModel):
     timeout: int | None = Field(default=None)
     enabled: bool | None = None
     enable_kv_store: bool | None = None
+    kv_lock_timeout_ms: int | None = Field(
+        default=None,
+        ge=100,
+        le=30000,
+        description="Lock timeout in milliseconds for KV operations (100-30000ms)",
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -568,6 +580,7 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     enabled: bool
     enable_kv_store: bool
+    kv_lock_timeout_ms: int
     last_triggered_at: datetime | None
     created_at: datetime
     updated_at: datetime

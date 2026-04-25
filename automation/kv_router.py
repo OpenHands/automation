@@ -55,6 +55,11 @@ from automation.kv_helpers import (
     set_nested_value,
     validate_key,
 )
+from automation.kv_metrics import (
+    record_conflict,
+    record_lock_wait,
+    record_state_size,
+)
 from automation.kv_schemas import (
     KVBatchOperation,
     KVBatchRequest,
@@ -73,7 +78,7 @@ from automation.kv_schemas import (
     KVSetResponse,
 )
 from automation.models import AutomationKV
-from automation.utils.kv import KVTokenError, verify_kv_token
+from automation.utils.kv import KVTokenClaims, KVTokenError, verify_kv_token
 
 
 logger = logging.getLogger(__name__)
@@ -84,13 +89,13 @@ router = APIRouter(prefix="/v1/kv", tags=["KV Store"])
 # --- Authentication ---
 
 
-async def get_automation_id_from_token(
+async def get_token_claims(
     authorization: Annotated[str, Header()],
-) -> uuid.UUID:
-    """Extract and verify the automation_id from the KV token.
+) -> KVTokenClaims:
+    """Extract and verify claims from the KV token.
 
     The token is passed via Authorization: Bearer <token> header.
-    It contains the automation_id as a trusted claim.
+    It contains the automation_id and lock_timeout_ms as trusted claims.
     """
     settings = get_config().service
 
@@ -120,6 +125,15 @@ async def get_automation_id_from_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         )
+
+
+# Backward-compatible alias for tests
+async def get_automation_id_from_token(
+    authorization: Annotated[str, Header()],
+) -> uuid.UUID:
+    """Extract automation_id from KV token (deprecated, use get_token_claims)."""
+    claims = await get_token_claims(authorization)
+    return claims.automation_id
 
 
 # --- Validation Helpers ---
@@ -181,58 +195,110 @@ async def _get_state_row(
 async def _get_state_row_for_update(
     session: AsyncSession,
     automation_id: uuid.UUID,
+    lock_timeout_ms: int = 5000,
 ) -> AutomationKV | None:
     """Get the state row with FOR UPDATE lock and bounded wait time.
 
     Since there's only ONE row per automation, this is the single lock point.
     All concurrent operations on this automation's state will serialize here.
 
-    Lock Timeout (Deadlock Prevention):
-    We set a 5-second lock_timeout before acquiring the row lock. Without this,
-    a slow or stuck transaction (e.g., network issue during commit, slow crypto)
-    would cause all subsequent KV operations on this automation to queue
-    indefinitely. With enough concurrent requests, this exhausts the connection
-    pool and degrades the entire service—not just this automation.
+    Timeout Strategy (Defense in Depth):
 
-    SET LOCAL scopes the timeout to this transaction only, so it doesn't affect
-    other queries in this session or pollute the connection pool.
+    1. Statement Timeout (2x lock timeout): Safety net that kills any runaway
+       query, including slow encryption, network issues, or unexpected operations.
+       This catches problems AFTER the lock is acquired.
 
-    If the lock times out, PostgreSQL raises an error which we catch and convert
-    to HTTP 409 Conflict, allowing clients to retry with backoff.
+    2. Lock Timeout (configurable): Fail fast if waiting too long for another
+       transaction to release the row lock. This catches contention BEFORE
+       the lock is acquired. Configurable per-automation via kv_lock_timeout_ms.
+
+    Statement timeout > lock timeout because:
+    - If we're waiting for a lock, lock_timeout triggers first
+    - If we have the lock but operation is slow, statement_timeout triggers
+    - The 2x ratio gives legitimate operations enough headroom
+
+    SET LOCAL scopes both timeouts to this transaction only, so they don't
+    affect other queries in this session or pollute the connection pool.
+
+    If either timeout fires, PostgreSQL raises an error which we catch and
+    convert to HTTP 409 Conflict, allowing clients to retry with backoff.
+
+    Args:
+        session: Database session
+        automation_id: UUID of the automation
+        lock_timeout_ms: Lock timeout in milliseconds (from token claims)
     """
-    # Bound how long we'll wait for the row lock. This prevents a single slow
-    # transaction from cascading into connection pool exhaustion.
-    await session.execute(text("SET LOCAL lock_timeout = '5000ms'"))
+    # Statement timeout: 2x lock timeout as safety net for runaway operations
+    statement_timeout_ms = lock_timeout_ms * 2
+    stmt_sql = f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'"
+    await session.execute(text(stmt_sql))
+    # Lock timeout: fail fast when waiting for lock (configurable per-automation)
+    lock_sql = f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"
+    await session.execute(text(lock_sql))
 
-    result = await session.execute(
-        select(AutomationKV)
-        .where(AutomationKV.automation_id == automation_id)
-        .with_for_update()
-    )
+    # Record lock wait time
+    with record_lock_wait():
+        result = await session.execute(
+            select(AutomationKV)
+            .where(AutomationKV.automation_id == automation_id)
+            .with_for_update()
+        )
     return result.scalars().first()
 
 
 def _is_lock_timeout_error(exc: Exception) -> bool:
-    """Check if an exception is a PostgreSQL lock timeout error.
+    """Check if an exception is a PostgreSQL lock or statement timeout error.
 
-    PostgreSQL raises error code 55P03 (lock_not_available) when lock_timeout
-    is exceeded. This can surface through asyncpg or SQLAlchemy wrappers.
+    PostgreSQL error codes:
+    - 55P03 (lock_not_available): lock_timeout exceeded while waiting for lock
+    - 57014 (query_canceled): statement_timeout exceeded during query execution
+
+    Both indicate the operation took too long and should be retried.
     """
     error_str = str(exc).lower()
-    # asyncpg surfaces this as "lock_not_available" or error code 55P03
     return (
+        # Lock timeout errors (55P03)
         "lock_not_available" in error_str
         or "55p03" in error_str
         or "could not obtain lock" in error_str
         or "canceling statement due to lock timeout" in error_str
+        # Statement timeout errors (57014)
+        or "query_canceled" in error_str
+        or "57014" in error_str
+        or "canceling statement due to statement timeout" in error_str
     )
 
 
+# Default retry delay in seconds for 409 responses
+_RETRY_AFTER_SECONDS = "1"
+
+
 def _raise_lock_conflict() -> None:
-    """Raise HTTP 409 for lock timeout - signals client should retry."""
+    """Raise HTTP 409 for lock/statement timeout - signals client should retry.
+
+    Includes Retry-After header suggesting initial backoff delay.
+    Clients should use exponential backoff with jitter on subsequent retries.
+    """
+    record_conflict("lock_timeout")
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail="kv_store_busy: another operation is in progress, please retry",
+        headers={"Retry-After": _RETRY_AFTER_SECONDS},
+    )
+
+
+def _raise_version_conflict(expected: int, actual: int) -> None:
+    """Raise HTTP 409 for version mismatch - signals optimistic concurrency failure."""
+    record_conflict("version_mismatch")
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "version_mismatch",
+            "message": "State was modified by another process",
+            "expected_version": expected,
+            "actual_version": actual,
+        },
+        headers={"Retry-After": _RETRY_AFTER_SECONDS},
     )
 
 
@@ -271,6 +337,9 @@ async def _save_state(
 
     encrypted = safe_encrypt(secret, state)
 
+    # Record state size metric (encrypted size includes crypto overhead)
+    record_state_size(len(encrypted))
+
     if existing_row is None:
         # Create new row
         row = AutomationKV(
@@ -298,7 +367,7 @@ def _get_version(state: dict[str, Any]) -> int:
 
 @router.get("")
 async def list_keys(
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVListKeysResponse:
     """List all keys for this automation.
@@ -307,7 +376,7 @@ async def list_keys(
     """
     settings = get_config().service
 
-    row = await _get_state_row(session, automation_id)
+    row = await _get_state_row(session, claims.automation_id)
     state = _decrypt_state(settings.kv_secret, row)
 
     # Filter out system keys (e.g., $version)
@@ -320,7 +389,7 @@ async def get_value(
     key: ValidatedKey,
     path: str | None = Query(default=None, description="Nested path (dot notation)"),
     meta: bool = Query(default=False, description="Include metadata and version"),
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse | KVKeyPathResponse | KVKeyMetaResponse:
     """Get a value by key, optionally at a nested path.
@@ -329,7 +398,7 @@ async def get_value(
     """
     settings = get_config().service
 
-    row = await _get_state_row(session, automation_id)
+    row = await _get_state_row(session, claims.automation_id)
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -378,7 +447,7 @@ async def set_value(
         default=None,
         description="Only set if current state version matches (optimistic lock)",
     ),
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVSetResponse | KVConflictResponse:
     """Set a value for a key.
@@ -406,7 +475,9 @@ async def set_value(
 
     # Lock the state row for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -417,14 +488,7 @@ async def set_value(
     if if_version is not None:
         current_version = _get_version(state)
         if current_version != if_version:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "version_mismatch",
-                    "expected_version": if_version,
-                    "actual_version": current_version,
-                },
-            )
+            _raise_version_conflict(if_version, current_version)
 
     key_exists = key in state
 
@@ -444,7 +508,7 @@ async def set_value(
 
     # Save
     saved_row = await _save_state(
-        session, automation_id, state, settings.kv_secret, row
+        session, claims.automation_id, state, settings.kv_secret, row
     )
 
     created = not key_exists
@@ -467,7 +531,7 @@ async def patch_value(
         default=None,
         description="Only patch if current state version matches (optimistic lock)",
     ),
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyPathResponse:
     """Update a nested path within an existing value.
@@ -479,7 +543,9 @@ async def patch_value(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -490,14 +556,7 @@ async def patch_value(
     if if_version is not None:
         current_version = _get_version(state)
         if current_version != if_version:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "version_mismatch",
-                    "expected_version": if_version,
-                    "actual_version": current_version,
-                },
-            )
+            _raise_version_conflict(if_version, current_version)
 
     if key not in state:
         raise HTTPException(
@@ -519,7 +578,7 @@ async def patch_value(
     state[key] = value
     _check_state_size(state, settings)
 
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVKeyPathResponse(
         key=key,
@@ -540,7 +599,7 @@ async def delete_key(
         default=None,
         description="Only delete if current state version matches (optimistic lock)",
     ),
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVDeleteResponse:
     """Delete a key.
@@ -552,7 +611,9 @@ async def delete_key(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -563,14 +624,7 @@ async def delete_key(
     if if_version is not None:
         current_version = _get_version(state)
         if current_version != if_version:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "version_mismatch",
-                    "expected_version": if_version,
-                    "actual_version": current_version,
-                },
-            )
+            _raise_version_conflict(if_version, current_version)
 
     if key not in state:
         return KVDeleteResponse(key=key, deleted=False)
@@ -580,7 +634,9 @@ async def delete_key(
     if row is not None:
         if _has_user_keys(state):
             # Still have user keys, update the row
-            await _save_state(session, automation_id, state, settings.kv_secret, row)
+            await _save_state(
+                session, claims.automation_id, state, settings.kv_secret, row
+            )
         else:
             # No user keys left, delete the row entirely
             await session.delete(row)
@@ -593,7 +649,7 @@ async def delete_key(
 async def increment(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
     """Atomically increment an integer value.
@@ -608,7 +664,9 @@ async def increment(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -626,7 +684,7 @@ async def increment(
         state[key] = new_value
 
     _check_state_size(state, settings)
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -635,7 +693,7 @@ async def increment(
 async def decrement(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
     """Atomically decrement an integer value.
@@ -650,7 +708,9 @@ async def decrement(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -668,7 +728,7 @@ async def decrement(
         state[key] = new_value
 
     _check_state_size(state, settings)
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -677,7 +737,7 @@ async def decrement(
 async def lpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Push a value to the left (front) of a list.
@@ -688,7 +748,9 @@ async def lpush(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -705,7 +767,7 @@ async def lpush(
         state[key] = value
 
     _check_state_size(state, settings)
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -714,7 +776,7 @@ async def lpush(
 async def rpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Push a value to the right (back) of a list.
@@ -725,7 +787,9 @@ async def rpush(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -742,7 +806,7 @@ async def rpush(
         state[key] = value
 
     _check_state_size(state, settings)
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -750,7 +814,7 @@ async def rpush(
 @router.post("/{key}/lpop")
 async def lpop(
     key: ValidatedKey,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
     """Pop a value from the left (front) of a list.
@@ -761,7 +825,9 @@ async def lpop(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -780,7 +846,7 @@ async def lpop(
     popped = value.pop(0)
     state[key] = value
 
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -788,7 +854,7 @@ async def lpop(
 @router.post("/{key}/rpop")
 async def rpop(
     key: ValidatedKey,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
     """Pop a value from the right (back) of a list.
@@ -799,7 +865,9 @@ async def rpop(
 
     # Lock for atomic read-modify-write
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -818,7 +886,7 @@ async def rpop(
     popped = value.pop()
     state[key] = value
 
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -826,13 +894,13 @@ async def rpop(
 @router.get("/{key}/len")
 async def list_length(
     key: ValidatedKey,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Get the length of a list."""
     settings = get_config().service
 
-    row = await _get_state_row(session, automation_id)
+    row = await _get_state_row(session, claims.automation_id)
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -999,7 +1067,7 @@ def _execute_batch_operation(
 @router.post("/batch")
 async def batch(
     body: KVBatchRequest,
-    automation_id: uuid.UUID = Depends(get_automation_id_from_token),
+    claims: KVTokenClaims = Depends(get_token_claims),
     session: AsyncSession = Depends(get_session),
 ) -> KVBatchResponse:
     """Execute multiple KV operations atomically in a single transaction.
@@ -1022,7 +1090,9 @@ async def batch(
 
     # Acquire lock for atomic batch execution
     try:
-        row = await _get_state_row_for_update(session, automation_id)
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, claims.lock_timeout_ms
+        )
     except Exception as e:
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
@@ -1033,15 +1103,7 @@ async def batch(
 
     # Check version if specified
     if body.if_version is not None and current_version != body.if_version:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "version_mismatch",
-                "message": "State was modified by another process",
-                "expected_version": body.if_version,
-                "actual_version": current_version,
-            },
-        )
+        _raise_version_conflict(body.if_version, current_version)
 
     # Execute all operations
     results = []
@@ -1064,6 +1126,6 @@ async def batch(
     _check_state_size(state, settings)
 
     # Save state (auto-increments $version)
-    await _save_state(session, automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
 
     return KVBatchResponse(version=_get_version(state), results=results)
