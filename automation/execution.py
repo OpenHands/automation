@@ -29,6 +29,11 @@ from automation.utils.sandbox import delete_sandbox
 
 logger = logging.getLogger(__name__)
 
+# Retry configuration defaults for sandbox operations
+RATE_LIMIT_MIN_WAIT = 10
+RATE_LIMIT_MAX_WAIT = 60
+RATE_LIMIT_MAX_RETRIES = 5
+
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
     """Check if exception is a 429 rate limit error."""
@@ -49,22 +54,18 @@ def _log_extra(
     return extra
 
 
-def _get_retry_decorator():
-    """Build tenacity retry decorator with current config values.
-
-    Config values are read at call time, so changes to settings take effect.
-    """
-    sandbox_config = get_config().sandbox
-    return retry(
-        retry=retry_if_exception(_is_rate_limit_error),
-        stop=stop_after_attempt(sandbox_config.rate_limit_max_retries),
-        wait=wait_exponential(
-            min=sandbox_config.rate_limit_min_wait,
-            max=sandbox_config.rate_limit_max_wait,
-        ),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
+# Module-level retry decorator for sandbox operations.
+# Config is cached at startup, so this uses stable values.
+_sandbox_retry = retry(
+    retry=retry_if_exception(_is_rate_limit_error),
+    stop=stop_after_attempt(RATE_LIMIT_MAX_RETRIES),
+    wait=wait_exponential(
+        min=RATE_LIMIT_MIN_WAIT,
+        max=RATE_LIMIT_MAX_WAIT,
+    ),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 
 
 def build_tarball(files: dict[str, str | bytes]) -> bytes:
@@ -95,7 +96,7 @@ async def _create_sandbox(
 ) -> str:
     """Create a sandbox and return its ID. Retries on rate limit."""
 
-    @_get_retry_decorator()
+    @_sandbox_retry
     async def _do_create():
         resp = await client.post(f"{api_url}/api/v1/sandboxes", headers=headers)
         resp.raise_for_status()
@@ -109,7 +110,7 @@ async def _poll_sandbox(
 ) -> dict[str, Any]:
     """Poll sandbox status. Retries on rate limit."""
 
-    @_get_retry_decorator()
+    @_sandbox_retry
     async def _do_poll():
         resp = await client.get(
             f"{api_url}/api/v1/sandboxes",

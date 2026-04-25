@@ -34,6 +34,7 @@ logger = logging.getLogger("automation.auth")
 # Retry configuration for rate limiting
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 10.0  # Default, can be overridden by config
 
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
@@ -49,6 +50,16 @@ def _get_auth_cache() -> TTLCache[str, "AuthenticatedUser"]:
             ttl=http_config.auth_cache_ttl,
         )
     return _auth_cache
+
+
+def _reset_auth_cache() -> None:
+    """Reset the auth cache so it will be recreated with new config values.
+
+    Called by clear_config_cache() to ensure tests that change config see
+    the new cache settings take effect.
+    """
+    global _auth_cache
+    _auth_cache = None
 
 
 class AuthMethod(StrEnum):
@@ -117,6 +128,21 @@ def _return_last_response(retry_state: RetryCallState) -> httpx.Response:
     return retry_state.outcome.result()
 
 
+# Module-level retry decorator for auth requests.
+# Config is cached at startup, so this uses stable values.
+_auth_retry = retry(
+    retry=retry_if_result(_is_rate_limited),
+    stop=stop_after_attempt(MAX_RETRIES + 1),
+    wait=wait_exponential(
+        multiplier=INITIAL_BACKOFF_SECONDS,
+        max=MAX_BACKOFF_SECONDS,
+    ),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    retry_error_callback=_return_last_response,
+)
+
+
+@_auth_retry
 async def _make_auth_request_with_retry(
     client: httpx.AsyncClient,
     url: str,
@@ -124,8 +150,7 @@ async def _make_auth_request_with_retry(
 ) -> httpx.Response:
     """Make an auth request with exponential backoff retry on 429 responses.
 
-    Uses tenacity for retry logic with exponential backoff. Config values are
-    read at call time, so changes to settings take effect on next call.
+    Uses tenacity for retry logic with exponential backoff.
 
     Args:
         client: The httpx client to use for requests
@@ -138,24 +163,7 @@ async def _make_auth_request_with_retry(
     Raises:
         httpx.RequestError: If there's a network/connection error
     """
-    # Build decorator at call time to use current config values
-    http_config = get_config().http
-    decorator = retry(
-        retry=retry_if_result(_is_rate_limited),
-        stop=stop_after_attempt(MAX_RETRIES + 1),
-        wait=wait_exponential(
-            multiplier=INITIAL_BACKOFF_SECONDS,
-            max=http_config.max_backoff,
-        ),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        retry_error_callback=_return_last_response,
-    )
-
-    @decorator
-    async def _do_request():
-        return await client.get(url, headers=headers)
-
-    return await _do_request()
+    return await client.get(url, headers=headers)
 
 
 def require_permission(permission: str):

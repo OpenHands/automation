@@ -16,7 +16,7 @@ Usage (preferred):
     config.storage.file_store
     config.log.log_level
 
-Legacy usage (backward compatible):
+Legacy usage (backward compatible, emits deprecation warnings):
     from automation.config import get_settings, get_storage_settings, get_log_settings
 
     settings = get_settings()        # Returns config.service
@@ -24,6 +24,7 @@ Legacy usage (backward compatible):
     log = get_log_settings()         # Returns config.log
 """
 
+import warnings
 from functools import cached_property, lru_cache
 from typing import Literal
 from urllib.parse import urlparse
@@ -413,7 +414,8 @@ def clear_config_cache() -> None:
     """Clear the config cache. Useful for testing with different env vars.
 
     This clears the lru_cache for get_config(), forcing settings to be
-    reloaded from environment variables on next access.
+    reloaded from environment variables on next access. It also resets
+    the auth cache so new cache settings (TTL, size) take effect.
 
     Note:
         This does NOT reset module-level values that were captured at import
@@ -427,6 +429,11 @@ def clear_config_cache() -> None:
     """
     get_config.cache_clear()
 
+    # Reset auth cache so new config values (TTL, size) take effect
+    from automation.auth import _reset_auth_cache
+
+    _reset_auth_cache()
+
 
 # ---------------------------------------------------------------------------
 # Backward-compatible aliases
@@ -434,6 +441,9 @@ def clear_config_cache() -> None:
 
 # Type alias for backward compatibility
 Settings = ServiceSettings
+
+# Track which deprecated functions have already warned to avoid spam
+_warned_functions: set[str] = set()
 
 
 def get_settings() -> ServiceSettings:
@@ -444,6 +454,13 @@ def get_settings() -> ServiceSettings:
     Returns:
         ServiceSettings instance (same as get_config().service).
     """
+    if "get_settings" not in _warned_functions:
+        warnings.warn(
+            "get_settings() is deprecated. Use get_config().service instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _warned_functions.add("get_settings")
     return get_config().service
 
 
@@ -455,6 +472,13 @@ def get_storage_settings() -> StorageSettings:
     Returns:
         StorageSettings instance (same as get_config().storage).
     """
+    if "get_storage_settings" not in _warned_functions:
+        warnings.warn(
+            "get_storage_settings() is deprecated. Use get_config().storage instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _warned_functions.add("get_storage_settings")
     return get_config().storage
 
 
@@ -466,4 +490,11 @@ def get_log_settings() -> LogSettings:
     Returns:
         LogSettings instance (same as get_config().log).
     """
+    if "get_log_settings" not in _warned_functions:
+        warnings.warn(
+            "get_log_settings() is deprecated. Use get_config().log instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _warned_functions.add("get_log_settings")
     return get_config().log
