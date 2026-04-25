@@ -96,6 +96,43 @@ async def get_automation_id_from_token(
         )
 
 
+# --- Validation Helpers ---
+
+
+def _check_value_size(value: Any, settings=None) -> None:
+    """Validate that a value doesn't exceed the configured size limit.
+
+    Args:
+        value: The value to check (will be JSON-serialized to measure size)
+        settings: Optional settings object (fetched if not provided)
+
+    Raises:
+        HTTPException: 413 Payload Too Large if value exceeds limit
+    """
+    import json
+
+    if settings is None:
+        settings = get_settings()
+
+    max_size = settings.kv_max_value_size
+    if max_size <= 0:
+        return  # Size limit disabled
+
+    # Measure the JSON-serialized size (this is what gets encrypted/stored)
+    try:
+        serialized = json.dumps(value)
+    except (TypeError, ValueError):
+        # If we can't serialize it, the encrypt step will fail anyway
+        return
+
+    actual_size = len(serialized.encode("utf-8"))
+    if actual_size > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Value size ({actual_size} bytes) exceeds limit ({max_size} bytes)",
+        )
+
+
 # --- Database Helpers ---
 
 
@@ -217,6 +254,7 @@ async def set_value(
     - 200: Key updated (existing key)
     - 201: Key created (new key, or nx=true success)
     - 409: Conflict (nx=true but key exists, or xx=true but key doesn't exist)
+    - 413: Payload too large (value exceeds size limit)
     """
     settings = get_settings()
 
@@ -225,6 +263,8 @@ async def set_value(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot use both nx and xx",
         )
+
+    _check_value_size(body, settings)
 
     try:
         encrypted = encrypt_value(settings.kv_secret, body)
@@ -354,6 +394,9 @@ async def patch_value(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"invalid_path: {e}",
         )
+
+    # Check size of the updated value before encrypting
+    _check_value_size(value, settings)
 
     try:
         kv.value_encrypted = encrypt_value(settings.kv_secret, value)
@@ -541,6 +584,7 @@ async def lpush(
     if kv is None:
         # Initialize with single-element list
         value = [body.value]
+        _check_value_size(value, settings)
         try:
             encrypted = encrypt_value(settings.kv_secret, value)
         except KVEncryptionError as e:
@@ -575,6 +619,7 @@ async def lpush(
         )
 
     value.insert(0, body.value)
+    _check_value_size(value, settings)
 
     try:
         kv.value_encrypted = encrypt_value(settings.kv_secret, value)
@@ -607,6 +652,7 @@ async def rpush(
     if kv is None:
         # Initialize with single-element list
         value = [body.value]
+        _check_value_size(value, settings)
         try:
             encrypted = encrypt_value(settings.kv_secret, value)
         except KVEncryptionError as e:
@@ -641,6 +687,7 @@ async def rpush(
         )
 
     value.append(body.value)
+    _check_value_size(value, settings)
 
     try:
         kv.value_encrypted = encrypt_value(settings.kv_secret, value)

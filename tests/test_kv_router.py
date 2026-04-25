@@ -797,3 +797,135 @@ class TestListOperations:
 
         assert response.status_code == 400
         assert "type_mismatch" in response.json()["detail"]
+
+
+class TestValueSizeLimit:
+    """Tests for KV value size limit enforcement.
+
+    The size limit is configurable via AUTOMATION_KV_MAX_VALUE_SIZE.
+    Default is 64KB. These tests use a smaller limit for efficiency.
+    """
+
+    @pytest.fixture
+    async def small_limit_client(
+        self, async_engine, async_session_factory, async_session, monkeypatch
+    ):
+        """Client with a small value size limit (1KB) for testing."""
+        monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
+        monkeypatch.setenv("AUTOMATION_KV_MAX_VALUE_SIZE", "1024")  # 1KB
+
+        from automation.config import get_settings
+
+        get_settings.cache_clear()
+
+        async def override_get_session():
+            yield async_session
+
+        async def override_get_automation_id():
+            return TEST_AUTOMATION_ID
+
+        app.dependency_overrides[get_session] = override_get_session
+        app.dependency_overrides[get_automation_id_from_token] = (
+            override_get_automation_id
+        )
+
+        app.state.engine = async_engine
+        app.state.session_factory = async_session_factory
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            yield client
+
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    async def test_set_within_limit_succeeds(self, small_limit_client):
+        """Setting a value within size limit succeeds."""
+        small_value = {"data": "x" * 100}  # ~120 bytes
+
+        response = await small_limit_client.put(
+            "/api/automation/v1/kv/small_key",
+            json=small_value,
+        )
+
+        assert response.status_code == 201
+
+    async def test_set_exceeds_limit_returns_413(self, small_limit_client):
+        """Setting a value exceeding size limit returns 413."""
+        large_value = {"data": "x" * 2000}  # ~2KB, exceeds 1KB limit
+
+        response = await small_limit_client.put(
+            "/api/automation/v1/kv/large_key",
+            json=large_value,
+        )
+
+        assert response.status_code == 413
+        assert "exceeds limit" in response.json()["detail"]
+
+    async def test_patch_exceeds_limit_returns_413(
+        self, small_limit_client, async_session
+    ):
+        """Patching a value to exceed size limit returns 413."""
+        # Start with a small value
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="growing_obj",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, {"field": "small"}),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        # Try to patch in a large value
+        response = await small_limit_client.patch(
+            "/api/automation/v1/kv/growing_obj",
+            json={"path": "field", "value": "x" * 2000},
+        )
+
+        assert response.status_code == 413
+        assert "exceeds limit" in response.json()["detail"]
+
+    async def test_rpush_exceeds_limit_returns_413(
+        self, small_limit_client, async_session
+    ):
+        """Pushing to a list to exceed size limit returns 413."""
+        # Start with a list near the limit
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="growing_list",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, ["x" * 500]),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        # Try to push another large item
+        response = await small_limit_client.post(
+            "/api/automation/v1/kv/growing_list/rpush",
+            json={"value": "x" * 600},
+        )
+
+        assert response.status_code == 413
+        assert "exceeds limit" in response.json()["detail"]
+
+    async def test_lpush_exceeds_limit_returns_413(
+        self, small_limit_client, async_session
+    ):
+        """Left-pushing to a list to exceed size limit returns 413."""
+        # Start with a list near the limit
+        kv = AutomationKV(
+            automation_id=TEST_AUTOMATION_ID,
+            key="growing_list_left",
+            value_encrypted=encrypt_value(TEST_KV_SECRET, ["x" * 500]),
+        )
+        async_session.add(kv)
+        await async_session.commit()
+
+        # Try to lpush another large item
+        response = await small_limit_client.post(
+            "/api/automation/v1/kv/growing_list_left/lpush",
+            json={"value": "x" * 600},
+        )
+
+        assert response.status_code == 413
+        assert "exceeds limit" in response.json()["detail"]
