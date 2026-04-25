@@ -40,7 +40,7 @@ from fastapi import (
     Response,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import get_settings
@@ -179,17 +179,58 @@ async def _get_state_row_for_update(
     session: AsyncSession,
     automation_id: uuid.UUID,
 ) -> AutomationKV | None:
-    """Get the state row with FOR UPDATE lock.
+    """Get the state row with FOR UPDATE lock and bounded wait time.
 
     Since there's only ONE row per automation, this is the single lock point.
     All concurrent operations on this automation's state will serialize here.
+
+    Lock Timeout (Deadlock Prevention):
+    We set a 5-second lock_timeout before acquiring the row lock. Without this,
+    a slow or stuck transaction (e.g., network issue during commit, slow crypto)
+    would cause all subsequent KV operations on this automation to queue
+    indefinitely. With enough concurrent requests, this exhausts the connection
+    pool and degrades the entire service—not just this automation.
+
+    SET LOCAL scopes the timeout to this transaction only, so it doesn't affect
+    other queries in this session or pollute the connection pool.
+
+    If the lock times out, PostgreSQL raises an error which we catch and convert
+    to HTTP 409 Conflict, allowing clients to retry with backoff.
     """
+    # Bound how long we'll wait for the row lock. This prevents a single slow
+    # transaction from cascading into connection pool exhaustion.
+    await session.execute(text("SET LOCAL lock_timeout = '5000ms'"))
+
     result = await session.execute(
         select(AutomationKV)
         .where(AutomationKV.automation_id == automation_id)
         .with_for_update()
     )
     return result.scalars().first()
+
+
+def _is_lock_timeout_error(exc: Exception) -> bool:
+    """Check if an exception is a PostgreSQL lock timeout error.
+
+    PostgreSQL raises error code 55P03 (lock_not_available) when lock_timeout
+    is exceeded. This can surface through asyncpg or SQLAlchemy wrappers.
+    """
+    error_str = str(exc).lower()
+    # asyncpg surfaces this as "lock_not_available" or error code 55P03
+    return (
+        "lock_not_available" in error_str
+        or "55p03" in error_str
+        or "could not obtain lock" in error_str
+        or "canceling statement due to lock timeout" in error_str
+    )
+
+
+def _raise_lock_conflict() -> None:
+    """Raise HTTP 409 for lock timeout - signals client should retry."""
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="kv_store_busy: another operation is in progress, please retry",
+    )
 
 
 def _decrypt_state(secret: str, row: AutomationKV | None) -> dict[str, Any]:
@@ -325,7 +366,12 @@ async def set_value(
         )
 
     # Lock the state row for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     key_exists = key in state
@@ -372,7 +418,12 @@ async def patch_value(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -414,7 +465,12 @@ async def delete_key(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -452,7 +508,12 @@ async def increment(
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -489,7 +550,12 @@ async def decrement(
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -522,7 +588,12 @@ async def lpush(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -554,7 +625,12 @@ async def rpush(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -585,7 +661,12 @@ async def lpop(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:
@@ -618,7 +699,12 @@ async def rpop(
     settings = get_settings()
 
     # Lock for atomic read-modify-write
-    row = await _get_state_row_for_update(session, automation_id)
+    try:
+        row = await _get_state_row_for_update(session, automation_id)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
     state = _decrypt_state(settings.kv_secret, row)
 
     if key not in state:

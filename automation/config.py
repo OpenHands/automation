@@ -274,6 +274,11 @@ class ServiceSettings(BaseSettings):
     gcp_project: str | None = None
     gcp_region: str | None = None
 
+    # Maximum seconds to wait for a connection from the pool.
+    # Prevents indefinite hangs when pool is exhausted due to slow operations.
+    # If pool exhaustion is frequent, increase pool_size rather than this timeout.
+    db_pool_timeout: float = 30
+
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
 
