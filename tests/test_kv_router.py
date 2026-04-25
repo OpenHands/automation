@@ -1,4 +1,38 @@
-"""Tests for KV store API endpoints."""
+"""Tests for KV store API endpoints.
+
+Testing Strategy
+================
+
+This module uses two different test client fixtures depending on the test type:
+
+1. `kv_client` - For most tests (single-request tests)
+   - Overrides `get_session` to use a SHARED async_session
+   - All requests go through the same database session/connection
+   - Simpler setup, good for testing individual endpoint behavior
+   - ⚠️ NOT suitable for concurrent request tests (causes deadlocks)
+
+2. `concurrent_kv_client` - For concurrency tests ONLY
+   - Does NOT override `get_session`
+   - Each request gets its own session from the session factory
+   - Enables true concurrent database operations with separate connections
+   - Required for testing FOR UPDATE locking behavior
+
+Why This Matters
+----------------
+The KV store uses `SELECT ... FOR UPDATE` to implement atomic operations like
+increment/decrement and list push/pop. When multiple requests try to modify
+the same key:
+
+- With separate sessions: Requests queue up waiting for the lock, execute
+  sequentially, and produce correct results.
+
+- With a shared session: All requests try to use the same connection. The
+  first request acquires the lock, and subsequent requests DEADLOCK waiting
+  for a lock they can never acquire (because they're on the same connection).
+
+If you're adding new concurrency tests, use `concurrent_kv_client`.
+If you're adding single-request tests, use `kv_client`.
+"""
 
 import uuid
 
@@ -22,9 +56,20 @@ TEST_RUN_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 TEST_KV_SECRET = "test-kv-secret-key-for-testing-only"
 
 
+# =============================================================================
+# Test Client Fixtures
+# =============================================================================
+
+
 @pytest.fixture
 async def kv_client(async_engine, async_session_factory, async_session, monkeypatch):
-    """Create an async test client with KV token auth."""
+    """Create an async test client with KV token auth (shared session).
+
+    This fixture uses a SHARED async_session for all requests. It's suitable
+    for single-request tests but will DEADLOCK if used for concurrent requests.
+
+    For concurrency tests, use `concurrent_kv_client` instead.
+    """
     # Set the KV secret so encryption/decryption uses the same key
     monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
 
@@ -463,22 +508,34 @@ class TestIncrement:
 class TestConcurrency:
     """Tests for concurrent atomic operations.
 
-    These tests verify that FOR UPDATE locking prevents race conditions
-    when multiple requests modify the same key simultaneously.
+    IMPORTANT: These tests use `concurrent_kv_client`, NOT `kv_client`.
+    See the module docstring for why this distinction matters.
 
-    Note: These tests require a separate fixture that uses the session factory
-    instead of a shared session, to allow true concurrent database connections.
+    These tests verify that FOR UPDATE locking prevents race conditions
+    when multiple requests modify the same key simultaneously. The tests
+    fire N concurrent requests and verify the final state is correct,
+    proving no operations were lost to race conditions.
+
+    If these tests hang or timeout, it likely means someone accidentally
+    used `kv_client` instead of `concurrent_kv_client`, causing a deadlock.
     """
 
     @pytest.fixture
     async def concurrent_kv_client(
         self, async_engine, async_session_factory, async_session, monkeypatch
     ):
-        """Client for concurrency tests that uses session factory (not shared session).
+        """Client for concurrency tests (separate session per request).
 
-        Unlike kv_client, this doesn't override get_session, allowing each request
-        to get its own session from the factory. This enables true concurrent
-        database operations with separate connections.
+        CRITICAL: This fixture does NOT override get_session, unlike kv_client.
+        This allows each concurrent request to get its own database session
+        from the factory, enabling true parallel database operations.
+
+        Why this matters:
+        - KV operations use SELECT ... FOR UPDATE to lock rows
+        - If all requests share one session/connection, they deadlock
+        - With separate sessions, requests queue on the lock and succeed
+
+        Use this fixture for ANY test that fires multiple concurrent requests.
         """
         monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
 
@@ -489,7 +546,8 @@ class TestConcurrency:
         async def override_get_automation_id():
             return TEST_AUTOMATION_ID
 
-        # Only override auth, NOT the session - let each request get its own
+        # IMPORTANT: Only override auth, NOT the session!
+        # Each request must get its own session from the factory.
         app.dependency_overrides[get_automation_id_from_token] = (
             override_get_automation_id
         )
