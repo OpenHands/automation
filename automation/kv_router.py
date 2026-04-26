@@ -43,7 +43,7 @@ from fastapi import (
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from automation.config import get_settings
+from automation.config import get_config
 from automation.db import get_session
 from automation.kv_helpers import (
     get_nested_value,
@@ -92,7 +92,7 @@ async def get_automation_id_from_token(
     The token is passed via Authorization: Bearer <token> header.
     It contains the automation_id as a trusted claim.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     if not settings.kv_secret:
         raise HTTPException(
@@ -143,7 +143,7 @@ def _check_state_size(state: dict[str, Any], settings=None) -> None:
     import json
 
     if settings is None:
-        settings = get_settings()
+        settings = get_config().service
 
     max_size = settings.kv_max_value_size
     if max_size <= 0:
@@ -305,7 +305,7 @@ async def list_keys(
 
     Note: System keys (starting with $) are filtered from the response.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     row = await _get_state_row(session, automation_id)
     state = _decrypt_state(settings.kv_secret, row)
@@ -327,7 +327,7 @@ async def get_value(
 
     With meta=true, includes version for optimistic concurrency control.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     row = await _get_state_row(session, automation_id)
     state = _decrypt_state(settings.kv_secret, row)
@@ -396,7 +396,7 @@ async def set_value(
     - 409: Conflict (nx/xx/if_version check failed)
     - 413: Payload too large (state exceeds size limit)
     """
-    settings = get_settings()
+    settings = get_config().service
 
     if nx and xx:
         raise HTTPException(
@@ -475,7 +475,7 @@ async def patch_value(
     Query params:
     - if_version=N: Only patch if current $version equals N (optimistic concurrency)
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -548,7 +548,7 @@ async def delete_key(
     Query params:
     - if_version=N: Only delete if current $version equals N (optimistic concurrency)
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -603,7 +603,7 @@ async def increment(
     Note: The stored value must be an integer. Float values are rejected
     because integer arithmetic on floats can cause precision loss.
     """
-    settings = get_settings()
+    settings = get_config().service
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
@@ -645,7 +645,7 @@ async def decrement(
     Note: The stored value must be an integer. Float values are rejected
     because integer arithmetic on floats can cause precision loss.
     """
-    settings = get_settings()
+    settings = get_config().service
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
@@ -684,7 +684,7 @@ async def lpush(
 
     Creates the list if it doesn't exist.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -721,7 +721,7 @@ async def rpush(
 
     Creates the list if it doesn't exist.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -757,7 +757,7 @@ async def lpop(
 
     Returns null if key doesn't exist or list is empty.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -795,7 +795,7 @@ async def rpop(
 
     Returns null if key doesn't exist or list is empty.
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Lock for atomic read-modify-write
     try:
@@ -830,7 +830,7 @@ async def list_length(
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Get the length of a list."""
-    settings = get_settings()
+    settings = get_config().service
 
     row = await _get_state_row(session, automation_id)
     state = _decrypt_state(settings.kv_secret, row)
@@ -1018,7 +1018,7 @@ async def batch(
     - 409: Lock timeout (another operation in progress)
     - 413: Payload too large (state exceeds size limit)
     """
-    settings = get_settings()
+    settings = get_config().service
 
     # Acquire lock for atomic batch execution
     try:
