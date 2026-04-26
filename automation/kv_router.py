@@ -43,7 +43,7 @@ from fastapi import (
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from automation.config import get_config
+from automation.config import KVSettings, get_config
 from automation.db import get_session
 from automation.kv_helpers import (
     get_nested_value,
@@ -97,9 +97,9 @@ async def get_token_claims(
     The token is passed via Authorization: Bearer <token> header.
     It contains the automation_id and lock_timeout_ms as trusted claims.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
-    if not settings.kv_secret:
+    if not kv_config.kv_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="KV store not configured (missing AUTOMATION_KV_SECRET)",
@@ -119,7 +119,7 @@ async def get_token_claims(
         )
 
     try:
-        return verify_kv_token(settings.kv_secret, token)
+        return verify_kv_token(kv_config.kv_secret, token)
     except KVTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -144,22 +144,24 @@ async def get_automation_id_from_token(
 ValidatedKey = Annotated[str, Depends(lambda key: validate_key(key))]
 
 
-def _check_state_size(state: dict[str, Any], settings=None) -> None:
+def _check_state_size(
+    state: dict[str, Any], kv_config: KVSettings | None = None
+) -> None:
     """Validate that the entire state document doesn't exceed the configured size limit.
 
     Args:
         state: The state dict to check (will be JSON-serialized to measure size)
-        settings: Optional settings object (fetched if not provided)
+        kv_config: Optional KVSettings object (fetched if not provided)
 
     Raises:
         HTTPException: 413 Payload Too Large if state exceeds limit
     """
     import json
 
-    if settings is None:
-        settings = get_config().service
+    if kv_config is None:
+        kv_config = get_config().kv
 
-    max_size = settings.kv_max_value_size
+    max_size = kv_config.kv_max_value_size
     if max_size <= 0:
         return  # Size limit disabled
 
@@ -374,10 +376,10 @@ async def list_keys(
 
     Note: System keys (starting with $) are filtered from the response.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     row = await _get_state_row(session, claims.automation_id)
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     # Filter out system keys (e.g., $version)
     keys = [k for k in state.keys() if not k.startswith("$")]
@@ -396,10 +398,10 @@ async def get_value(
 
     With meta=true, includes version for optimistic concurrency control.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     row = await _get_state_row(session, claims.automation_id)
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         raise HTTPException(
@@ -465,7 +467,7 @@ async def set_value(
     - 409: Conflict (nx/xx/if_version check failed)
     - 413: Payload too large (state exceeds size limit)
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     if nx and xx:
         raise HTTPException(
@@ -482,7 +484,7 @@ async def set_value(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     # Check version if specified (optimistic concurrency)
     if if_version is not None:
@@ -504,11 +506,11 @@ async def set_value(
 
     # Update state
     state[key] = body
-    _check_state_size(state, settings)
+    _check_state_size(state, kv_config)
 
     # Save
     saved_row = await _save_state(
-        session, claims.automation_id, state, settings.kv_secret, row
+        session, claims.automation_id, state, kv_config.kv_secret, row
     )
 
     created = not key_exists
@@ -539,7 +541,7 @@ async def patch_value(
     Query params:
     - if_version=N: Only patch if current $version equals N (optimistic concurrency)
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -550,7 +552,7 @@ async def patch_value(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     # Check version if specified (optimistic concurrency)
     if if_version is not None:
@@ -576,9 +578,9 @@ async def patch_value(
         )
 
     state[key] = value
-    _check_state_size(state, settings)
+    _check_state_size(state, kv_config)
 
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyPathResponse(
         key=key,
@@ -607,7 +609,7 @@ async def delete_key(
     Query params:
     - if_version=N: Only delete if current $version equals N (optimistic concurrency)
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -618,7 +620,7 @@ async def delete_key(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     # Check version if specified (optimistic concurrency)
     if if_version is not None:
@@ -635,7 +637,7 @@ async def delete_key(
         if _has_user_keys(state):
             # Still have user keys, update the row
             await _save_state(
-                session, claims.automation_id, state, settings.kv_secret, row
+                session, claims.automation_id, state, kv_config.kv_secret, row
             )
         else:
             # No user keys left, delete the row entirely
@@ -659,7 +661,7 @@ async def increment(
     Note: The stored value must be an integer. Float values are rejected
     because integer arithmetic on floats can cause precision loss.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
@@ -671,7 +673,7 @@ async def increment(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         # Initialize with `by`
@@ -683,8 +685,8 @@ async def increment(
         new_value = value + by
         state[key] = new_value
 
-    _check_state_size(state, settings)
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -703,7 +705,7 @@ async def decrement(
     Note: The stored value must be an integer. Float values are rejected
     because integer arithmetic on floats can cause precision loss.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
     by = body.by if body else 1
 
     # Lock for atomic read-modify-write
@@ -715,7 +717,7 @@ async def decrement(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         # Initialize with `-by`
@@ -727,8 +729,8 @@ async def decrement(
         new_value = value - by
         state[key] = new_value
 
-    _check_state_size(state, settings)
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -744,7 +746,7 @@ async def lpush(
 
     Creates the list if it doesn't exist.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -755,7 +757,7 @@ async def lpush(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         # Initialize with single-element list
@@ -766,8 +768,8 @@ async def lpush(
         value.insert(0, body.value)
         state[key] = value
 
-    _check_state_size(state, settings)
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -783,7 +785,7 @@ async def rpush(
 
     Creates the list if it doesn't exist.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -794,7 +796,7 @@ async def rpush(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         # Initialize with single-element list
@@ -805,8 +807,8 @@ async def rpush(
         value.append(body.value)
         state[key] = value
 
-    _check_state_size(state, settings)
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -821,7 +823,7 @@ async def lpop(
 
     Returns null if key doesn't exist or list is empty.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -832,7 +834,7 @@ async def lpop(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         return KVKeyResponse(key=key, value=None)
@@ -846,7 +848,7 @@ async def lpop(
     popped = value.pop(0)
     state[key] = value
 
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -861,7 +863,7 @@ async def rpop(
 
     Returns null if key doesn't exist or list is empty.
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Lock for atomic read-modify-write
     try:
@@ -872,7 +874,7 @@ async def rpop(
         if _is_lock_timeout_error(e):
             _raise_lock_conflict()
         raise
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         return KVKeyResponse(key=key, value=None)
@@ -886,7 +888,7 @@ async def rpop(
     popped = value.pop()
     state[key] = value
 
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -898,10 +900,10 @@ async def list_length(
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Get the length of a list."""
-    settings = get_config().service
+    kv_config = get_config().kv
 
     row = await _get_state_row(session, claims.automation_id)
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
         raise HTTPException(
@@ -1086,7 +1088,7 @@ async def batch(
     - 409: Lock timeout (another operation in progress)
     - 413: Payload too large (state exceeds size limit)
     """
-    settings = get_config().service
+    kv_config = get_config().kv
 
     # Acquire lock for atomic batch execution
     try:
@@ -1098,7 +1100,7 @@ async def batch(
             _raise_lock_conflict()
         raise
 
-    state = _decrypt_state(settings.kv_secret, row)
+    state = _decrypt_state(kv_config.kv_secret, row)
     current_version = _get_version(state)
 
     # Check version if specified
@@ -1123,9 +1125,9 @@ async def batch(
             )
 
     # Validate state size before saving
-    _check_state_size(state, settings)
+    _check_state_size(state, kv_config)
 
     # Save state (auto-increments $version)
-    await _save_state(session, claims.automation_id, state, settings.kv_secret, row)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
     return KVBatchResponse(version=_get_version(state), results=results)

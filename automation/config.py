@@ -8,7 +8,8 @@ service. Configuration is organized into a composed AppConfig with typed section
     ├── storage: StorageSettings    # File storage (no prefix, SDK conventions)
     ├── log: LogSettings            # Logging (no prefix)
     ├── http: HttpSettings          # HTTP client (AUTOMATION_ prefix)
-    └── sandbox: SandboxSettings    # Sandbox execution (AUTOMATION_ prefix)
+    ├── sandbox: SandboxSettings    # Sandbox execution (AUTOMATION_ prefix)
+    └── kv: KVSettings              # Key-value store (AUTOMATION_ prefix)
 
 Usage (preferred):
     from automation.config import get_config
@@ -212,6 +213,56 @@ class SandboxSettings(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
+# KVSettings - Key-value store configuration
+# ---------------------------------------------------------------------------
+
+
+class KVSettings(BaseSettings):
+    """Key-value store configuration for automation state persistence.
+
+    The KV store provides per-automation state storage with encryption and
+    JWT-based authentication. It must be explicitly enabled per-automation.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_KV_SECRET: Secret for JWT signing and value encryption.
+            Must be set to enable KV store. Generate with:
+            python -c "import secrets; print(secrets.token_urlsafe(32))"
+        AUTOMATION_KV_MAX_VALUE_SIZE: Max value size in bytes (default: 64KB)
+    """
+
+    # Secret key for signing KV store JWT tokens and encrypting KV values.
+    # Must be set to enable the KV store feature.
+    kv_secret: str = ""
+
+    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    #
+    # Performance guidance - PostgreSQL TOAST behavior:
+    #
+    #   Limit     Stored Size   TOAST Chunks   Read Latency
+    #   -------   -----------   ------------   ------------
+    #   < 2 KB    inline        0              1x (optimal)
+    #   2-8 KB    compressed    0              ~2x
+    #   64 KB     ~65 KB        ~33            ~5-10x
+    #   128 KB    ~131 KB       ~66            ~10-15x
+    #   256 KB    ~262 KB       ~131           ~15-25x
+    #   512 KB    ~524 KB       ~262           ~25-40x
+    #
+    # Values > 8KB are stored in a separate TOAST table, requiring index lookups
+    # for each ~2KB chunk. The default 64KB is generous for typical KV use cases
+    # (counters, flags, small configs). For larger blobs, consider object storage.
+    #
+    # Set to 0 to disable the limit (not recommended).
+    kv_max_value_size: int = 64 * 1024  # 64 KB
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Check if KV store is enabled (kv_secret is set)."""
+        return bool(self.kv_secret)
+
+
+# ---------------------------------------------------------------------------
 # ServiceSettings - Core service configuration (formerly "Settings")
 # ---------------------------------------------------------------------------
 
@@ -321,30 +372,6 @@ class ServiceSettings(BaseSettings):
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
 
-    # Secret key for signing KV store JWT tokens and encrypting KV values.
-    # Must be set to enable the KV store feature.
-    kv_secret: str = ""
-
-    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
-    #
-    # Performance guidance - PostgreSQL TOAST behavior:
-    #
-    #   Limit     Stored Size   TOAST Chunks   Read Latency
-    #   -------   -----------   ------------   ------------
-    #   < 2 KB    inline        0              1x (optimal)
-    #   2-8 KB    compressed    0              ~2x
-    #   64 KB     ~65 KB        ~33            ~5-10x
-    #   128 KB    ~131 KB       ~66            ~10-15x
-    #   256 KB    ~262 KB       ~131           ~15-25x
-    #   512 KB    ~524 KB       ~262           ~25-40x
-    #
-    # Values > 8KB are stored in a separate TOAST table, requiring index lookups
-    # for each ~2KB chunk. The default 64KB is generous for typical KV use cases
-    # (counters, flags, small configs). For larger blobs, consider object storage.
-    #
-    # Set to 0 to disable the limit (not recommended).
-    kv_max_value_size: int = 64 * 1024  # 64 KB
-
     model_config = {"env_prefix": "AUTOMATION_"}
 
     @property
@@ -407,6 +434,7 @@ class AppConfig:
         log: Logging settings
         http: HTTP client settings (timeouts, caching)
         sandbox: Sandbox execution settings (limits, retries)
+        kv: Key-value store settings (secrets, limits)
 
     Example:
         config = get_config()
@@ -414,6 +442,7 @@ class AppConfig:
         print(config.storage.file_store)
         print(config.log.log_level)
         print(config.sandbox.max_run_duration)
+        print(config.kv.enabled)
     """
 
     @cached_property
@@ -440,6 +469,11 @@ class AppConfig:
     def sandbox(self) -> SandboxSettings:
         """Sandbox execution configuration (AUTOMATION_ prefix)."""
         return SandboxSettings()
+
+    @cached_property
+    def kv(self) -> KVSettings:
+        """Key-value store configuration (AUTOMATION_ prefix)."""
+        return KVSettings()
 
 
 @lru_cache

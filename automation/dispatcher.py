@@ -166,9 +166,10 @@ async def _execute_run(
         env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
 
         # Generate KV token if automation has KV store enabled
-        if automation.enable_kv_store and settings.kv_secret:
+        kv_config = get_config().kv
+        if automation.enable_kv_store and kv_config.kv_secret:
             kv_token = create_kv_token(
-                secret=settings.kv_secret,
+                secret=kv_config.kv_secret,
                 automation_id=automation.id,
                 run_id=run.id,
                 lock_timeout_ms=automation.kv_lock_timeout_ms,
