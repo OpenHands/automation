@@ -37,9 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.app import app
 from automation.db import get_session
-from automation.kv_router import get_automation_id_from_token
+from automation.kv_router import get_token_claims
 from automation.models import Automation, AutomationKV
-from automation.utils.kv import decrypt_value, encrypt_value
+from automation.utils.kv import (
+    DEFAULT_LOCK_TIMEOUT_MS,
+    KVTokenClaims,
+    decrypt_value,
+    encrypt_value,
+)
 
 
 # Test UUIDs
@@ -113,11 +118,14 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
     async def override_get_session():
         yield async_session
 
-    async def override_get_automation_id():
-        return TEST_AUTOMATION_ID
+    async def override_get_token_claims():
+        return KVTokenClaims(
+            automation_id=TEST_AUTOMATION_ID,
+            lock_timeout_ms=DEFAULT_LOCK_TIMEOUT_MS,
+        )
 
     app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_automation_id_from_token] = override_get_automation_id
+    app.dependency_overrides[get_token_claims] = override_get_token_claims
 
     app.state.engine = async_engine
     app.state.session_factory = async_session_factory
@@ -169,7 +177,7 @@ class TestKVTokenAuth:
         )
 
         result = verify_kv_token(TEST_KV_SECRET, token)
-        assert result == TEST_AUTOMATION_ID
+        assert result.automation_id == TEST_AUTOMATION_ID
 
     def test_invalid_token_raises_error(self):
         """Invalid token raises KVTokenError."""
