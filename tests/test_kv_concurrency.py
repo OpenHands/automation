@@ -145,8 +145,9 @@ class TestKVTokenClaims:
 
     def test_verify_token_backward_compatible(self):
         """Old tokens without lock_timeout_ms use default."""
-        import jwt
         from datetime import UTC, datetime, timedelta
+
+        import jwt
 
         # Create a token manually without lock_timeout_ms (simulating old token)
         payload = {
@@ -164,8 +165,9 @@ class TestKVTokenClaims:
 
     def test_verify_token_invalid_timeout_uses_default(self):
         """Invalid lock_timeout_ms in token uses default."""
-        import jwt
         from datetime import UTC, datetime, timedelta
+
+        import jwt
 
         # Create a token with invalid timeout
         payload = {
@@ -182,8 +184,9 @@ class TestKVTokenClaims:
 
     def test_verify_token_too_small_timeout_uses_default(self):
         """Lock timeout < 100ms uses default."""
-        import jwt
         from datetime import UTC, datetime, timedelta
+
+        import jwt
 
         payload = {
             "automation_id": str(TEST_AUTOMATION_ID),
@@ -276,8 +279,9 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_timeout_min_validation(self):
         """CreateAutomationRequest rejects timeout < 100ms."""
-        from automation.schemas import CreateAutomationRequest
         from pydantic import ValidationError
+
+        from automation.schemas import CreateAutomationRequest
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
@@ -292,8 +296,9 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_timeout_max_validation(self):
         """CreateAutomationRequest rejects timeout > 30000ms."""
-        from automation.schemas import CreateAutomationRequest
         from pydantic import ValidationError
+
+        from automation.schemas import CreateAutomationRequest
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
@@ -315,8 +320,9 @@ class TestLockTimeoutValidation:
 
     def test_update_automation_timeout_validation(self):
         """UpdateAutomationRequest validates timeout bounds."""
-        from automation.schemas import UpdateAutomationRequest
         from pydantic import ValidationError
+
+        from automation.schemas import UpdateAutomationRequest
 
         with pytest.raises(ValidationError):
             UpdateAutomationRequest(kv_lock_timeout_ms=99)  # Too low
