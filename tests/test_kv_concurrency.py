@@ -256,7 +256,7 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_default_timeout(self):
         """CreateAutomationRequest has default lock timeout."""
-        from automation.schemas import CronTrigger, CreateAutomationRequest
+        from automation.schemas import CreateAutomationRequest, CronTrigger
 
         req = CreateAutomationRequest(
             name="test",
@@ -268,7 +268,7 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_custom_timeout(self):
         """CreateAutomationRequest accepts custom lock timeout."""
-        from automation.schemas import CronTrigger, CreateAutomationRequest
+        from automation.schemas import CreateAutomationRequest, CronTrigger
 
         req = CreateAutomationRequest(
             name="test",
