@@ -103,13 +103,15 @@ class TestRetryAfterHeader:
 
     def test_version_conflict_includes_versions(self):
         """_raise_version_conflict includes version info in detail."""
+        from typing import Any, cast
+
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
             _raise_version_conflict(expected=5, actual=6)
 
         exc = exc_info.value
-        detail = exc.detail
+        detail = cast(dict[str, Any], exc.detail)
         assert detail["error"] == "version_mismatch"
         assert detail["expected_version"] == 5
         assert detail["actual_version"] == 6
@@ -254,11 +256,11 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_default_timeout(self):
         """CreateAutomationRequest has default lock timeout."""
-        from automation.schemas import CreateAutomationRequest
+        from automation.schemas import CronTrigger, CreateAutomationRequest
 
         req = CreateAutomationRequest(
             name="test",
-            trigger={"type": "cron", "schedule": "0 9 * * *"},
+            trigger=CronTrigger(schedule="0 9 * * *"),
             tarball_path="gs://bucket/path.tar.gz",
             entrypoint="python run.py",
         )
@@ -266,11 +268,11 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_custom_timeout(self):
         """CreateAutomationRequest accepts custom lock timeout."""
-        from automation.schemas import CreateAutomationRequest
+        from automation.schemas import CronTrigger, CreateAutomationRequest
 
         req = CreateAutomationRequest(
             name="test",
-            trigger={"type": "cron", "schedule": "0 9 * * *"},
+            trigger=CronTrigger(schedule="0 9 * * *"),
             tarball_path="gs://bucket/path.tar.gz",
             entrypoint="python run.py",
             kv_lock_timeout_ms=2000,
@@ -281,12 +283,12 @@ class TestLockTimeoutValidation:
         """CreateAutomationRequest rejects timeout < 100ms."""
         from pydantic import ValidationError
 
-        from automation.schemas import CreateAutomationRequest
+        from automation.schemas import CreateAutomationRequest, CronTrigger
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
                 name="test",
-                trigger={"type": "cron", "schedule": "0 9 * * *"},
+                trigger=CronTrigger(schedule="0 9 * * *"),
                 tarball_path="gs://bucket/path.tar.gz",
                 entrypoint="python run.py",
                 kv_lock_timeout_ms=50,  # Too low
@@ -298,12 +300,12 @@ class TestLockTimeoutValidation:
         """CreateAutomationRequest rejects timeout > 30000ms."""
         from pydantic import ValidationError
 
-        from automation.schemas import CreateAutomationRequest
+        from automation.schemas import CreateAutomationRequest, CronTrigger
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
                 name="test",
-                trigger={"type": "cron", "schedule": "0 9 * * *"},
+                trigger=CronTrigger(schedule="0 9 * * *"),
                 tarball_path="gs://bucket/path.tar.gz",
                 entrypoint="python run.py",
                 kv_lock_timeout_ms=60000,  # Too high

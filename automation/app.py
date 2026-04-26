@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from automation.auth import create_http_client
-from automation.config import get_settings
+from automation.config import get_config, get_settings
 from automation.db import create_engine, create_session_factory
 from automation.dispatcher import dispatcher_loop
 from automation.event_router import router as event_router
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 
     logger.info(
         "Starting OpenHands Automations Service",
-        extra={"kv_store_configured": bool(settings.kv_secret)},
+        extra={"kv_store_configured": get_config().kv.enabled},
     )
 
     # Create shared httpx client for auth (stored in app.state for DI)
