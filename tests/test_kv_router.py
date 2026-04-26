@@ -106,9 +106,9 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
     """Create an async test client with KV token auth (shared session)."""
     monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
 
-    from automation.config import get_settings
+    from automation.config import clear_config_cache
 
-    get_settings.cache_clear()
+    clear_config_cache()
 
     async def override_get_session():
         yield async_session
@@ -129,7 +129,7 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
         yield client
 
     app.dependency_overrides.clear()
-    get_settings.cache_clear()
+    clear_config_cache()
 
 
 @pytest.fixture(autouse=True)
