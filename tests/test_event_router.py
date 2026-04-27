@@ -400,7 +400,6 @@ async def test_receive_unknown_source(
     assert "Unknown webhook source" in response.json()["detail"]
 
 
-
 # =============================================================================
 # GitLab Event Tests
 # =============================================================================
