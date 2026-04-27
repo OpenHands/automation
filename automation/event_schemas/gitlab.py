@@ -401,26 +401,14 @@ GITLAB_PAYLOAD_CLASSES: dict[str, type[GitLabEvent]] = {
 # =============================================================================
 
 # Detection rules: (event_type, jmespath_expression)
-# GitLab events have an `object_kind` field that identifies the event type
+# GitLab webhooks always include `object_kind` field that identifies the event type
 GITLAB_DETECTION_RULES: list[tuple[str, str]] = [
-    # GitLab payloads have explicit object_kind field
     ("merge_request", "object_kind == 'merge_request'"),
     ("push", "object_kind == 'push'"),
     ("tag_push", "object_kind == 'tag_push'"),
     ("issue", "object_kind == 'issue'"),
     ("note", "object_kind == 'note'"),
     ("pipeline", "object_kind == 'pipeline'"),
-    # Fallback detection using payload structure (when object_kind is absent)
-    (
-        "merge_request",
-        "contains(keys(@), 'object_attributes') && contains(keys(@), 'merge_request')",
-    ),
-    (
-        "issue",
-        "contains(keys(@), 'object_attributes') && "
-        "object_attributes.noteable_type == null && "
-        "!contains(keys(@), 'merge_request')",
-    ),
 ]
 
 # Lazy-initialized detector (created on first use)
