@@ -5,6 +5,7 @@ every N seconds (configurable via AUTOMATION_SCHEDULER_INTERVAL_SECONDS) for
 enabled cron automations whose next fire time is due.
 
 Uses FOR UPDATE SKIP LOCKED for multi-worker safety in PostgreSQL.
+On SQLite (single-process deployments) the row-level lock is skipped.
 """
 
 import asyncio
@@ -28,6 +29,11 @@ DEFAULT_BATCH_SIZE = 50
 POLL_INTERVAL_SECONDS = 60
 
 
+def _is_sqlite(session: AsyncSession) -> bool:
+    """Return True when the bound engine is SQLite."""
+    return session.bind.dialect.name == "sqlite" if session.bind else False
+
+
 async def _fetch_enabled_automations(
     session: AsyncSession,
     batch_size: int,
@@ -40,6 +46,10 @@ async def _fetch_enabled_automations(
 
     The poll_threshold filters out automations that were recently polled,
     ensuring fair rotation through all automations when using batching.
+
+    On SQLite the ``FOR UPDATE SKIP LOCKED`` clause is omitted because
+    SQLite only supports database-level locking and does not have
+    row-level locks.  This is safe for single-process deployments.
 
     Args:
         session: Database session
@@ -59,8 +69,9 @@ async def _fetch_enabled_automations(
         )
         .order_by(Automation.last_polled_at.asc().nulls_first())
         .limit(batch_size)
-        .with_for_update(skip_locked=True)
     )
+    if not _is_sqlite(session):
+        select_query = select_query.with_for_update(skip_locked=True)
 
     result = await session.execute(select_query)
     return list(result.scalars().all())

@@ -221,6 +221,14 @@ class ServiceSettings(BaseSettings):
 
     Environment variables (AUTOMATION_ prefix):
         # Database
+        AUTOMATION_DB_URL: Full database URL (optional, overrides host/port/name/user/pass).
+            Supports PostgreSQL (postgresql+asyncpg://...) and SQLite (sqlite+aiosqlite:///...).
+            When set, all other DB_* settings (except pool settings) are ignored.
+            Examples:
+              - sqlite+aiosqlite:///./automations.db  (relative path)
+              - sqlite+aiosqlite:////tmp/automations.db  (absolute path)
+              - postgresql+asyncpg://user:pass@host:5432/dbname
+
         AUTOMATION_DB_HOST: Database host (default: localhost)
         AUTOMATION_DB_PORT: Database port (default: 5432)
         AUTOMATION_DB_NAME: Database name (default: automations)
@@ -260,6 +268,9 @@ class ServiceSettings(BaseSettings):
     """
 
     # Database
+    # Full URL takes precedence over individual host/port/name/user/pass settings.
+    # Supports PostgreSQL and SQLite (e.g. sqlite+aiosqlite:///./automations.db).
+    db_url: str | None = None
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "automations"
@@ -273,6 +284,11 @@ class ServiceSettings(BaseSettings):
     gcp_db_instance: str | None = None
     gcp_project: str | None = None
     gcp_region: str | None = None
+
+    @property
+    def is_sqlite(self) -> bool:
+        """True when the database backend is SQLite."""
+        return self.db_url is not None and self.db_url.startswith("sqlite")
 
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
