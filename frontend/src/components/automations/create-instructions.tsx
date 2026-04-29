@@ -1,23 +1,29 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import TerminalIcon from "#/icons/terminal.svg?react";
 import SparkleIcon from "#/icons/sparkle.svg?react";
+import ChevronDownIcon from "#/icons/chevron-down.svg?react";
 
 const DOCS_URL =
   "https://docs.openhands.dev/openhands/usage/automations/overview";
 const NEW_CONVERSATION_URL = "/";
 const PLUGIN_COMMAND = "/openhands-automation create";
 
-export function CreateInstructions() {
+interface CreateInstructionsProps {
+  /** If true, the instructions are collapsible and start collapsed */
+  collapsible?: boolean;
+}
+
+export function CreateInstructions({
+  collapsible = false,
+}: CreateInstructionsProps) {
   const { t } = useTranslation();
+  const [isExpanded, setIsExpanded] = useState(!collapsible);
 
-  return (
-    <div className="w-full max-w-2xl">
-      <h3 className="text-center text-sm font-medium text-content">
-        {t(I18nKey.AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE)}
-      </h3>
-
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
+  const content = (
+    <>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
         {/* Option 1: Claude Code / Codex */}
         <div className="rounded-lg border border-border bg-surface-card p-4">
           <div className="flex items-center gap-2">
@@ -56,7 +62,7 @@ export function CreateInstructions() {
       </div>
 
       {/* Documentation link */}
-      <p className="mt-6 text-center text-sm text-content-muted">
+      <p className="mt-4 text-center text-sm text-content-muted">
         <a
           href={DOCS_URL}
           target="_blank"
@@ -66,6 +72,37 @@ export function CreateInstructions() {
           {t(I18nKey.AUTOMATIONS$EMPTY_LEARN_MORE)}
         </a>
       </p>
+    </>
+  );
+
+  if (collapsible) {
+    return (
+      <div className="w-full rounded-lg border border-border bg-surface-card">
+        <button
+          type="button"
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex w-full items-center justify-between p-4 text-left hover:bg-surface-elevated transition-colors rounded-lg"
+        >
+          <span className="text-sm font-medium text-content">
+            {t(I18nKey.AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE)}
+          </span>
+          <ChevronDownIcon
+            className={`size-5 text-content-muted transition-transform ${
+              isExpanded ? "rotate-180" : ""
+            }`}
+          />
+        </button>
+        {isExpanded && <div className="px-4 pb-4">{content}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full max-w-2xl">
+      <h3 className="text-center text-sm font-medium text-content">
+        {t(I18nKey.AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE)}
+      </h3>
+      {content}
     </div>
   );
 }

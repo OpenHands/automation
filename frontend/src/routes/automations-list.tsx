@@ -84,7 +84,7 @@ export default function AutomationsList() {
       </div>
 
       {/* Content */}
-      <div className="mt-6 flex flex-col gap-8">
+      <div className="mt-6 flex flex-col gap-6">
         {isLoading && (
           <div className="flex flex-col gap-3">
             {Array.from({ length: 3 }).map((_, i) => (
@@ -101,6 +101,9 @@ export default function AutomationsList() {
 
         {!isLoading && !isError && data && data.automations.length > 0 && (
           <>
+            {/* Collapsible creation instructions at the top */}
+            <CreateInstructions collapsible />
+
             <AutomationGroup
               title={t(I18nKey.AUTOMATIONS$ACTIVE)}
               count={active.length}
@@ -125,11 +128,6 @@ export default function AutomationsList() {
                 {t(I18nKey.AUTOMATIONS$LOAD_MORE)}
               </button>
             )}
-
-            {/* Always show creation instructions */}
-            <div className="mt-4 flex justify-center">
-              <CreateInstructions />
-            </div>
           </>
         )}
       </div>
