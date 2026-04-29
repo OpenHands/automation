@@ -23,8 +23,9 @@ describe("CreateInstructions", () => {
         screen.getByText("AUTOMATIONS$EMPTY_OPTION_PLUGIN_DESC"),
       ).toBeInTheDocument();
 
-      const codeElement = screen.getByRole("code");
-      expect(codeElement).toHaveTextContent("/openhands-automation create");
+      const codeElement = screen.getByText("/openhands-automation create");
+      expect(codeElement).toBeInTheDocument();
+      expect(codeElement.tagName).toBe("CODE");
     });
 
     it("renders the conversation option with link", () => {
