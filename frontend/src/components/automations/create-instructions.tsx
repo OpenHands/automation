@@ -9,6 +9,8 @@ const DOCS_URL =
   "https://docs.openhands.dev/openhands/usage/automations/overview";
 const NEW_CONVERSATION_URL = "/";
 const PLUGIN_COMMAND = "/openhands-automation create";
+const PLUGIN_INSTALL_URL =
+  "https://github.com/OpenHands/extensions#quick-start";
 
 interface CreateInstructionsProps {
   /** If true, the instructions are collapsible and start collapsed */
@@ -33,6 +35,14 @@ export function CreateInstructions({
             </span>
           </div>
           <p className="mt-2 text-sm text-content-muted">
+            <a
+              href={PLUGIN_INSTALL_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-content transition-colors"
+            >
+              {t(I18nKey.AUTOMATIONS$EMPTY_INSTALL_PLUGIN)}
+            </a>{" "}
             {t(I18nKey.AUTOMATIONS$EMPTY_OPTION_PLUGIN_DESC)}
           </p>
           <code className="mt-2 block rounded bg-surface-elevated px-3 py-2 font-mono text-xs text-content">
