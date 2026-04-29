@@ -21,17 +21,9 @@ function formatRunTimestamp(dateStr: string, locale: string): string {
 
 function getConversationUrl(conversationId: string): string {
   const { hostname } = window.location;
-  let baseHost: string;
-
-  if (hostname.includes("staging.all-hands.dev")) {
-    baseHost = "staging.all-hands.dev";
-  } else if (hostname.includes("app.all-hands.dev")) {
-    baseHost = "app.all-hands.dev";
-  } else {
-    // For localhost development, default to app.all-hands.dev
-    baseHost = "app.all-hands.dev";
-  }
-
+  const baseHost = hostname.includes("staging.all-hands.dev")
+    ? "staging.all-hands.dev"
+    : "app.all-hands.dev";
   return `https://${baseHost}/conversations/${conversationId}`;
 }
 
@@ -39,36 +31,8 @@ export function ActivityLogItem({ run }: ActivityLogItemProps) {
   const { t, i18n } = useTranslation();
   const hasConversation = !!run.conversation_id;
 
-  const handleClick = () => {
-    if (hasConversation && run.conversation_id) {
-      window.open(getConversationUrl(run.conversation_id), "_blank");
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.key === "Enter" || e.key === " ") && hasConversation) {
-      e.preventDefault();
-      handleClick();
-    }
-  };
-
-  return (
-    <div
-      role="button"
-      tabIndex={hasConversation ? 0 : -1}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-      className={`flex items-center justify-between px-5 py-3 transition-colors ${
-        hasConversation
-          ? "cursor-pointer hover:bg-surface-elevated focus:bg-surface-elevated focus:outline-none"
-          : "cursor-default"
-      }`}
-      aria-label={
-        hasConversation
-          ? `View conversation for run at ${formatRunTimestamp(run.started_at, i18n.language)}`
-          : t(I18nKey.AUTOMATIONS$DETAIL$NO_CONVERSATION)
-      }
-    >
+  const content = (
+    <>
       <div className="flex items-center gap-3">
         <span className="text-sm text-content">
           {formatRunTimestamp(run.started_at, i18n.language)}
@@ -80,6 +44,29 @@ export function ActivityLogItem({ run }: ActivityLogItemProps) {
         )}
       </div>
       <RunStatusBadge status={run.status} />
+    </>
+  );
+
+  if (hasConversation && run.conversation_id) {
+    return (
+      <a
+        href={getConversationUrl(run.conversation_id)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center justify-between px-5 py-3 transition-colors cursor-pointer hover:bg-surface-elevated focus:bg-surface-elevated focus:outline-none"
+        aria-label={`View conversation for run at ${formatRunTimestamp(run.started_at, i18n.language)}`}
+      >
+        {content}
+      </a>
+    );
+  }
+
+  return (
+    <div
+      className="flex items-center justify-between px-5 py-3 cursor-default"
+      aria-label={t(I18nKey.AUTOMATIONS$DETAIL$NO_CONVERSATION)}
+    >
+      {content}
     </div>
   );
 }
