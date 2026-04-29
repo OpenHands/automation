@@ -26,9 +26,10 @@ describe("EmptyState", () => {
     expect(
       screen.getByText("AUTOMATIONS$EMPTY_OPTION_PLUGIN_DESC"),
     ).toBeInTheDocument();
-    // The command is displayed in a code block
-    const codeBlock = screen.getByRole("code");
-    expect(codeBlock).toHaveTextContent("/openhands-automation create");
+    // The command is displayed in a code element
+    const codeElement = screen.getByText("/openhands-automation create");
+    expect(codeElement).toBeInTheDocument();
+    expect(codeElement.tagName).toBe("CODE");
   });
 
   it("renders conversation option with link", () => {
