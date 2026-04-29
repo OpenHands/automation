@@ -12,12 +12,13 @@ function makeRun(
   status: AutomationRunStatus,
   startedDaysAgo: number,
   hour = 9,
+  hasConversation = true,
 ): AutomationRun {
   const started = daysAgo(startedDaysAgo, hour);
   return {
     id,
     status,
-    conversation_id: `conv-${id}`,
+    conversation_id: hasConversation ? `conv-${id}` : null,
     error_detail:
       status === AutomationRunStatus.FAILED
         ? "Process exited with code 1"
@@ -53,7 +54,7 @@ export const MOCK_AUTOMATION_RUNS: Record<string, AutomationRun[]> = {
     makeRun("r3-03", AutomationRunStatus.COMPLETED, 3),
   ],
   "a1000000-0000-0000-0000-000000000004": [
-    makeRun("r4-01", AutomationRunStatus.FAILED, 14, 11),
+    makeRun("r4-01", AutomationRunStatus.FAILED, 14, 11, false), // Failed before sandbox creation
     makeRun("r4-02", AutomationRunStatus.COMPLETED, 21, 11),
   ],
   "a1000000-0000-0000-0000-000000000005": [],
