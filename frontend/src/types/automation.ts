@@ -36,7 +36,7 @@ export enum AutomationRunStatus {
 export interface AutomationRun {
   id: string;
   status: AutomationRunStatus;
-  conversation_id: string;
+  conversation_id: string | null;
   error_detail: string | null;
   started_at: string;
   completed_at: string | null;

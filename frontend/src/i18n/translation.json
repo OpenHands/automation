@@ -322,6 +322,23 @@
     "tr": "Henüz etkinlik yok",
     "uk": "Ще немає активності"
   },
+  "AUTOMATIONS$DETAIL$NO_CONVERSATION": {
+    "en": "Conversation not created",
+    "ja": "会話が作成されていません",
+    "zh-CN": "对话未创建",
+    "zh-TW": "對話未建立",
+    "ko-KR": "대화가 생성되지 않음",
+    "no": "Samtale ikke opprettet",
+    "ar": "لم يتم إنشاء المحادثة",
+    "de": "Konversation nicht erstellt",
+    "fr": "Conversation non créée",
+    "it": "Conversazione non creata",
+    "pt": "Conversa não criada",
+    "es": "Conversación no creada",
+    "ca": "Conversa no creada",
+    "tr": "Konuşma oluşturulmadı",
+    "uk": "Розмову не створено"
+  },
   "AUTOMATIONS$DETAIL$TIME_JUST_NOW": {
     "en": "Just now",
     "ja": "たった今",
