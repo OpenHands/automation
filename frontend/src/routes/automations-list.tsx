@@ -12,6 +12,7 @@ import { AutomationCardSkeleton } from "#/components/automations/automation-card
 import { EmptyState } from "#/components/automations/empty-state";
 import { ErrorState } from "#/components/automations/error-state";
 import { DeleteConfirmationModal } from "#/components/automations/delete-confirmation-modal";
+import { CreateInstructions } from "#/components/automations/create-instructions";
 
 const PAGE_SIZE = 50;
 
@@ -83,7 +84,7 @@ export default function AutomationsList() {
       </div>
 
       {/* Content */}
-      <div className="mt-6 flex flex-col gap-8">
+      <div className="mt-6 flex flex-col gap-6">
         {isLoading && (
           <div className="flex flex-col gap-3">
             {Array.from({ length: 3 }).map((_, i) => (
@@ -100,6 +101,9 @@ export default function AutomationsList() {
 
         {!isLoading && !isError && data && data.automations.length > 0 && (
           <>
+            {/* Collapsible creation instructions at the top */}
+            <CreateInstructions collapsible />
+
             <AutomationGroup
               title={t(I18nKey.AUTOMATIONS$ACTIVE)}
               count={active.length}
