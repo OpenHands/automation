@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    LargeBinary,
     String,
     Text,
     Uuid,
@@ -72,6 +73,17 @@ class Automation(Base):
 
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    # Whether this automation has access to the key-value store for state persistence
+    enable_kv_store: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # Lock timeout in milliseconds for KV store operations.
+    # Controls how long to wait for the row lock before returning 409 Conflict.
+    # Default 5000ms (5s) is suitable for most cases. Lower values (e.g., 2000ms)
+    # help high-throughput event handlers fail fast. Higher values (e.g., 10000ms)
+    # may be needed for long-running batch operations.
+    # Valid range: 100ms - 30000ms (30s)
+    kv_lock_timeout_ms: Mapped[int] = mapped_column(default=5000, nullable=False)
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -307,4 +319,68 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class AutomationKV(Base):
+    """Single-document state store for automation persistence.
+
+    Each automation has exactly ONE row containing its entire state as an
+    encrypted JSON document. The API presents a key-value interface, but
+    "keys" are top-level fields within this single document.
+
+    Single-Document Design (Deadlock Prevention):
+        By storing all state in one row per automation, we eliminate multi-key
+        deadlock scenarios. All operations on an automation's state serialize
+        through a single row lock. There's no possibility of lock ordering
+        issues because there's only one lock to acquire.
+
+        Trade-off: Every operation reads/writes the entire state blob. This is
+        acceptable because automation state is intended to be small (cursors,
+        counters, configs) and access is infrequent (scheduled runs).
+
+    Storage Design:
+        We store encrypted values as BYTEA (binary) rather than TEXT because:
+        - AES-GCM produces raw bytes, not text
+        - Avoids ~33% base64 encoding overhead that TEXT would require
+        - Better PostgreSQL TOAST behavior for binary data
+        - See automation/utils/kv.py for full encryption design rationale
+    """
+
+    __tablename__ = "automation_kv"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,  # ONE row per automation
+    )
+
+    # Encrypted bytes containing the entire state document as JSON.
+    # Format: 12-byte nonce || AES-256-GCM(JSON) || 16-byte auth tag
+    # The decrypted JSON is a dict where keys are the "KV keys" from the API.
+    # Example decrypted: {"config": {...}, "counter": 42, "queue": [...]}
+    state_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Index for efficient lookup by automation_id (unique constraint
+        # is already defined on the column, this ensures index exists)
+        Index(
+            "ix_automation_kv_automation_id",
+            "automation_id",
+            unique=True,
+        ),
     )

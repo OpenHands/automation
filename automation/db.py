@@ -65,6 +65,10 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
         max_overflow=settings.db_max_overflow,
         pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
+        # Fail fast if pool is exhausted rather than waiting indefinitely.
+        # This surfaces pool exhaustion issues as errors instead of timeouts,
+        # making it easier to diagnose and fix (e.g., by increasing pool_size).
+        pool_timeout=settings.db_pool_timeout,
     )
     return EngineResult(engine=engine)
 
@@ -100,6 +104,8 @@ async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
         max_overflow=settings.db_max_overflow,
         pool_pre_ping=True,
         pool_recycle=settings.db_pool_recycle,
+        # Fail fast if pool is exhausted rather than waiting indefinitely.
+        pool_timeout=settings.db_pool_timeout,
     )
     return EngineResult(engine=engine, connector=connector)
 
