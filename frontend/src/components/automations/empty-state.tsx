@@ -6,7 +6,7 @@ import SparkleIcon from "#/icons/sparkle.svg?react";
 
 const DOCS_URL =
   "https://docs.openhands.dev/openhands/usage/automations/overview";
-const NEW_CONVERSATION_URL = "/conversations";
+const NEW_CONVERSATION_URL = "/";
 const PLUGIN_COMMAND = "/openhands-automation create";
 
 export function EmptyState() {

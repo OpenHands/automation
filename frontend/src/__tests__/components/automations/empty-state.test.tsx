@@ -46,7 +46,7 @@ describe("EmptyState", () => {
       name: /AUTOMATIONS\$EMPTY_START_CONVERSATION/,
     });
     expect(conversationLink).toBeInTheDocument();
-    expect(conversationLink).toHaveAttribute("href", "/conversations");
+    expect(conversationLink).toHaveAttribute("href", "/");
   });
 
   it("renders documentation link", () => {
