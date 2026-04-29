@@ -81,6 +81,7 @@ export function CreateInstructions({
         <button
           type="button"
           onClick={() => setIsExpanded(!isExpanded)}
+          aria-expanded={isExpanded}
           className="flex w-full items-center justify-between p-4 text-left hover:bg-surface-elevated transition-colors rounded-lg"
         >
           <span className="text-sm font-medium text-content">

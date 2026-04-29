@@ -63,12 +63,12 @@ describe("CreateInstructions", () => {
     it("starts collapsed and shows only the title button", () => {
       render(<CreateInstructions collapsible />);
 
-      // Title button should be visible
-      expect(
-        screen.getByRole("button", {
-          name: "AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE",
-        }),
-      ).toBeInTheDocument();
+      // Title button should be visible with aria-expanded="false"
+      const button = screen.getByRole("button", {
+        name: "AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE",
+      });
+      expect(button).toBeInTheDocument();
+      expect(button).toHaveAttribute("aria-expanded", "false");
 
       // Content should not be visible
       expect(
@@ -80,12 +80,15 @@ describe("CreateInstructions", () => {
       const user = userEvent.setup();
       render(<CreateInstructions collapsible />);
 
+      const button = screen.getByRole("button", {
+        name: "AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE",
+      });
+
       // Click to expand
-      await user.click(
-        screen.getByRole("button", {
-          name: "AUTOMATIONS$EMPTY_HOW_TO_CREATE_TITLE",
-        }),
-      );
+      await user.click(button);
+
+      // aria-expanded should now be "true"
+      expect(button).toHaveAttribute("aria-expanded", "true");
 
       // Content should now be visible
       expect(
