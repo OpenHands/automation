@@ -12,6 +12,7 @@ import { AutomationCardSkeleton } from "#/components/automations/automation-card
 import { EmptyState } from "#/components/automations/empty-state";
 import { ErrorState } from "#/components/automations/error-state";
 import { DeleteConfirmationModal } from "#/components/automations/delete-confirmation-modal";
+import { CreateInstructions } from "#/components/automations/create-instructions";
 
 const PAGE_SIZE = 50;
 
@@ -124,6 +125,11 @@ export default function AutomationsList() {
                 {t(I18nKey.AUTOMATIONS$LOAD_MORE)}
               </button>
             )}
+
+            {/* Always show creation instructions */}
+            <div className="mt-4 flex justify-center">
+              <CreateInstructions />
+            </div>
           </>
         )}
       </div>
