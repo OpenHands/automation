@@ -62,10 +62,7 @@ export function ActivityLogItem({ run }: ActivityLogItemProps) {
   }
 
   return (
-    <div
-      className="flex items-center justify-between px-5 py-3 cursor-default"
-      aria-label={t(I18nKey.AUTOMATIONS$DETAIL$NO_CONVERSATION)}
-    >
+    <div className="flex items-center justify-between px-5 py-3 cursor-default">
       {content}
     </div>
   );

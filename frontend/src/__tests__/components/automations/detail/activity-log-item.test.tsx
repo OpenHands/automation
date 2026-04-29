@@ -144,13 +144,13 @@ describe("ActivityLogItem", () => {
     expect(link.getAttribute("aria-label")).toContain("View conversation");
   });
 
-  it("has appropriate aria-label for div without conversation", () => {
+  it("does not have aria-label on non-interactive div", () => {
     const run = createRun({ conversation_id: null });
     const { container } = render(<ActivityLogItem run={run} />);
 
-    const div = container.querySelector("div[aria-label]");
-    expect(div?.getAttribute("aria-label")).toBe(
-      "AUTOMATIONS$DETAIL$NO_CONVERSATION",
-    );
+    // Non-interactive divs don't need aria-label since visible text is read naturally
+    const div = container.querySelector("div.cursor-default");
+    expect(div).toBeInTheDocument();
+    expect(div).not.toHaveAttribute("aria-label");
   });
 });
