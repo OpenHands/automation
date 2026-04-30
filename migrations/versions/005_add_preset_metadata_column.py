@@ -1,6 +1,6 @@
 """Add preset_metadata column to automations table.
 
-This migration adds a nullable JSONB preset_metadata column to the automations
+This migration adds a nullable JSON preset_metadata column to the automations
 table for storing preset-specific configuration that the UI can consume.
 
 The field stores metadata like preset_type, prompt, plugins, and repos
@@ -16,7 +16,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 
 revision: str = "005"
@@ -28,11 +27,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column(
         "automations",
-        sa.Column(
-            "preset_metadata",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-        ),
+        sa.Column("preset_metadata", sa.JSON(), nullable=True),
     )
 
 

@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     DateTime,
     Enum,
@@ -57,7 +58,7 @@ class Automation(Base):
 
     # Preset-specific metadata (populated by preset endpoints, NULL for custom
     # SDK automations). Schema: {"preset_type": "prompt"|"plugin", ...}
-    preset_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    preset_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Trigger config — for MVP, only cron is supported.
     trigger: Mapped[dict] = mapped_column(JSONB, nullable=False)
