@@ -1,33 +1,48 @@
-# Combined OpenHands GUI + Automation Service — self-hosted image
+# Combined Agent Server GUI + Automation Service — self-hosted image
 #
 # This image bundles everything needed for local/self-hosted deployments:
-# - OpenHands GUI (conversation interface) at /
+# - Agent Server GUI (conversation interface) at /
 # - Automation service (scheduler, dispatcher, API) at /automations, /api/automation
-# - OpenHands App Server (manages conversation sandboxes)
-# - Agent server for automation runs
-# - SQLite databases (no external database required)
+# - Agent server (shared by both GUI and automations)
+# - SQLite database (no external database required)
 #
 # Architecture:
 # - Nginx on port 8000 (reverse proxy)
-# - OpenHands App Server on port 3000 (GUI + conversation API) - uses /app/.venv
-# - Automation Service on port 8001 (automation API) - uses /app/automation-venv
-# - Agent Server on port 3002 (for automation runs only)
+# - Agent Server on port 3002 (conversations + automation runs)
+# - Automation Service on port 8001 (automation API)
 #
-# Key Design: SEPARATE VENVS
-#   OpenHands uses /app/.venv (openhands-sdk 1.15.0)
-#   Automation uses /app/automation-venv (openhands-sdk 1.18.1)
-#   This avoids version conflicts between the two services.
+# The agent-server-gui connects directly to agent-server, eliminating the need
+# for the full OpenHands app server. This is simpler and more lightweight.
 #
 # Usage:
 #   docker build -f containers/Dockerfile.combined -t openhands-local .
 #   docker run -p 8000:8000 \
-#     -v ./workspace:/workspace \
+#     -v ~/.openhands:/root/.openhands \
 #     -v ./data:/data \
 #     -e LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
 #     -e LLM_API_KEY=sk-ant-... \
 #     openhands-local
 
-# ---- Stage 1: Build Automation frontend ----
+# ---- Stage 1: Build Agent Server GUI ----
+FROM node:22-slim AS gui-frontend
+WORKDIR /build
+
+# Clone agent-server-gui repo
+# Pin to a specific commit for reproducibility
+ARG AGENT_SERVER_GUI_REF=main
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && \
+    git clone --depth 50 https://github.com/OpenHands/agent-server-gui.git . && \
+    git checkout ${AGENT_SERVER_GUI_REF} && \
+    rm -rf .git && \
+    apt-get purge -y git && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install dependencies and build
+RUN npm ci && npm run build
+
+# Output is in /build/build/
+
+# ---- Stage 2: Build Automation frontend ----
 FROM node:24-slim AS automation-frontend
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
@@ -37,22 +52,20 @@ COPY frontend/ .
 ENV VITE_BASE_PATH=/automations
 RUN npm run build
 
-# ---- Stage 2: Agent server binary from SDK ----
+# ---- Stage 3: Agent server binary from SDK ----
 FROM ghcr.io/openhands/agent-server:latest-python AS agent-server
 
-# ---- Stage 3: Combined local image (based on OpenHands) ----
-# Use OpenHands image as base since it has the GUI frontend and server code
-FROM docker.openhands.dev/openhands/openhands:1.6
+# ---- Stage 4: Final combined image ----
+FROM python:3.13-slim
 
-USER root
 WORKDIR /app
 
 LABEL org.opencontainers.image.title="OpenHands Local (GUI + Automations)"
-LABEL org.opencontainers.image.description="Self-contained OpenHands with GUI, automations, and embedded services"
+LABEL org.opencontainers.image.description="Self-contained OpenHands with agent-server-gui, automations, and embedded agent server"
 LABEL org.opencontainers.image.source="https://github.com/OpenHands/automation"
 
-# Install additional system deps
-# tmux is required for OpenHands local runtime
+# Install system dependencies
+# tmux is required for agent-server local runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         supervisor \
@@ -60,14 +73,15 @@ RUN apt-get update && \
         libpq-dev \
         procps \
         tmux \
+        curl \
+        git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy agent server binary from SDK image (for automation runs)
+# Copy agent server binary from SDK image
 COPY --from=agent-server /usr/local/bin/openhands-agent-server /usr/local/bin/openhands-agent-server
 
-# ---- Create separate venv for Automation Service ----
-# This isolates it from OpenHands to avoid SDK version conflicts
-RUN python3.13 -m venv /app/automation-venv && \
+# ---- Create venv for Automation Service ----
+RUN python3 -m venv /app/automation-venv && \
     /app/automation-venv/bin/pip install --upgrade pip
 
 # Copy automation service source code
@@ -77,15 +91,13 @@ COPY automation/ /app/automation-src/automation/
 COPY migrations/ /app/automation-src/migrations/
 COPY alembic.ini /app/automation-src/
 
-# Install automation service in its own venv (with all its dependencies)
+# Install automation service in its venv
 RUN cd /app/automation-src && \
     /app/automation-venv/bin/pip install --no-cache-dir .
 
-# Copy built automation frontend assets
+# Copy built frontends
+COPY --from=gui-frontend /build/build /app/gui-frontend
 COPY --from=automation-frontend /frontend/build /app/automation-frontend
-
-# Move OpenHands frontend to separate directory (it's at /app/frontend/build)
-RUN mv /app/frontend/build /app/openhands-frontend
 
 # Copy configuration files
 COPY containers/nginx.conf /etc/nginx/nginx.conf
@@ -94,23 +106,13 @@ COPY containers/entrypoint.combined.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Create directories for data persistence
-RUN mkdir -p /data /workspace/runs /tmp/openhands-sandboxes && \
+RUN mkdir -p /data /workspace /tmp/openhands-sandboxes && \
     chmod 755 /data /workspace /tmp/openhands-sandboxes
 
 # Remove default nginx site
 RUN rm -f /etc/nginx/sites-enabled/default
 
 # ---- Environment Configuration ----
-
-# OpenHands App Server configuration
-# Use 'local' runtime for self-hosted deployments (not docker/kubernetes)
-ENV RUNTIME=local
-ENV OH_PERSISTENCE_DIR=/root/.openhands
-ENV FILE_STORE_PATH=/root/.openhands
-ENV SERVE_FRONTEND=false
-# Skip browser dependency check since Chromium isn't installed in this image
-# Browser operations will fail but basic functionality works
-ENV SKIP_DEPENDENCY_CHECK=1
 
 # Automation service configuration  
 ENV AUTOMATION_AGENT_SERVER_URL=http://localhost:3002
@@ -123,7 +125,7 @@ ENV AUTOMATION_FRONTEND_DIR=/app/automation-frontend
 ENV FILE_STORE=local
 ENV LOCAL_STORAGE_PATH=/data/storage
 
-# Agent server for automation runs (separate from GUI sandboxes)
+# Agent server port (shared by GUI and automations)
 ENV AGENT_SERVER_PORT=3002
 
 # Volumes for data persistence
@@ -133,9 +135,9 @@ VOLUME /workspace
 # Expose nginx (main entry point)
 EXPOSE 8000
 
-# Health check
+# Health check via agent-server
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:3002/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
