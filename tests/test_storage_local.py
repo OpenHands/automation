@@ -173,6 +173,75 @@ class TestLocalFileStore:
         assert BUCKET_PREFIX == "automation"
 
 
+class TestLocalFileStorePathTraversal:
+    """Security tests for path traversal prevention."""
+
+    def test_path_traversal_blocked_write(self, tmp_path: Path):
+        """Path traversal attempts should be blocked for write operations."""
+        store = LocalFileStore(tmp_path)
+
+        # These paths escape the base directory when combined with automation/ prefix
+        malicious_paths = [
+            "../../../etc/passwd",  # escapes via automation/../../../etc/passwd
+            "../../secret",  # escapes via automation/../../secret
+            "automation/../../../secret",  # escapes via double automation prefix
+        ]
+
+        for bad_path in malicious_paths:
+            with pytest.raises(ValueError, match="Path traversal"):
+                store.write(bad_path, "malicious")
+
+    def test_path_traversal_blocked_read(self, tmp_path: Path):
+        """Path traversal attempts should be blocked for read operations."""
+        store = LocalFileStore(tmp_path)
+
+        malicious_paths = [
+            "../../../etc/passwd",
+            "../../secret",
+        ]
+
+        for bad_path in malicious_paths:
+            with pytest.raises(ValueError, match="Path traversal"):
+                store.read(bad_path)
+
+    def test_path_traversal_blocked_delete(self, tmp_path: Path):
+        """Path traversal attempts should be blocked for delete operations."""
+        store = LocalFileStore(tmp_path)
+
+        with pytest.raises(ValueError, match="Path traversal"):
+            store.delete("../../../important_file")
+
+    def test_path_traversal_blocked_list(self, tmp_path: Path):
+        """Path traversal attempts should be blocked for list operations."""
+        store = LocalFileStore(tmp_path)
+
+        with pytest.raises(ValueError, match="Path traversal"):
+            store.list("../../../etc")
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_blocked_write_stream(self, tmp_path: Path):
+        """Path traversal attempts should be blocked for streaming writes."""
+        store = LocalFileStore(tmp_path)
+
+        async def mock_stream():
+            yield b"malicious"
+
+        with pytest.raises(ValueError, match="Path traversal"):
+            await store.write_stream("../../../etc/passwd", mock_stream())
+
+    def test_valid_paths_still_work(self, tmp_path: Path):
+        """Ensure valid paths with dots in names still work."""
+        store = LocalFileStore(tmp_path)
+
+        # Paths with dots but no traversal should work
+        store.write("file.txt", "content")
+        store.write("dir.name/file.ext", "content")
+        store.write("..hidden/file", "content")  # double dot at start of name
+
+        assert store.read("file.txt") == b"content"
+        assert store.read("dir.name/file.ext") == b"content"
+
+
 class TestLocalFileStoreWriteStream:
     """Tests for the async write_stream method."""
 
