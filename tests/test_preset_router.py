@@ -1213,8 +1213,14 @@ class TestPresetMetadata:
         assert data["preset_metadata"]["prompt"] == "Test prompt"
         assert "repos" in data["preset_metadata"]
         assert len(data["preset_metadata"]["repos"]) == 2
-        assert data["preset_metadata"]["repos"][0]["url"] == "https://github.com/owner/repo1"
-        assert data["preset_metadata"]["repos"][1]["url"] == "https://github.com/owner/repo2"
+        assert (
+            data["preset_metadata"]["repos"][0]["url"]
+            == "https://github.com/owner/repo1"
+        )
+        assert (
+            data["preset_metadata"]["repos"][1]["url"]
+            == "https://github.com/owner/repo2"
+        )
         assert data["preset_metadata"]["repos"][1]["ref"] == "main"
 
     async def test_plugin_preset_sets_preset_metadata(
@@ -1276,7 +1282,10 @@ class TestPresetMetadata:
         assert "plugins" in data["preset_metadata"]
         assert "repos" in data["preset_metadata"]
         assert len(data["preset_metadata"]["repos"]) == 1
-        assert data["preset_metadata"]["repos"][0]["url"] == "https://github.com/owner/repo"
+        assert (
+            data["preset_metadata"]["repos"][0]["url"]
+            == "https://github.com/owner/repo"
+        )
         assert data["preset_metadata"]["repos"][0]["ref"] == "develop"
 
     async def test_preset_metadata_stored_in_database(
