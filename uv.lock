@@ -2137,8 +2137,8 @@ wheels = [
 
 [[package]]
 name = "openhands-agent-server"
-version = "1.19.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=openhands%2Fadd-conversation-id-to-callback#8943db1f79417943720f4e48d55589c06fb9866a" }
+version = "1.19.1"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=v1.19.1#826c1d5bf7f5dff9431b39ffdb07de6453010a9e" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -2204,8 +2204,8 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=openhands%2Fadd-conversation-id-to-callback" },
-    { name = "openhands-workspace", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=openhands%2Fadd-conversation-id-to-callback" },
+    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=v1.19.1" },
+    { name = "openhands-workspace", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=v1.19.1" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pydantic-settings", specifier = ">=2" },
@@ -2231,8 +2231,8 @@ dev = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.19.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=openhands%2Fadd-conversation-id-to-callback#8943db1f79417943720f4e48d55589c06fb9866a" }
+version = "1.19.1"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=v1.19.1#826c1d5bf7f5dff9431b39ffdb07de6453010a9e" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2251,8 +2251,8 @@ dependencies = [
 
 [[package]]
 name = "openhands-workspace"
-version = "1.19.0"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=openhands%2Fadd-conversation-id-to-callback#8943db1f79417943720f4e48d55589c06fb9866a" }
+version = "1.19.1"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=v1.19.1#826c1d5bf7f5dff9431b39ffdb07de6453010a9e" }
 dependencies = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
