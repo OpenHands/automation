@@ -328,24 +328,32 @@ async def dispatch_automation(
     timeout: int | None = None,
     callback_url: str | None = None,
     run_id: str | None = None,
+    local_mode: bool = False,
 ) -> DispatchResult:
-    """Dispatch an automation to a sandbox (fire-and-forget).
+    """Dispatch an automation to a sandbox or local agent server (fire-and-forget).
 
+    Cloud mode (local_mode=False):
     1. Create sandbox and wait until RUNNING.
     2. Get tarball into sandbox (upload bytes OR download from URL).
     3. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
     4. Return immediately without waiting for the entrypoint to complete.
 
-    The SDK inside the sandbox will POST to callback_url when finished.
-    The caller should store sandbox_id to verify status later if needed.
+    Local mode (local_mode=True):
+    1. Use api_url directly as the agent server (no sandbox creation).
+    2. Get tarball into agent server (upload bytes OR download from URL).
+    3. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+    4. Return immediately without waiting for the entrypoint to complete.
+
+    The SDK inside the execution environment will POST to callback_url when finished.
+    The caller should store sandbox_id to verify status later if needed (Cloud mode only).
 
     *tarball_source*: Either raw bytes (uploaded to sandbox) or a URL string
     (downloaded directly inside sandbox via curl). URLs avoid downloading
     untrusted/large files on the automation service.
 
-    *env_vars* are exported before the entrypoint runs.  The sandbox
-    identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works.
+    *env_vars* are exported before the entrypoint runs.  In Cloud mode, the
+    sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
+    injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -366,38 +374,49 @@ async def dispatch_automation(
     def _log_ctx() -> dict[str, Any]:
         return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
-    logger.info("Dispatching automation to sandbox", extra=_log_ctx())
+    if local_mode:
+        logger.info("Dispatching automation to local agent server", extra=_log_ctx())
+    else:
+        logger.info("Dispatching automation to sandbox", extra=_log_ctx())
 
     async with httpx.AsyncClient(timeout=http_timeout) as client:
-        try:
-            sandbox_id, session_key, agent_url = await _create_and_wait(
-                client, api_url, api_key
-            )
-            logger.info(
-                "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=_log_ctx()
-            )
-        except Exception as e:
-            # If sandbox creation started but failed to reach RUNNING,
-            # still attempt cleanup.
-            logger.exception("Sandbox creation failed", extra=_log_ctx())
-            if sandbox_id:
-                await delete_sandbox(client, api_url, api_key, sandbox_id)
-            return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+        # In local mode, skip sandbox creation - use agent server directly
+        if local_mode:
+            agent_url = api_url
+            session_key = api_key
+            logger.info("Using local agent server at %s", agent_url, extra=_log_ctx())
+        else:
+            try:
+                sandbox_id, session_key, agent_url = await _create_and_wait(
+                    client, api_url, api_key
+                )
+                logger.info(
+                    "Sandbox ready: %s at %s", sandbox_id, agent_url, extra=_log_ctx()
+                )
+            except Exception as e:
+                # If sandbox creation started but failed to reach RUNNING,
+                # still attempt cleanup.
+                logger.exception("Sandbox creation failed", extra=_log_ctx())
+                if sandbox_id:
+                    await delete_sandbox(client, api_url, api_key, sandbox_id)
+                return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
 
         try:
-            # Always inject sandbox identity so the SDK can call
+            # In Cloud mode, inject sandbox identity so the SDK can call
             # get_llm() / get_secrets() inside the sandbox.
-            env_vars.setdefault("SANDBOX_ID", sandbox_id)
-            env_vars.setdefault("SESSION_API_KEY", session_key)
+            # In local mode, these are not needed (SDK uses different auth).
+            if not local_mode and sandbox_id:
+                env_vars.setdefault("SANDBOX_ID", sandbox_id)
+                env_vars.setdefault("SESSION_API_KEY", session_key)
 
-            # Get tarball into sandbox: upload bytes or download from URL
+            # Get tarball into execution environment: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
-                logger.info("Uploading tarball to sandbox", extra=_log_ctx())
+                logger.info("Uploading tarball to agent server", extra=_log_ctx())
                 await _upload(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
             else:
-                logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
+                logger.info("Downloading tarball from URL", extra=_log_ctx())
                 await _download_in_sandbox(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
@@ -429,7 +448,8 @@ async def dispatch_automation(
 
         except PermanentDispatchError:
             # Clean up sandbox before re-raising so dispatcher can disable automation
-            if sandbox_id:
+            # (only in Cloud mode - local mode has no sandbox to clean up)
+            if sandbox_id and not local_mode:
                 try:
                     await delete_sandbox(client, api_url, api_key, sandbox_id)
                 except Exception:
@@ -438,7 +458,8 @@ async def dispatch_automation(
         except Exception as e:
             logger.exception("Automation dispatch failed", extra=_log_ctx())
             # Delete sandbox on dispatch failure to avoid orphaned sandboxes
-            if sandbox_id:
+            # (only in Cloud mode - local mode has no sandbox to clean up)
+            if sandbox_id and not local_mode:
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
             return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
 

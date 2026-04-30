@@ -202,6 +202,7 @@ async def _execute_run(
             timeout=effective_timeout,
             callback_url=callback_url,
             run_id=run_id,
+            local_mode=backend.is_local_mode,
         )
 
         sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
