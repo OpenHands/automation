@@ -130,9 +130,43 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Database
 
-- **Engine**: SQLAlchemy async with asyncpg; supports direct PostgreSQL (`AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc.) or GCP Cloud SQL connector (`AUTOMATION_GCP_DB_INSTANCE`)
-- **Migrations**: Alembic in `migrations/` directory
-- **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher polling, optimistic `UPDATE WHERE status=X` for callback/watchdog
+Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
+
+| Feature | PostgreSQL | SQLite |
+|---------|------------|--------|
+| Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
+| Driver | asyncpg | aiosqlite |
+| Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
+| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+
+### Writing Migrations
+
+Migrations must be **cross-database compatible**:
+
+```python
+# ✅ DO: Use generic SQLAlchemy types
+sa.Column("id", sa.Uuid, primary_key=True)
+sa.Column("data", sa.JSON, nullable=False)
+
+# ❌ DON'T: Use PostgreSQL-specific types
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+sa.Column("id", UUID(as_uuid=True), ...)  # Won't work on SQLite
+sa.Column("data", JSONB, ...)             # Won't work on SQLite
+```
+
+For PostgreSQL-only features (partial indexes, advisory locks), use conditionals:
+
+```python
+def _is_sqlite() -> bool:
+    return op.get_bind().dialect.name == "sqlite"
+
+def upgrade() -> None:
+    # ... create tables ...
+    if not _is_sqlite():
+        op.create_index("ix_partial", "table", ["col"], postgresql_where=...)
+```
+
+- **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
 
 ## Preset-Based Automation Creation
 
