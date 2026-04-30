@@ -6,6 +6,10 @@ actual run status by querying the sandbox's bash command history.
 
 The ``timeout_at`` column is set to ``started_at + max_duration`` when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``).
+
+Local mode vs Cloud mode:
+- Cloud mode: Discovers sandbox, queries its agent server, cleans up sandbox
+- Local mode: Queries pre-configured agent server directly, no cleanup needed
 """
 
 import asyncio
@@ -19,6 +23,7 @@ from sqlalchemy.orm import selectinload
 from automation.config import Settings
 from automation.models import AutomationRun, AutomationRunStatus
 from automation.utils import log_extra
+from automation.utils.agent_server import verify_run_on_agent_server
 from automation.utils.api_key import get_api_key_for_automation_run
 from automation.utils.sandbox import cleanup_sandbox, verify_run_status
 from automation.utils.time import utcnow
@@ -32,65 +37,74 @@ async def _verify_and_mark_run(
     run: AutomationRun,
     settings: Settings,
 ) -> bool:
-    """Verify run status via sandbox and mark accordingly.
+    """Verify run status via sandbox/agent server and mark accordingly.
 
-    Attempts to connect to the sandbox and check the last bash command's exit code.
-    If verification succeeds, marks the run based on the actual result.
-    If verification fails (sandbox unavailable), marks as FAILED with timeout error.
+    Cloud mode: Discovers sandbox, queries its agent server, cleans up sandbox.
+    Local mode: Queries pre-configured agent server directly, no cleanup.
 
     Returns True if the run was marked with a terminal status.
     """
     run_id = str(run.id)
     sandbox_id = run.sandbox_id
+    is_local = settings.is_local_mode
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
 
-    # If no sandbox_id, we can't verify - mark as failed
-    if not sandbox_id:
-        logger.warning("No sandbox_id for stale run, marking FAILED", extra=extra)
-        stmt = (
-            update(AutomationRun)
-            .where(
-                AutomationRun.id == run.id,
-                AutomationRun.status == AutomationRunStatus.RUNNING,
-            )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail="Timed out: no sandbox_id available for verification",
-            )
+    # Local mode: verify via pre-configured agent server
+    if is_local:
+        logger.info("Local mode: verifying run on agent server", extra=extra)
+        verification = await verify_run_on_agent_server(
+            agent_url=settings.agent_server_url,
+            session_key=settings.agent_server_api_key,
+            run_id=run_id,
         )
-        result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
-        return result.rowcount > 0
+    else:
+        # Cloud mode: need sandbox_id to discover agent server
+        if not sandbox_id:
+            logger.warning("No sandbox_id for stale run, marking FAILED", extra=extra)
+            stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run.id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status=AutomationRunStatus.FAILED,
+                    completed_at=now,
+                    error_detail="Timed out: no sandbox_id available for verification",
+                )
+            )
+            result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+            return result.rowcount > 0
 
-    # Get API key for sandbox access
-    try:
-        api_key = await get_api_key_for_automation_run(run)
-    except Exception as e:
-        logger.warning("Failed to get API key for verification: %s", e, extra=extra)
-        stmt = (
-            update(AutomationRun)
-            .where(
-                AutomationRun.id == run.id,
-                AutomationRun.status == AutomationRunStatus.RUNNING,
+        # Get API key for sandbox access
+        try:
+            api_key = await get_api_key_for_automation_run(run)
+        except Exception as e:
+            logger.warning("Failed to get API key for verification: %s", e, extra=extra)
+            stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run.id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status=AutomationRunStatus.FAILED,
+                    completed_at=now,
+                    error_detail=f"Timed out: could not get API key: {e}",
+                )
             )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail=f"Timed out: could not get API key for verification: {e}",
-            )
+            result = await session.execute(stmt)  # type: ignore[assignment]
+            return result.rowcount > 0
+
+        # Try to verify via sandbox
+        verification = await verify_run_status(
+            api_url=settings.openhands_api_base_url,
+            api_key=api_key,
+            sandbox_id=sandbox_id,
+            keep_alive=run.keep_alive,
+            run_id=run_id,
         )
-        result = await session.execute(stmt)  # type: ignore[assignment]
-        return result.rowcount > 0
-
-    # Try to verify via sandbox
-    verification = await verify_run_status(
-        api_url=settings.openhands_api_base_url,
-        api_key=api_key,
-        sandbox_id=sandbox_id,
-        keep_alive=run.keep_alive,
-        run_id=run_id,
-    )
 
     if verification.verified:
         exit_code = verification.exit_code
@@ -177,11 +191,13 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
-    # Clean up sandbox if not keep_alive (best effort, may already be gone)
-    if not run.keep_alive and sandbox_id:
+    # Clean up sandbox if not keep_alive (Cloud mode only, best effort)
+    # Local mode has no sandbox to clean up
+    if not is_local and not run.keep_alive and sandbox_id:
+        # api_key was set in the Cloud mode branch above
         await cleanup_sandbox(
             api_url=settings.openhands_api_base_url,
-            api_key=api_key,
+            api_key=api_key,  # type: ignore[possibly-undefined]
             sandbox_id=sandbox_id,
             run_id=run_id,
         )

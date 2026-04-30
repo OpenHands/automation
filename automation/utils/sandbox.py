@@ -2,28 +2,35 @@
 
 Provides functions to verify automation run status by querying the sandbox's
 bash command history, and to clean up sandboxes after runs complete.
+
+For Cloud mode only — uses sandbox discovery to find agent server URL.
+For local mode, use utils/agent_server.py directly.
 """
 
 import logging
 
 import httpx
-from pydantic.dataclasses import dataclass
 
+from automation.utils.agent_server import (
+    BashCommandResult,
+    VerificationResult,
+    get_last_bash_command_result,
+)
 from automation.utils.log_context import log_extra
 
 
+# Re-export for backward compatibility
+__all__ = [
+    "BashCommandResult",
+    "VerificationResult",
+    "get_last_bash_command_result",
+    "get_sandbox_agent_url",
+    "delete_sandbox",
+    "cleanup_sandbox",
+    "verify_run_status",
+]
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class BashCommandResult:
-    """Result of querying a sandbox for the last bash command."""
-
-    found: bool
-    exit_code: int | None = None
-    stdout: str = ""
-    stderr: str = ""
-    error: str | None = None
 
 
 async def get_sandbox_agent_url(
@@ -36,6 +43,8 @@ async def get_sandbox_agent_url(
 
     Returns (agent_url, session_key) if the sandbox is running with an agent server,
     or None if the sandbox is not available.
+
+    Cloud mode only — discovers agent server via sandbox API.
     """
     try:
         resp = await client.get(
@@ -59,56 +68,6 @@ async def get_sandbox_agent_url(
     except Exception as e:
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
         return None
-
-
-async def get_last_bash_command_result(
-    client: httpx.AsyncClient,
-    agent_url: str,
-    session_key: str,
-) -> BashCommandResult:
-    """Query the sandbox for the last bash command's result.
-
-    Returns the exit code and output of the most recent bash command.
-    """
-    try:
-        # Search for the most recent BashOutput event
-        resp = await client.get(
-            f"{agent_url}/api/bash/bash_events/search",
-            params={
-                "kind__eq": "BashOutput",
-                "sort_order": "TIMESTAMP_DESC",
-                "limit": 1,
-            },
-            headers={"X-Session-API-Key": session_key},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        page = resp.json()
-
-        items = page.get("items", [])
-        if not items:
-            return BashCommandResult(found=False, error="No bash output found")
-
-        output = items[0]
-        exit_code = output.get("exit_code")
-
-        # If exit_code is None, the command is still running
-        if exit_code is None:
-            return BashCommandResult(
-                found=True,
-                exit_code=None,
-                error="Command still running",
-            )
-
-        return BashCommandResult(
-            found=True,
-            exit_code=exit_code,
-            stdout=output.get("stdout") or "",
-            stderr=output.get("stderr") or "",
-        )
-    except Exception as e:
-        logger.warning("Failed to get bash command result: %s", e)
-        return BashCommandResult(found=False, error=str(e))
 
 
 async def delete_sandbox(
@@ -167,18 +126,6 @@ async def cleanup_sandbox(
     except Exception:
         logger.exception("Error deleting sandbox", extra=extra)
         return False
-
-
-@dataclass(frozen=True)
-class VerificationResult:
-    """Result of verifying an automation run's sandbox status."""
-
-    verified: bool
-    success: bool | None = None  # None if not verified
-    exit_code: int | None = None
-    stdout: str = ""
-    stderr: str = ""
-    error: str | None = None
 
 
 async def verify_run_status(

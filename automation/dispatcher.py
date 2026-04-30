@@ -1,13 +1,18 @@
 """Dispatcher for processing pending automation runs.
 
 Polls the automation_runs table for PENDING jobs and dispatches them
-to sandboxes via the SaaS API.  Uses FOR UPDATE SKIP LOCKED for
-multi-worker safety (PostgreSQL). SQLite deployments skip row locking
-(single-process mode assumed).
+to sandboxes (Cloud mode) or a local agent server (local mode).
+
+Uses FOR UPDATE SKIP LOCKED for multi-worker safety (PostgreSQL).
+SQLite deployments skip row locking (single-process mode assumed).
 
 Completion is handled asynchronously: the SDK running inside the sandbox
 POSTs to ``/v1/runs/{id}/complete`` when the entry-point
 exits, so the dispatcher does **not** block waiting for results.
+
+Local mode vs Cloud mode:
+- Cloud mode: Creates sandbox per run, mints per-user API key
+- Local mode: Uses pre-configured agent server, uses config-level API key
 """
 
 import asyncio
@@ -108,21 +113,24 @@ async def _execute_run(
 ) -> None:
     """Execute a single run in a background task (fire-and-forget).
 
+    Cloud mode:
     1. Fetch a per-user API key from the SaaS service (on demand, never stored).
-    2. Determine tarball source:
-       - Internal (oh-internal://): Download from GCS and upload to sandbox.
-       - External (http/https): Pass URL for direct download inside sandbox.
-    3. Call ``dispatch_automation()`` to spin up a sandbox and start the entrypoint.
-    4. Store sandbox_id on the run for later verification.
-    5. If the sandbox fails to start, mark the run FAILED.
+    2. Determine tarball source and dispatch to a new sandbox.
+    3. Store sandbox_id for watchdog verification.
+
+    Local mode:
+    1. Use config-level API key (no per-user key minting).
+    2. Dispatch to the pre-configured local agent server.
+    3. No sandbox_id to store (persistent server).
 
     The SDK inside the sandbox fires the completion callback on exit.
-    The watchdog will verify status via sandbox if the callback is missed.
+    The watchdog will verify status if the callback is missed.
     """
     run_id = str(run.id)
     automation = run.automation
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
+    is_local = settings.is_local_mode
 
     # Helper for consistent structured logging with run context
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
@@ -133,8 +141,14 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
 
     try:
-        # 1. Fetch a per-user API key from the SaaS service
-        api_key = await get_api_key_for_automation_run(run)
+        # 1. Get API key: local mode uses config key, cloud mode mints per-user key
+        if is_local:
+            api_key = settings.agent_server_api_key
+            api_url = settings.agent_server_url
+            logger.info("Local mode: using configured agent server", extra=_log_ctx())
+        else:
+            api_key = await get_api_key_for_automation_run(run)
+            api_url = settings.openhands_api_base_url
 
         # 2. Determine tarball source
         tarball_source: bytes | str
@@ -143,7 +157,7 @@ async def _execute_run(
             tarball_source = tarball_path
             logger.info("HTTP URL tarball, will download in sandbox", extra=_log_ctx())
         else:
-            # Internal (oh-internal://): download from GCS, upload to sandbox
+            # Internal (oh-internal://): download from storage, upload to sandbox
             upload_id = parse_internal_upload_id(tarball_path)
             if upload_id is None:
                 raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
@@ -156,11 +170,19 @@ async def _execute_run(
                 extra=_log_ctx(),
             )
 
-        # 3. Build env vars for the sandbox
-        env_vars = {
-            "OPENHANDS_API_KEY": api_key,
-            "OPENHANDS_CLOUD_API_URL": settings.openhands_api_base_url,
-        }
+        # 3. Build env vars for the execution environment
+        env_vars: dict[str, str] = {}
+
+        if is_local:
+            # Local mode: inject agent server URL for SDK's RemoteWorkspace
+            env_vars["AGENT_SERVER_URL"] = settings.agent_server_url
+            # If there's an OpenHands API key in config, inject it for LLM/secrets
+            if settings.openhands_api_base_url:
+                env_vars["OPENHANDS_CLOUD_API_URL"] = settings.openhands_api_base_url
+        else:
+            # Cloud mode: inject Cloud API credentials
+            env_vars["OPENHANDS_API_KEY"] = api_key
+            env_vars["OPENHANDS_CLOUD_API_URL"] = settings.openhands_api_base_url
 
         # Trigger context so the SDK script knows *why* it was invoked
         # Includes automation metadata and event payload (for event-triggered runs)
@@ -184,9 +206,9 @@ async def _execute_run(
         else:
             effective_timeout = max_run_duration
 
-        # 5. Dispatch to sandbox (fire-and-forget)
+        # 5. Dispatch to sandbox/agent server (fire-and-forget)
         result = await dispatch_automation(
-            api_url=settings.openhands_api_base_url,
+            api_url=api_url,
             api_key=api_key,
             entrypoint=automation.entrypoint,
             tarball_source=tarball_source,
@@ -198,7 +220,7 @@ async def _execute_run(
 
         sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
         if result.success:
-            # Store sandbox_id for later verification by the watchdog
+            # Store sandbox_id for later verification by the watchdog (Cloud mode only)
             if result.sandbox_id:
                 await update_sandbox_id(session_factory, run.id, result.sandbox_id)
             logger.info(
@@ -208,7 +230,7 @@ async def _execute_run(
             # Don't mark as COMPLETED here - wait for the callback
         else:
             logger.warning(
-                "Sandbox dispatch failed: %s",
+                "Dispatch failed: %s",
                 result.error,
                 extra=sandbox_extra,
             )
