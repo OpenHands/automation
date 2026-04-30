@@ -13,6 +13,7 @@ from automation.db import (
     using_sqlite,
 )
 
+
 # Get the project root directory (parent of tests/)
 PROJECT_ROOT = Path(__file__).parent.parent
 

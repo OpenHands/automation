@@ -41,11 +41,12 @@ class LocalAgentServerBackend(ExecutionBackend):
     def is_local_mode(self) -> bool:
         return True
 
-    async def acquire(self, _client: httpx.AsyncClient) -> ExecutionContext:
+    async def acquire(self, client: httpx.AsyncClient) -> ExecutionContext:  # noqa: ARG002
         """Return the pre-configured agent server context.
 
         No sandbox creation needed — the agent server is already running.
         """
+        del client  # unused in local mode
         logger.debug(
             "Using local agent server at %s",
             self.agent_server_url,
@@ -56,6 +57,7 @@ class LocalAgentServerBackend(ExecutionBackend):
             sandbox_id=None,  # No sandbox in local mode
         )
 
-    async def release(self, _client: httpx.AsyncClient, _ctx: ExecutionContext) -> None:
+    async def release(self, client: httpx.AsyncClient, ctx: ExecutionContext) -> None:  # noqa: ARG002
         """No-op — local agent server is persistent."""
+        del client, ctx  # unused in local mode
         logger.debug("Local mode: skipping sandbox cleanup (persistent server)")
