@@ -256,6 +256,74 @@ class TestAuthCacheReset:
         assert cache1 is not cache2
 
 
+class TestLocalModeSettings:
+    """Tests for local agent-server mode configuration."""
+
+    def test_is_local_mode_false_by_default(self):
+        """is_local_mode is False when agent_server_url is not set."""
+        settings = Settings()
+        assert settings.is_local_mode is False
+
+    def test_is_local_mode_false_when_empty_string(self):
+        """is_local_mode is False when agent_server_url is empty string."""
+        settings = Settings(agent_server_url="")
+        assert settings.is_local_mode is False
+
+    def test_is_local_mode_true_when_set(self):
+        """is_local_mode is True when agent_server_url is configured."""
+        settings = Settings(agent_server_url="http://localhost:3000")
+        assert settings.is_local_mode is True
+
+    def test_agent_server_url_default(self):
+        """agent_server_url defaults to empty string."""
+        settings = Settings()
+        assert settings.agent_server_url == ""
+
+    def test_agent_server_api_key_default(self):
+        """agent_server_api_key defaults to empty string."""
+        settings = Settings()
+        assert settings.agent_server_api_key == ""
+
+    def test_workspace_base_default(self):
+        """workspace_base defaults to /workspace."""
+        settings = Settings()
+        assert settings.workspace_base == "/workspace"
+
+    def test_db_url_default(self):
+        """db_url defaults to empty string."""
+        settings = Settings()
+        assert settings.db_url == ""
+
+    def test_local_mode_full_configuration(self):
+        """All local mode settings can be configured together."""
+        settings = Settings(
+            agent_server_url="http://localhost:3000",
+            agent_server_api_key="local-key",
+            workspace_base="/my/workspace",
+            db_url="sqlite+aiosqlite:////data/automations.db",
+        )
+        assert settings.is_local_mode is True
+        assert settings.agent_server_url == "http://localhost:3000"
+        assert settings.agent_server_api_key == "local-key"
+        assert settings.workspace_base == "/my/workspace"
+        assert settings.db_url == "sqlite+aiosqlite:////data/automations.db"
+
+    def test_local_mode_from_env(self, monkeypatch):
+        """Local mode settings are loaded from environment variables."""
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "env-key")
+        monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", "/env/workspace")
+        monkeypatch.setenv("AUTOMATION_DB_URL", "sqlite+aiosqlite:////data/test.db")
+        clear_config_cache()
+
+        settings = Settings()
+        assert settings.is_local_mode is True
+        assert settings.agent_server_url == "http://localhost:3000"
+        assert settings.agent_server_api_key == "env-key"
+        assert settings.workspace_base == "/env/workspace"
+        assert settings.db_url == "sqlite+aiosqlite:////data/test.db"
+
+
 class TestDeprecatedFunctionWarnings:
     """Tests for deprecation warnings on legacy functions."""
 

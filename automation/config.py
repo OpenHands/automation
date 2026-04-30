@@ -220,7 +220,7 @@ class ServiceSettings(BaseSettings):
     """Core service configuration.
 
     Environment variables (AUTOMATION_ prefix):
-        # Database
+        # Database (PostgreSQL - Cloud mode default)
         AUTOMATION_DB_HOST: Database host (default: localhost)
         AUTOMATION_DB_PORT: Database port (default: 5432)
         AUTOMATION_DB_NAME: Database name (default: automations)
@@ -230,10 +230,18 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
 
+        # Database URL (alternative to host/port config, supports SQLite for local mode)
+        AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
+
         # GCP Cloud SQL
         AUTOMATION_GCP_DB_INSTANCE: Cloud SQL instance (optional)
         AUTOMATION_GCP_PROJECT: GCP project (optional)
         AUTOMATION_GCP_REGION: GCP region (optional)
+
+        # Local agent-server mode (self-hosted deployments)
+        AUTOMATION_AGENT_SERVER_URL: Local agent server URL (e.g., http://localhost:3000)
+        AUTOMATION_AGENT_SERVER_API_KEY: Session API key for local agent server
+        AUTOMATION_WORKSPACE_BASE: Base workspace directory (default: /workspace)
 
         # Background workers
         AUTOMATION_SCHEDULER_INTERVAL_SECONDS: Scheduler poll interval (default: 60)
@@ -254,12 +262,12 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_FRONTEND_DIR: Frontend static files directory (optional)
 
         # Auth
-        AUTOMATION_SERVICE_KEY: Service key for SaaS API (required)
+        AUTOMATION_SERVICE_KEY: Service key for SaaS API (required in cloud mode)
         AUTOMATION_WEBHOOK_SECRET: Webhook signature secret (optional)
         AUTOMATION_OPENHANDS_API_BASE_URL: OpenHands API URL (default: https://app.all-hands.dev)
     """
 
-    # Database
+    # Database (PostgreSQL - Cloud mode)
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "automations"
@@ -269,10 +277,26 @@ class ServiceSettings(BaseSettings):
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
 
+    # Database URL (alternative config, supports SQLite for local mode)
+    # When set, takes precedence over host/port config.
+    # Examples:
+    #   - sqlite+aiosqlite:////data/automations.db (local SQLite)
+    #   - postgresql+asyncpg://user:pass@host/db (PostgreSQL)
+    db_url: str = ""
+
     # GCP Cloud SQL (if set, takes precedence over host/port)
     gcp_db_instance: str | None = None
     gcp_project: str | None = None
     gcp_region: str | None = None
+
+    # Local agent-server mode (self-hosted deployments)
+    # When agent_server_url is set, the service operates in "local mode":
+    # - Uses a persistent local agent server instead of cloud sandboxes
+    # - Skips per-user API key minting (uses agent_server_api_key instead)
+    # - Supports SQLite database via db_url
+    agent_server_url: str = ""
+    agent_server_api_key: str = ""
+    workspace_base: str = "/workspace"
 
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
@@ -290,6 +314,7 @@ class ServiceSettings(BaseSettings):
 
     # Service key for authenticating with the SaaS API to fetch per-user
     # API keys (called by the dispatcher before each automation run).
+    # Required in cloud mode, not needed in local mode.
     service_key: str = ""
 
     # Public base URL where this service is reachable (without /api/automation).
@@ -317,6 +342,17 @@ class ServiceSettings(BaseSettings):
     webhook_secret: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def is_local_mode(self) -> bool:
+        """Check if running in local agent-server mode.
+
+        Local mode is enabled when agent_server_url is configured. In this mode:
+        - Uses a persistent local agent server instead of cloud sandboxes
+        - Skips per-user API key minting
+        - No sandbox creation/deletion lifecycle
+        """
+        return bool(self.agent_server_url)
 
     @property
     def base_path(self) -> str:
