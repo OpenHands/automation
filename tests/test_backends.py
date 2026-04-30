@@ -242,7 +242,7 @@ class TestCloudSandboxBackend:
 
         result = await backend.verify_run(mock_run, "run-123")
         assert result.verified is False
-        assert "No sandbox_id" in result.error
+        assert result.error is not None and "No sandbox_id" in result.error
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_verify_run_status(self):
