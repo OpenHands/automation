@@ -309,6 +309,12 @@ class ServiceSettings(BaseSettings):
     agent_server_api_key: str = ""
     workspace_base: str = "/workspace"
 
+    # LLM configuration for local mode (passed to preset scripts)
+    # These are only used in local mode; Cloud mode fetches LLM config from user's account
+    llm_model: str = ""
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
 

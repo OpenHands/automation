@@ -38,6 +38,9 @@ class LocalAgentServerBackend(ExecutionBackend):
         agent_server_url: str,
         api_key: str,
         cloud_api_url: str | None = None,
+        llm_model: str | None = None,
+        llm_api_key: str | None = None,
+        llm_base_url: str | None = None,
     ):
         """Initialize the local agent-server backend.
 
@@ -46,10 +49,16 @@ class LocalAgentServerBackend(ExecutionBackend):
                 (e.g., "http://localhost:3000")
             api_key: API key for authenticating with the agent server
             cloud_api_url: Optional Cloud API URL for LLM/secrets access
+            llm_model: LLM model identifier (e.g., anthropic/claude-sonnet-4-20250514)
+            llm_api_key: LLM provider API key
+            llm_base_url: Optional custom LLM base URL
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
         self.cloud_api_url = cloud_api_url
+        self.llm_model = llm_model
+        self.llm_api_key = llm_api_key
+        self.llm_base_url = llm_base_url
 
     @property
     def is_local_mode(self) -> bool:
@@ -106,6 +115,13 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Optionally include Cloud API URL for LLM/secrets access
         if self.cloud_api_url:
             env_vars["OPENHANDS_CLOUD_API_URL"] = self.cloud_api_url
+        # LLM configuration for preset scripts
+        if self.llm_model:
+            env_vars["LLM_MODEL"] = self.llm_model
+        if self.llm_api_key:
+            env_vars["LLM_API_KEY"] = self.llm_api_key
+        if self.llm_base_url:
+            env_vars["LLM_BASE_URL"] = self.llm_base_url
         return env_vars
 
     async def verify_run(

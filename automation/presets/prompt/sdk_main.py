@@ -10,7 +10,7 @@ This script is auto-generated from a user's prompt. It supports two modes:
 **Local Mode** (self-hosted):
   Uses OpenHandsCloudWorkspace with local_agent_server_mode=True.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
-  LLM configured from env vars: OPENHANDS_LLM_MODEL, OPENHANDS_LLM_API_KEY, OPENHANDS_LLM_BASE_URL
+  LLM configured from env vars: LLM_MODEL, LLM_API_KEY, LLM_BASE_URL
   No secrets/MCP support in local mode (configure at container level).
 
 The script:
@@ -39,9 +39,9 @@ Env vars (Cloud mode - all required):
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
   SESSION_API_KEY            - API key for agent server auth (optional)
-  OPENHANDS_LLM_MODEL        - LLM model identifier (e.g., anthropic/claude-sonnet-4-20250514)
-  OPENHANDS_LLM_API_KEY      - LLM provider API key
-  OPENHANDS_LLM_BASE_URL     - optional, custom LLM base URL
+  LLM_MODEL                  - LLM model identifier (e.g., anthropic/claude-sonnet-4-20250514)
+  LLM_API_KEY                - LLM provider API key
+  LLM_BASE_URL               - optional, custom LLM base URL
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
@@ -66,9 +66,9 @@ sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
 # Local mode env vars
-llm_model = os.environ.get("OPENHANDS_LLM_MODEL", "")
-llm_api_key = os.environ.get("OPENHANDS_LLM_API_KEY", "")
-llm_base_url = os.environ.get("OPENHANDS_LLM_BASE_URL", "")
+llm_model = os.environ.get("LLM_MODEL", "")
+llm_api_key = os.environ.get("LLM_API_KEY", "")
+llm_base_url = os.environ.get("LLM_BASE_URL", "")
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -78,15 +78,15 @@ if IS_LOCAL_MODE:
     # Local mode: AGENT_SERVER_URL + LLM config required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
     print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
-    print(f"  OPENHANDS_LLM_MODEL: {'OK' if llm_model else 'MISSING'}")
-    print(f"  OPENHANDS_LLM_API_KEY: {'OK' if llm_api_key else 'MISSING'}")
-    print(f"  OPENHANDS_LLM_BASE_URL: {'OK' if llm_base_url else 'NONE (using default)'}")
+    print(f"  LLM_MODEL: {'OK' if llm_model else 'MISSING'}")
+    print(f"  LLM_API_KEY: {'OK' if llm_api_key else 'MISSING'}")
+    print(f"  LLM_BASE_URL: {'OK' if llm_base_url else 'NONE (using default)'}")
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
     if not llm_model or not llm_api_key:
         print(
-            "FAIL: OPENHANDS_LLM_MODEL and OPENHANDS_LLM_API_KEY required for local mode",
+            "FAIL: LLM_MODEL and LLM_API_KEY required for local mode",
             file=sys.stderr,
         )
         sys.exit(1)

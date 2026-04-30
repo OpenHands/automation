@@ -8,8 +8,8 @@
 # Usage:
 #   docker run -p 8000:8000 \
 #     -v ./workspace:/workspace \
-#     -e OPENHANDS_LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
-#     -e OPENHANDS_LLM_API_KEY=sk-ant-... \
+#     -e LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
+#     -e LLM_API_KEY=sk-ant-... \
 #     ghcr.io/openhands/automation-local:latest
 
 # ---- Stage 1: Build frontend ----

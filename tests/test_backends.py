@@ -97,13 +97,17 @@ class TestLocalAgentServerBackend:
         assert api_key == "local-key"
 
     def test_build_env_vars_basic(self):
-        """build_env_vars() includes AGENT_SERVER_URL."""
+        """build_env_vars() includes AGENT_SERVER_URL and SDK-required vars."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
         )
-        env_vars = backend.build_env_vars("ignored-key")
-        assert env_vars == {"AGENT_SERVER_URL": "http://localhost:3000"}
+        env_vars = backend.build_env_vars("session-key")
+        assert env_vars == {
+            "AGENT_SERVER_URL": "http://localhost:3000",
+            "SANDBOX_ID": "local-mode",
+            "SESSION_API_KEY": "session-key",
+        }
 
     def test_build_env_vars_with_cloud_url(self):
         """build_env_vars() includes OPENHANDS_CLOUD_API_URL if set."""
@@ -112,10 +116,31 @@ class TestLocalAgentServerBackend:
             api_key="local-key",
             cloud_api_url="https://app.all-hands.dev",
         )
-        env_vars = backend.build_env_vars("ignored-key")
+        env_vars = backend.build_env_vars("session-key")
         assert env_vars == {
             "AGENT_SERVER_URL": "http://localhost:3000",
+            "SANDBOX_ID": "local-mode",
+            "SESSION_API_KEY": "session-key",
             "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",
+        }
+
+    def test_build_env_vars_with_llm_config(self):
+        """build_env_vars() includes LLM config when set."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+            llm_model="anthropic/claude-sonnet-4-20250514",
+            llm_api_key="sk-ant-xxx",
+            llm_base_url="https://custom.api.com",
+        )
+        env_vars = backend.build_env_vars("session-key")
+        assert env_vars == {
+            "AGENT_SERVER_URL": "http://localhost:3000",
+            "SANDBOX_ID": "local-mode",
+            "SESSION_API_KEY": "session-key",
+            "LLM_MODEL": "anthropic/claude-sonnet-4-20250514",
+            "LLM_API_KEY": "sk-ant-xxx",
+            "LLM_BASE_URL": "https://custom.api.com",
         }
 
     @pytest.mark.asyncio

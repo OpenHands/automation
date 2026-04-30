@@ -45,6 +45,9 @@ def get_backend(api_key: str | None = None) -> ExecutionBackend:
             agent_server_url=settings.agent_server_url,
             api_key=settings.agent_server_api_key,
             cloud_api_url=settings.openhands_api_base_url or None,
+            llm_model=settings.llm_model or None,
+            llm_api_key=settings.llm_api_key or None,
+            llm_base_url=settings.llm_base_url or None,
         )
     else:
         if not api_key:
