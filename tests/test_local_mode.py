@@ -110,7 +110,7 @@ class TestGetLastBashCommandResult:
         )
 
         assert result.found is False
-        assert "Not found" in result.error
+        assert result.error is not None and "Not found" in result.error
 
     @pytest.mark.asyncio
     async def test_handles_empty_response(self):

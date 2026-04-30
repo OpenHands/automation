@@ -5,7 +5,7 @@ the system should automatically disable it to prevent repeated failed runs.
 """
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -17,6 +17,14 @@ from automation.execution import _is_permanent_http_error
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+def create_mock_backend(is_local_mode: bool = False):
+    """Create a mock backend for testing."""
+    mock_backend = MagicMock()
+    mock_backend.is_local_mode = is_local_mode
+    mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
+    return mock_backend
 
 
 def _docker_available() -> bool:
@@ -207,11 +215,10 @@ class TestDownloadInternalTarball:
 class TestExecuteRunDisablesAutomation:
     """Tests that _execute_run disables automation on permanent errors."""
 
+    @pytest.mark.asyncio
     @patch("automation.dispatcher.dispatch_automation")
-    @patch("automation.dispatcher.get_api_key_for_automation_run")
     async def test_disables_automation_on_internal_tarball_not_found(
         self,
-        mock_get_api_key,
         mock_dispatch,
         async_session_factory,
         mock_settings,
@@ -220,7 +227,7 @@ class TestExecuteRunDisablesAutomation:
         from automation.dispatcher import _execute_run
         from automation.models import Automation, AutomationRun, AutomationRunStatus
 
-        mock_get_api_key.return_value = "test-api-key"
+        mock_backend = create_mock_backend()
 
         # Create an automation with a non-existent internal tarball
         fake_upload_id = uuid.uuid4()
@@ -256,7 +263,8 @@ class TestExecuteRunDisablesAutomation:
             )
             run = result.scalars().first()
 
-            await _execute_run(run, mock_settings, async_session_factory)
+            with patch("automation.dispatcher.get_backend", return_value=mock_backend):
+                await _execute_run(run, mock_settings, async_session_factory)
 
         # Verify automation was disabled
         async with async_session_factory() as session:
@@ -277,11 +285,10 @@ class TestExecuteRunDisablesAutomation:
             assert run.status == AutomationRunStatus.FAILED
             assert "not found" in run.error_detail.lower()
 
+    @pytest.mark.asyncio
     @patch("automation.dispatcher.dispatch_automation")
-    @patch("automation.dispatcher.get_api_key_for_automation_run")
     async def test_does_not_disable_on_transient_error(
         self,
-        mock_get_api_key,
         mock_dispatch,
         async_session_factory,
         mock_settings,
@@ -290,7 +297,7 @@ class TestExecuteRunDisablesAutomation:
         from automation.dispatcher import _execute_run
         from automation.models import Automation, AutomationRun, AutomationRunStatus
 
-        mock_get_api_key.return_value = "test-api-key"
+        mock_backend = create_mock_backend()
         # Simulate a transient dispatch failure (e.g., sandbox creation failed)
         mock_dispatch.return_value = AsyncMock(
             success=False, sandbox_id=None, error="Connection timeout"
@@ -328,7 +335,8 @@ class TestExecuteRunDisablesAutomation:
             )
             run = result.scalars().first()
 
-            await _execute_run(run, mock_settings, async_session_factory)
+            with patch("automation.dispatcher.get_backend", return_value=mock_backend):
+                await _execute_run(run, mock_settings, async_session_factory)
 
         # Verify automation is still enabled (transient error)
         async with async_session_factory() as session:
