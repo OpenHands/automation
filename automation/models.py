@@ -1,4 +1,11 @@
-"""SQLAlchemy ORM models for the automations service."""
+"""SQLAlchemy ORM models for the automations service.
+
+The models use :class:`sqlalchemy.types.JSON` so they work with both
+PostgreSQL (which transparently maps ``JSON`` to its native ``json`` /
+``jsonb`` type) and SQLite.  PostgreSQL-only constructs such as partial
+indexes are guarded behind a dialect check so that SQLite simply skips
+them.
+"""
 
 import enum
 import uuid
@@ -10,12 +17,12 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    JSON,
     String,
     Text,
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from automation.utils import utcnow
@@ -56,7 +63,7 @@ class Automation(Base):
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Trigger config — for MVP, only cron is supported.
-    trigger: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -151,7 +158,7 @@ class AutomationRun(Base):
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
     # For custom webhooks: the raw payload dict
-    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -171,7 +178,9 @@ class AutomationRun(Base):
 
     __table_args__ = (
         # Partial index for efficient PENDING polling.
-        # This service uses PostgreSQL exclusively in all environments.
+        # The postgresql_where clause is a PostgreSQL-specific optimization;
+        # on SQLite it is silently ignored by SQLAlchemy and a regular
+        # (non-partial) index is created instead.
         Index(
             "ix_automation_runs_pending",
             "created_at",

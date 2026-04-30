@@ -1,15 +1,15 @@
 """Alembic migration environment.
 
-Follows the same patterns as the OpenHands enterprise migrations:
-- Reads DB connection from environment variables
-- Supports GCP Cloud SQL connector for production
-- Supports local PostgreSQL for development
-- Uses PostgreSQL advisory locks for safe concurrent execution
+Supports three database backends:
 
-Note: Uses pg8000 (sync driver) while the application uses asyncpg (async driver).
-This is intentional - Alembic runs synchronously, and both drivers produce
-identical DDL/schema operations. The GCP Cloud SQL connector's sync connect()
-method pairs naturally with pg8000.
+- **PostgreSQL** (default) via pg8000 (sync driver) — Alembic runs
+  synchronously so pg8000 is used instead of the application's asyncpg.
+- **GCP Cloud SQL** — Uses the Cloud SQL Python connector with pg8000.
+- **SQLite** — For local / open-source deployments.  Enabled by setting
+  ``AUTOMATION_DB_URL`` to a ``sqlite:///`` URL.
+
+PostgreSQL migrations use advisory locks for safe concurrent execution.
+SQLite skips advisory locks since it only supports single-writer access.
 """
 
 import os
@@ -26,6 +26,9 @@ target_metadata = Base.metadata
 # Using a hash of "automation_migrations" to avoid collisions
 MIGRATION_LOCK_ID = 849320147
 
+# Full URL takes precedence when set (supports both PostgreSQL and SQLite)
+DB_URL = os.getenv("AUTOMATION_DB_URL")
+
 DB_USER = os.getenv("AUTOMATION_DB_USER", os.getenv("DB_USER", "postgres"))
 DB_PASS = os.getenv("AUTOMATION_DB_PASS", os.getenv("DB_PASS", "postgres"))
 DB_HOST = os.getenv("AUTOMATION_DB_HOST", os.getenv("DB_HOST", "localhost"))
@@ -37,7 +40,29 @@ GCP_PROJECT = os.getenv("AUTOMATION_GCP_PROJECT", os.getenv("GCP_PROJECT"))
 GCP_REGION = os.getenv("AUTOMATION_GCP_REGION", os.getenv("GCP_REGION"))
 
 
+def _is_sqlite_url(url: str | None) -> bool:
+    return url is not None and url.startswith("sqlite")
+
+
 def get_engine(database_name=DB_NAME):
+    # --- SQLite ---------------------------------------------------------
+    if _is_sqlite_url(DB_URL):
+        # Strip the async driver prefix so Alembic can use the sync pysqlite
+        sync_url = DB_URL.replace("sqlite+aiosqlite", "sqlite")
+        engine = create_engine(sync_url)
+
+        # Enable foreign keys for every connection (off by default in SQLite)
+        from sqlalchemy import event as sa_event
+
+        @sa_event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        return engine
+
+    # --- GCP Cloud SQL --------------------------------------------------
     if GCP_DB_INSTANCE:
         from google.cloud.sql.connector import Connector
 
@@ -57,18 +82,30 @@ def get_engine(database_name=DB_NAME):
             creator=get_db_connection,
             pool_pre_ping=True,
         )
-    else:
-        url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{database_name}"
-        return create_engine(url, pool_pre_ping=True)
+
+    # --- Direct PostgreSQL ----------------------------------------------
+    if DB_URL and not _is_sqlite_url(DB_URL):
+        # Caller provided a full PostgreSQL URL — normalise driver to pg8000
+        sync_url = DB_URL.replace("postgresql+asyncpg", "postgresql+pg8000")
+        return create_engine(sync_url, pool_pre_ping=True)
+
+    url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{database_name}"
+    return create_engine(url, pool_pre_ping=True)
 
 
 def run_migrations_offline():
-    url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    if _is_sqlite_url(DB_URL):
+        sync_url = DB_URL.replace("sqlite+aiosqlite", "sqlite")
+    else:
+        sync_url = (
+            f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        )
     context.configure(
-        url=url,
+        url=sync_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_as_batch=_is_sqlite_url(DB_URL),
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -80,22 +117,29 @@ def run_migrations_online():
     Uses PostgreSQL advisory locks to ensure only one migration process
     runs at a time, even when multiple pods/containers attempt migrations
     concurrently. Other processes will wait for the lock to be released.
+
+    On SQLite, advisory locks are skipped (not supported / not needed).
+    ``render_as_batch`` is enabled so ALTER TABLE operations work within
+    SQLite's limited DDL capabilities.
     """
     engine = get_engine()
-    # Use engine.begin() for auto-commit behavior (required in SQLAlchemy 2.0)
-    # Note: Do NOT use context.begin_transaction() here - engine.begin() already
-    # provides transaction management. Nesting transactions causes issues where
-    # only the first migration gets committed.
+    is_sqlite = _is_sqlite_url(DB_URL)
+
     with engine.begin() as connection:
-        # Acquire advisory lock - blocks until lock is available
-        # This ensures only one migration runs at a time across all pods
-        connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
+        if not is_sqlite:
+            connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
         try:
-            context.configure(connection=connection, target_metadata=target_metadata)
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                render_as_batch=is_sqlite,
+            )
             context.run_migrations()
         finally:
-            # Release the lock so other waiting processes can proceed
-            connection.execute(text(f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})"))
+            if not is_sqlite:
+                connection.execute(
+                    text(f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})")
+                )
 
 
 if context.is_offline_mode():

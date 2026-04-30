@@ -2,7 +2,8 @@
 
 Polls the automation_runs table for PENDING jobs and dispatches them
 to sandboxes via the SaaS API.  Uses FOR UPDATE SKIP LOCKED for
-multi-worker safety.
+multi-worker safety (PostgreSQL).  On SQLite the row-level lock is
+skipped since SQLite deployments are single-process.
 
 Completion is handled asynchronously: the SDK running inside the sandbox
 POSTs to ``/v1/runs/{id}/complete`` when the entry-point
@@ -68,6 +69,11 @@ async def _download_internal_tarball(
     return store.read(upload.storage_path)
 
 
+def _is_sqlite(session: AsyncSession) -> bool:
+    """Return True when the bound engine is SQLite."""
+    return session.bind.dialect.name == "sqlite" if session.bind else False
+
+
 async def _poll_pending_runs(
     session: AsyncSession,
     batch_size: int,
@@ -76,6 +82,8 @@ async def _poll_pending_runs(
 
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
+
+    On SQLite the ``FOR UPDATE SKIP LOCKED`` clause is omitted.
     """
     select_query = (
         select(AutomationRun)
@@ -83,8 +91,9 @@ async def _poll_pending_runs(
         .where(AutomationRun.status == AutomationRunStatus.PENDING)
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
-        .with_for_update(skip_locked=True)
     )
+    if not _is_sqlite(session):
+        select_query = select_query.with_for_update(skip_locked=True)
     result = await session.execute(select_query)
     return list(result.scalars().all())
 

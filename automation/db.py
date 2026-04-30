@@ -1,8 +1,17 @@
 """Database engine and session management.
 
-Follows the same patterns as OpenHands enterprise:
-- asyncpg for PostgreSQL
-- GCP Cloud SQL connector for production
+Supports two backends:
+- **PostgreSQL** (asyncpg) — default for production.  Includes GCP Cloud SQL
+  connector support via ``AUTOMATION_GCP_DB_INSTANCE``.
+- **SQLite** (aiosqlite) — lightweight local backend for open-source /
+  self-hosted deployments.  Enabled by setting ``AUTOMATION_DB_URL`` to a
+  ``sqlite+aiosqlite:///`` URL.
+
+Which backend is used is determined by :pyclass:`ServiceSettings`:
+
+1. ``db_url`` starting with ``sqlite`` → SQLite
+2. ``gcp_db_instance`` set → GCP Cloud SQL (PostgreSQL)
+3. Otherwise → direct PostgreSQL via ``db_host`` / ``db_port`` / …
 """
 
 import logging
@@ -11,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
+from sqlalchemy import event as sa_event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -40,7 +50,7 @@ class EngineResult:
 
 
 async def create_engine(settings: ServiceSettings | None = None) -> EngineResult:
-    """Create a new PostgreSQL database engine based on settings.
+    """Create a database engine based on settings.
 
     Returns an EngineResult containing the engine and optional GCP connector.
     Call result.dispose() on shutdown to properly clean up resources.
@@ -48,17 +58,55 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     if settings is None:
         settings = get_config().service
 
+    if settings.is_sqlite:
+        return _create_sqlite_engine(settings)
+
     if settings.gcp_db_instance:
         return await _create_gcp_engine(settings)
 
-    url = URL.create(
-        "postgresql+asyncpg",
-        username=settings.db_user,
-        password=settings.db_pass,
-        host=settings.db_host,
-        port=settings.db_port,
-        database=settings.db_name,
+    return _create_pg_engine(settings)
+
+
+# -- SQLite ----------------------------------------------------------------
+
+def _create_sqlite_engine(settings: ServiceSettings) -> EngineResult:
+    """Create an async SQLite engine via aiosqlite.
+
+    Enables WAL journal mode and foreign key enforcement on every new
+    connection so SQLite behaves closer to PostgreSQL for our use case.
+    """
+    engine = create_async_engine(
+        settings.db_url,
+        echo=False,
+        # SQLite does not support pool_size/max_overflow the same way
+        # but StaticPool is fine for single-process usage
     )
+
+    @sa_event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return EngineResult(engine=engine)
+
+
+# -- PostgreSQL (direct) ---------------------------------------------------
+
+def _create_pg_engine(settings: ServiceSettings) -> EngineResult:
+    """Create a direct asyncpg PostgreSQL engine."""
+    if settings.db_url:
+        url = settings.db_url
+    else:
+        url = URL.create(
+            "postgresql+asyncpg",
+            username=settings.db_user,
+            password=settings.db_pass,
+            host=settings.db_host,
+            port=settings.db_port,
+            database=settings.db_name,
+        )
     engine = create_async_engine(
         url,
         pool_size=settings.db_pool_size,
@@ -68,6 +116,8 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     )
     return EngineResult(engine=engine)
 
+
+# -- GCP Cloud SQL ---------------------------------------------------------
 
 async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
     """Create engine using GCP Cloud SQL connector (async).

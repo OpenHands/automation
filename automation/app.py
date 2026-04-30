@@ -58,6 +58,16 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine_result.engine
     app.state.session_factory = create_session_factory(engine_result.engine)
 
+    # For SQLite: auto-create tables (SQLite is intended for simple local
+    # deployments where running Alembic migrations is not practical since the
+    # existing migration scripts use PostgreSQL-specific DDL).
+    if settings.is_sqlite:
+        from automation.models import Base
+
+        async with engine_result.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("SQLite tables created/verified")
+
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
