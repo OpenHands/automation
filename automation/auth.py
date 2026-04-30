@@ -201,7 +201,23 @@ async def authenticate_request(
     Calls the OpenHands API GET /api/v1/users/me to verify credentials and get
     user/org identity. Implements retry with exponential backoff for rate limiting.
     Results are cached in-memory for 20 seconds to reduce API calls.
+
+    If AUTOMATION_AUTH_DISABLED=true, returns a local user for self-hosted mode.
     """
+    # Check if auth is disabled (self-hosted local mode)
+    config = get_config()
+    if config.http.auth_disabled:
+        # Use fixed UUIDs for local mode (deterministic for testing)
+        # Grant all automation-related permissions for local admin
+        return AuthenticatedUser(
+            user_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            email="local@localhost",
+            role="admin",
+            permissions=["manage_automations", "automations:read", "automations:write"],
+            auth_method=AuthMethod.API_KEY,
+        )
+
     # Determine authentication method (API key takes priority)
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
