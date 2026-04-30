@@ -38,8 +38,8 @@ if [[ -n "${LLM_BASE_URL}" ]]; then
 fi
 
 # ---- Create data directories ----
-mkdir -p /data/openhands /data/storage /data/sessions /tmp/openhands-sandboxes
-chmod 755 /data/openhands /data/storage /data/sessions /tmp/openhands-sandboxes
+mkdir -p /data/openhands /data/storage /data/sessions /root/.openhands/conversations /tmp/openhands-sandboxes
+chmod 755 /data/openhands /data/storage /data/sessions /root/.openhands /root/.openhands/conversations /tmp/openhands-sandboxes
 
 # ---- Run database migrations ----
 
