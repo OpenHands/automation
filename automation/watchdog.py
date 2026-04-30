@@ -32,7 +32,7 @@ logger = logging.getLogger("automation.watchdog")
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
-    settings: Settings,
+    settings: Settings,  # noqa: ARG001 - kept for API compatibility
 ) -> bool:
     """Verify run status via backend and mark accordingly.
 
@@ -154,11 +154,13 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
-    # Clean up resources via backend (mode-specific: Cloud cleans up sandbox, local is no-op)
-    try:
-        await backend.cleanup_after_verification(run, run_id)
-    except Exception as e:
-        logger.warning("Cleanup after verification failed: %s", e, extra=extra)
+    # Clean up resources via backend (Cloud deletes sandbox, local is no-op)
+    # Skip cleanup if keep_alive is True — user wants to inspect the sandbox
+    if not run.keep_alive:
+        try:
+            await backend.cleanup_after_verification(run, run_id)
+        except Exception as e:
+            logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
     error_msg = verification.error or "no completion callback received"
 
