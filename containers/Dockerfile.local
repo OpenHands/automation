@@ -72,9 +72,16 @@ RUN mkdir -p /data /workspace/runs && \
 ENV AUTOMATION_AGENT_SERVER_URL=http://localhost:3000
 ENV AUTOMATION_AGENT_SERVER_API_KEY=local-embedded
 ENV AUTOMATION_DB_URL=sqlite+aiosqlite:////data/automations.db
-ENV AUTOMATION_BASE_URL=http://localhost:8000/api/automation
+ENV AUTOMATION_BASE_URL=http://localhost:8000
 ENV AUTOMATION_WORKSPACE_BASE=/workspace
 ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
+
+# Auth bypass for self-hosted mode (no OpenHands Cloud auth required)
+ENV AUTOMATION_AUTH_DISABLED=true
+
+# Local file storage for tarballs (instead of GCS/S3)
+ENV FILE_STORE=local
+ENV LOCAL_STORAGE_PATH=/data/storage
 
 # Agent server configuration
 ENV SESSION_API_KEY=local-embedded

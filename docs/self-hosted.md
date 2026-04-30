@@ -78,6 +78,7 @@ open http://localhost:8000/automations
 │                                                              │
 │  /workspace ──── user's project files (volume)              │
 │  /data/automations.db ──── SQLite database (volume)         │
+│  /data/storage ──── tarball uploads (local file storage)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -172,7 +173,7 @@ export AUTOMATION_AGENT_SERVER_API_KEY="your-agent-server-key"
 export AUTOMATION_DB_URL="sqlite+aiosqlite:///./automation.db"
 
 # Required: Base URL for callbacks
-export AUTOMATION_BASE_URL="http://localhost:8000/api/automation"
+export AUTOMATION_BASE_URL="http://localhost:8000"
 
 # Required: LLM configuration (for preset automations)
 export OPENHANDS_LLM_MODEL="anthropic/claude-sonnet-4-20250514"
@@ -225,7 +226,7 @@ curl http://localhost:8000/api/automation/v1
 | `AUTOMATION_AGENT_SERVER_URL` | Agent server URL | `http://localhost:3000` |
 | `AUTOMATION_AGENT_SERVER_API_KEY` | Agent server API key | `your-secret-key` |
 | `AUTOMATION_DB_URL` | Database URL | `sqlite+aiosqlite:///./automation.db` |
-| `AUTOMATION_BASE_URL` | Service base URL (for callbacks) | `http://localhost:8000/api/automation` |
+| `AUTOMATION_BASE_URL` | Service base URL (for callbacks) | `http://localhost:8000` |
 
 ### Optional Settings
 
@@ -236,6 +237,24 @@ curl http://localhost:8000/api/automation/v1
 | `AUTOMATION_SCHEDULER_INTERVAL` | Scheduler poll interval (seconds) | `10` |
 | `AUTOMATION_DISPATCHER_INTERVAL` | Dispatcher poll interval (seconds) | `5` |
 | `AUTOMATION_WATCHDOG_INTERVAL` | Watchdog poll interval (seconds) | `30` |
+| `AUTOMATION_AUTH_DISABLED` | Disable auth (self-hosted mode) | `false` |
+
+### Storage Options
+
+The Docker image uses local filesystem storage by default. For manual setup:
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `FILE_STORE` | Storage backend: `gcs`, `s3`, or `local` | `gcs` |
+| `LOCAL_STORAGE_PATH` | Directory for local storage (if `FILE_STORE=local`) | (required) |
+| `GCS_BUCKET_NAME` | GCS bucket (if `FILE_STORE=gcs`) | (required) |
+| `AWS_S3_BUCKET` | S3 bucket (if `FILE_STORE=s3`) | (required) |
+
+For self-hosted mode, set:
+```bash
+FILE_STORE=local
+LOCAL_STORAGE_PATH=/data/storage
+```
 
 ### Database Options
 
