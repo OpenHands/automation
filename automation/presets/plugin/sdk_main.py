@@ -277,6 +277,7 @@ This automation was triggered by a webhook event:
         workspace=workspace,
         plugins=plugin_sources,  # All plugins loaded here
         callbacks=[event_callback],
+        delete_on_close=False,  # Keep conversation visible in GUI after completion
     )
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
