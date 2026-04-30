@@ -1,28 +1,46 @@
-"""Plugin-based automation script — runs inside an OpenHands Cloud sandbox.
+"""Plugin-based automation script — runs inside an OpenHands execution environment.
 
-This script is auto-generated from a plugin automation request. It:
-  1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
-  2. Clones repositories if configured (via workspace.clone_repos())
-  3. Loads ALL skills via workspace.load_skills_from_agent_server()
-     (public, user, project, org skills - mirrors V1 conversation behavior)
-  4. Fetches LLM config via workspace.get_llm()
-  5. Fetches secrets via workspace.get_secrets()
-  6. Fetches MCP config via workspace.get_mcp_config()
-  7. Gets default agent with tools and condenser via get_default_agent()
-  8. Loads plugins from plugins_config.json
-  9. Creates a Conversation with all plugins and skills
-  10. Sends the prompt (with event context if available) and runs
-  11. On context manager exit, the workspace sends a completion callback
+This script is auto-generated from a plugin automation request. It supports two modes:
+
+**Cloud Mode** (default):
+  Uses OpenHandsCloudWorkspace connected to OpenHands Cloud API.
+  Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
+
+**Local Mode** (self-hosted):
+  Uses RemoteWorkspace connected to a local agent server.
+  Requires: AGENT_SERVER_URL (presence triggers local mode)
+  Optional: OPENHANDS_CLOUD_API_URL for LLM/secrets/MCP config via Cloud API
+
+The script:
+  1. Detects mode based on AGENT_SERVER_URL presence
+  2. Opens the appropriate workspace EARLY (ensures callback on any failure)
+  3. Clones repositories if configured (via workspace.clone_repos())
+  4. Loads ALL skills via workspace.load_skills_from_agent_server()
+  5. Fetches LLM config via workspace.get_llm()
+  6. Fetches secrets via workspace.get_secrets()
+  7. Fetches MCP config via workspace.get_mcp_config()
+  8. Gets default agent with tools and condenser via get_default_agent()
+  9. Loads plugins from plugins_config.json
+  10. Creates a Conversation with all plugins and skills
+  11. Sends the prompt (with event context if available) and runs
+  12. On context manager exit, the workspace sends a completion callback
 
 IMPORTANT: The workspace context is entered early so that ANY exception
 (skill loading, plugin config parsing, etc.) triggers the __exit__ callback,
 avoiding silent failures that require watchdog timeout.
 
-Env vars injected by the dispatcher (read by the SDK automatically):
+Env vars (Cloud mode - all required):
   OPENHANDS_API_KEY          - per-user automation API key
   OPENHANDS_CLOUD_API_URL    - SaaS API base URL
   SANDBOX_ID                 - this sandbox's Cloud API identifier
   SESSION_API_KEY            - session key for sandbox settings auth
+
+Env vars (Local mode):
+  AGENT_SERVER_URL           - local agent server URL (presence = local mode)
+  OPENHANDS_CLOUD_API_URL    - optional, for LLM/secrets/MCP via Cloud API
+  OPENHANDS_API_KEY          - optional, required if using Cloud API features
+
+Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
@@ -34,23 +52,40 @@ import sys
 import time
 
 
+# Detect execution mode based on AGENT_SERVER_URL presence
+agent_server_url = os.environ.get("AGENT_SERVER_URL", "")
+IS_LOCAL_MODE = bool(agent_server_url)
+
+# Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
-# Verify dispatcher-injected env vars (must happen before workspace context)
-print("=== ENV VARS ===")
-for name, val in [
-    ("OPENHANDS_API_KEY", api_key),
-    ("OPENHANDS_CLOUD_API_URL", api_url),
-    ("SANDBOX_ID", sandbox_id),
-    ("SESSION_API_KEY", session_key),
-]:
-    print(f"  {name}: {'OK' if val else 'MISSING'}")
-    if not val:
-        print(f"FAIL: {name} not set", file=sys.stderr)
+print("=== EXECUTION MODE ===")
+print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
+
+print("\n=== ENV VARS ===")
+if IS_LOCAL_MODE:
+    # Local mode: only AGENT_SERVER_URL is required
+    print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
+    print(f"  OPENHANDS_CLOUD_API_URL: {'OK' if api_url else 'NONE (no Cloud features)'}")
+    print(f"  OPENHANDS_API_KEY: {'OK' if api_key else 'NONE (no Cloud features)'}")
+    if not agent_server_url:
+        print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
+else:
+    # Cloud mode: all Cloud env vars are required
+    for name, val in [
+        ("OPENHANDS_API_KEY", api_key),
+        ("OPENHANDS_CLOUD_API_URL", api_url),
+        ("SANDBOX_ID", sandbox_id),
+        ("SESSION_API_KEY", session_key),
+    ]:
+        print(f"  {name}: {'OK' if val else 'MISSING'}")
+        if not val:
+            print(f"FAIL: {name} not set", file=sys.stderr)
+            sys.exit(1)
 
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
@@ -61,15 +96,32 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
 from openhands.tools import get_default_agent
-from openhands.workspace import OpenHandsCloudWorkspace
+
+if IS_LOCAL_MODE:
+    from openhands.workspace import RemoteWorkspace
+else:
+    from openhands.workspace import OpenHandsCloudWorkspace
+
+# Create workspace based on mode
+print("\n=== SDK WORKSPACE ===")
+if IS_LOCAL_MODE:
+    print(f"  using RemoteWorkspace at {agent_server_url}")
+    workspace_ctx = RemoteWorkspace(
+        agent_server_url=agent_server_url,
+        # Optional Cloud API integration for LLM/secrets/MCP
+        cloud_api_url=api_url if api_url else None,
+        cloud_api_key=api_key if api_key else None,
+    )
+else:
+    print(f"  using OpenHandsCloudWorkspace at {api_url}")
+    workspace_ctx = OpenHandsCloudWorkspace(
+        local_agent_server_mode=True,
+        cloud_api_url=api_url,
+        cloud_api_key=api_key,
+    )
 
 # Enter workspace context EARLY - any exception from here on triggers callback
-print("\n=== SDK WORKSPACE ===")
-with OpenHandsCloudWorkspace(
-    local_agent_server_mode=True,
-    cloud_api_url=api_url,
-    cloud_api_key=api_key,
-) as workspace:
+with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
 
