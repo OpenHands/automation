@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,9 @@ from automation.db import (
     set_sqlite_mode,
     using_sqlite,
 )
+
+# Get the project root directory (parent of tests/)
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class TestIsSqliteUrl:
@@ -129,7 +133,7 @@ class TestSqliteMigrations:
                 env=env,
                 capture_output=True,
                 text=True,
-                cwd="/workspace/project/automation",
+                cwd=str(PROJECT_ROOT),
             )
             assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
 
