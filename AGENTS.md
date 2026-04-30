@@ -144,14 +144,15 @@ Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
 Migrations must be **cross-database compatible**:
 
 ```python
-# ✅ DO: Use generic SQLAlchemy types
-sa.Column("id", sa.Uuid, primary_key=True)
-sa.Column("data", sa.JSON, nullable=False)
+# ✅ DO: Import and use generic SQLAlchemy types
+from sqlalchemy import Column, JSON, Uuid
+Column("id", Uuid, primary_key=True)
+Column("data", JSON, nullable=False)
 
 # ❌ DON'T: Use PostgreSQL-specific types
 from sqlalchemy.dialects.postgresql import UUID, JSONB
-sa.Column("id", UUID(as_uuid=True), ...)  # Won't work on SQLite
-sa.Column("data", JSONB, ...)             # Won't work on SQLite
+Column("id", UUID(as_uuid=True), ...)  # Won't work on SQLite
+Column("data", JSONB, ...)             # Won't work on SQLite
 ```
 
 For PostgreSQL-only features (partial indexes, advisory locks), use conditionals:

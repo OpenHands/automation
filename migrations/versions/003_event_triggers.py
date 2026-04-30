@@ -15,8 +15,8 @@ Create Date: 2026-04-06
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import JSON, Boolean, Column, DateTime, String, Uuid, text
 
 
 revision: str = "003"
@@ -29,18 +29,18 @@ def upgrade() -> None:
     # 1. Create custom_webhooks table
     op.create_table(
         "custom_webhooks",
-        sa.Column("id", sa.Uuid, primary_key=True),
-        sa.Column("org_id", sa.Uuid, nullable=False),
-        sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("source", sa.String(100), nullable=False),  # user-defined name
-        sa.Column("webhook_secret", sa.String(255), nullable=False),
-        sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
+        Column("id", Uuid, primary_key=True),
+        Column("org_id", Uuid, nullable=False),
+        Column("name", String(255), nullable=False),
+        Column("source", String(100), nullable=False),  # user-defined name
+        Column("webhook_secret", String(255), nullable=False),
+        Column("enabled", Boolean, nullable=False, server_default="true"),
         # JMESPath expression to extract event identifier from payload.
         # Examples: "type", "event.type", "type || event.name"
         # Default "type" for webhooks like Stripe: {"type": "payment.completed"}
-        sa.Column(
+        Column(
             "event_key_expr",
-            sa.String(500),
+            String(500),
             nullable=False,
             server_default="type",
         ),
@@ -49,23 +49,23 @@ def upgrade() -> None:
         # - Stripe: Stripe-Signature
         # - Slack: X-Slack-Signature
         # - Generic: X-Signature-256 (our default for custom webhooks)
-        sa.Column(
+        Column(
             "signature_header",
-            sa.String(100),
+            String(100),
             nullable=False,
             server_default="X-Signature-256",
         ),
-        sa.Column(
+        Column(
             "created_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
-        sa.Column(
+        Column(
             "updated_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index("ix_custom_webhooks_org_id", "custom_webhooks", ["org_id"])
@@ -83,7 +83,7 @@ def upgrade() -> None:
     # Uses generic JSON for cross-database compatibility
     op.add_column(
         "automation_runs",
-        sa.Column("event_payload", sa.JSON, nullable=True),
+        Column("event_payload", JSON, nullable=True),
     )
 
 

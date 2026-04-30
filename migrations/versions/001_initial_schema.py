@@ -12,8 +12,19 @@ Create Date: 2026-03-13
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    Uuid,
+    text,
+)
 
 
 revision: str = "001"
@@ -29,34 +40,34 @@ def _is_sqlite() -> bool:
 
 def upgrade() -> None:
     # Create automations table
-    # Uses sa.Uuid for cross-database UUID support
-    # Uses sa.JSON for cross-database JSON support (PostgreSQL uses JSONB internally)
+    # Uses Uuid for cross-database UUID support
+    # Uses JSON for cross-database JSON support (PostgreSQL uses JSONB internally)
     op.create_table(
         "automations",
-        sa.Column("id", sa.Uuid, primary_key=True),
-        sa.Column("user_id", sa.Uuid, nullable=False),
-        sa.Column("org_id", sa.Uuid, nullable=False),
-        sa.Column("name", sa.String(500), nullable=False),
-        sa.Column("trigger", sa.JSON, nullable=False),
-        sa.Column("tarball_path", sa.Text, nullable=False),
-        sa.Column("setup_script_path", sa.Text, nullable=True),
-        sa.Column("entrypoint", sa.Text, nullable=False),
-        sa.Column("timeout", sa.Integer, nullable=True),
-        sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_triggered_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_polled_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
+        Column("id", Uuid, primary_key=True),
+        Column("user_id", Uuid, nullable=False),
+        Column("org_id", Uuid, nullable=False),
+        Column("name", String(500), nullable=False),
+        Column("trigger", JSON, nullable=False),
+        Column("tarball_path", Text, nullable=False),
+        Column("setup_script_path", Text, nullable=True),
+        Column("entrypoint", Text, nullable=False),
+        Column("timeout", Integer, nullable=True),
+        Column("enabled", Boolean, nullable=False, server_default="true"),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        Column("last_triggered_at", DateTime(timezone=True), nullable=True),
+        Column("last_polled_at", DateTime(timezone=True), nullable=True),
+        Column(
             "created_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
-        sa.Column(
+        Column(
             "updated_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index("ix_automations_user_id", "automations", ["user_id"])
@@ -68,32 +79,32 @@ def upgrade() -> None:
     # Create automation_runs table (event queue + history)
     op.create_table(
         "automation_runs",
-        sa.Column("id", sa.Uuid, primary_key=True),
-        sa.Column(
+        Column("id", Uuid, primary_key=True),
+        Column(
             "automation_id",
-            sa.Uuid,
-            sa.ForeignKey("automations.id", ondelete="CASCADE"),
+            Uuid,
+            ForeignKey("automations.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column(
+        Column(
             "status",
-            sa.String(20),
+            String(20),
             nullable=False,
             server_default="PENDING",
         ),
-        sa.Column("error_detail", sa.Text, nullable=True),
-        sa.Column(
+        Column("error_detail", Text, nullable=True),
+        Column(
             "created_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("conversation_id", sa.String(255), nullable=True),
-        sa.Column("timeout_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("keep_alive", sa.Boolean(), nullable=False, server_default="false"),
-        sa.Column("sandbox_id", sa.String(255), nullable=True),
+        Column("started_at", DateTime(timezone=True), nullable=True),
+        Column("completed_at", DateTime(timezone=True), nullable=True),
+        Column("conversation_id", String(255), nullable=True),
+        Column("timeout_at", DateTime(timezone=True), nullable=True),
+        Column("keep_alive", Boolean(), nullable=False, server_default="false"),
+        Column("sandbox_id", String(255), nullable=True),
     )
     op.create_index(
         "ix_automation_runs_automation_id", "automation_runs", ["automation_id"]
@@ -107,7 +118,7 @@ def upgrade() -> None:
             "ix_automation_runs_pending",
             "automation_runs",
             ["created_at"],
-            postgresql_where=sa.text("status = 'PENDING'"),
+            postgresql_where=text("status = 'PENDING'"),
         )
 
     op.create_index("ix_automation_runs_timeout_at", "automation_runs", ["timeout_at"])
