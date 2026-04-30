@@ -312,11 +312,12 @@ class TestDispatcherLocalMode:
 class TestWatchdogLocalMode:
     """Tests for watchdog local mode behavior."""
 
-    def test_watchdog_imports_local_mode_function(self):
-        """Verify watchdog imports verify_run_on_agent_server."""
-        from automation.watchdog import verify_run_on_agent_server
+    def test_watchdog_uses_backend_abstraction(self):
+        """Verify watchdog uses backend abstraction for verification."""
+        from automation.watchdog import get_backend
 
-        assert callable(verify_run_on_agent_server)
+        # Watchdog imports get_backend to delegate mode-specific logic
+        assert callable(get_backend)
 
     def test_config_local_mode_property(self, monkeypatch):
         """Verify Settings has is_local_mode property."""

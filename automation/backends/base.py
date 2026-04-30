@@ -2,8 +2,14 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
+
+
+if TYPE_CHECKING:
+    from automation.models import AutomationRun
+    from automation.utils.agent_server import VerificationResult
 
 
 @dataclass
@@ -28,9 +34,13 @@ class ExecutionContext:
 class ExecutionBackend(ABC):
     """Abstract base class for execution backends.
 
-    Execution backends handle the lifecycle of acquiring and releasing
-    execution contexts. The execution logic (upload, bash commands) is
-    shared across backends.
+    Execution backends encapsulate all mode-specific behavior:
+    - Sandbox/agent server lifecycle (acquire/release)
+    - API key acquisition
+    - Environment variable injection
+    - Run verification and cleanup
+
+    This keeps dispatcher and watchdog mode-agnostic.
     """
 
     @abstractmethod
@@ -63,6 +73,69 @@ class ExecutionBackend(ABC):
         Args:
             client: HTTP client for making requests
             ctx: The execution context to release
+        """
+
+    @abstractmethod
+    async def get_api_key(self, run: "AutomationRun") -> str:
+        """Get the API key for executing an automation run.
+
+        For Cloud mode: Mints a per-user API key via the service key.
+        For Local mode: Returns the pre-configured API key.
+
+        Args:
+            run: The automation run (used for user context in Cloud mode)
+
+        Returns:
+            API key string
+        """
+
+    @abstractmethod
+    def build_env_vars(self, api_key: str) -> dict[str, str]:
+        """Build environment variables to inject into the execution environment.
+
+        For Cloud mode: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL
+        For Local mode: AGENT_SERVER_URL, optionally OPENHANDS_CLOUD_API_URL
+
+        Args:
+            api_key: The API key from get_api_key()
+
+        Returns:
+            Dictionary of environment variable name -> value
+        """
+
+    @abstractmethod
+    async def verify_run(
+        self,
+        run: "AutomationRun",
+        run_id: str,
+    ) -> "VerificationResult":
+        """Verify the status of a running automation.
+
+        For Cloud mode: Discovers sandbox, queries agent server, cleans up.
+        For Local mode: Queries agent server directly, no cleanup.
+
+        Args:
+            run: The automation run to verify
+            run_id: Run ID string for logging
+
+        Returns:
+            VerificationResult with verification outcome
+        """
+
+    @abstractmethod
+    async def cleanup_after_verification(
+        self,
+        run: "AutomationRun",
+        run_id: str,
+    ) -> None:
+        """Clean up resources after verification fails.
+
+        For Cloud mode: Deletes the sandbox (if not keep_alive).
+        For Local mode: No-op (persistent server).
+
+        Args:
+            run: The automation run
+            run_id: Run ID string for logging
         """
 
     @property

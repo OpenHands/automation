@@ -1,5 +1,7 @@
 """Tests for execution backends."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from automation.backends import (
@@ -83,6 +85,73 @@ class TestLocalAgentServerBackend:
         # Should not raise
         await backend.release(None, ctx)  # type: ignore
 
+    @pytest.mark.asyncio
+    async def test_get_api_key_returns_config_key(self):
+        """get_api_key() returns the pre-configured API key."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+        )
+        mock_run = MagicMock()
+        api_key = await backend.get_api_key(mock_run)
+        assert api_key == "local-key"
+
+    def test_build_env_vars_basic(self):
+        """build_env_vars() includes AGENT_SERVER_URL."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+        )
+        env_vars = backend.build_env_vars("ignored-key")
+        assert env_vars == {"AGENT_SERVER_URL": "http://localhost:3000"}
+
+    def test_build_env_vars_with_cloud_url(self):
+        """build_env_vars() includes OPENHANDS_CLOUD_API_URL if set."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+            cloud_api_url="https://app.all-hands.dev",
+        )
+        env_vars = backend.build_env_vars("ignored-key")
+        assert env_vars == {
+            "AGENT_SERVER_URL": "http://localhost:3000",
+            "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",
+        }
+
+    @pytest.mark.asyncio
+    async def test_verify_run_calls_agent_server(self):
+        """verify_run() delegates to verify_run_on_agent_server."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+        )
+        mock_run = MagicMock()
+        mock_result = MagicMock(verified=True, exit_code=0)
+
+        with patch(
+            "automation.backends.local.verify_run_on_agent_server",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ) as mock_verify:
+            result = await backend.verify_run(mock_run, "run-123")
+            assert result == mock_result
+            mock_verify.assert_called_once_with(
+                agent_url="http://localhost:3000",
+                session_key="local-key",
+                run_id="run-123",
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_after_verification_is_noop(self):
+        """cleanup_after_verification() is a no-op for local backend."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+        )
+        mock_run = MagicMock()
+        # Should not raise
+        await backend.cleanup_after_verification(mock_run, "run-123")
+
 
 class TestCloudSandboxBackend:
     """Tests for CloudSandboxBackend."""
@@ -130,6 +199,132 @@ class TestCloudSandboxBackend:
         sandbox = {"exposed_urls": None}
         result = CloudSandboxBackend._find_agent_server_url(sandbox)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_api_key_mints_per_user_key(self):
+        """get_api_key() mints a per-user key via service key."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        mock_run = MagicMock()
+
+        with patch(
+            "automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="sk-user-minted",
+        ) as mock_mint:
+            api_key = await backend.get_api_key(mock_run)
+            assert api_key == "sk-user-minted"
+            mock_mint.assert_called_once_with(mock_run)
+
+    def test_build_env_vars(self):
+        """build_env_vars() includes Cloud API credentials."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        env_vars = backend.build_env_vars("sk-user")
+        assert env_vars == {
+            "OPENHANDS_API_KEY": "sk-user",
+            "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",
+        }
+
+    @pytest.mark.asyncio
+    async def test_verify_run_without_sandbox_id(self):
+        """verify_run() returns error when sandbox_id is missing."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        mock_run = MagicMock()
+        mock_run.sandbox_id = None
+
+        result = await backend.verify_run(mock_run, "run-123")
+        assert result.verified is False
+        assert "No sandbox_id" in result.error
+
+    @pytest.mark.asyncio
+    async def test_verify_run_calls_verify_run_status(self):
+        """verify_run() delegates to verify_run_status."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        mock_run = MagicMock()
+        mock_run.sandbox_id = "sandbox-123"
+        mock_run.keep_alive = False
+        mock_result = MagicMock(verified=True, exit_code=0)
+
+        with (
+            patch(
+                "automation.backends.cloud.get_api_key_for_automation_run",
+                new_callable=AsyncMock,
+                return_value="sk-user",
+            ),
+            patch(
+                "automation.backends.cloud.verify_run_status",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ) as mock_verify,
+        ):
+            result = await backend.verify_run(mock_run, "run-123")
+            assert result == mock_result
+            mock_verify.assert_called_once_with(
+                api_url="https://app.all-hands.dev",
+                api_key="sk-user",
+                sandbox_id="sandbox-123",
+                keep_alive=False,
+                run_id="run-123",
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_after_verification_deletes_sandbox(self):
+        """cleanup_after_verification() deletes sandbox when not keep_alive."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        mock_run = MagicMock()
+        mock_run.sandbox_id = "sandbox-123"
+        mock_run.keep_alive = False
+
+        with (
+            patch(
+                "automation.backends.cloud.get_api_key_for_automation_run",
+                new_callable=AsyncMock,
+                return_value="sk-user",
+            ),
+            patch(
+                "automation.backends.cloud.cleanup_sandbox",
+                new_callable=AsyncMock,
+            ) as mock_cleanup,
+        ):
+            await backend.cleanup_after_verification(mock_run, "run-123")
+            mock_cleanup.assert_called_once_with(
+                api_url="https://app.all-hands.dev",
+                api_key="sk-user",
+                sandbox_id="sandbox-123",
+                run_id="run-123",
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_after_verification_skips_keep_alive(self):
+        """cleanup_after_verification() skips cleanup when keep_alive=True."""
+        backend = CloudSandboxBackend(
+            api_url="https://app.all-hands.dev",
+            api_key="sk-service",
+        )
+        mock_run = MagicMock()
+        mock_run.sandbox_id = "sandbox-123"
+        mock_run.keep_alive = True
+
+        with patch(
+            "automation.backends.cloud.cleanup_sandbox",
+            new_callable=AsyncMock,
+        ) as mock_cleanup:
+            await backend.cleanup_after_verification(mock_run, "run-123")
+            mock_cleanup.assert_not_called()
 
 
 class TestGetBackend:

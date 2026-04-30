@@ -1,18 +1,17 @@
 """Dispatcher for processing pending automation runs.
 
 Polls the automation_runs table for PENDING jobs and dispatches them
-to sandboxes (Cloud mode) or a local agent server (local mode).
+to execution backends (Cloud sandbox or local agent server).
 
 Uses FOR UPDATE SKIP LOCKED for multi-worker safety (PostgreSQL).
 SQLite deployments skip row locking (single-process mode assumed).
 
-Completion is handled asynchronously: the SDK running inside the sandbox
-POSTs to ``/v1/runs/{id}/complete`` when the entry-point
+Completion is handled asynchronously: the SDK running inside the execution
+environment POSTs to ``/v1/runs/{id}/complete`` when the entry-point
 exits, so the dispatcher does **not** block waiting for results.
 
-Local mode vs Cloud mode:
-- Cloud mode: Creates sandbox per run, mints per-user API key
-- Local mode: Uses pre-configured agent server, uses config-level API key
+The dispatcher is mode-agnostic — all mode-specific logic is encapsulated
+in the ExecutionBackend (see automation/backends/).
 """
 
 import asyncio
@@ -26,13 +25,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from automation.backends import get_backend
 from automation.config import ServiceSettings, get_config
 from automation.db import using_sqlite
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils import log_extra
-from automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
+from automation.utils.api_key import APIKeyError
 from automation.utils.run import (
     disable_automation,
     mark_run_status,
@@ -113,24 +113,20 @@ async def _execute_run(
 ) -> None:
     """Execute a single run in a background task (fire-and-forget).
 
-    Cloud mode:
-    1. Fetch a per-user API key from the SaaS service (on demand, never stored).
-    2. Determine tarball source and dispatch to a new sandbox.
-    3. Store sandbox_id for watchdog verification.
+    Mode-agnostic execution flow:
+    1. Get backend and API key via backend.get_api_key()
+    2. Determine tarball source
+    3. Build env vars via backend.build_env_vars()
+    4. Dispatch to execution environment
+    5. Store sandbox_id for watchdog verification (if applicable)
 
-    Local mode:
-    1. Use config-level API key (no per-user key minting).
-    2. Dispatch to the pre-configured local agent server.
-    3. No sandbox_id to store (persistent server).
-
-    The SDK inside the sandbox fires the completion callback on exit.
+    The SDK inside the execution environment fires the completion callback on exit.
     The watchdog will verify status if the callback is missed.
     """
     run_id = str(run.id)
     automation = run.automation
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
-    is_local = settings.is_local_mode
 
     # Helper for consistent structured logging with run context
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
@@ -141,13 +137,15 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
 
     try:
-        # 1. Get API key: local mode uses config key, cloud mode mints per-user key
-        if is_local:
-            api_key = settings.agent_server_api_key
+        # 1. Get backend and API key (mode-specific logic encapsulated in backend)
+        backend = get_backend()
+        api_key = await backend.get_api_key(run)
+
+        # For dispatch_automation, we need the appropriate URL
+        if backend.is_local_mode:
             api_url = settings.agent_server_url
-            logger.info("Local mode: using configured agent server", extra=_log_ctx())
+            logger.info("Using local agent server backend", extra=_log_ctx())
         else:
-            api_key = await get_api_key_for_automation_run(run)
             api_url = settings.openhands_api_base_url
 
         # 2. Determine tarball source
@@ -170,22 +168,10 @@ async def _execute_run(
                 extra=_log_ctx(),
             )
 
-        # 3. Build env vars for the execution environment
-        env_vars: dict[str, str] = {}
+        # 3. Build env vars via backend (mode-specific logic encapsulated)
+        env_vars = backend.build_env_vars(api_key)
 
-        if is_local:
-            # Local mode: inject agent server URL for SDK's RemoteWorkspace
-            env_vars["AGENT_SERVER_URL"] = settings.agent_server_url
-            # If there's an OpenHands API key in config, inject it for LLM/secrets
-            if settings.openhands_api_base_url:
-                env_vars["OPENHANDS_CLOUD_API_URL"] = settings.openhands_api_base_url
-        else:
-            # Cloud mode: inject Cloud API credentials
-            env_vars["OPENHANDS_API_KEY"] = api_key
-            env_vars["OPENHANDS_CLOUD_API_URL"] = settings.openhands_api_base_url
-
-        # Trigger context so the SDK script knows *why* it was invoked
-        # Includes automation metadata and event payload (for event-triggered runs)
+        # Add trigger context so the SDK script knows *why* it was invoked
         trigger_context = {
             "trigger": automation.trigger,
             "automation_id": str(automation.id),
@@ -206,7 +192,7 @@ async def _execute_run(
         else:
             effective_timeout = max_run_duration
 
-        # 5. Dispatch to sandbox/agent server (fire-and-forget)
+        # 5. Dispatch to execution environment (fire-and-forget)
         result = await dispatch_automation(
             api_url=api_url,
             api_key=api_key,
@@ -220,7 +206,7 @@ async def _execute_run(
 
         sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
         if result.success:
-            # Store sandbox_id for later verification by the watchdog (Cloud mode only)
+            # Store sandbox_id for later verification by the watchdog
             if result.sandbox_id:
                 await update_sandbox_id(session_factory, run.id, result.sandbox_id)
             logger.info(

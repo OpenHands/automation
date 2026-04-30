@@ -44,6 +44,7 @@ def get_backend(api_key: str | None = None) -> ExecutionBackend:
         return LocalAgentServerBackend(
             agent_server_url=settings.agent_server_url,
             api_key=settings.agent_server_api_key,
+            cloud_api_url=settings.openhands_api_base_url or None,
         )
     else:
         if not api_key:

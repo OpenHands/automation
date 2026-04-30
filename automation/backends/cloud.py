@@ -3,9 +3,11 @@
 Creates a fresh Cloud sandbox for each automation run.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from tenacity import (
@@ -18,8 +20,13 @@ from tenacity import (
 
 from automation.backends.base import ExecutionBackend, ExecutionContext
 from automation.config import get_config
-from automation.utils.sandbox import delete_sandbox
+from automation.utils.api_key import get_api_key_for_automation_run
+from automation.utils.sandbox import cleanup_sandbox, delete_sandbox, verify_run_status
 
+
+if TYPE_CHECKING:
+    from automation.models import AutomationRun
+    from automation.utils.agent_server import VerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,59 @@ class CloudSandboxBackend(ExecutionBackend):
         """Delete the sandbox."""
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
+
+    async def get_api_key(self, run: AutomationRun) -> str:
+        """Mint a per-user API key via the service key."""
+        return await get_api_key_for_automation_run(run)
+
+    def build_env_vars(self, api_key: str) -> dict[str, str]:
+        """Build Cloud mode environment variables."""
+        return {
+            "OPENHANDS_API_KEY": api_key,
+            "OPENHANDS_CLOUD_API_URL": self.api_url,
+        }
+
+    async def verify_run(
+        self,
+        run: AutomationRun,
+        run_id: str,
+    ) -> VerificationResult:
+        """Verify run status via sandbox discovery."""
+        sandbox_id = run.sandbox_id
+        if not sandbox_id:
+            from automation.utils.agent_server import VerificationResult
+
+            return VerificationResult(
+                verified=False,
+                error="No sandbox_id available for verification",
+            )
+
+        # Get API key for sandbox access
+        api_key = await get_api_key_for_automation_run(run)
+
+        return await verify_run_status(
+            api_url=self.api_url,
+            api_key=api_key,
+            sandbox_id=sandbox_id,
+            keep_alive=run.keep_alive,
+            run_id=run_id,
+        )
+
+    async def cleanup_after_verification(
+        self,
+        run: AutomationRun,
+        run_id: str,
+    ) -> None:
+        """Clean up sandbox after verification failure."""
+        sandbox_id = run.sandbox_id
+        if not run.keep_alive and sandbox_id:
+            api_key = await get_api_key_for_automation_run(run)
+            await cleanup_sandbox(
+                api_url=self.api_url,
+                api_key=api_key,
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+            )
 
     async def _create_and_wait(
         self,
