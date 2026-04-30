@@ -181,9 +181,10 @@ async def get_event_automations(
     else:
         # PostgreSQL: Use ->> operator to extract text values from JSON
         # trigger->>'type' returns the text value of the 'type' key
+        # Note: .astext only works with JSONB, use op('->>') for generic JSON
         trigger_filter = and_(
-            Automation.trigger["type"].astext == literal("event"),
-            Automation.trigger["source"].astext == literal(source),
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
         )
 
     result = await session.execute(
