@@ -1,5 +1,8 @@
 """Tests for database module."""
 
+import os
+import tempfile
+
 import pytest
 
 from automation.db import (
@@ -100,3 +103,52 @@ class TestEngineResult:
         """Dispose works when connector is None."""
         result = _create_sqlite_engine("sqlite+aiosqlite:///:memory:")
         await result.dispose()  # Should not raise
+
+
+class TestSqliteMigrations:
+    """Tests for SQLite migration support."""
+
+    def test_migrations_run_on_sqlite(self, monkeypatch):
+        """Alembic migrations can run on SQLite via CLI."""
+        import subprocess
+
+        # Create a temporary SQLite database
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            db_url = f"sqlite:///{db_path}"
+
+            # Run alembic upgrade head via subprocess with the env var set
+            # This ensures the env.py picks up AUTOMATION_DB_URL correctly
+            env = os.environ.copy()
+            env["AUTOMATION_DB_URL"] = db_url
+
+            result = subprocess.run(
+                ["uv", "run", "alembic", "upgrade", "head"],
+                env=env,
+                capture_output=True,
+                text=True,
+                cwd="/workspace/project/automation",
+            )
+            assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
+
+            # Verify tables were created by checking the schema
+            from sqlalchemy import create_engine, inspect
+
+            engine = create_engine(db_url)
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+
+            # Verify all expected tables exist
+            assert "automations" in tables
+            assert "automation_runs" in tables
+            assert "tarball_uploads" in tables
+            assert "custom_webhooks" in tables
+            assert "alembic_version" in tables
+
+            engine.dispose()
+        finally:
+            # Clean up
+            if os.path.exists(db_path):
+                os.unlink(db_path)

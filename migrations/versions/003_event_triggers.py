@@ -6,6 +6,8 @@ This migration adds:
 2. event_payload column to automation_runs for storing trigger payloads
 3. signature_header column to custom_webhooks for configurable signature headers
 
+Cross-database compatible: works with both PostgreSQL and SQLite.
+
 Revision ID: 003
 Revises: 002
 Create Date: 2026-04-06
@@ -15,7 +17,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 
 revision: str = "003"
@@ -28,8 +29,8 @@ def upgrade() -> None:
     # 1. Create custom_webhooks table
     op.create_table(
         "custom_webhooks",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("org_id", UUID(as_uuid=True), nullable=False),
+        sa.Column("id", sa.Uuid, primary_key=True),
+        sa.Column("org_id", sa.Uuid, nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("source", sa.String(100), nullable=False),  # user-defined name
         sa.Column("webhook_secret", sa.String(255), nullable=False),
@@ -79,9 +80,10 @@ def upgrade() -> None:
     # Stores the webhook payload that triggered event-based automation runs.
     # For GitHub events: model_dump() of parsed Pydantic event
     # For custom webhooks: the raw payload dict
+    # Uses generic JSON for cross-database compatibility
     op.add_column(
         "automation_runs",
-        sa.Column("event_payload", JSONB, nullable=True),
+        sa.Column("event_payload", sa.JSON, nullable=True),
     )
 
 

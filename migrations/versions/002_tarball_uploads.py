@@ -1,5 +1,7 @@
 """Add tarball_uploads table for storing upload metadata.
 
+Cross-database compatible: works with both PostgreSQL and SQLite.
+
 Revision ID: 002
 Revises: 001
 Create Date: 2026-03-20
@@ -9,7 +11,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
 
 
 revision: str = "002"
@@ -21,9 +22,9 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.create_table(
         "tarball_uploads",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", UUID(as_uuid=True), nullable=False),
-        sa.Column("org_id", UUID(as_uuid=True), nullable=False),
+        sa.Column("id", sa.Uuid, primary_key=True),
+        sa.Column("user_id", sa.Uuid, nullable=False),
+        sa.Column("org_id", sa.Uuid, nullable=False),
         # User-provided metadata
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("description", sa.Text, nullable=True),

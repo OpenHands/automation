@@ -61,14 +61,24 @@ async def lifespan(app: FastAPI):
     # Set SQLite mode flag for scheduler/dispatcher to use
     set_sqlite_mode(engine_result.is_sqlite)
 
-    # Auto-create tables for SQLite (bypasses Alembic migrations)
-    # For PostgreSQL, migrations are managed via Alembic
+    # Auto-run migrations for SQLite on startup
+    # This ensures the schema is always up-to-date for local deployments
+    # For PostgreSQL, migrations are typically run separately via `alembic upgrade head`
     if engine_result.is_sqlite:
-        from automation.models import Base
+        from alembic import command
+        from alembic.config import Config
 
-        async with engine_result.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("SQLite tables created automatically")
+        alembic_cfg = Config()
+        alembic_cfg.set_main_option("script_location", "migrations")
+        # Set the database URL for Alembic to use (sync version)
+        db_url = settings.db_url
+        if db_url.startswith("sqlite+aiosqlite"):
+            db_url = db_url.replace("sqlite+aiosqlite", "sqlite", 1)
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+        # Run migrations synchronously (Alembic doesn't support async)
+        command.upgrade(alembic_cfg, "head")
+        logger.info("SQLite database migrations applied")
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
