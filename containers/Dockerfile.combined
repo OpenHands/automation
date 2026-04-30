@@ -28,11 +28,10 @@ FROM node:22-slim AS gui-frontend
 WORKDIR /build
 
 # Clone agent-server-gui repo
-# Pin to a specific commit for reproducibility
-ARG AGENT_SERVER_GUI_REF=main
+# Pin to a specific commit/branch for reproducibility
+ARG AGENT_SERVER_GUI_REF=fix/version-fallback-to-sdk-version
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && \
-    git clone --depth 50 https://github.com/OpenHands/agent-server-gui.git . && \
-    git checkout ${AGENT_SERVER_GUI_REF} && \
+    git clone --branch ${AGENT_SERVER_GUI_REF} --depth 1 https://github.com/OpenHands/agent-server-gui.git . && \
     rm -rf .git && \
     apt-get purge -y git && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
