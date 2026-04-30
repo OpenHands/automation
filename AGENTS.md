@@ -1,6 +1,18 @@
 # Automations Service
 
-Self-contained microservice that schedules and dispatches automation runs inside OpenHands Cloud sandboxes.
+Self-contained microservice that schedules and dispatches automation runs. Supports both OpenHands Cloud sandboxes (default) and self-hosted local agent servers.
+
+## Execution Modes
+
+| Feature | Cloud Mode (default) | Local Mode (self-hosted) |
+|---------|---------------------|--------------------------|
+| Execution environment | Fresh Cloud sandbox per run | Persistent local agent server |
+| Database | PostgreSQL (Cloud SQL) | SQLite or PostgreSQL |
+| Auth | Per-user API keys via service key | Config-level API key |
+| Sandbox cleanup | Automatic after run | Not needed (persistent server) |
+| Config flag | `AUTOMATION_AGENT_SERVER_URL` not set | `AUTOMATION_AGENT_SERVER_URL` set |
+
+See `docs/self-hosted.md` for detailed self-hosted deployment instructions.
 
 ## Repository Structure
 
@@ -11,9 +23,9 @@ automation/
 │   ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
 │   ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
 │   ├── constants.py        # Timeouts, polling intervals, sandbox constants
-│   ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
-│   ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
-│   ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│   ├── db.py               # Database engine and session factory (asyncpg / aiosqlite)
+│   ├── dispatcher.py       # Polls PENDING runs, dispatches to execution backend
+│   ├── execution.py        # Agent server interaction: upload → execute
 │   ├── logger.py           # JSON structured logging configuration
 │   ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
 │   ├── router.py           # API routes (CRUD, trigger, callback, runs list)
@@ -21,19 +33,29 @@ automation/
 │   ├── schemas.py          # Pydantic request/response schemas
 │   ├── uploads.py          # Tarball upload router
 │   ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│   ├── backends/           # Pluggable execution backends
+│   │   ├── base.py         # Abstract ExecutionBackend interface
+│   │   ├── cloud.py        # CloudSandboxBackend (creates Cloud sandbox per run)
+│   │   └── local.py        # LocalAgentServerBackend (uses persistent agent server)
 │   ├── storage/            # File storage abstraction
 │   │   ├── file_store.py   # Abstract base class for file storage
 │   │   └── google_cloud.py # GCS implementation
+│   ├── presets/            # Pre-built automation templates
+│   │   ├── prompt/         # Prompt-based automation (sdk_main.py, setup.sh)
+│   │   └── plugin/         # Plugin-based automation (sdk_main.py, setup.sh)
 │   └── utils/              # Utility modules
+│       ├── agent_server.py # Shared agent server queries (verification)
 │       ├── api_key.py      # Per-user API key minting via service key
 │       ├── cron.py         # Cron schedule utilities (next/prev fire time)
 │       ├── run.py          # Run status transitions (create, mark, update)
-│       ├── sandbox.py      # Sandbox verification and cleanup
+│       ├── sandbox.py      # Cloud sandbox verification and cleanup
 │       ├── tarball_validation.py  # Tarball path validation (internal/external)
 │       └── time.py         # UTC time helpers
 ├── containers/
 │   └── Dockerfile          # Container image definition
-├── migrations/              # Alembic migrations
+├── docs/
+│   └── self-hosted.md      # Self-hosted deployment guide
+├── migrations/              # Alembic migrations (cross-DB compatible)
 ├── scripts/
 │   ├── test_automation.py  # E2E test (sandbox lifecycle with live streaming)
 │   └── test_tarball/       # Tarball contents uploaded to sandbox during test
@@ -42,8 +64,10 @@ automation/
 ├── tests/                   # Unit tests (flat structure, no external deps)
 │   ├── integration/        # Integration tests (require OPENHANDS_API_KEY)
 │   ├── test_auth.py
+│   ├── test_backends.py    # Backend abstraction tests
 │   ├── test_dispatcher.py
 │   ├── test_execution.py
+│   ├── test_local_mode.py  # Local mode specific tests
 │   ├── test_router.py
 │   ├── test_scheduler.py
 │   └── ...
@@ -93,22 +117,27 @@ The Docker image includes the built frontend SPA and serves it via FastAPI.
 
 ## Dispatch Pipeline
 
-The dispatcher uses a **fire-and-forget** model. For each PENDING run:
+The dispatcher uses a **fire-and-forget** model via pluggable **execution backends**. For each PENDING run:
 
-1. **Fetch per-user API key** — `get_api_key_for_automation_run()` mints a key via the service key
-2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox
-3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
-4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
-5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
+1. **Get backend** — `get_backend()` returns `CloudSandboxBackend` or `LocalAgentServerBackend` based on config
+2. **Get API key** — `backend.get_api_key(run)` mints per-user key (Cloud) or returns config key (local)
+3. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside sandbox
+4. **Acquire execution context** — `backend.acquire(client)`:
+   - **Cloud**: Create sandbox → poll until RUNNING → extract agent-server URL
+   - **Local**: Return pre-configured agent server URL
+5. **Build env vars** — `backend.build_env_vars(api_key)` returns mode-specific env vars
+6. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
+7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
-7. **Return immediately** — Dispatcher does not wait for completion
+8. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
 - **Happy path**: SDK inside sandbox POSTs to `POST /api/v1/automations/runs/{id}/complete`
-- **Fallback**: Watchdog scans for runs past their `timeout_at` deadline, verifies status via sandbox bash history, and marks as COMPLETED or FAILED
+- **Fallback**: Watchdog calls `backend.verify_run()` for runs past their `timeout_at` deadline
 
-### Env Vars Injected Into Sandbox
+### Env Vars Injected Into Execution Environment
+
+**Cloud Mode:**
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
@@ -116,11 +145,24 @@ Completion is handled asynchronously:
 | `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`) | Cloud API base URL |
 | `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
+
+**Local Mode:**
+
+| Variable | Source | Purpose |
+|----------|--------|---------|
+| `AGENT_SERVER_URL` | Config (`agent_server_url`) | SDK uses RemoteWorkspace |
+| `OPENHANDS_CLOUD_API_URL` | Config (optional) | For hybrid mode LLM/secrets/MCP |
+| `OPENHANDS_API_KEY` | Config (optional) | For hybrid mode Cloud API auth |
+
+**Common (both modes):**
+
+| Variable | Source | Purpose |
+|----------|--------|---------|
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script |
 
-The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
+The preset scripts detect mode via `AGENT_SERVER_URL` presence and use `RemoteWorkspace` (local) or `OpenHandsCloudWorkspace` (Cloud) accordingly.
 
 ## Callback & Race Condition Handling
 
