@@ -126,12 +126,14 @@ if IS_LOCAL_MODE:
         if port_str.isdigit():
             port = int(port_str)
     print(f"  using OpenHandsCloudWorkspace (local mode) on port {port}")
+    # Use SESSION_API_KEY for callback auth (auth is disabled in local mode,
+    # but the SDK still sends a Bearer token, so we need a non-empty value)
     workspace_ctx = OpenHandsCloudWorkspace(
         local_agent_server_mode=True,
         agent_server_port=port,
-        # Empty strings for Cloud API (not used in local mode)
+        # Empty URL (not used in local mode), but provide a key for callback auth
         cloud_api_url="",
-        cloud_api_key="",
+        cloud_api_key=session_key or "local-mode",
     )
 else:
     # Cloud mode: connect to sandbox's agent server with full Cloud API features
