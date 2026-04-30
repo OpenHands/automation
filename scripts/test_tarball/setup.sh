@@ -1,11 +1,12 @@
 #!/bin/bash
-# Install the OpenHands SDK from main branch.
+# Install the OpenHands SDK from PyPI.
 set -e
 
-SDK_REF="main"
-echo "[setup] installing openhands SDK ($SDK_REF)"
+SDK_VERSION="1.19.1"
+echo "[setup] installing openhands SDK ($SDK_VERSION)"
+# Package order doesn't matter - pip resolves all dependencies together
 pip install -q --no-cache-dir \
-  "openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-workspace" \
-  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-sdk" \
-  "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-tools"
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}"
 echo "[setup] done"
