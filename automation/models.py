@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     DateTime,
     Enum,
@@ -15,7 +16,6 @@ from sqlalchemy import (
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from automation.utils import utcnow
@@ -56,7 +56,8 @@ class Automation(Base):
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Trigger config — for MVP, only cron is supported.
-    trigger: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
+    trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -151,7 +152,8 @@ class AutomationRun(Base):
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
     # For custom webhooks: the raw payload dict
-    event_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
+    event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

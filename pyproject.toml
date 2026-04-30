@@ -10,6 +10,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+  "aiosqlite>=0.20",
   "alembic>=1.14",
   "asyncpg>=0.30",
   "boto3>=1.35",

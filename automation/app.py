@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from automation.auth import create_http_client
 from automation.config import get_settings
-from automation.db import create_engine, create_session_factory
+from automation.db import create_engine, create_session_factory, set_sqlite_mode
 from automation.dispatcher import dispatcher_loop
 from automation.event_router import router as event_router
 from automation.logger import setup_all_loggers
@@ -57,6 +57,18 @@ async def lifespan(app: FastAPI):
     app.state.engine_result = engine_result
     app.state.engine = engine_result.engine
     app.state.session_factory = create_session_factory(engine_result.engine)
+
+    # Set SQLite mode flag for scheduler/dispatcher to use
+    set_sqlite_mode(engine_result.is_sqlite)
+
+    # Auto-create tables for SQLite (bypasses Alembic migrations)
+    # For PostgreSQL, migrations are managed via Alembic
+    if engine_result.is_sqlite:
+        from automation.models import Base
+
+        async with engine_result.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("SQLite tables created automatically")
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()

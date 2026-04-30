@@ -1,8 +1,12 @@
 """Database engine and session management.
 
-Follows the same patterns as OpenHands enterprise:
-- asyncpg for PostgreSQL
-- GCP Cloud SQL connector for production
+Supports two database backends:
+- PostgreSQL (asyncpg): Default for cloud deployments
+- SQLite (aiosqlite): For local/self-hosted deployments
+
+The backend is selected based on the AUTOMATION_DB_URL setting:
+- If db_url starts with "sqlite": Use SQLite
+- Otherwise: Use PostgreSQL (with optional GCP Cloud SQL connector)
 """
 
 import logging
@@ -25,12 +29,18 @@ from automation.config import ServiceSettings, get_config
 logger = logging.getLogger("automation.db")
 
 
+def is_sqlite_url(url: str) -> bool:
+    """Check if a database URL is for SQLite."""
+    return url.startswith("sqlite")
+
+
 @dataclass
 class EngineResult:
     """Result of create_engine containing the engine and optional connector."""
 
     engine: AsyncEngine
     connector: Any = None  # google.cloud.sql.connector.Connector when using GCP
+    is_sqlite: bool = False
 
     async def dispose(self) -> None:
         """Dispose the engine and close the connector if present."""
@@ -40,7 +50,12 @@ class EngineResult:
 
 
 async def create_engine(settings: ServiceSettings | None = None) -> EngineResult:
-    """Create a new PostgreSQL database engine based on settings.
+    """Create a database engine based on settings.
+
+    Supports three configurations (checked in order):
+    1. db_url with SQLite: Use aiosqlite for local deployments
+    2. gcp_db_instance: Use Cloud SQL connector for GCP
+    3. Default: Use asyncpg with host/port config
 
     Returns an EngineResult containing the engine and optional GCP connector.
     Call result.dispose() on shutdown to properly clean up resources.
@@ -48,9 +63,25 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     if settings is None:
         settings = get_config().service
 
+    # 1. Check for explicit db_url (supports SQLite for local mode)
+    if settings.db_url:
+        if is_sqlite_url(settings.db_url):
+            return _create_sqlite_engine(settings.db_url)
+        # PostgreSQL URL provided directly
+        engine = create_async_engine(
+            settings.db_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=True,
+        )
+        return EngineResult(engine=engine, is_sqlite=False)
+
+    # 2. GCP Cloud SQL connector
     if settings.gcp_db_instance:
         return await _create_gcp_engine(settings)
 
+    # 3. Default: PostgreSQL with host/port config
     url = URL.create(
         "postgresql+asyncpg",
         username=settings.db_user,
@@ -66,7 +97,30 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
         pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
     )
-    return EngineResult(engine=engine)
+    return EngineResult(engine=engine, is_sqlite=False)
+
+
+def _create_sqlite_engine(db_url: str) -> EngineResult:
+    """Create SQLite engine for local deployments.
+
+    SQLite configuration notes:
+    - Uses aiosqlite driver for async support
+    - No connection pooling (SQLite handles this internally)
+    - check_same_thread=False required for async usage
+    """
+    # Ensure the URL uses aiosqlite driver
+    if not db_url.startswith("sqlite+aiosqlite"):
+        db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+
+    engine = create_async_engine(
+        db_url,
+        # SQLite-specific settings
+        connect_args={"check_same_thread": False},
+        # No pooling for SQLite - it handles this internally
+        pool_pre_ping=True,
+    )
+    logger.info("Created SQLite engine: %s", db_url.split("?")[0])
+    return EngineResult(engine=engine, is_sqlite=True)
 
 
 async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
@@ -107,6 +161,28 @@ async def _create_gcp_engine(settings: ServiceSettings) -> EngineResult:
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     """Create a session factory for the given engine."""
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# Module-level flag set after engine creation to indicate SQLite usage.
+# Used by scheduler/dispatcher to skip PostgreSQL-specific features like
+# FOR UPDATE SKIP LOCKED (not supported by SQLite).
+_is_sqlite: bool = False
+
+
+def set_sqlite_mode(is_sqlite: bool) -> None:
+    """Set the SQLite mode flag. Called during app startup."""
+    global _is_sqlite
+    _is_sqlite = is_sqlite
+
+
+def using_sqlite() -> bool:
+    """Check if the database backend is SQLite.
+
+    Returns True when running with SQLite, which affects:
+    - FOR UPDATE SKIP LOCKED is skipped (not supported by SQLite)
+    - Single-process mode is assumed (no row locking needed)
+    """
+    return _is_sqlite
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
