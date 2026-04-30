@@ -46,8 +46,8 @@ RUN apt-get update && \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-# Copy agent server from SDK image
-COPY --from=agent-server /agent-server /agent-server
+# Copy agent server binary from SDK image (it's a compiled standalone binary)
+COPY --from=agent-server /usr/local/bin/openhands-agent-server /usr/local/bin/openhands-agent-server
 
 # Install automation service
 COPY pyproject.toml ./
