@@ -61,30 +61,29 @@ RUN uv pip install --system .
 # Copy built frontend assets
 COPY --from=frontend-build /frontend/build /app/frontend-dist
 
-# Copy supervisord configuration
+# Copy supervisord configuration and entrypoint
 COPY containers/supervisord.conf /etc/supervisor/supervisord.conf
+COPY containers/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Create directories for data persistence
 RUN mkdir -p /data /workspace/runs && \
     chmod 755 /data /workspace
 
 # Pre-configure for local mode (all can be overridden at runtime)
+# NOTE: Sensitive defaults (API keys, auth settings) are set in entrypoint.sh
+#       to avoid baking them into image layers.
 ENV AUTOMATION_AGENT_SERVER_URL=http://localhost:3000
-ENV AUTOMATION_AGENT_SERVER_API_KEY=local-embedded
 ENV AUTOMATION_DB_URL=sqlite+aiosqlite:////data/automations.db
 ENV AUTOMATION_BASE_URL=http://localhost:8000
 ENV AUTOMATION_WORKSPACE_BASE=/workspace
 ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
-
-# Auth bypass for self-hosted mode (no OpenHands Cloud auth required)
-ENV AUTOMATION_AUTH_DISABLED=true
 
 # Local file storage for tarballs (instead of GCS/S3)
 ENV FILE_STORE=local
 ENV LOCAL_STORAGE_PATH=/data/storage
 
 # Agent server configuration
-ENV SESSION_API_KEY=local-embedded
 ENV AGENT_SERVER_PORT=3000
 
 # Volumes for data persistence and workspace mounting
@@ -98,5 +97,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/automation/health || exit 1
 
-# Use supervisord to run both services
+# Entrypoint sets secure defaults, then runs the command
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
