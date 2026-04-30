@@ -11,7 +11,11 @@ set -e
 export AUTOMATION_AGENT_SERVER_API_KEY="${AUTOMATION_AGENT_SERVER_API_KEY:-local-embedded}"
 
 # Session API key for agent server authentication
-export SESSION_API_KEY="${SESSION_API_KEY:-local-embedded}"
+# Note: This is set via supervisord environment for agent-server ONLY.
+# Do NOT export here - it would require X-Session-API-Key header for all
+# browser requests to OpenHands GUI, breaking the frontend.
+# The value is passed to supervisord as AGENT_SERVER_SESSION_API_KEY
+export AGENT_SERVER_SESSION_API_KEY="${SESSION_API_KEY:-local-embedded}"
 
 # Auth bypass for self-hosted mode (no OpenHands Cloud auth required)
 export AUTOMATION_AUTH_DISABLED="${AUTOMATION_AUTH_DISABLED:-true}"
