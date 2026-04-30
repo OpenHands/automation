@@ -92,11 +92,16 @@ class LocalAgentServerBackend(ExecutionBackend):
 
     def build_env_vars(
         self,
-        api_key: str,  # noqa: ARG002
+        api_key: str,
     ) -> dict[str, str]:
         """Build local mode environment variables."""
         env_vars = {
             "AGENT_SERVER_URL": self.agent_server_url,
+            # Set a dummy SANDBOX_ID for SDK compatibility
+            # The SDK's load_skills_from_agent_server requires this to be set
+            "SANDBOX_ID": "local-mode",
+            # Session key for agent-server auth (same key used for all requests)
+            "SESSION_API_KEY": api_key,
         }
         # Optionally include Cloud API URL for LLM/secrets access
         if self.cloud_api_url:

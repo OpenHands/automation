@@ -5,20 +5,22 @@ This script is auto-generated from a user's prompt. It supports two modes:
 **Cloud Mode** (default):
   Uses OpenHandsCloudWorkspace connected to OpenHands Cloud API.
   Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
+  LLM/secrets/MCP fetched from user's Cloud account via workspace methods.
 
 **Local Mode** (self-hosted):
-  Uses APIRemoteWorkspace connected to a local agent server.
+  Uses OpenHandsCloudWorkspace with local_agent_server_mode=True.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
-  Optional: OPENHANDS_CLOUD_API_URL for LLM/secrets/MCP config via Cloud API
+  LLM configured from env vars: OPENHANDS_LLM_MODEL, OPENHANDS_LLM_API_KEY, OPENHANDS_LLM_BASE_URL
+  No secrets/MCP support in local mode (configure at container level).
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
   2. Opens the appropriate workspace EARLY (ensures callback on any failure)
   3. Clones repositories if configured (via workspace.clone_repos())
   4. Loads ALL skills via workspace.load_skills_from_agent_server()
-  5. Fetches LLM config via workspace.get_llm()
-  6. Fetches secrets via workspace.get_secrets()
-  7. Fetches MCP config via workspace.get_mcp_config()
+  5. Gets LLM config (Cloud: workspace.get_llm(), Local: env vars)
+  6. Gets secrets if available (Cloud only)
+  7. Gets MCP config if available (Cloud only)
   8. Gets default agent with tools and condenser via get_default_agent()
   9. Creates a Conversation and injects secrets
   10. Sends the user's prompt (with event context if available) and runs
@@ -36,8 +38,10 @@ Env vars (Cloud mode - all required):
 
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
-  OPENHANDS_CLOUD_API_URL    - optional, for LLM/secrets/MCP via Cloud API
-  OPENHANDS_API_KEY          - optional, required if using Cloud API features
+  SESSION_API_KEY            - API key for agent server auth (optional)
+  OPENHANDS_LLM_MODEL        - LLM model identifier (e.g., anthropic/claude-sonnet-4-20250514)
+  OPENHANDS_LLM_API_KEY      - LLM provider API key
+  OPENHANDS_LLM_BASE_URL     - optional, custom LLM base URL
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
@@ -61,17 +65,30 @@ api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
+# Local mode env vars
+llm_model = os.environ.get("OPENHANDS_LLM_MODEL", "")
+llm_api_key = os.environ.get("OPENHANDS_LLM_API_KEY", "")
+llm_base_url = os.environ.get("OPENHANDS_LLM_BASE_URL", "")
+
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
 
 print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
-    # Local mode: only AGENT_SERVER_URL is required
+    # Local mode: AGENT_SERVER_URL + LLM config required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
-    print(f"  OPENHANDS_CLOUD_API_URL: {'OK' if api_url else 'NONE (no Cloud features)'}")
-    print(f"  OPENHANDS_API_KEY: {'OK' if api_key else 'NONE (no Cloud features)'}")
+    print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
+    print(f"  OPENHANDS_LLM_MODEL: {'OK' if llm_model else 'MISSING'}")
+    print(f"  OPENHANDS_LLM_API_KEY: {'OK' if llm_api_key else 'MISSING'}")
+    print(f"  OPENHANDS_LLM_BASE_URL: {'OK' if llm_base_url else 'NONE (using default)'}")
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
+        sys.exit(1)
+    if not llm_model or not llm_api_key:
+        print(
+            "FAIL: OPENHANDS_LLM_MODEL and OPENHANDS_LLM_API_KEY required for local mode",
+            file=sys.stderr,
+        )
         sys.exit(1)
 else:
     # Cloud mode: all Cloud env vars are required
@@ -92,25 +109,32 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk import Conversation, LLM, RemoteConversation
 from openhands.tools import get_default_agent
-
-if IS_LOCAL_MODE:
-    from openhands.workspace import APIRemoteWorkspace
-else:
-    from openhands.workspace import OpenHandsCloudWorkspace
+from openhands.workspace import OpenHandsCloudWorkspace
 
 # Create workspace based on mode
+# Both modes use OpenHandsCloudWorkspace with local_agent_server_mode=True
+# This provides full workspace functionality (skills, commands, etc.)
 print("\n=== SDK WORKSPACE ===")
 if IS_LOCAL_MODE:
-    print(f"  using APIRemoteWorkspace at {agent_server_url}")
-    workspace_ctx = APIRemoteWorkspace(
-        agent_server_url=agent_server_url,
-        # Optional Cloud API integration for LLM/secrets/MCP
-        cloud_api_url=api_url if api_url else None,
-        cloud_api_key=api_key if api_key else None,
+    # Local mode: connect to local agent server with Cloud API features disabled
+    # Extract port from agent_server_url (e.g., "http://localhost:3000" -> 3000)
+    port = 3000
+    if ":" in agent_server_url:
+        port_str = agent_server_url.rsplit(":", 1)[-1].rstrip("/")
+        if port_str.isdigit():
+            port = int(port_str)
+    print(f"  using OpenHandsCloudWorkspace (local mode) on port {port}")
+    workspace_ctx = OpenHandsCloudWorkspace(
+        local_agent_server_mode=True,
+        agent_server_port=port,
+        # Empty strings for Cloud API (not used in local mode)
+        cloud_api_url="",
+        cloud_api_key="",
     )
 else:
+    # Cloud mode: connect to sandbox's agent server with full Cloud API features
     print(f"  using OpenHandsCloudWorkspace at {api_url}")
     workspace_ctx = OpenHandsCloudWorkspace(
         local_agent_server_mode=True,
@@ -196,34 +220,50 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # get_llm() — fetches LLM config from the user's SaaS account
+    # Get LLM config - different approach for local vs Cloud mode
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm()
-    print(f"  model: {llm.model}")
+    if IS_LOCAL_MODE:
+        # Local mode: create LLM directly from env vars
+        llm = LLM(
+            model=llm_model,
+            api_key=llm_api_key,
+            base_url=llm_base_url if llm_base_url else None,
+        )
+        print(f"  model: {llm.model} (from env vars)")
+    else:
+        # Cloud mode: fetch from user's SaaS account
+        llm = workspace.get_llm()
+        print(f"  model: {llm.model} (from Cloud API)")
     print(f"  api_key present: {bool(llm.api_key)}")
 
-    # get_secrets() — builds LookupSecret references for the user's secrets
+    # get_secrets() — only available in Cloud mode
     print("\n=== GET_SECRETS ===")
     secrets = {}
-    try:
-        secrets = workspace.get_secrets()
-        print(f"  available: {list(secrets.keys()) or '(none)'}")
-    except Exception as e:
-        # Not a hard failure — user may not have secrets configured
-        print(f"  get_secrets() failed (ok if no secrets): {e}")
+    if IS_LOCAL_MODE:
+        print("  skipped (not available in local mode)")
+    else:
+        try:
+            secrets = workspace.get_secrets()
+            print(f"  available: {list(secrets.keys()) or '(none)'}")
+        except Exception as e:
+            # Not a hard failure — user may not have secrets configured
+            print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    # get_mcp_config() — fetches MCP server configuration from user's account
+    # get_mcp_config() — only available in Cloud mode
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = None
-    try:
-        mcp_config = workspace.get_mcp_config()
-        if mcp_config and mcp_config.get("mcpServers"):
-            print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
-        else:
-            print("  no MCP servers configured")
-    except Exception as e:
-        # Not a hard failure — user may not have MCP configured
-        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+    if IS_LOCAL_MODE:
+        print("  skipped (not available in local mode)")
+    else:
+        try:
+            mcp_config = workspace.get_mcp_config()
+            if mcp_config and mcp_config.get("mcpServers"):
+                print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
+            else:
+                print("  no MCP servers configured")
+        except Exception as e:
+            # Not a hard failure — user may not have MCP configured
+            print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
