@@ -14,6 +14,22 @@ Self-contained microservice that schedules and dispatches automation runs. Suppo
 
 See `docs/self-hosted.md` for detailed self-hosted deployment instructions.
 
+### Docker Images
+
+| Image | Contents | Use Case |
+|-------|----------|----------|
+| `ghcr.io/openhands/automation:latest` | Automation service only | Cloud/production deployments |
+| `ghcr.io/openhands/automation-local:latest` | Automation + Agent Server + SQLite | Local/self-hosted deployments |
+
+**Quick Start (self-hosted):**
+```bash
+docker run -p 8000:8000 \
+  -v ./workspace:/workspace \
+  -e OPENHANDS_LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
+  -e OPENHANDS_LLM_API_KEY=sk-ant-... \
+  ghcr.io/openhands/automation-local:latest
+```
+
 ## Repository Structure
 
 ```

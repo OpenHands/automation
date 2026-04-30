@@ -14,97 +14,205 @@ The automation service supports two execution modes:
 | Auth | Per-user API keys via service key | Config-level API key |
 | Sandbox cleanup | Automatic after run | Not needed (persistent server) |
 
-## Prerequisites
+---
+
+## Quick Start with Docker (Recommended)
+
+The easiest way to run self-hosted is using the combined Docker image that packages everything:
+- Automation service (scheduler, dispatcher, API)
+- Agent server (from OpenHands SDK)
+- SQLite database
+
+### 1. Create Environment File
+
+```bash
+# Copy the example file
+cp .env.local.example .env.local
+
+# Edit with your LLM configuration
+cat > .env.local << 'EOF'
+OPENHANDS_LLM_MODEL=anthropic/claude-sonnet-4-20250514
+OPENHANDS_LLM_API_KEY=sk-ant-your-key-here
+EOF
+```
+
+### 2. Run the Combined Container
+
+```bash
+docker run -d \
+  --name automation \
+  -p 8000:8000 \
+  -v ./workspace:/workspace \
+  -v ./data:/data \
+  --env-file .env.local \
+  ghcr.io/openhands/automation-local:latest
+```
+
+### 3. Verify the Service
+
+```bash
+# Wait for startup (about 10 seconds)
+sleep 10
+
+# Health check
+curl http://localhost:8000/api/automation/health
+
+# Open the UI
+open http://localhost:8000/automations
+```
+
+### What's in the Container?
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Combined Local Container                        │
+│                                                              │
+│  ┌──────────────────┐    ┌──────────────────────────┐       │
+│  │  Automation      │    │  Agent Server            │       │
+│  │  Service :8000   │───▶│  (from SDK) :3000        │       │
+│  │                  │    │                          │       │
+│  │  - Scheduler     │    │  - Bash execution        │       │
+│  │  - Dispatcher    │    │  - File operations       │       │
+│  │  - API routes    │    │  - SDK workspace         │       │
+│  └──────────────────┘    └──────────────────────────┘       │
+│                                                              │
+│  /workspace ──── user's project files (volume)              │
+│  /data/automations.db ──── SQLite database (volume)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Building the Docker Image Locally
+
+If you want to build the combined image yourself:
+
+### Prerequisites
+
+- Docker 20.10+
+- Git
+
+### Build Steps
+
+```bash
+# Clone the repository
+git clone https://github.com/OpenHands/automation.git
+cd automation
+
+# Build the combined local image
+docker build -f containers/Dockerfile.local -t automation-local:dev .
+
+# Run your local build
+docker run -d \
+  --name automation \
+  -p 8000:8000 \
+  -v ./workspace:/workspace \
+  -v ./data:/data \
+  -e OPENHANDS_LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
+  -e OPENHANDS_LLM_API_KEY=sk-ant-your-key-here \
+  automation-local:dev
+```
+
+### Build Options
+
+The `Dockerfile.local` uses multi-stage builds:
+
+1. **Stage 1** (`frontend-build`): Builds the frontend SPA
+2. **Stage 2** (`agent-server`): Pulls the agent server from `ghcr.io/openhands/agent-server`
+3. **Stage 3**: Combines everything into the final image
+
+### Troubleshooting Build Issues
+
+**"Cannot pull agent-server image"**
+```bash
+# Try pulling the base image manually first
+docker pull ghcr.io/openhands/agent-server:latest-python
+
+# If that fails, check your Docker authentication
+docker login ghcr.io
+```
+
+**"Frontend build fails"**
+```bash
+# Ensure the frontend directory exists
+ls frontend/package.json
+
+# If no frontend, build without it (API only mode)
+# Edit Dockerfile.local to remove the frontend stage
+```
+
+---
+
+## Manual Installation (Without Docker)
+
+For development or when Docker isn't available.
+
+### Prerequisites
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv) package manager
-- A running OpenHands agent server (see [Running Agent Server](#running-agent-server))
+- A running OpenHands agent server
 
-## Quick Start
-
-### 1. Clone the Repository
+### 1. Clone and Install
 
 ```bash
 git clone https://github.com/OpenHands/automation.git
 cd automation
-```
-
-### 2. Install Dependencies
-
-```bash
 uv sync
 ```
 
-### 3. Configure Environment
-
-Create a `.env` file or export environment variables:
+### 2. Configure Environment
 
 ```bash
 # Required: Agent server connection
 export AUTOMATION_AGENT_SERVER_URL="http://localhost:3000"
 export AUTOMATION_AGENT_SERVER_API_KEY="your-agent-server-key"
 
-# Required: SQLite database (or use PostgreSQL)
+# Required: SQLite database
 export AUTOMATION_DB_URL="sqlite+aiosqlite:///./automation.db"
 
-# Required: Base URL for callbacks (use your external URL)
+# Required: Base URL for callbacks
 export AUTOMATION_BASE_URL="http://localhost:8000/api/automation"
 
-# Optional: OpenHands Cloud API for LLM/secrets/MCP (hybrid mode)
-# export AUTOMATION_OPENHANDS_API_BASE_URL="https://app.all-hands.dev"
-# export OPENHANDS_API_KEY="sk-oh-..."
+# Required: LLM configuration (for preset automations)
+export OPENHANDS_LLM_MODEL="anthropic/claude-sonnet-4-20250514"
+export OPENHANDS_LLM_API_KEY="sk-ant-..."
 ```
 
-### 4. Start the Service
+### 3. Start Agent Server
+
+The agent server is part of the [OpenHands SDK](https://github.com/OpenHands/software-agent-sdk):
+
+```bash
+# Option A: Run from SDK repository
+git clone https://github.com/OpenHands/software-agent-sdk.git
+cd software-agent-sdk/openhands-agent-server
+uv sync
+SESSION_API_KEY=your-key uv run python -m openhands.agent_server --port 3000
+```
+
+```bash
+# Option B: Use Docker
+docker run -p 3000:3000 \
+  -e SESSION_API_KEY=your-key \
+  ghcr.io/openhands/agent-server:latest-python
+```
+
+### 4. Start Automation Service
 
 ```bash
 uv run uvicorn automation.app:app --host 0.0.0.0 --port 8000
 ```
 
-The service will:
-- Create SQLite tables automatically on first startup
-- Start the scheduler (creates PENDING runs from cron triggers)
-- Start the dispatcher (executes PENDING runs on the agent server)
-- Start the watchdog (marks stale RUNNING runs as FAILED)
-
-### 5. Verify the Service
+### 5. Verify
 
 ```bash
 # Health check
 curl http://localhost:8000/api/automation/health
 
-# List automations (requires auth in production)
+# List automations
 curl http://localhost:8000/api/automation/v1
 ```
-
----
-
-## Running Agent Server
-
-The automation service dispatches work to an OpenHands agent server. You need a running agent server accessible via HTTP.
-
-### Option A: Run Agent Server Locally
-
-```bash
-# Clone OpenHands
-git clone https://github.com/All-Hands-AI/OpenHands.git
-cd OpenHands
-
-# Start agent server (see OpenHands docs for full setup)
-poetry run python -m openhands.server
-```
-
-The agent server typically runs on `http://localhost:3000`.
-
-### Option B: Use Docker
-
-```bash
-docker run -p 3000:3000 ghcr.io/all-hands-ai/openhands:latest
-```
-
-### Option C: Use Existing Deployment
-
-Point `AUTOMATION_AGENT_SERVER_URL` to any accessible OpenHands agent server.
 
 ---
 

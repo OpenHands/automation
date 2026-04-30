@@ -1,0 +1,95 @@
+# Self-hosted automation service — combined image with agent server + SQLite
+#
+# This image bundles everything needed for local/self-hosted deployments:
+# - Automation service (scheduler, dispatcher, watchdog, API)
+# - Agent server from OpenHands SDK
+# - SQLite database (no external database required)
+#
+# Usage:
+#   docker run -p 8000:8000 \
+#     -v ./workspace:/workspace \
+#     -e OPENHANDS_LLM_MODEL=anthropic/claude-sonnet-4-20250514 \
+#     -e OPENHANDS_LLM_API_KEY=sk-ant-... \
+#     ghcr.io/openhands/automation-local:latest
+
+# ---- Stage 1: Build frontend ----
+FROM node:24-slim AS frontend-build
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
+
+# ---- Stage 2: Agent server from SDK ----
+FROM ghcr.io/openhands/agent-server:latest-python AS agent-server
+
+# ---- Stage 3: Combined local image ----
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+ENV PYTHONPATH='/app'
+
+LABEL org.opencontainers.image.title="OpenHands Automation (Self-Hosted)"
+LABEL org.opencontainers.image.description="Self-contained automation service with embedded agent server"
+LABEL org.opencontainers.image.source="https://github.com/OpenHands/automation"
+
+# Install system deps
+# - supervisor: process manager for running both services
+# - libpq-dev: PostgreSQL client libs (optional, for hybrid mode)
+# - git: for SDK git dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        supervisor \
+        libpq-dev \
+        git \
+        curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv
+
+# Copy agent server from SDK image
+COPY --from=agent-server /agent-server /agent-server
+
+# Install automation service
+COPY pyproject.toml ./
+COPY README.md ./
+COPY automation/ automation/
+COPY migrations/ migrations/
+COPY alembic.ini .
+
+RUN uv pip install --system .
+
+# Copy built frontend assets
+COPY --from=frontend-build /frontend/build /app/frontend-dist
+
+# Copy supervisord configuration
+COPY containers/supervisord.conf /etc/supervisor/supervisord.conf
+
+# Create directories for data persistence
+RUN mkdir -p /data /workspace/runs && \
+    chmod 755 /data /workspace
+
+# Pre-configure for local mode (all can be overridden at runtime)
+ENV AUTOMATION_AGENT_SERVER_URL=http://localhost:3000
+ENV AUTOMATION_AGENT_SERVER_API_KEY=local-embedded
+ENV AUTOMATION_DB_URL=sqlite+aiosqlite:////data/automations.db
+ENV AUTOMATION_BASE_URL=http://localhost:8000/api/automation
+ENV AUTOMATION_WORKSPACE_BASE=/workspace
+ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
+
+# Agent server configuration
+ENV SESSION_API_KEY=local-embedded
+ENV AGENT_SERVER_PORT=3000
+
+# Volumes for data persistence and workspace mounting
+VOLUME /data
+VOLUME /workspace
+
+# Expose automation service API (agent server is internal only)
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/api/automation/health || exit 1
+
+# Use supervisord to run both services
+CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
