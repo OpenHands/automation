@@ -105,8 +105,8 @@ RUN rm -f /etc/nginx/sites-enabled/default
 # OpenHands App Server configuration
 # Use 'local' runtime for self-hosted deployments (not docker/kubernetes)
 ENV RUNTIME=local
-ENV OH_PERSISTENCE_DIR=/data/openhands
-ENV FILE_STORE_PATH=/data/sessions
+ENV OH_PERSISTENCE_DIR=/root/.openhands
+ENV FILE_STORE_PATH=/root/.openhands
 ENV SERVE_FRONTEND=false
 # Skip browser dependency check since Chromium isn't installed in this image
 # Browser operations will fail but basic functionality works
