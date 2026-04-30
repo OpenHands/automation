@@ -1,16 +1,16 @@
 #!/bin/bash
-# Install the OpenHands SDK from release tag.
+# Install the OpenHands SDK from PyPI.
 #
 # Note: Repository cloning is handled by the SDK's
 # OpenHandsCloudWorkspace.clone_repos() method inside main.py.
 set -e
 
-SDK_REF="v1.19.1"
+SDK_VERSION="1.19.1"
 
-echo "[setup] Installing OpenHands SDK (version: $SDK_REF)"
+echo "[setup] Installing OpenHands SDK (version: $SDK_VERSION)"
 pip install -q --no-cache-dir \
-  "openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-workspace" \
-  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-sdk" \
-  "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-tools"
+  "openhands-workspace>=${SDK_VERSION}" \
+  "openhands-sdk>=${SDK_VERSION}" \
+  "openhands-tools>=${SDK_VERSION}"
 
 echo "[setup] Done"
