@@ -7,7 +7,7 @@ This script is auto-generated from a user's prompt. It supports two modes:
   Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
 
 **Local Mode** (self-hosted):
-  Uses RemoteWorkspace connected to a local agent server.
+  Uses APIRemoteWorkspace connected to a local agent server.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
   Optional: OPENHANDS_CLOUD_API_URL for LLM/secrets/MCP config via Cloud API
 
@@ -96,15 +96,15 @@ from openhands.sdk import Conversation, RemoteConversation
 from openhands.tools import get_default_agent
 
 if IS_LOCAL_MODE:
-    from openhands.workspace import RemoteWorkspace
+    from openhands.workspace import APIRemoteWorkspace
 else:
     from openhands.workspace import OpenHandsCloudWorkspace
 
 # Create workspace based on mode
 print("\n=== SDK WORKSPACE ===")
 if IS_LOCAL_MODE:
-    print(f"  using RemoteWorkspace at {agent_server_url}")
-    workspace_ctx = RemoteWorkspace(
+    print(f"  using APIRemoteWorkspace at {agent_server_url}")
+    workspace_ctx = APIRemoteWorkspace(
         agent_server_url=agent_server_url,
         # Optional Cloud API integration for LLM/secrets/MCP
         cloud_api_url=api_url if api_url else None,
