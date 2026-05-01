@@ -58,13 +58,23 @@ import httpx
 
 
 def fetch_agent_server_settings(base_url: str, api_key: str | None = None) -> dict:
-    """Fetch settings from agent-server's /api/settings endpoint."""
+    """Fetch settings from agent-server's /api/settings endpoint.
+
+    Uses expose_secrets=true to get actual LLM API key values instead of
+    masked placeholders ("**********").
+    """
     headers = {}
     if api_key:
         headers["X-Session-API-Key"] = api_key
 
     try:
-        response = httpx.get(f"{base_url.rstrip('/')}/api/settings", headers=headers, timeout=10)
+        # Request exposed secrets for LLM API key
+        response = httpx.get(
+            f"{base_url.rstrip('/')}/api/settings",
+            params={"expose_secrets": "true"},
+            headers=headers,
+            timeout=10,
+        )
         response.raise_for_status()
         return response.json()
     except Exception as e:

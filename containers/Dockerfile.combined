@@ -51,10 +51,10 @@ COPY frontend/ .
 ENV VITE_BASE_PATH=/automations
 RUN npm run build
 
-# ---- Stage 3: Agent server binary from SDK ----
-FROM ghcr.io/openhands/agent-server:latest-python AS agent-server
-
-# ---- Stage 4: Final combined image ----
+# ---- Stage 3: Final combined image ----
+# Note: We install agent-server from branch in the final image instead of using
+# the pre-built binary, because we need the feat/settings-persistence branch
+# for /api/settings endpoints.
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -76,8 +76,18 @@ RUN apt-get update && \
         git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy agent server binary from SDK image
-COPY --from=agent-server /usr/local/bin/openhands-agent-server /usr/local/bin/openhands-agent-server
+# ---- Install agent-server from SDK branch ----
+# Using feat/settings-persistence branch for /api/settings endpoints
+ARG SDK_REF=feat/settings-persistence
+RUN pip install --no-cache-dir \
+    "openhands-agent-server @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-agent-server" \
+    "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-sdk" \
+    "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-tools" \
+    libtmux
+
+# Create wrapper script for agent-server (the package entry point is 'agent-server')
+RUN echo '#!/bin/bash\nexec agent-server "$@"' > /usr/local/bin/openhands-agent-server && \
+    chmod +x /usr/local/bin/openhands-agent-server
 
 # ---- Create venv for Automation Service ----
 RUN python3 -m venv /app/automation-venv && \
