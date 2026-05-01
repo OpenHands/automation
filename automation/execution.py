@@ -426,12 +426,14 @@ async def dispatch_automation(
                 parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
                 exports = " && ".join(parts) + " && "
 
+            # Export env vars BEFORE setup.sh so it can detect execution mode
+            # (e.g., AGENT_SERVER_URL for local mode SDK installation)
             cmd = (
                 f"mkdir -p {WORK_DIR}"
                 f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
                 f" && cd {WORK_DIR}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
-                f" && {exports}{entrypoint}"
+                f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {entrypoint}"
             )
 
             logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
@@ -566,12 +568,14 @@ async def run_automation(
                 parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
                 exports = " && ".join(parts) + " && "
 
+            # Export env vars BEFORE setup.sh so it can detect execution mode
+            # (e.g., AGENT_SERVER_URL for local mode SDK installation)
             cmd = (
                 f"mkdir -p {WORK_DIR}"
                 f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
                 f" && cd {WORK_DIR}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
-                f" && {exports}{entrypoint}"
+                f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {entrypoint}"
             )
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
