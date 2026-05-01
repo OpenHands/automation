@@ -10,17 +10,17 @@ This script is auto-generated from a user's prompt. It supports two modes:
 **Local Mode** (self-hosted):
   Uses OpenHandsCloudWorkspace with local_agent_server_mode=True.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
-  LLM/secrets/MCP fetched from agent-server's persisted settings (via /api/settings).
-  Falls back to env vars: LLM_MODEL, LLM_API_KEY, LLM_BASE_URL if not configured.
+  LLM/secrets/MCP fetched from agent-server's persisted settings via workspace methods.
+  Falls back to env vars: LLM_MODEL, LLM_API_KEY, LLM_BASE_URL if workspace.get_llm() fails.
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
   2. Opens the appropriate workspace EARLY (ensures callback on any failure)
   3. Clones repositories if configured (via workspace.clone_repos())
   4. Loads ALL skills via workspace.load_skills_from_agent_server()
-  5. Gets LLM config (Cloud: workspace.get_llm(), Local: agent-server settings or env)
-  6. Gets secrets if available (both modes via agent-server or Cloud API)
-  7. Gets MCP config if available (both modes via agent-server or Cloud API)
+  5. Gets LLM config via workspace.get_llm() (works in both Cloud and Local modes)
+  6. Gets secrets via workspace.get_secrets() (works in both modes)
+  7. Gets MCP config via workspace.get_mcp_config() (works in both modes)
   8. Gets default agent with tools and condenser via get_default_agent()
   9. Creates a Conversation and injects secrets
   10. Sends the user's prompt (with event context if available) and runs
@@ -39,9 +39,9 @@ Env vars (Cloud mode - all required):
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
   SESSION_API_KEY            - API key for agent server auth (optional)
-  LLM_MODEL                  - fallback LLM model if not in saved settings
-  LLM_API_KEY                - fallback LLM API key if not in saved settings
-  LLM_BASE_URL               - fallback LLM base URL if not in saved settings
+  LLM_MODEL                  - fallback LLM model if workspace.get_llm() fails
+  LLM_API_KEY                - fallback LLM API key if workspace.get_llm() fails
+  LLM_BASE_URL               - fallback LLM base URL if workspace.get_llm() fails
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
@@ -53,66 +53,6 @@ import json
 import os
 import sys
 import time
-
-import httpx
-
-
-def fetch_agent_server_settings(base_url: str, api_key: str | None = None) -> dict:
-    """Fetch settings from agent-server's /api/settings endpoint.
-
-    Uses expose_secrets=true to get actual LLM API key values instead of
-    masked placeholders ("**********").
-    """
-    headers = {}
-    if api_key:
-        headers["X-Session-API-Key"] = api_key
-
-    try:
-        # Request exposed secrets for LLM API key
-        response = httpx.get(
-            f"{base_url.rstrip('/')}/api/settings",
-            params={"expose_secrets": "true"},
-            headers=headers,
-            timeout=10,
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"  Warning: Failed to fetch settings from agent-server: {e}")
-        return {}
-
-
-def fetch_agent_server_secrets(base_url: str, api_key: str | None = None) -> dict:
-    """Fetch secrets list from agent-server and resolve values."""
-    headers = {}
-    if api_key:
-        headers["X-Session-API-Key"] = api_key
-
-    secrets = {}
-    try:
-        # Get list of secrets
-        response = httpx.get(f"{base_url.rstrip('/')}/api/settings/secrets", headers=headers, timeout=10)
-        response.raise_for_status()
-        secrets_list = response.json().get("secrets", [])
-
-        # Fetch each secret value
-        for secret_info in secrets_list:
-            name = secret_info.get("name")
-            if name:
-                try:
-                    val_response = httpx.get(
-                        f"{base_url.rstrip('/')}/api/settings/secrets/{name}",
-                        headers=headers,
-                        timeout=10
-                    )
-                    val_response.raise_for_status()
-                    secrets[name] = val_response.text
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"  Warning: Failed to fetch secrets from agent-server: {e}")
-
-    return secrets
 
 
 # Detect execution mode based on AGENT_SERVER_URL presence
@@ -276,76 +216,64 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Get LLM config - different approach for local vs Cloud mode
+    # Get LLM config via workspace.get_llm() (works in both Cloud and Local modes)
+    # In local mode, workspace fetches from agent-server's /api/settings endpoint
+    # Falls back to env vars if workspace.get_llm() doesn't return valid config
     print("\n=== GET_LLM ===")
-    if IS_LOCAL_MODE:
-        # Local mode: try to get LLM from agent-server settings, fall back to env vars
-        saved_settings = fetch_agent_server_settings(agent_server_url, session_key)
-        agent_settings = saved_settings.get("agent_settings", {})
-        llm_settings = agent_settings.get("llm", {})
-
-        # Extract LLM config from saved settings or use env var fallbacks
-        llm_model = llm_settings.get("model") or llm_model_env
-        llm_api_key = llm_settings.get("api_key") or llm_api_key_env
-        llm_base_url = llm_settings.get("base_url") or llm_base_url_env
-
-        if not llm_model or not llm_api_key:
-            print("FAIL: LLM_MODEL and LLM_API_KEY required (not in saved settings or env)", file=sys.stderr)
-            sys.exit(1)
-
-        llm = LLM(
-            model=llm_model,
-            api_key=llm_api_key,
-            base_url=llm_base_url if llm_base_url else None,
-        )
-        source = "saved settings" if llm_settings.get("model") else "env vars"
-        print(f"  model: {llm.model} (from {source})")
-    else:
-        # Cloud mode: fetch from user's SaaS account
+    llm = None
+    try:
         llm = workspace.get_llm()
-        print(f"  model: {llm.model} (from Cloud API)")
+        if llm.model and llm.api_key:
+            source = "agent-server settings" if IS_LOCAL_MODE else "Cloud API"
+            print(f"  model: {llm.model} (from {source})")
+        else:
+            # workspace.get_llm() returned but missing required fields
+            llm = None
+    except Exception as e:
+        print(f"  workspace.get_llm() failed: {e}")
+
+    # Fallback to env vars in local mode if workspace.get_llm() didn't work
+    if llm is None and IS_LOCAL_MODE:
+        if llm_model_env and llm_api_key_env:
+            llm = LLM(
+                model=llm_model_env,
+                api_key=llm_api_key_env,
+                base_url=llm_base_url_env if llm_base_url_env else None,
+            )
+            print(f"  model: {llm.model} (from env vars fallback)")
+        else:
+            print("FAIL: LLM config not in saved settings and env vars not set", file=sys.stderr)
+            sys.exit(1)
+    elif llm is None:
+        print("FAIL: workspace.get_llm() failed and no fallback available", file=sys.stderr)
+        sys.exit(1)
+
     print(f"  api_key present: {bool(llm.api_key)}")
 
-    # get_secrets() — fetch from agent-server in local mode, Cloud API in cloud mode
+    # Get secrets via workspace.get_secrets() (works in both modes)
+    # In local mode, fetches from agent-server's /api/settings/secrets endpoint
     print("\n=== GET_SECRETS ===")
     secrets = {}
-    if IS_LOCAL_MODE:
-        # Local mode: fetch secrets from agent-server
-        secrets = fetch_agent_server_secrets(agent_server_url, session_key)
-        if secrets:
-            print(f"  available: {list(secrets.keys())}")
-        else:
-            print("  no secrets configured (or failed to fetch)")
-    else:
-        try:
-            secrets = workspace.get_secrets()
-            print(f"  available: {list(secrets.keys()) or '(none)'}")
-        except Exception as e:
-            # Not a hard failure — user may not have secrets configured
-            print(f"  get_secrets() failed (ok if no secrets): {e}")
+    try:
+        secrets = workspace.get_secrets()
+        print(f"  available: {list(secrets.keys()) or '(none)'}")
+    except Exception as e:
+        # Not a hard failure — user may not have secrets configured
+        print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    # get_mcp_config() — fetch from saved settings in local mode, Cloud API in cloud mode
+    # Get MCP config via workspace.get_mcp_config() (works in both modes)
+    # In local mode, fetches from agent-server's /api/settings endpoint
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = None
-    if IS_LOCAL_MODE:
-        # Local mode: extract MCP config from agent-server settings
-        mcp_config = agent_settings.get("mcp_config")
-        if mcp_config and (mcp_config.get("sse_servers") or mcp_config.get("stdio_servers") or mcp_config.get("shttp_servers")):
-            server_count = len(mcp_config.get("sse_servers", [])) + len(mcp_config.get("stdio_servers", [])) + len(mcp_config.get("shttp_servers", []))
-            print(f"  servers: {server_count} configured (from saved settings)")
+    try:
+        mcp_config = workspace.get_mcp_config()
+        if mcp_config and mcp_config.get("mcpServers"):
+            print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
         else:
             print("  no MCP servers configured")
-            mcp_config = None
-    else:
-        try:
-            mcp_config = workspace.get_mcp_config()
-            if mcp_config and mcp_config.get("mcpServers"):
-                print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
-            else:
-                print("  no MCP servers configured")
-        except Exception as e:
-            # Not a hard failure — user may not have MCP configured
-            print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+    except Exception as e:
+        # Not a hard failure — user may not have MCP configured
+        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
