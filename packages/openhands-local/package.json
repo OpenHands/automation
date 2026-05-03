@@ -37,15 +37,6 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "dependencies": {
-    "@manzt/uv": "^0.8.13"
-  },
-  "optionalDependencies": {
-    "@manzt/uv-darwin-arm64": "^0.8.13",
-    "@manzt/uv-darwin-x64": "^0.8.13",
-    "@manzt/uv-linux-arm64": "^0.8.13",
-    "@manzt/uv-linux-x64": "^0.8.13",
-    "@manzt/uv-win32-x64": "^0.8.13"
-  },
+  "dependencies": {},
   "devDependencies": {}
 }

@@ -208,86 +208,42 @@ function commandExists(cmd) {
   }
 }
 
-// Get path to bundled uv from @manzt/uv npm package
-function getBundledUvPath() {
-  try {
-    // Try to resolve the @manzt/uv package
-    const uvPkgPath = join(__dirname, '..', 'node_modules', '@manzt', 'uv');
-    if (existsSync(uvPkgPath)) {
-      // The binary path is platform-specific
-      const platform = process.platform;
-      const arch = process.arch;
-      let binaryName = 'uv';
-      
-      // Map to @manzt/uv platform packages
-      const platformMap = {
-        'darwin-arm64': '@manzt/uv-darwin-arm64',
-        'darwin-x64': '@manzt/uv-darwin-x64',
-        'linux-arm64': '@manzt/uv-linux-arm64',
-        'linux-x64': '@manzt/uv-linux-x64',
-        'win32-x64': '@manzt/uv-win32-x64',
-      };
-      
-      const platformKey = `${platform}-${arch}`;
-      const platformPkg = platformMap[platformKey];
-      
-      if (platformPkg) {
-        const binPath = join(__dirname, '..', 'node_modules', platformPkg, 'uv');
-        if (existsSync(binPath)) {
-          return binPath;
-        }
-      }
-    }
-  } catch {
-    // Bundled uv not available
-  }
-  return null;
-}
-
-// Set up uv - prefer bundled, fall back to system, install if needed
-function setupUv() {
-  // First, check for bundled uv from npm package
-  const bundledUv = getBundledUvPath();
-  if (bundledUv) {
-    log(`  Using bundled uv: ${bundledUv}`, c.dim);
-    // Create a wrapper function that uses the bundled binary
-    return bundledUv;
+// Ensure uv is installed - install from official source if not present
+function ensureUvInstalled() {
+  // Add ~/.local/bin to PATH (where uv installs by default)
+  const uvBinPath = join(homedir(), '.local', 'bin');
+  if (!process.env.PATH.includes(uvBinPath)) {
+    process.env.PATH = `${uvBinPath}:${process.env.PATH}`;
   }
   
-  // Check for system uv
+  // Check if uv is already available
   if (commandExists('uv')) {
-    log('  Using system uv', c.dim);
-    return 'uv';
+    const version = execSync('uv --version', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    log(`  Found ${version}`, c.dim);
+    return true;
   }
   
-  // Install uv if not present
-  log('  Installing uv...', c.yellow);
+  // Install uv via official installer (installs to ~/.local/bin)
+  log('  Installing uv via official installer...', c.yellow);
   
   try {
-    // Use the official uv installer
     execSync('curl -LsSf https://astral.sh/uv/install.sh | sh', {
       stdio: 'inherit',
       shell: true,
     });
     
-    // Add uv to PATH for this session
-    const uvPath = join(homedir(), '.local', 'bin');
-    process.env.PATH = `${uvPath}:${process.env.PATH}`;
-    
     // Verify installation
     if (commandExists('uv')) {
-      log('  uv installed successfully', c.green);
-      return 'uv';
+      const version = execSync('uv --version', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+      log(`  Installed ${version}`, c.green);
+      return true;
     }
   } catch (err) {
     logError(`Failed to install uv: ${err.message}`);
   }
   
-  return null;
+  return false;
 }
-
-// Global uv command (set during prerequisites check)
-let UV_CMD = 'uv';
 
 // Check prerequisites
 function checkPrerequisites() {
@@ -324,10 +280,9 @@ function checkPrerequisites() {
     process.exit(1);
   }
   
-  // Set up uv (bundled, system, or install)
-  UV_CMD = setupUv();
-  if (!UV_CMD) {
-    logError('Failed to set up uv. Please install manually: https://docs.astral.sh/uv/');
+  // Ensure uv is installed (auto-installs if not present)
+  if (!ensureUvInstalled()) {
+    logError('Failed to install uv. Please install manually: https://docs.astral.sh/uv/');
     process.exit(1);
   }
   
@@ -415,7 +370,7 @@ function setupAutomation(config) {
   }
   
   log('  Syncing Python dependencies...');
-  execSync(`${UV_CMD} sync`, { cwd: autoDir, stdio: 'inherit' });
+  execSync(`uv sync`, { cwd: autoDir, stdio: 'inherit' });
   
   logSuccess('Automation service ready');
   return autoDir;
@@ -425,7 +380,7 @@ function setupAutomation(config) {
 function getUvToolBinDir() {
   try {
     // uv tool installs to ~/.local/bin by default
-    const uvBinDir = execSync(`${UV_CMD} tool dir`, { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const uvBinDir = execSync(`uv tool dir`, { stdio: 'pipe', encoding: 'utf-8' }).trim();
     return join(dirname(uvBinDir), 'bin');
   } catch {
     return join(homedir(), '.local', 'bin');
@@ -471,14 +426,14 @@ function installAgentServer(config) {
     log(`  Installing SDK from git ref: ${config.sdkRef}...`);
     const gitBase = `git+https://github.com/OpenHands/software-agent-sdk.git@${config.sdkRef}`;
     // Uninstall first to force reinstall
-    execSync(`${UV_CMD} tool uninstall openhands-agent-server 2>/dev/null || true`, { stdio: 'pipe', shell: true });
-    execSync(`${UV_CMD} tool install --with openhands-sdk --with openhands-tools --with openhands-workspace --with libtmux "${gitBase}#subdirectory=openhands-agent-server"`, {
+    execSync(`uv tool uninstall openhands-agent-server 2>/dev/null || true`, { stdio: 'pipe', shell: true });
+    execSync(`uv tool install --with openhands-sdk --with openhands-tools --with openhands-workspace --with libtmux "${gitBase}#subdirectory=openhands-agent-server"`, {
       stdio: 'inherit',
     });
   } else if (needsInstall) {
     // Install from PyPI
     log('  Installing openhands-agent-server via uv tool...');
-    execSync(`${UV_CMD} tool install --with openhands-sdk --with openhands-tools --with openhands-workspace --with libtmux openhands-agent-server`, {
+    execSync(`uv tool install --with openhands-sdk --with openhands-tools --with openhands-workspace --with libtmux openhands-agent-server`, {
       stdio: 'inherit',
     });
   }
@@ -486,7 +441,7 @@ function installAgentServer(config) {
   // Final verification
   if (!existsSync(agentServerPath)) {
     logError(`agent-server not found at ${agentServerPath}`);
-    logError(`Try running: ${UV_CMD} tool install openhands-agent-server`);
+    logError(`Try running: uv tool install openhands-agent-server`);
     process.exit(1);
   }
   
@@ -545,10 +500,6 @@ function startServices(config, guiDir, autoDir, agentServerInfo) {
   // Start Agent Server
   log('  Starting Agent Server...');
   
-  // For uvx, we need to use "uv tool run" or just "uvx" which is an alias
-  // Use the UV_CMD variable with "tool run" subcommand
-  const uvxCmd = UV_CMD === 'uv' ? 'uvx' : `${UV_CMD} tool run`;
-  
   if (agentServerInfo.useUvx) {
     // Dev mode: use uvx for ephemeral installation
     // Build uvx command with all dependencies
@@ -556,7 +507,7 @@ function startServices(config, guiDir, autoDir, agentServerInfo) {
     const gitBase = `git+https://github.com/OpenHands/software-agent-sdk.git@${sdkRef}`;
     
     // Use the shell form since we might have a path with spaces
-    spawnService('agent-server', UV_CMD, [
+    spawnService('agent-server', 'uv', [
       'tool', 'run',
       '--with', 'openhands-sdk',
       '--with', 'openhands-tools', 
@@ -604,7 +555,7 @@ function startServices(config, guiDir, autoDir, agentServerInfo) {
     
     // Start Automation Backend
     log('  Starting Automation Backend...');
-    spawnService('auto-backend', UV_CMD, [
+    spawnService('auto-backend', 'uv', [
       'run', 'uvicorn', 'automation.app:app',
       '--host', '127.0.0.1',
       '--port', ports.autoBackend.toString(),
