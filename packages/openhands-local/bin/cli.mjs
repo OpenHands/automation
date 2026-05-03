@@ -32,6 +32,11 @@ function parseArgs() {
     workspaceDir: process.cwd(),
     skipSetup: false,
     verbose: false,
+    // Development mode options
+    dev: false,
+    localAutomation: null,
+    localGui: null,
+    sdkRef: null,
   };
   
   for (let i = 0; i < args.length; i++) {
@@ -72,6 +77,29 @@ function parseArgs() {
       case '--verbose':
         config.verbose = true;
         break;
+      // Development mode
+      case '--dev':
+        config.dev = true;
+        break;
+      case '--local-automation':
+        config.localAutomation = resolve(args[++i]);
+        break;
+      case '--local-gui':
+        config.localGui = resolve(args[++i]);
+        break;
+      case '--sdk-ref':
+        config.sdkRef = args[++i];
+        break;
+    }
+  }
+  
+  // In dev mode, auto-detect local repos relative to this package
+  if (config.dev) {
+    const packageRoot = resolve(__dirname, '..');
+    const autoRoot = resolve(packageRoot, '../..');
+    
+    if (!config.localAutomation && existsSync(join(autoRoot, 'automation', 'app.py'))) {
+      config.localAutomation = autoRoot;
     }
   }
   
@@ -100,22 +128,26 @@ OPTIONS:
   --skip-setup            Skip dependency installation
   --verbose               Show detailed output
 
+DEVELOPMENT OPTIONS:
+  --dev                   Use local automation repo (auto-detects from package location)
+  --local-automation <p>  Path to local automation repo
+  --local-gui <path>      Path to local agent-server-gui repo  
+  --sdk-ref <ref>         Install SDK from git ref (branch/tag/commit)
+
 ENVIRONMENT VARIABLES:
   LLM_MODEL               Same as --model
   LLM_API_KEY             Same as --api-key
   LLM_BASE_URL            Same as --base-url
 
 EXAMPLES:
-  # Start with environment variables
-  export LLM_MODEL=anthropic/claude-sonnet-4-20250514
-  export LLM_API_KEY=sk-ant-xxxxx
-  npx @openhands/local
+  # Production: uses released packages from PyPI/npm
+  npx @openhands/local --model anthropic/claude-sonnet-4-20250514 --api-key sk-ant-...
 
-  # Start with CLI arguments
-  npx @openhands/local --model openai/gpt-4 --api-key sk-xxxxx
+  # Development: use local automation repo (run from automation/packages/openhands-local)
+  node bin/cli.mjs --dev --port 12000
 
-  # Use a custom port and workspace
-  npx @openhands/local --port 3000 --workspace ./my-project
+  # Development with explicit paths
+  npx @openhands/local --local-automation /path/to/automation --port 12000
 
 REQUIREMENTS:
   - Node.js >= 22
@@ -249,11 +281,18 @@ function cloneOrUpdate(repoUrl, targetDir, branch = 'main') {
 function setupAgentServerGui(config) {
   logStep('2/5', 'Setting up Agent Server GUI...');
   
-  const guiDir = join(config.dataDir, 'repos', 'agent-server-gui');
+  let guiDir;
   
-  if (!existsSync(guiDir)) {
-    log('  Cloning agent-server-gui...');
-    cloneOrUpdate('https://github.com/OpenHands/agent-server-gui.git', guiDir);
+  if (config.localGui) {
+    guiDir = config.localGui;
+    log(`  Using local GUI: ${guiDir}`, c.cyan);
+  } else {
+    guiDir = join(config.dataDir, 'repos', 'agent-server-gui');
+    
+    if (!existsSync(guiDir)) {
+      log('  Cloning agent-server-gui...');
+      cloneOrUpdate('https://github.com/OpenHands/agent-server-gui.git', guiDir);
+    }
   }
   
   if (!existsSync(join(guiDir, 'node_modules'))) {
@@ -269,11 +308,18 @@ function setupAgentServerGui(config) {
 function setupAutomation(config) {
   logStep('3/5', 'Setting up Automation service...');
   
-  const autoDir = join(config.dataDir, 'repos', 'automation');
+  let autoDir;
   
-  if (!existsSync(autoDir)) {
-    log('  Cloning automation repository...');
-    cloneOrUpdate('https://github.com/OpenHands/automation.git', autoDir, 'feat/agent-server-gui');
+  if (config.localAutomation) {
+    autoDir = config.localAutomation;
+    log(`  Using local automation: ${autoDir}`, c.cyan);
+  } else {
+    autoDir = join(config.dataDir, 'repos', 'automation');
+    
+    if (!existsSync(autoDir)) {
+      log('  Cloning automation repository...');
+      cloneOrUpdate('https://github.com/OpenHands/automation.git', autoDir, 'feat/agent-server-gui');
+    }
   }
   
   if (!existsSync(join(autoDir, 'frontend', 'node_modules'))) {
@@ -288,25 +334,64 @@ function setupAutomation(config) {
   return autoDir;
 }
 
+// Find the pip-installed bin directory
+function findPipBinDir() {
+  try {
+    const userBase = execSync('python3 -m site --user-base', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    return join(userBase, 'bin');
+  } catch {
+    return join(homedir(), '.local', 'bin');
+  }
+}
+
 // Install agent-server
 function installAgentServer(config) {
   logStep('4/5', 'Installing Agent Server...');
   
+  const pipBinDir = findPipBinDir();
+  
+  // Add pip bin to PATH for this process and child processes
+  process.env.PATH = `${pipBinDir}:${process.env.PATH}`;
+  
   // Check if already installed
-  try {
-    execSync('agent-server --help', { stdio: 'pipe' });
-    logSuccess('Agent Server already installed');
-    return;
-  } catch {
-    // Not installed, continue
+  const agentServerPath = join(pipBinDir, 'agent-server');
+  let needsInstall = !existsSync(agentServerPath);
+  
+  if (!needsInstall) {
+    // Verify it works
+    try {
+      execSync(`${agentServerPath} --help`, { stdio: 'pipe' });
+      log(`  Found agent-server at ${agentServerPath}`, c.dim);
+    } catch {
+      needsInstall = true;
+    }
   }
   
-  log('  Installing openhands-agent-server...');
-  execSync('uv pip install --system openhands-agent-server openhands-sdk openhands-tools openhands-workspace libtmux', {
-    stdio: 'inherit',
-  });
+  if (config.sdkRef) {
+    // Install from git with specific ref (forces reinstall)
+    log(`  Installing SDK from git ref: ${config.sdkRef}...`);
+    const gitBase = `git+https://github.com/OpenHands/software-agent-sdk.git@${config.sdkRef}`;
+    execSync(`pip install --user --upgrade --force-reinstall "${gitBase}#subdirectory=openhands-agent-server" "${gitBase}#subdirectory=openhands-sdk" "${gitBase}#subdirectory=openhands-tools" "${gitBase}#subdirectory=openhands-workspace" libtmux`, {
+      stdio: 'inherit',
+    });
+    needsInstall = false;
+  } else if (needsInstall) {
+    // Install from PyPI with matching versions
+    log('  Installing openhands-agent-server from PyPI...');
+    execSync('pip install --user "openhands-agent-server" "openhands-sdk" "openhands-tools" "openhands-workspace" libtmux', {
+      stdio: 'inherit',
+    });
+  }
   
-  logSuccess('Agent Server installed');
+  // Final verification
+  if (!existsSync(agentServerPath)) {
+    logError(`agent-server not found at ${agentServerPath}`);
+    logError(`Make sure ${pipBinDir} is in your PATH`);
+    process.exit(1);
+  }
+  
+  logSuccess('Agent Server ready');
+  return pipBinDir;
 }
 
 // Process manager
@@ -346,7 +431,7 @@ function spawnService(name, command, args, options = {}) {
 }
 
 // Start all services
-function startServices(config, guiDir, autoDir) {
+function startServices(config, guiDir, autoDir, pipBinDir) {
   logStep('5/5', 'Starting services...');
   
   const ports = {
@@ -357,9 +442,12 @@ function startServices(config, guiDir, autoDir) {
     proxy: config.port,
   };
   
+  // Use full path to agent-server
+  const agentServerBin = join(pipBinDir, 'agent-server');
+  
   // Start Agent Server
   log('  Starting Agent Server...');
-  spawnService('agent-server', 'agent-server', [
+  spawnService('agent-server', agentServerBin, [
     '--host', '127.0.0.1',
     '--port', ports.agentServer.toString(),
   ], {
@@ -379,7 +467,7 @@ function startServices(config, guiDir, autoDir) {
       cwd: guiDir,
       env: {
         VITE_BACKEND_HOST: `127.0.0.1:${ports.agentServer}`,
-        PORT: ports.agentGui.toString(),
+        VITE_FRONTEND_PORT: ports.agentGui.toString(),
       },
       color: c.magenta,
     });
@@ -431,14 +519,21 @@ function startServices(config, guiDir, autoDir) {
 // Start reverse proxy
 function startProxy(ports) {
   function routeToPort(url) {
-    if (url.startsWith('/automations') || url.startsWith('/api/automation')) {
+    // /api/automation/* -> automation backend directly
+    if (url.startsWith('/api/automation')) {
+      return ports.autoBackend;
+    }
+    // /automations/* -> automation frontend
+    if (url.startsWith('/automations')) {
       return ports.autoFrontend;
     }
+    // /api/*, /sockets, etc -> agent server
     if (url.startsWith('/api/') || url.startsWith('/sockets') || 
         url === '/server_info' || url === '/health' || 
         url === '/ready' || url === '/alive') {
       return ports.agentServer;
     }
+    // Everything else -> agent server GUI
     return ports.agentGui;
   }
   
@@ -559,19 +654,22 @@ async function main() {
   checkPrerequisites();
   ensureDirectories(config);
   
-  let guiDir, autoDir;
+  let guiDir, autoDir, pipBinDir;
   
   if (!config.skipSetup) {
     guiDir = setupAgentServerGui(config);
     autoDir = setupAutomation(config);
-    installAgentServer(config);
+    pipBinDir = installAgentServer(config);
   } else {
-    guiDir = join(config.dataDir, 'repos', 'agent-server-gui');
-    autoDir = join(config.dataDir, 'repos', 'automation');
+    guiDir = config.localGui || join(config.dataDir, 'repos', 'agent-server-gui');
+    autoDir = config.localAutomation || join(config.dataDir, 'repos', 'automation');
+    pipBinDir = findPipBinDir();
+    // Still need to add pip bin to PATH
+    process.env.PATH = `${pipBinDir}:${process.env.PATH}`;
   }
   
   // Start
-  startServices(config, guiDir, autoDir);
+  startServices(config, guiDir, autoDir, pipBinDir);
 }
 
 main().catch(err => {
