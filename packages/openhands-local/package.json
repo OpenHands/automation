@@ -1,0 +1,42 @@
+{
+  "name": "@openhands/local",
+  "version": "0.1.0",
+  "description": "Run OpenHands locally with a single command - no Docker required",
+  "type": "module",
+  "bin": {
+    "openhands-local": "./bin/cli.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/cli.mjs",
+    "test": "echo \"No tests yet\""
+  },
+  "keywords": [
+    "openhands",
+    "ai",
+    "agent",
+    "automation",
+    "local",
+    "development"
+  ],
+  "author": "OpenHands Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpenHands/automation.git",
+    "directory": "packages/openhands-local"
+  },
+  "homepage": "https://github.com/OpenHands/automation#readme",
+  "bugs": {
+    "url": "https://github.com/OpenHands/automation/issues"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
