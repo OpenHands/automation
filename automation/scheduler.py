@@ -5,6 +5,7 @@ every N seconds (configurable via AUTOMATION_SCHEDULER_INTERVAL_SECONDS) for
 enabled cron automations whose next fire time is due.
 
 Uses FOR UPDATE SKIP LOCKED for multi-worker safety in PostgreSQL.
+SQLite deployments skip row locking (single-process mode assumed).
 """
 
 import asyncio
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from automation.db import using_sqlite
 from automation.models import Automation, AutomationRun
 from automation.utils import is_automation_due, utcnow
 from automation.utils.run import create_pending_run
@@ -33,10 +35,13 @@ async def _fetch_enabled_automations(
     batch_size: int,
     poll_threshold: datetime,
 ) -> list[Automation]:
-    """Fetch enabled automations using FOR UPDATE SKIP LOCKED.
+    """Fetch enabled automations, optionally using FOR UPDATE SKIP LOCKED.
 
-    This allows multiple workers to poll concurrently without picking
-    the same rows. Each worker claims a batch atomically.
+    For PostgreSQL: Uses FOR UPDATE SKIP LOCKED so multiple workers can poll
+    concurrently without picking the same rows. Each worker claims a batch atomically.
+
+    For SQLite: Skips row locking (not supported). SQLite deployments assume
+    single-process mode where row locking isn't needed.
 
     The poll_threshold filters out automations that were recently polled,
     ensuring fair rotation through all automations when using batching.
@@ -59,8 +64,11 @@ async def _fetch_enabled_automations(
         )
         .order_by(Automation.last_polled_at.asc().nulls_first())
         .limit(batch_size)
-        .with_for_update(skip_locked=True)
     )
+
+    # Apply row locking for PostgreSQL only (SQLite doesn't support it)
+    if not using_sqlite():
+        select_query = select_query.with_for_update(skip_locked=True)
 
     result = await session.execute(select_query)
     return list(result.scalars().all())
@@ -72,11 +80,13 @@ async def poll_and_schedule(
 ) -> list[AutomationRun]:
     """Poll for due automations and create pending runs atomically.
 
-    Fetches enabled automations using FOR UPDATE SKIP LOCKED for multi-worker
-    safety, updates last_polled_at for ALL fetched automations (to ensure fair
-    batch rotation), filters to those that are due, and creates PENDING runs.
-    All within a single transaction so row locks are held throughout and no
-    schedules can be lost or duplicated.
+    Fetches enabled automations (using FOR UPDATE SKIP LOCKED on PostgreSQL for
+    multi-worker safety), updates last_polled_at for ALL fetched automations
+    (to ensure fair batch rotation), filters to those that are due, and creates
+    PENDING runs. All within a single transaction so row locks are held throughout
+    and no schedules can be lost or duplicated.
+
+    Note: SQLite deployments skip row locking (single-process mode assumed).
 
     Args:
         session_factory: SQLAlchemy async session factory

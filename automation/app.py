@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from automation.auth import create_http_client
 from automation.config import get_settings
-from automation.db import create_engine, create_session_factory
+from automation.db import create_engine, create_session_factory, set_sqlite_mode
 from automation.dispatcher import dispatcher_loop
 from automation.event_router import router as event_router
 from automation.logger import setup_all_loggers
@@ -57,6 +57,33 @@ async def lifespan(app: FastAPI):
     app.state.engine_result = engine_result
     app.state.engine = engine_result.engine
     app.state.session_factory = create_session_factory(engine_result.engine)
+
+    # Set SQLite mode flag for scheduler/dispatcher to use
+    set_sqlite_mode(engine_result.is_sqlite)
+
+    # Auto-run migrations for SQLite on startup
+    # This ensures the schema is always up-to-date for local deployments
+    # For PostgreSQL, migrations are typically run separately via `alembic upgrade head`
+    if engine_result.is_sqlite:
+        from alembic import command
+        from alembic.config import Config
+
+        from automation.db import normalize_sqlite_url_for_alembic
+
+        alembic_cfg = Config()
+        alembic_cfg.set_main_option("script_location", "migrations")
+        # Set the database URL for Alembic to use (sync version)
+        db_url = normalize_sqlite_url_for_alembic(settings.db_url)
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+        # Run migrations synchronously (Alembic doesn't support async)
+        try:
+            command.upgrade(alembic_cfg, "head")
+            logger.info("SQLite database migrations applied")
+        except Exception as e:
+            logger.error(f"Failed to apply SQLite migrations: {e}")
+            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
+            raise RuntimeError(msg) from e
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()

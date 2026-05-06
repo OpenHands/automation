@@ -2,7 +2,8 @@
 
 Polls the automation_runs table for PENDING jobs and dispatches them
 to sandboxes via the SaaS API.  Uses FOR UPDATE SKIP LOCKED for
-multi-worker safety.
+multi-worker safety (PostgreSQL). SQLite deployments skip row locking
+(single-process mode assumed).
 
 Completion is handled asynchronously: the SDK running inside the sandbox
 POSTs to ``/v1/runs/{id}/complete`` when the entry-point
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from automation.config import ServiceSettings, get_config
+from automation.db import using_sqlite
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import dispatch_automation
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
@@ -72,7 +74,13 @@ async def _poll_pending_runs(
     session: AsyncSession,
     batch_size: int,
 ) -> list[AutomationRun]:
-    """Poll pending runs using FOR UPDATE SKIP LOCKED.
+    """Poll pending runs, optionally using FOR UPDATE SKIP LOCKED.
+
+    For PostgreSQL: Uses FOR UPDATE SKIP LOCKED so multiple workers can poll
+    concurrently without picking the same rows.
+
+    For SQLite: Skips row locking (not supported). SQLite deployments assume
+    single-process mode where row locking isn't needed.
 
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
@@ -83,8 +91,12 @@ async def _poll_pending_runs(
         .where(AutomationRun.status == AutomationRunStatus.PENDING)
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
-        .with_for_update(skip_locked=True)
     )
+
+    # Apply row locking for PostgreSQL only (SQLite doesn't support it)
+    if not using_sqlite():
+        select_query = select_query.with_for_update(skip_locked=True)
+
     result = await session.execute(select_query)
     return list(result.scalars().all())
 

@@ -12,10 +12,11 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from automation.config import Settings, get_settings
+from automation.db import using_sqlite
 from automation.models import Automation, AutomationRun, CustomWebhook
 from automation.schemas import EventTrigger, WebhookConfig
 
@@ -158,18 +159,36 @@ async def get_event_automations(
     """
     # Query for enabled automations with event triggers for this source
     # We can't filter by event pattern in DB because triggers support wildcards
-    result = await session.execute(
-        select(Automation).where(
-            Automation.org_id == org_id,
-            Automation.enabled == True,  # noqa: E712
-            Automation.deleted_at.is_(None),
-            Automation.trigger.contains(
-                {
-                    "type": "event",
-                    "source": source,
-                }
-            ),
+    #
+    # Database-specific handling for JSON column (generic JSON, not JSONB):
+    # - PostgreSQL: Use ->> operator to extract text values from JSON
+    # - SQLite: Use json_extract() function
+    from sqlalchemy import func, literal
+
+    base_filters = [
+        Automation.org_id == org_id,
+        Automation.enabled == True,  # noqa: E712
+        Automation.deleted_at.is_(None),
+    ]
+
+    if using_sqlite():
+        # SQLite: Use json_extract for type and source matching
+        # json_extract returns the value at the path, or NULL if not found
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
         )
+    else:
+        # PostgreSQL: Use ->> operator to extract text values from JSON
+        # trigger->>'type' returns the text value of the 'type' key
+        # Note: .astext only works with JSONB, use op('->>') for generic JSON
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+
+    result = await session.execute(
+        select(Automation).where(*base_filters, trigger_filter)
     )
     automations = result.scalars().all()
 
