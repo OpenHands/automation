@@ -45,7 +45,6 @@ def normalize_sqlite_url_for_alembic(url: str) -> str:
     return url
 
 
-
 @dataclass
 class EngineResult:
     """Result of create_engine containing the engine and optional connector."""
