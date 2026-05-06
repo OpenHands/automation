@@ -319,6 +319,92 @@ class DispatchResult:
     error: str | None = None
 
 
+async def execute_in_context(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    entrypoint: str,
+    tarball_source: bytes | str,
+    env_vars: dict[str, str] | None = None,
+    timeout: int | None = None,
+    run_id: str | None = None,
+    sandbox_id: str | None = None,
+) -> DispatchResult:
+    """Execute automation code in an existing execution context.
+
+    This is the core execution logic used by both Cloud and Local modes.
+    The context (agent_url, session_key) is obtained from the backend.
+
+    1. Get tarball into environment (upload bytes OR download from URL).
+    2. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+    3. Return immediately without waiting for the entrypoint to complete.
+
+    Args:
+        client: HTTP client for making requests
+        agent_url: URL of the agent server
+        session_key: API key for the agent server
+        entrypoint: Command to run
+        tarball_source: Either raw bytes or URL string
+        env_vars: Environment variables to export
+        timeout: Max execution time
+        run_id: Run ID for logging
+        sandbox_id: Sandbox ID for logging (Cloud mode only)
+
+    Returns:
+        DispatchResult with success status
+    """
+    if timeout is None:
+        timeout = get_config().sandbox.max_run_duration
+
+    env_vars = dict(env_vars) if env_vars else {}
+
+    def _log_ctx() -> dict[str, Any]:
+        return log_extra(run_id=run_id, sandbox_id=sandbox_id)
+
+    try:
+        # Get tarball into environment: upload bytes or download from URL
+        if isinstance(tarball_source, bytes):
+            logger.info("Uploading tarball", extra=_log_ctx())
+            await _upload(client, agent_url, session_key, tarball_source, TARBALL_PATH)
+        else:
+            logger.info("Downloading tarball from URL", extra=_log_ctx())
+            await _download_in_sandbox(
+                client, agent_url, session_key, tarball_source, TARBALL_PATH
+            )
+
+        exports = ""
+        if env_vars:
+            parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
+            exports = " && ".join(parts) + " && "
+
+        cmd = (
+            f"mkdir -p {WORK_DIR}"
+            f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
+            f" && cd {WORK_DIR}"
+            f" && ([ ! -f setup.sh ] || bash setup.sh)"
+            f" && {exports}{entrypoint}"
+        )
+
+        logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
+        command_id = await _start_bash(
+            client, agent_url, session_key, cmd, timeout=timeout
+        )
+        logger.info(
+            "Entrypoint started (command_id=%s), disconnecting",
+            command_id,
+            extra=_log_ctx(),
+        )
+
+        return DispatchResult(success=True, sandbox_id=sandbox_id)
+
+    except PermanentDispatchError:
+        # Re-raise so caller can handle (e.g., disable automation)
+        raise
+    except Exception as e:
+        logger.exception("Execution failed", extra=_log_ctx())
+        return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+
+
 async def dispatch_automation(
     api_url: str,
     api_key: str,

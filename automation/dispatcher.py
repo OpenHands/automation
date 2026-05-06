@@ -21,6 +21,7 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -29,7 +30,7 @@ from automation.backends import get_backend
 from automation.config import ServiceSettings, get_config
 from automation.db import using_sqlite
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
-from automation.execution import dispatch_automation
+from automation.execution import execute_in_context
 from automation.models import AutomationRun, AutomationRunStatus, TarballUpload
 from automation.utils import log_extra
 from automation.utils.api_key import APIKeyError
@@ -114,11 +115,12 @@ async def _execute_run(
     """Execute a single run in a background task (fire-and-forget).
 
     Mode-agnostic execution flow:
-    1. Get backend and API key via backend.get_api_key()
-    2. Determine tarball source
-    3. Build env vars via backend.build_env_vars()
-    4. Dispatch to execution environment
-    5. Store sandbox_id for watchdog verification (if applicable)
+    1. Get backend for this run
+    2. Get execution context (creates sandbox in Cloud, returns config in local)
+    3. Determine tarball source
+    4. Build env vars via backend
+    5. Execute in context (upload tarball, start entrypoint)
+    6. Store sandbox_id for watchdog verification (if applicable)
 
     The SDK inside the execution environment fires the completion callback on exit.
     The watchdog will verify status if the callback is missed.
@@ -135,94 +137,126 @@ async def _execute_run(
         )
 
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
+    http_timeout = get_config().http.http_long_timeout
 
     try:
-        # 1. Get backend for this run (mode-specific logic encapsulated in backend)
+        # 1. Get backend for this run (mode-specific logic encapsulated)
         backend = get_backend(run)
-        api_key = await backend.get_api_key()
 
-        # For dispatch_automation, we need the appropriate URL
-        if backend.is_local_mode:
-            api_url = settings.agent_server_url
-            logger.info("Using local agent server backend", extra=_log_ctx())
-        else:
-            api_url = settings.openhands_api_base_url
+        # 2. Get execution context (creates sandbox in Cloud, returns config in local)
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
+            try:
+                ctx = await backend.get_execution_context(client)
+                logger.info(
+                    "Execution context ready: %s",
+                    ctx.agent_url,
+                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+                )
+            except Exception as e:
+                logger.exception("Failed to get execution context", extra=_log_ctx())
+                await mark_run_terminal(
+                    session_factory, run, AutomationRunStatus.FAILED, str(e)
+                )
+                return
 
-        # 2. Determine tarball source
-        tarball_source: bytes | str
-        if is_http_url(tarball_path):
-            # HTTP(S) URL: download directly inside sandbox (untrusted/large)
-            tarball_source = tarball_path
-            logger.info("HTTP URL tarball, will download in sandbox", extra=_log_ctx())
-        else:
-            # Internal (oh-internal://): download from storage, upload to sandbox
-            upload_id = parse_internal_upload_id(tarball_path)
-            if upload_id is None:
-                raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
+            sandbox_id = ctx.sandbox_id
 
-            async with session_factory() as session:
-                tarball_source = await _download_internal_tarball(upload_id, session)
-            logger.info(
-                "Internal tarball downloaded (%d bytes)",
-                len(tarball_source),
-                extra=_log_ctx(),
-            )
+            try:
+                # 3. Determine tarball source
+                tarball_source: bytes | str
+                if is_http_url(tarball_path):
+                    # HTTP(S) URL: download directly inside environment
+                    tarball_source = tarball_path
+                    logger.info(
+                        "HTTP URL tarball, will download in environment",
+                        extra=_log_ctx(sandbox_id=sandbox_id),
+                    )
+                else:
+                    # Internal (oh-internal://): download from storage, upload
+                    upload_id = parse_internal_upload_id(tarball_path)
+                    if upload_id is None:
+                        raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
 
-        # 3. Build env vars via backend (mode-specific logic encapsulated)
-        env_vars = backend.build_env_vars()
+                    async with session_factory() as session:
+                        tarball_source = await _download_internal_tarball(
+                            upload_id, session
+                        )
+                    logger.info(
+                        "Internal tarball downloaded (%d bytes)",
+                        len(tarball_source),
+                        extra=_log_ctx(sandbox_id=sandbox_id),
+                    )
 
-        # Add trigger context so the SDK script knows *why* it was invoked
-        trigger_context = {
-            "trigger": automation.trigger,
-            "automation_id": str(automation.id),
-            "automation_name": automation.name,
-        }
+                # 4. Build env vars via backend (mode-specific)
+                env_vars = backend.build_env_vars()
 
-        # Include webhook event payload if this is an event-triggered run
-        if run.event_payload is not None:
-            trigger_context["event"] = run.event_payload
+                # Add sandbox identity for SDK (Cloud mode)
+                if ctx.sandbox_id:
+                    env_vars.setdefault("SANDBOX_ID", ctx.sandbox_id)
+                    env_vars.setdefault("SESSION_API_KEY", ctx.session_key)
 
-        env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
+                # Add callback info
+                env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+                env_vars["AUTOMATION_RUN_ID"] = run_id
 
-        # 4. Calculate effective timeout: use automation's timeout if set,
-        # capped at system maximum; otherwise use system default
-        max_run_duration = get_config().sandbox.max_run_duration
-        if automation.timeout is not None:
-            effective_timeout = min(automation.timeout, max_run_duration)
-        else:
-            effective_timeout = max_run_duration
+                # Add trigger context so the SDK script knows *why* it was invoked
+                trigger_context = {
+                    "trigger": automation.trigger,
+                    "automation_id": str(automation.id),
+                    "automation_name": automation.name,
+                }
 
-        # 5. Dispatch to execution environment (fire-and-forget)
-        result = await dispatch_automation(
-            api_url=api_url,
-            api_key=api_key,
-            entrypoint=automation.entrypoint,
-            tarball_source=tarball_source,
-            env_vars=env_vars,
-            timeout=effective_timeout,
-            callback_url=callback_url,
-            run_id=run_id,
-        )
+                # Include webhook event payload if this is an event-triggered run
+                if run.event_payload is not None:
+                    trigger_context["event"] = run.event_payload
 
-        sandbox_extra = _log_ctx(sandbox_id=result.sandbox_id)
-        if result.success:
-            # Store sandbox_id for later verification by the watchdog
-            if result.sandbox_id:
-                await update_sandbox_id(session_factory, run.id, result.sandbox_id)
-            logger.info(
-                "Automation dispatched successfully, waiting for callback",
-                extra=sandbox_extra,
-            )
-            # Don't mark as COMPLETED here - wait for the callback
-        else:
-            logger.warning(
-                "Dispatch failed: %s",
-                result.error,
-                extra=sandbox_extra,
-            )
-            await mark_run_terminal(
-                session_factory, run, AutomationRunStatus.FAILED, result.error
-            )
+                env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
+
+                # 5. Calculate effective timeout
+                max_run_duration = get_config().sandbox.max_run_duration
+                if automation.timeout is not None:
+                    effective_timeout = min(automation.timeout, max_run_duration)
+                else:
+                    effective_timeout = max_run_duration
+
+                # 6. Execute in context (upload tarball, start entrypoint)
+                result = await execute_in_context(
+                    client=client,
+                    agent_url=ctx.agent_url,
+                    session_key=ctx.session_key,
+                    entrypoint=automation.entrypoint,
+                    tarball_source=tarball_source,
+                    env_vars=env_vars,
+                    timeout=effective_timeout,
+                    run_id=run_id,
+                    sandbox_id=ctx.sandbox_id,
+                )
+
+                if result.success:
+                    # Store sandbox_id for later verification by the watchdog
+                    if ctx.sandbox_id:
+                        await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+                    logger.info(
+                        "Automation dispatched successfully, waiting for callback",
+                        extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+                    )
+                    # Don't mark as COMPLETED here - wait for the callback
+                else:
+                    logger.warning(
+                        "Execution failed: %s",
+                        result.error,
+                        extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+                    )
+                    # Clean up on failure
+                    await backend.release_context(client, ctx)
+                    await mark_run_terminal(
+                        session_factory, run, AutomationRunStatus.FAILED, result.error
+                    )
+
+            except PermanentDispatchError:
+                # Clean up before re-raising so caller can disable automation
+                await backend.release_context(client, ctx)
+                raise
 
     except PermanentDispatchError as exc:
         # Permanent configuration error - disable the automation
