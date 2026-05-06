@@ -21,10 +21,20 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 def _create_mock_backend() -> MagicMock:
     """Create a mock backend for dispatcher tests."""
+    from automation.backends.base import ExecutionContext
+
     mock_backend = MagicMock()
     mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
     mock_backend.build_env_vars = MagicMock(return_value={})
     mock_backend.is_local_mode = False
+    # Mock execution context methods
+    mock_ctx = ExecutionContext(
+        agent_url="http://localhost:3000",
+        session_key="test-session-key",
+        sandbox_id=None,
+    )
+    mock_backend.get_execution_context = AsyncMock(return_value=mock_ctx)
+    mock_backend.release_context = AsyncMock(return_value=None)
     return mock_backend
 
 
