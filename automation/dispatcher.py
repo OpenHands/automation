@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from automation.backends import get_backend
+from automation.backends import ExecutionContext, get_backend
 from automation.config import ServiceSettings, get_config
 from automation.db import using_sqlite
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
@@ -129,6 +129,8 @@ async def _execute_run(
     automation = run.automation
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
+    http_timeout = get_config().http.http_long_timeout
+    backend = get_backend(run)
 
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
         return log_extra(
@@ -141,76 +143,95 @@ async def _execute_run(
         if disable:
             await disable_automation(session_factory, automation.id, error)
 
-    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
-    http_timeout = get_config().http.http_long_timeout
-    backend = get_backend(run)
+    async def _release(ctx: ExecutionContext) -> None:
+        """Release execution context (delete sandbox in cloud mode)."""
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
+            await backend.release_context(client, ctx)
 
-    # Phase 1: Get execution context (may create sandbox)
-    # If this fails, there's nothing to clean up
-    async with httpx.AsyncClient(timeout=http_timeout) as client:
-        try:
+    # 1. Get execution context - if this fails, nothing to clean up
+    try:
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             ctx = await backend.get_execution_context(client)
-        except Exception:
-            logger.exception("Failed to get execution context", extra=_log_ctx())
-            await _fail("Failed to get execution context")
-            return
+    except Exception:
+        logger.exception("Failed to get execution context", extra=_log_ctx())
+        await _fail("Failed to get execution context")
+        return
 
-        logger.info(
-            "Execution context ready: %s",
-            ctx.agent_url,
+    logger.info(
+        "Execution context ready: %s",
+        ctx.agent_url,
+        extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+    )
+
+    # 2. Prepare tarball source
+    try:
+        tarball_source: bytes | str
+        if is_http_url(tarball_path):
+            tarball_source = tarball_path
+            logger.info(
+                "HTTP URL tarball, will download in environment",
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+        else:
+            upload_id = parse_internal_upload_id(tarball_path)
+            if upload_id is None:
+                raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
+            async with session_factory() as session:
+                tarball_source = await _download_internal_tarball(upload_id, session)
+            logger.info(
+                "Internal tarball downloaded (%d bytes)",
+                len(tarball_source),
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+    except PermanentDispatchError as exc:
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
+        await _release(ctx)
+        await _fail(str(exc), disable=True)
+        return
+    except (APIKeyError, ValueError) as exc:
+        logger.error(
+            "Dispatch error: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await _release(ctx)
+        await _fail(str(exc))
+        return
 
-        # Phase 2: Execute in context (ctx is guaranteed valid from here)
-        try:
-            # Determine tarball source
-            tarball_source: bytes | str
-            if is_http_url(tarball_path):
-                tarball_source = tarball_path
-                logger.info(
-                    "HTTP URL tarball, will download in environment",
-                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-                )
-            else:
-                upload_id = parse_internal_upload_id(tarball_path)
-                if upload_id is None:
-                    raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
+    # 3. Build env vars
+    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
+    env_vars = backend.build_env_vars()
+    if ctx.sandbox_id:
+        env_vars.setdefault("SANDBOX_ID", ctx.sandbox_id)
+        env_vars.setdefault("SESSION_API_KEY", ctx.session_key)
+    env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_RUN_ID"] = run_id
+    env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
+        {
+            "trigger": automation.trigger,
+            "automation_id": str(automation.id),
+            "automation_name": automation.name,
+            **({"event": run.event_payload} if run.event_payload else {}),
+        }
+    )
 
-                async with session_factory() as session:
-                    tarball_source = await _download_internal_tarball(
-                        upload_id, session
-                    )
-                logger.info(
-                    "Internal tarball downloaded (%d bytes)",
-                    len(tarball_source),
-                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-                )
+    # 4. Calculate effective timeout
+    max_run_duration = get_config().sandbox.max_run_duration
+    effective_timeout = (
+        min(automation.timeout, max_run_duration)
+        if automation.timeout
+        else max_run_duration
+    )
 
-            # Build env vars
-            env_vars = backend.build_env_vars()
-            if ctx.sandbox_id:
-                env_vars.setdefault("SANDBOX_ID", ctx.sandbox_id)
-                env_vars.setdefault("SESSION_API_KEY", ctx.session_key)
-            env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
-            env_vars["AUTOMATION_RUN_ID"] = run_id
-            env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
-                {
-                    "trigger": automation.trigger,
-                    "automation_id": str(automation.id),
-                    "automation_name": automation.name,
-                    **({"event": run.event_payload} if run.event_payload else {}),
-                }
-            )
-
-            # Calculate effective timeout
-            max_run_duration = get_config().sandbox.max_run_duration
-            effective_timeout = (
-                min(automation.timeout, max_run_duration)
-                if automation.timeout
-                else max_run_duration
-            )
-
-            # Execute in context
+    # 5. Execute in context
+    try:
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             result = await execute_in_context(
                 client=client,
                 agent_url=ctx.agent_url,
@@ -222,52 +243,39 @@ async def _execute_run(
                 run_id=run_id,
                 sandbox_id=ctx.sandbox_id,
             )
+    except PermanentDispatchError as exc:
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await _release(ctx)
+        await _fail(str(exc), disable=True)
+        return
+    except Exception:
+        logger.exception(
+            "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
+        )
+        await _release(ctx)
+        await _fail("Internal error")
+        return
 
-            # Handle result
-            if result.success:
-                if ctx.sandbox_id:
-                    await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
-                logger.info(
-                    "Automation dispatched successfully, waiting for callback",
-                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-                )
-                return  # Success - don't release context (sandbox stays running)
+    # 6. Handle result
+    if result.success:
+        if ctx.sandbox_id:
+            await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+        logger.info(
+            "Automation dispatched successfully, waiting for callback",
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        return
 
-            # Execution failed
-            logger.warning(
-                "Execution failed: %s",
-                result.error,
-                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-            )
-            await backend.release_context(client, ctx)
-            await _fail(result.error or "Execution failed")
-
-        except PermanentDispatchError as exc:
-            logger.error(
-                "Permanent dispatch error, disabling automation: %s",
-                exc,
-                exc_info=True,
-                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-            )
-            await backend.release_context(client, ctx)
-            await _fail(str(exc), disable=True)
-
-        except (APIKeyError, ValueError) as exc:
-            logger.error(
-                "Dispatch error: %s",
-                exc,
-                exc_info=True,
-                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-            )
-            await backend.release_context(client, ctx)
-            await _fail(str(exc))
-
-        except Exception:
-            logger.exception(
-                "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
-            )
-            await backend.release_context(client, ctx)
-            await _fail("Internal error")
+    logger.warning(
+        "Execution failed: %s", result.error, extra=_log_ctx(sandbox_id=ctx.sandbox_id)
+    )
+    await _release(ctx)
+    await _fail(result.error or "Execution failed")
 
 
 async def dispatch_pending_runs(
