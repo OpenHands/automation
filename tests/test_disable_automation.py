@@ -375,3 +375,134 @@ class TestExecuteRunDisablesAutomation:
             )
             run = result.scalars().first()
             assert run.status == AutomationRunStatus.FAILED
+
+
+def _create_mock_backend_with_api_key_check() -> MagicMock:
+    """Create a mock backend that enforces API key initialization order.
+
+    This simulates CloudSandboxBackend behavior where build_env_vars()
+    requires get_execution_context() to be called first.
+    """
+    from automation.backends.base import ExecutionContext
+
+    mock_backend = MagicMock()
+    mock_backend._api_key_initialized = False
+
+    async def mock_get_execution_context(client):
+        mock_backend._api_key_initialized = True
+        return ExecutionContext(
+            agent_url="http://localhost:3000",
+            session_key="test-session-key",
+            sandbox_id="test-sandbox-id",
+        )
+
+    def mock_build_env_vars():
+        if not mock_backend._api_key_initialized:
+            raise RuntimeError(
+                "API key not initialized. Call get_execution_context() first."
+            )
+        return {"OPENHANDS_API_KEY": "test-api-key"}
+
+    mock_backend.get_execution_context = mock_get_execution_context
+    mock_backend.build_env_vars = mock_build_env_vars
+    mock_backend.release_context = AsyncMock(return_value=None)
+    return mock_backend
+
+
+@pytest.fixture
+async def sqlite_session_factory():
+    """Create a SQLite-based session factory for tests without Docker."""
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from automation.models import Base
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    yield factory
+    await engine.dispose()
+
+
+class TestExecuteRunEnvVarOrdering:
+    """Tests that _execute_run calls backend methods in correct order.
+
+    Note: This test class uses SQLite and doesn't require Docker.
+    """
+
+    @patch("automation.dispatcher.execute_in_context")
+    @patch("automation.dispatcher.get_backend")
+    async def test_build_env_vars_called_after_get_execution_context(
+        self,
+        mock_get_backend,
+        mock_execute,
+        sqlite_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        """build_env_vars() must be called after get_execution_context().
+
+        This test catches the bug where build_env_vars() was called before
+        get_execution_context(), causing 'API key not initialized' errors
+        in CloudSandboxBackend.
+        """
+        from automation.dispatcher import _execute_run
+        from automation.execution import DispatchResult
+        from automation.models import Automation, AutomationRun, AutomationRunStatus
+
+        # Use a mock backend that enforces the correct calling order
+        mock_get_backend.return_value = _create_mock_backend_with_api_key_check()
+        mock_execute.return_value = DispatchResult(
+            success=True, sandbox_id="test-sandbox-id", error=None
+        )
+
+        async with sqlite_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/valid.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(run)
+            await session.commit()
+            automation_id = automation.id
+
+        # Re-fetch with automation relationship loaded
+        async with sqlite_session_factory() as session:
+            from sqlalchemy.orm import selectinload
+
+            result = await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.automation_id == automation_id)
+            )
+            run = result.scalars().first()
+
+            # This should NOT raise "API key not initialized" error
+            # If it does, build_env_vars() is being called before get_execution_context()
+            await _execute_run(run, mock_settings, sqlite_session_factory, mock_client)
+
+        # Verify execute_in_context was called (execution proceeded normally)
+        mock_execute.assert_called_once()
+
+        # Verify env vars include the API key from build_env_vars()
+        call_kwargs = mock_execute.call_args.kwargs
+        assert "OPENHANDS_API_KEY" in call_kwargs["env_vars"]
