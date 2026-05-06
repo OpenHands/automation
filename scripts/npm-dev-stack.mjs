@@ -72,6 +72,7 @@ const projectRoot = resolve(__dirname, '..');
 // These will be dynamically imported from agent-server-gui after setup
 let buildAgentServerCommand = null;
 let buildSafeDevConfig = null;
+let buildAgentServerEnv = null;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -326,6 +327,7 @@ async function setupAgentServerGui(config) {
   const devSafe = await import(devSafePath);
   buildAgentServerCommand = devSafe.buildAgentServerCommand;
   buildSafeDevConfig = devSafe.buildSafeDevConfig;
+  buildAgentServerEnv = devSafe.buildAgentServerEnv;
   
   logSuccess('agent-server-gui ready');
 }
@@ -415,8 +417,8 @@ async function waitForService(name, url, timeoutMs = 30000) {
 
 /**
  * Start agent-server using uvx.
- * Uses buildAgentServerCommand and buildSafeDevConfig imported from agent-server-gui's
- * dev-safe.mjs to ensure we stay in sync with their configuration.
+ * Uses buildAgentServerCommand, buildSafeDevConfig, and buildAgentServerEnv imported
+ * from agent-server-gui's dev-safe.mjs to ensure we stay in sync with their configuration.
  */
 function startAgentServer(config) {
   logService('agent-server', `Starting on port ${config.agentServerPort}...`, c.blue);
@@ -436,20 +438,17 @@ function startAgentServer(config) {
     OH_GUI_SAFE_VSCODE_PORT: vscodePort.toString(),
   });
   
+  // Use buildAgentServerEnv to get the env vars - this ensures we inherit any
+  // new env vars added by agent-server-gui without code changes here
+  const agentServerEnv = buildAgentServerEnv(safeConfig);
+  
   spawnService('agent-server', agentServerCmd.command, [
     ...agentServerCmd.args,
     '--host', '127.0.0.1',
     '--port', config.agentServerPort.toString(),
   ], {
     cwd: safeConfig.workspacesPath,
-    env: {
-      TMUX_TMPDIR: safeConfig.tmuxTmpDir,
-      OH_CONVERSATIONS_PATH: safeConfig.conversationsPath,
-      OH_BASH_EVENTS_DIR: safeConfig.bashEventsDir,
-      OH_SECRET_KEY: safeConfig.secretKey,
-      OH_VSCODE_PORT: safeConfig.vscodePort.toString(),
-      OPENHANDS_SUPPRESS_BANNER: '1',
-    },
+    env: agentServerEnv,
     color: c.blue,
   });
 }
