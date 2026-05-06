@@ -69,6 +69,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 
+// These will be dynamically imported from agent-server-gui after setup
+let buildAgentServerCommand = null;
+let buildSafeDevConfig = null;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════════════════════
@@ -316,6 +320,13 @@ async function setupAgentServerGui(config) {
   log('  Installing npm dependencies...');
   execSync('npm ci', { cwd: config.guiPath, stdio: 'inherit' });
   
+  // Import shared functions from dev-safe.mjs to stay in sync with agent-server-gui
+  log('  Loading shared configuration...');
+  const devSafePath = join(config.guiPath, 'scripts', 'dev-safe.mjs');
+  const devSafe = await import(devSafePath);
+  buildAgentServerCommand = devSafe.buildAgentServerCommand;
+  buildSafeDevConfig = devSafe.buildSafeDevConfig;
+  
   logSuccess('agent-server-gui ready');
 }
 
@@ -403,46 +414,40 @@ async function waitForService(name, url, timeoutMs = 30000) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Start agent-server using uvx (matches dev-safe.mjs behavior).
- * This runs the agent-server without permanent installation.
+ * Start agent-server using uvx.
+ * Uses buildAgentServerCommand and buildSafeDevConfig imported from agent-server-gui's
+ * dev-safe.mjs to ensure we stay in sync with their configuration.
  */
 function startAgentServer(config) {
   logService('agent-server', `Starting on port ${config.agentServerPort}...`, c.blue);
   
-  // Build uvx command - same logic as dev-safe.mjs
-  const gitRef = process.env.OH_AGENT_SERVER_GIT_REF || 'main';
-  const version = process.env.OH_AGENT_SERVER_VERSION;
+  // Use the same command builder as agent-server-gui
+  const agentServerCmd = buildAgentServerCommand(process.env);
+  logService('agent-server', `Using ${agentServerCmd.source}`, c.dim);
   
-  let uvxArgs;
+  // Get the safe dev config which includes secret key, paths, etc.
+  // We override the state directory and ports to use our unified location
+  // and avoid conflicts with automation services
+  const vscodePort = config.agentServerPort + 100; // Well away from other services
+  const safeConfig = buildSafeDevConfig(config.guiPath, {
+    ...process.env,
+    OH_GUI_SAFE_STATE_DIR: config.stateDir,
+    OH_GUI_SAFE_BACKEND_PORT: config.agentServerPort.toString(),
+    OH_GUI_SAFE_VSCODE_PORT: vscodePort.toString(),
+  });
   
-  if (version) {
-    // Use specific PyPI version
-    uvxArgs = [
-      '--with', 'openhands-tools',
-      '--with', 'openhands-workspace',
-      `openhands-agent-server==${version}`,
-    ];
-  } else {
-    // Use git ref (default: main)
-    const baseGitUrl = `git+https://github.com/OpenHands/software-agent-sdk@${gitRef}`;
-    uvxArgs = [
-      '--from', `${baseGitUrl}#subdirectory=openhands-agent-server`,
-      '--with', `${baseGitUrl}#subdirectory=openhands-tools`,
-      '--with', `${baseGitUrl}#subdirectory=openhands-workspace`,
-      'agent-server',
-    ];
-  }
-  
-  spawnService('agent-server', 'uvx', [
-    ...uvxArgs,
+  spawnService('agent-server', agentServerCmd.command, [
+    ...agentServerCmd.args,
     '--host', '127.0.0.1',
     '--port', config.agentServerPort.toString(),
   ], {
-    cwd: join(config.stateDir, 'workspaces'),
+    cwd: safeConfig.workspacesPath,
     env: {
-      TMUX_TMPDIR: join(config.stateDir, 'tmux'),
-      OH_CONVERSATIONS_PATH: join(config.stateDir, 'conversations'),
-      OH_BASH_EVENTS_DIR: join(config.stateDir, 'bash_events'),
+      TMUX_TMPDIR: safeConfig.tmuxTmpDir,
+      OH_CONVERSATIONS_PATH: safeConfig.conversationsPath,
+      OH_BASH_EVENTS_DIR: safeConfig.bashEventsDir,
+      OH_SECRET_KEY: safeConfig.secretKey,
+      OH_VSCODE_PORT: safeConfig.vscodePort.toString(),
       OPENHANDS_SUPPRESS_BANNER: '1',
     },
     color: c.blue,
