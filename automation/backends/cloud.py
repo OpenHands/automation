@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 from tenacity import (
@@ -20,13 +21,15 @@ from tenacity import (
 
 from automation.backends.base import ExecutionBackend, ExecutionContext
 from automation.config import get_config
+from automation.models import AutomationRun
 from automation.utils.api_key import get_api_key_for_automation_run
 from automation.utils.sandbox import cleanup_sandbox, delete_sandbox, verify_run_status
 
 
 if TYPE_CHECKING:
-    from automation.models import AutomationRun
     from automation.utils.agent_server import VerificationResult
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +41,34 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_auth_error(exc: BaseException) -> bool:
+    """Check if exception is an authentication error (401/403)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (401, 403)
+    return False
+
+
 class CloudSandboxBackend(ExecutionBackend):
     """Execution backend that creates Cloud sandboxes per run.
 
     This is the default backend for OpenHands Cloud deployments.
     Each automation run gets a fresh, isolated sandbox.
+
+    The backend is instantiated per-run with an AutomationRun. The per-user
+    API key is minted lazily on first use and cached. If an authentication
+    error occurs (401/403), the key is refreshed and the operation retried.
     """
 
-    def __init__(self, api_url: str, api_key: str):
-        """Initialize the Cloud sandbox backend.
+    def __init__(self, api_url: str, run: AutomationRun):
+        """Initialize the Cloud sandbox backend for a specific run.
 
         Args:
             api_url: OpenHands Cloud API URL (e.g., "https://app.all-hands.dev")
-            api_key: API key for authenticating with the Cloud API
+            run: The automation run (used to extract user info for API key)
         """
         self.api_url = api_url.rstrip("/")
-        self.api_key = api_key
+        self._run = run
+        self._api_key: str | None = None  # Lazily minted
 
         # Load sandbox config for retry/timeout settings
         sandbox_config = get_config().sandbox
@@ -76,15 +91,53 @@ class CloudSandboxBackend(ExecutionBackend):
     def is_local_mode(self) -> bool:
         return False
 
+    async def _ensure_api_key(self) -> str:
+        """Ensure the per-user API key is minted and return it.
+
+        The key is minted lazily on first call and cached for reuse.
+        """
+        if self._api_key is None:
+            self._api_key = await get_api_key_for_automation_run(self._run)
+        return self._api_key
+
+    async def _refresh_api_key(self) -> str:
+        """Force refresh the API key (e.g., after auth failure)."""
+        logger.info("Refreshing API key after authentication failure")
+        self._api_key = await get_api_key_for_automation_run(self._run)
+        return self._api_key
+
+    async def _with_auth_retry(
+        self,
+        operation: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Execute operation with auth retry on 401/403.
+
+        If the operation fails with an authentication error, refresh the
+        API key and retry once.
+        """
+        try:
+            return await operation()
+        except Exception as e:
+            if _is_auth_error(e):
+                await self._refresh_api_key()
+                return await operation()
+            raise
+
     async def acquire(self, client: httpx.AsyncClient) -> ExecutionContext:
         """Create a sandbox and wait for it to be ready."""
-        sandbox_id, session_key, agent_url = await self._create_and_wait(client)
+        api_key = await self._ensure_api_key()
+
+        async def _do_acquire() -> tuple[str, str, str]:
+            return await self._create_and_wait(client, await self._ensure_api_key())
+
+        sandbox_id, session_key, agent_url = await self._with_auth_retry(_do_acquire)
+
         return ExecutionContext(
             agent_url=agent_url,
             session_key=session_key,
             sandbox_id=sandbox_id,
             api_url=self.api_url,
-            api_key=self.api_key,
+            api_key=await self._ensure_api_key(),
         )
 
     async def release(self, client: httpx.AsyncClient, ctx: ExecutionContext) -> None:
@@ -92,24 +145,28 @@ class CloudSandboxBackend(ExecutionBackend):
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
 
-    async def get_api_key(self, run: AutomationRun) -> str:
-        """Mint a per-user API key via the service key."""
-        return await get_api_key_for_automation_run(run)
+    async def get_api_key(self) -> str:
+        """Return the per-user API key (minting if needed)."""
+        return await self._ensure_api_key()
 
-    def build_env_vars(self, api_key: str) -> dict[str, str]:
-        """Build Cloud mode environment variables."""
+    def build_env_vars(self) -> dict[str, str]:
+        """Build Cloud mode environment variables.
+
+        Note: This is synchronous. Caller must ensure _ensure_api_key()
+        was called first (e.g., via acquire() or get_api_key()).
+        """
+        if self._api_key is None:
+            raise RuntimeError(
+                "API key not initialized. Call get_api_key() or acquire() first."
+            )
         return {
-            "OPENHANDS_API_KEY": api_key,
+            "OPENHANDS_API_KEY": self._api_key,
             "OPENHANDS_CLOUD_API_URL": self.api_url,
         }
 
-    async def verify_run(
-        self,
-        run: AutomationRun,
-        run_id: str,
-    ) -> VerificationResult:
+    async def verify_run(self, run_id: str) -> VerificationResult:
         """Verify run status via sandbox discovery."""
-        sandbox_id = run.sandbox_id
+        sandbox_id = self._run.sandbox_id
         if not sandbox_id:
             from automation.utils.agent_server import VerificationResult
 
@@ -118,36 +175,39 @@ class CloudSandboxBackend(ExecutionBackend):
                 error="No sandbox_id available for verification",
             )
 
-        # Get API key for sandbox access
-        api_key = await get_api_key_for_automation_run(run)
+        api_key = await self._ensure_api_key()
 
-        return await verify_run_status(
-            api_url=self.api_url,
-            api_key=api_key,
-            sandbox_id=sandbox_id,
-            keep_alive=run.keep_alive,
-            run_id=run_id,
-        )
-
-    async def cleanup_after_verification(
-        self,
-        run: AutomationRun,
-        run_id: str,
-    ) -> None:
-        """Clean up sandbox after verification failure."""
-        sandbox_id = run.sandbox_id
-        if not run.keep_alive and sandbox_id:
-            api_key = await get_api_key_for_automation_run(run)
-            await cleanup_sandbox(
+        async def _do_verify() -> VerificationResult:
+            return await verify_run_status(
                 api_url=self.api_url,
-                api_key=api_key,
+                api_key=await self._ensure_api_key(),
                 sandbox_id=sandbox_id,
+                keep_alive=self._run.keep_alive,
                 run_id=run_id,
             )
+
+        return await self._with_auth_retry(_do_verify)
+
+    async def cleanup_after_verification(self, run_id: str) -> None:
+        """Clean up sandbox after verification failure."""
+        sandbox_id = self._run.sandbox_id
+        if not self._run.keep_alive and sandbox_id:
+            api_key = await self._ensure_api_key()
+
+            async def _do_cleanup() -> None:
+                await cleanup_sandbox(
+                    api_url=self.api_url,
+                    api_key=await self._ensure_api_key(),
+                    sandbox_id=sandbox_id,
+                    run_id=run_id,
+                )
+
+            await self._with_auth_retry(_do_cleanup)
 
     async def _create_and_wait(
         self,
         client: httpx.AsyncClient,
+        api_key: str,
         ready_timeout: float | None = None,
     ) -> tuple[str, str, str]:
         """Create a sandbox and poll until RUNNING.
@@ -157,7 +217,7 @@ class CloudSandboxBackend(ExecutionBackend):
         if ready_timeout is None:
             ready_timeout = self._ready_timeout
 
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"Authorization": f"Bearer {api_key}"}
         sandbox_id = await self._create_sandbox(client, headers)
 
         elapsed = 0.0
