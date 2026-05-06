@@ -459,7 +459,7 @@ function startAgentServerGui(config) {
     cwd: config.guiPath,
     env: {
       VITE_BACKEND_HOST: `127.0.0.1:${config.agentServerPort}`,
-      PORT: config.agentGuiPort.toString(),
+      VITE_FRONTEND_PORT: config.agentGuiPort.toString(),
     },
     color: c.magenta,
   });

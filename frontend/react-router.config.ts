@@ -22,7 +22,7 @@ const unpackClientDirectory = async () => {
 
 export default {
   appDirectory: "src",
-  basename: "/automations",
+  basename: "/automations/",
   buildEnd: unpackClientDirectory,
   ssr: false,
 } satisfies Config;
