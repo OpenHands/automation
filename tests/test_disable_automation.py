@@ -19,6 +19,12 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
+@pytest.fixture
+def mock_client():
+    """Mock httpx.AsyncClient for tests."""
+    return MagicMock()
+
+
 def _create_mock_backend() -> MagicMock:
     """Create a mock backend for dispatcher tests."""
     from automation.backends.base import ExecutionContext
@@ -234,6 +240,7 @@ class TestExecuteRunDisablesAutomation:
         mock_execute,
         async_session_factory,
         mock_settings,
+        mock_client,
     ):
         """Automation is disabled when internal tarball upload is not found."""
         from automation.dispatcher import _execute_run
@@ -275,7 +282,7 @@ class TestExecuteRunDisablesAutomation:
             )
             run = result.scalars().first()
 
-            await _execute_run(run, mock_settings, async_session_factory)
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         # Verify automation was disabled
         async with async_session_factory() as session:
@@ -304,6 +311,7 @@ class TestExecuteRunDisablesAutomation:
         mock_execute,
         async_session_factory,
         mock_settings,
+        mock_client,
     ):
         """Automation is NOT disabled on transient errors like network failures."""
         from automation.dispatcher import _execute_run
@@ -348,7 +356,7 @@ class TestExecuteRunDisablesAutomation:
             )
             run = result.scalars().first()
 
-            await _execute_run(run, mock_settings, async_session_factory)
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         # Verify automation is still enabled (transient error)
         async with async_session_factory() as session:

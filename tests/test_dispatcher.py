@@ -6,7 +6,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 import asyncio
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -24,6 +24,12 @@ from automation.utils.tarball_validation import is_http_url
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+@pytest.fixture
+def mock_client():
+    """Mock httpx.AsyncClient for tests."""
+    return MagicMock()
 
 
 class TestIsHttpUrl:
@@ -204,7 +210,7 @@ class TestDispatchPendingRuns:
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatches_pending_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Pending runs are dispatched and marked as RUNNING."""
         async with async_session_factory() as session:
@@ -228,7 +234,9 @@ class TestDispatchPendingRuns:
             await session.commit()
             run_id = run.id
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 1
         assert dispatched[0].id == run_id
@@ -243,7 +251,7 @@ class TestDispatchPendingRuns:
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Runs already in RUNNING status are not dispatched."""
         async with async_session_factory() as session:
@@ -267,13 +275,15 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 0
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_completed_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Completed runs are not dispatched."""
         async with async_session_factory() as session:
@@ -298,13 +308,15 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 0
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_respects_batch_size(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Only batch_size runs are dispatched at once."""
         async with async_session_factory() as session:
@@ -330,14 +342,14 @@ class TestDispatchPendingRuns:
             await session.commit()
 
         dispatched = await dispatch_pending_runs(
-            async_session_factory, mock_settings, batch_size=2
+            async_session_factory, mock_settings, mock_client, batch_size=2
         )
 
         assert len(dispatched) == 2
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_orders_by_created_at(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Oldest pending runs are dispatched first."""
         async with async_session_factory() as session:
@@ -369,7 +381,7 @@ class TestDispatchPendingRuns:
             old_run_id = old_run.id
 
         dispatched = await dispatch_pending_runs(
-            async_session_factory, mock_settings, batch_size=1
+            async_session_factory, mock_settings, mock_client, batch_size=1
         )
 
         assert len(dispatched) == 1
@@ -381,7 +393,7 @@ class TestDispatcherLoop:
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatcher_loop_exits_on_shutdown(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher exits gracefully when shutdown event is set."""
         shutdown_event = asyncio.Event()
@@ -469,7 +481,7 @@ class TestEffectiveTimeout:
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_automation_timeout_when_set(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher uses automation's timeout when set."""
 
@@ -494,7 +506,7 @@ class TestEffectiveTimeout:
             session.add(run)
             await session.commit()
 
-        await dispatch_pending_runs(async_session_factory, mock_settings)
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
@@ -505,7 +517,7 @@ class TestEffectiveTimeout:
 
     @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
         async with async_session_factory() as session:
@@ -529,7 +541,7 @@ class TestEffectiveTimeout:
             session.add(run)
             await session.commit()
 
-        await dispatch_pending_runs(async_session_factory, mock_settings)
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
