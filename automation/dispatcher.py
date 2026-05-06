@@ -142,21 +142,7 @@ async def _execute_run(
         if disable:
             await disable_automation(session_factory, automation.id, error)
 
-    # 1. Build env vars upfront (doesn't depend on ctx)
-    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
-    base_env_vars = backend.build_env_vars()
-    base_env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
-    base_env_vars["AUTOMATION_RUN_ID"] = run_id
-    base_env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
-        {
-            "trigger": automation.trigger,
-            "automation_id": str(automation.id),
-            "automation_name": automation.name,
-            **({"event": run.event_payload} if run.event_payload else {}),
-        }
-    )
-
-    # Calculate effective timeout
+    # 1. Calculate effective timeout (doesn't depend on ctx)
     max_run_duration = get_config().sandbox.max_run_duration
     effective_timeout = (
         min(automation.timeout, max_run_duration)
@@ -165,6 +151,7 @@ async def _execute_run(
     )
 
     # 2. Get execution context - if this fails, nothing to clean up
+    # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
         ctx = await backend.get_execution_context(client)
     except Exception:
@@ -178,13 +165,24 @@ async def _execute_run(
         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
     )
 
-    # Add ctx-specific env vars
-    env_vars = dict(base_env_vars)
+    # 3. Build env vars (must be after get_execution_context for cloud mode API key)
+    callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
+    env_vars = backend.build_env_vars()
+    env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_RUN_ID"] = run_id
+    env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
+        {
+            "trigger": automation.trigger,
+            "automation_id": str(automation.id),
+            "automation_name": automation.name,
+            **({"event": run.event_payload} if run.event_payload else {}),
+        }
+    )
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
 
-    # 3. Prepare tarball source
+    # 4. Prepare tarball source
     try:
         tarball_source: bytes | str
         if is_http_url(tarball_path):
@@ -225,7 +223,7 @@ async def _execute_run(
         await _fail(str(exc))
         return
 
-    # 4. Execute in context
+    # 5. Execute in context
     try:
         result = await execute_in_context(
             client=client,
@@ -256,7 +254,7 @@ async def _execute_run(
         await _fail("Internal error")
         return
 
-    # 5. Handle result
+    # 6. Handle result
     if result.success:
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
