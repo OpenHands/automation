@@ -34,6 +34,18 @@ def is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite")
 
 
+def normalize_sqlite_url_for_alembic(url: str) -> str:
+    """Convert async SQLite URL to sync version for Alembic.
+
+    Alembic doesn't support async drivers, so we need to convert
+    sqlite+aiosqlite:// URLs to plain sqlite:// URLs.
+    """
+    if url.startswith("sqlite+aiosqlite"):
+        return url.replace("sqlite+aiosqlite", "sqlite", 1)
+    return url
+
+
+
 @dataclass
 class EngineResult:
     """Result of create_engine containing the engine and optional connector."""
