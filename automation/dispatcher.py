@@ -135,22 +135,35 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
+    async def _fail(error: str, disable: bool = False) -> None:
+        """Mark run as failed and optionally disable the automation."""
+        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        if disable:
+            await disable_automation(session_factory, automation.id, error)
+
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     http_timeout = get_config().http.http_long_timeout
     backend = get_backend(run)
-    ctx = None  # Track context for cleanup
 
-    try:
-        async with httpx.AsyncClient(timeout=http_timeout) as client:
-            # 1. Get execution context (sandbox in Cloud, config in local)
+    # Phase 1: Get execution context (may create sandbox)
+    # If this fails, there's nothing to clean up
+    async with httpx.AsyncClient(timeout=http_timeout) as client:
+        try:
             ctx = await backend.get_execution_context(client)
-            logger.info(
-                "Execution context ready: %s",
-                ctx.agent_url,
-                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-            )
+        except Exception:
+            logger.exception("Failed to get execution context", extra=_log_ctx())
+            await _fail("Failed to get execution context")
+            return
 
-            # 2. Determine tarball source
+        logger.info(
+            "Execution context ready: %s",
+            ctx.agent_url,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+
+        # Phase 2: Execute in context (ctx is guaranteed valid from here)
+        try:
+            # Determine tarball source
             tarball_source: bytes | str
             if is_http_url(tarball_path):
                 tarball_source = tarball_path
@@ -173,7 +186,7 @@ async def _execute_run(
                     extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                 )
 
-            # 3. Build env vars
+            # Build env vars
             env_vars = backend.build_env_vars()
             if ctx.sandbox_id:
                 env_vars.setdefault("SANDBOX_ID", ctx.sandbox_id)
@@ -189,7 +202,7 @@ async def _execute_run(
                 }
             )
 
-            # 4. Calculate effective timeout
+            # Calculate effective timeout
             max_run_duration = get_config().sandbox.max_run_duration
             effective_timeout = (
                 min(automation.timeout, max_run_duration)
@@ -197,7 +210,7 @@ async def _execute_run(
                 else max_run_duration
             )
 
-            # 5. Execute in context
+            # Execute in context
             result = await execute_in_context(
                 client=client,
                 agent_url=ctx.agent_url,
@@ -210,7 +223,7 @@ async def _execute_run(
                 sandbox_id=ctx.sandbox_id,
             )
 
-            # 6. Handle result
+            # Handle result
             if result.success:
                 if ctx.sandbox_id:
                     await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
@@ -227,45 +240,34 @@ async def _execute_run(
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
             await backend.release_context(client, ctx)
-            await mark_run_terminal(
-                session_factory,
-                run,
-                AutomationRunStatus.FAILED,
-                result.error or "Execution failed",
+            await _fail(result.error or "Execution failed")
+
+        except PermanentDispatchError as exc:
+            logger.error(
+                "Permanent dispatch error, disabling automation: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
+            await backend.release_context(client, ctx)
+            await _fail(str(exc), disable=True)
 
-    except PermanentDispatchError as exc:
-        logger.error(
-            "Permanent dispatch error, disabling automation: %s",
-            exc,
-            exc_info=True,
-            extra=_log_ctx(),
-        )
-        if ctx:
-            async with httpx.AsyncClient(timeout=http_timeout) as client:
-                await backend.release_context(client, ctx)
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, str(exc)
-        )
-        await disable_automation(session_factory, automation.id, str(exc))
+        except (APIKeyError, ValueError) as exc:
+            logger.error(
+                "Dispatch error: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            await backend.release_context(client, ctx)
+            await _fail(str(exc))
 
-    except (APIKeyError, ValueError) as exc:
-        logger.error("Dispatch error: %s", exc, exc_info=True, extra=_log_ctx())
-        if ctx:
-            async with httpx.AsyncClient(timeout=http_timeout) as client:
-                await backend.release_context(client, ctx)
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, str(exc)
-        )
-
-    except Exception:
-        logger.exception("Background execution failed", extra=_log_ctx())
-        if ctx:
-            async with httpx.AsyncClient(timeout=http_timeout) as client:
-                await backend.release_context(client, ctx)
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
-        )
+        except Exception:
+            logger.exception(
+                "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
+            )
+            await backend.release_context(client, ctx)
+            await _fail("Internal error")
 
 
 async def dispatch_pending_runs(
