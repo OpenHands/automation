@@ -9,6 +9,7 @@ import pytest
 from automation.db import (
     _create_sqlite_engine,
     is_sqlite_url,
+    normalize_sqlite_url_for_alembic,
     set_sqlite_mode,
     using_sqlite,
 )
@@ -110,6 +111,40 @@ class TestEngineResult:
         await result.dispose()  # Should not raise
 
 
+class TestNormalizeSqliteUrlForAlembic:
+    """Tests for normalize_sqlite_url_for_alembic helper function."""
+
+    def test_converts_aiosqlite_to_sqlite(self):
+        """Converts sqlite+aiosqlite:// to sqlite://."""
+        url = "sqlite+aiosqlite:///test.db"
+        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///test.db"
+
+    def test_converts_aiosqlite_with_absolute_path(self):
+        """Converts sqlite+aiosqlite with absolute path."""
+        url = "sqlite+aiosqlite:////data/automations.db"
+        assert normalize_sqlite_url_for_alembic(url) == "sqlite:////data/automations.db"
+
+    def test_preserves_plain_sqlite_url(self):
+        """Plain sqlite:// URL is unchanged."""
+        url = "sqlite:///test.db"
+        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///test.db"
+
+    def test_preserves_postgresql_url(self):
+        """PostgreSQL URLs are unchanged."""
+        url = "postgresql://user:pass@host/db"
+        assert normalize_sqlite_url_for_alembic(url) == url
+
+    def test_preserves_postgresql_asyncpg_url(self):
+        """PostgreSQL+asyncpg URLs are unchanged."""
+        url = "postgresql+asyncpg://user:pass@host/db"
+        assert normalize_sqlite_url_for_alembic(url) == url
+
+    def test_handles_memory_database(self):
+        """Memory database URL is converted correctly."""
+        url = "sqlite+aiosqlite:///:memory:"
+        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///:memory:"
+
+
 class TestSqliteMigrations:
     """Tests for SQLite migration support."""
 
@@ -157,3 +192,73 @@ class TestSqliteMigrations:
             # Clean up
             if os.path.exists(db_path):
                 os.unlink(db_path)
+
+    def test_auto_migration_applies_schema(self):
+        """Auto-migration on startup creates all required tables.
+
+        This tests the auto-migration behavior added in app.py for SQLite,
+        using the normalize_sqlite_url_for_alembic helper function.
+        """
+        import subprocess
+
+        # Create a temporary SQLite database
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            # Test the URL normalization helper
+            async_url = f"sqlite+aiosqlite:///{db_path}"
+            sync_url = normalize_sqlite_url_for_alembic(async_url)
+            assert sync_url == f"sqlite:///{db_path}"
+
+            # Run migrations using subprocess to avoid env.py PostgreSQL defaults
+            env = os.environ.copy()
+            env["AUTOMATION_DB_URL"] = sync_url
+
+            result = subprocess.run(
+                ["uv", "run", "alembic", "upgrade", "head"],
+                env=env,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+            )
+            assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
+
+            # Verify tables were created
+            from sqlalchemy import create_engine, inspect
+
+            engine = create_engine(sync_url)
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+
+            assert "automations" in tables
+            assert "automation_runs" in tables
+            assert "tarball_uploads" in tables
+            assert "alembic_version" in tables
+
+            engine.dispose()
+        finally:
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+    def test_auto_migration_error_handling(self):
+        """Migration failure returns non-zero exit code.
+
+        This tests that migration failures are properly propagated.
+        """
+        import subprocess
+
+        # Use an invalid database path that will cause a migration error
+        env = os.environ.copy()
+        # Path that doesn't exist and can't be created
+        env["AUTOMATION_DB_URL"] = "sqlite:////nonexistent/path/test.db"
+
+        result = subprocess.run(
+            ["uv", "run", "alembic", "upgrade", "head"],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=str(PROJECT_ROOT),
+        )
+        # The migration should fail (non-zero exit code)
+        assert result.returncode != 0

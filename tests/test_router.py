@@ -1274,3 +1274,165 @@ class TestBackwardCompatibility:
             },
         )
         assert response.status_code == 422
+
+
+class TestCompleteRun:
+    """Tests for POST /runs/{run_id}/complete endpoint."""
+
+    async def test_complete_run_saves_conversation_id_for_completed_runs(
+        self, async_client, async_session
+    ):
+        """Complete endpoint saves conversation_id when status is COMPLETED."""
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Complete it as COMPLETED with a conversation_id
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "conversation_id": "conv-completed-123"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["conversation_id"] == "conv-completed-123"
+
+        # Verify in database
+        await async_session.refresh(run)
+        assert run.conversation_id == "conv-completed-123"
+        assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_saves_conversation_id_for_failed_runs(
+        self, async_client, async_session
+    ):
+        """Complete endpoint saves conversation_id when status is FAILED."""
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Complete it as FAILED with a conversation_id and error
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "conversation_id": "conv-failed-456",
+                "error": "Test error message",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["conversation_id"] == "conv-failed-456"
+        assert data["error_detail"] == "Test error message"
+
+        # Verify in database
+        await async_session.refresh(run)
+        assert run.conversation_id == "conv-failed-456"
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.error_detail == "Test error message"
+
+    async def test_complete_run_without_conversation_id(
+        self, async_client, async_session
+    ):
+        """Complete endpoint works without conversation_id."""
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a RUNNING run
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Complete without conversation_id
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["conversation_id"] is None
+
+    async def test_complete_run_not_running_returns_409(
+        self, async_client, async_session
+    ):
+        """Complete endpoint returns 409 if run is not in RUNNING state."""
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Create a PENDING run (not RUNNING)
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        # Try to complete it
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 409
+        assert "PENDING" in response.json()["detail"]
