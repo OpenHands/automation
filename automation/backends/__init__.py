@@ -1,39 +1,42 @@
 """Execution backends for automation runs.
 
-Provides pluggable backends for acquiring and releasing execution contexts:
+Provides pluggable backends for getting and releasing execution contexts:
 - CloudSandboxBackend: Creates fresh Cloud sandboxes per run (default)
 - LocalAgentServerBackend: Uses a pre-configured local agent server
 
 Usage:
     from automation.backends import get_backend
 
-    backend = get_backend()  # Returns appropriate backend based on config
-    ctx = await backend.acquire(client)
+    backend = get_backend(run)  # Returns backend for this run
+    ctx = await backend.get_execution_context(client)
     try:
         # Use ctx.agent_url and ctx.session_key
         ...
     finally:
-        await backend.release(client, ctx)
+        await backend.release_context(client, ctx)
 """
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from automation.backends.base import ExecutionBackend, ExecutionContext
 from automation.backends.cloud import CloudSandboxBackend
 from automation.backends.local import LocalAgentServerBackend
 
 
-def get_backend(api_key: str | None = None) -> ExecutionBackend:
-    """Get the appropriate execution backend based on configuration.
+if TYPE_CHECKING:
+    from automation.models import AutomationRun
+
+
+def get_backend(run: AutomationRun) -> ExecutionBackend:
+    """Get the appropriate execution backend for an automation run.
 
     Args:
-        api_key: API key for Cloud mode (required if not in local mode).
-            In Cloud mode, this is the per-user API key for sandbox creation.
-            In local mode, this is ignored (config-level key is used).
+        run: The automation run this backend will operate on.
 
     Returns:
         ExecutionBackend: Either CloudSandboxBackend or LocalAgentServerBackend
-
-    Raises:
-        ValueError: If api_key is required but not provided
     """
     from automation.config import get_config
 
@@ -44,14 +47,12 @@ def get_backend(api_key: str | None = None) -> ExecutionBackend:
         return LocalAgentServerBackend(
             agent_server_url=settings.agent_server_url,
             api_key=settings.agent_server_api_key,
-            cloud_api_url=settings.openhands_api_base_url or None,
+            run=run,
         )
     else:
-        if not api_key:
-            raise ValueError("api_key is required for Cloud mode")
         return CloudSandboxBackend(
             api_url=settings.openhands_api_base_url,
-            api_key=api_key,
+            run=run,
         )
 
 

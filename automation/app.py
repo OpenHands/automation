@@ -68,17 +68,22 @@ async def lifespan(app: FastAPI):
         from alembic import command
         from alembic.config import Config
 
+        from automation.db import normalize_sqlite_url_for_alembic
+
         alembic_cfg = Config()
         alembic_cfg.set_main_option("script_location", "migrations")
         # Set the database URL for Alembic to use (sync version)
-        db_url = settings.db_url
-        if db_url.startswith("sqlite+aiosqlite"):
-            db_url = db_url.replace("sqlite+aiosqlite", "sqlite", 1)
+        db_url = normalize_sqlite_url_for_alembic(settings.db_url)
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
         # Run migrations synchronously (Alembic doesn't support async)
-        command.upgrade(alembic_cfg, "head")
-        logger.info("SQLite database migrations applied")
+        try:
+            command.upgrade(alembic_cfg, "head")
+            logger.info("SQLite database migrations applied")
+        except Exception as e:
+            logger.error(f"Failed to apply SQLite migrations: {e}")
+            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
+            raise RuntimeError(msg) from e
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
