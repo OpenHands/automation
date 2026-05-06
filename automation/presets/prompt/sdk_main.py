@@ -14,13 +14,18 @@ This script is auto-generated from a user's prompt. It supports two modes:
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
-  2. Creates a remote Workspace connected to the agent server
+  2. Opens the Workspace context EARLY (ensures callback on any failure)
   3. Gets LLM config via workspace.get_llm()
   4. Gets secrets via workspace.get_secrets()
   5. Gets MCP config via workspace.get_mcp_config()
   6. Gets default agent with tools and condenser
   7. Creates a RemoteConversation and injects secrets
   8. Sends the user's prompt (with event context if available) and runs
+  9. On context manager exit, the workspace sends a completion callback
+
+IMPORTANT: The workspace context is entered early so that ANY exception
+(config loading, prompt parsing, etc.) triggers the __exit__ callback,
+avoiding silent failures that require watchdog timeout.
 
 Env vars (Cloud mode - all required):
   OPENHANDS_API_KEY          - per-user automation API key
@@ -83,7 +88,7 @@ print(
 )
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
-# SDK imports
+# SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation, Workspace
 from openhands.tools.preset.default import get_default_agent
 
@@ -98,34 +103,39 @@ else:
 print("\n=== SDK WORKSPACE ===")
 print(f"  connecting to agent server: {server_url}")
 
-# Create remote workspace connected to the agent server
-workspace = Workspace(host=server_url)
+# Create workspace context - use 'with' to ensure cleanup/callback on exit
+workspace_ctx = Workspace(host=server_url)
 
-# Verify connectivity
-result = workspace.execute_command("pwd")
-print(f"  workspace ready, cwd: {result.stdout.strip()}")
+# Enter workspace context EARLY - any exception from here on triggers callback
+with workspace_ctx as workspace:
+    # -- All remaining setup happens inside the workspace context --
+    # This ensures failures trigger the __exit__ callback
 
-# Parse event payload if present (for event-triggered automations)
-event_context = None
-if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
-    try:
-        event_context = json.loads(event_payload_json)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
+    # Verify connectivity
+    result = workspace.execute_command("pwd")
+    print(f"  workspace ready, cwd: {result.stdout.strip()}")
 
-# Load user's prompt from file (placed during automation creation)
-SCRIPT_DIR = os.path.dirname(__file__)
-PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
-with open(PROMPT_FILE) as f:
-    USER_PROMPT = f.read()
+    # Parse event payload if present (for event-triggered automations)
+    event_context = None
+    if event_payload_json := os.environ.get("AUTOMATION_EVENT_PAYLOAD"):
+        try:
+            event_context = json.loads(event_payload_json)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
 
-# Build prompt with context sections
-context_sections = []
+    # Load user's prompt from file (placed during automation creation)
+    SCRIPT_DIR = os.path.dirname(__file__)
+    PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
+    with open(PROMPT_FILE) as f:
+        USER_PROMPT = f.read()
 
-# Add event context if this is an event-triggered run
-if event_context and "event" in event_context:
-    event_json = json.dumps(event_context["event"], indent=2)
-    context_sections.append(f"""## Event Payload
+    # Build prompt with context sections
+    context_sections = []
+
+    # Add event context if this is an event-triggered run
+    if event_context and "event" in event_context:
+        event_json = json.dumps(event_context["event"], indent=2)
+        context_sections.append(f"""## Event Payload
 
 This automation was triggered by a webhook event:
 
@@ -133,95 +143,93 @@ This automation was triggered by a webhook event:
 {event_json}
 ```""")
 
-# Prepend context sections to the user prompt
-if context_sections:
-    context_block = "\n\n".join(context_sections)
-    USER_PROMPT = f"""{context_block}
+    # Prepend context sections to the user prompt
+    if context_sections:
+        context_block = "\n\n".join(context_sections)
+        USER_PROMPT = f"""{context_block}
 
 ## Task
 
 {USER_PROMPT}"""
 
-# Get LLM config via workspace
-print("\n=== GET_LLM ===")
-llm = workspace.get_llm()
-print(f"  model: {llm.model}")
-print(f"  api_key present: {bool(llm.api_key)}")
+    # Get LLM config via workspace
+    print("\n=== GET_LLM ===")
+    llm = workspace.get_llm()
+    print(f"  model: {llm.model}")
+    print(f"  api_key present: {bool(llm.api_key)}")
 
-# Get secrets via workspace
-print("\n=== GET_SECRETS ===")
-secrets = {}
-try:
-    secrets = workspace.get_secrets()
-    print(f"  available: {list(secrets.keys()) or '(none)'}")
-except Exception as e:
-    # Not a hard failure — user may not have secrets configured
-    print(f"  get_secrets() failed (ok if no secrets): {e}")
+    # Get secrets via workspace
+    print("\n=== GET_SECRETS ===")
+    secrets = {}
+    try:
+        secrets = workspace.get_secrets()
+        print(f"  available: {list(secrets.keys()) or '(none)'}")
+    except Exception as e:
+        # Not a hard failure — user may not have secrets configured
+        print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-# Get MCP config via workspace
-print("\n=== GET_MCP_CONFIG ===")
-mcp_config = None
-try:
-    mcp_config = workspace.get_mcp_config()
-    if mcp_config and mcp_config.get("mcpServers"):
-        print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
-    else:
-        print("  no MCP servers configured")
-except Exception as e:
-    # Not a hard failure — user may not have MCP configured
-    print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+    # Get MCP config via workspace
+    print("\n=== GET_MCP_CONFIG ===")
+    mcp_config = None
+    try:
+        mcp_config = workspace.get_mcp_config()
+        if mcp_config and mcp_config.get("mcpServers"):
+            print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
+        else:
+            print("  no MCP servers configured")
+    except Exception as e:
+        # Not a hard failure — user may not have MCP configured
+        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-# Get default agent with tools and condenser (CLI mode to disable browser)
-print("\n=== AGENT ===")
-agent = get_default_agent(llm=llm, cli_mode=True)
+    # Get default agent with tools and condenser (CLI mode to disable browser)
+    print("\n=== AGENT ===")
+    agent = get_default_agent(llm=llm, cli_mode=True)
 
-# Add MCP config if configured
-if mcp_config:
-    agent = agent.model_copy(update={"mcp_config": mcp_config})
+    # Add MCP config if configured
+    if mcp_config:
+        agent = agent.model_copy(update={"mcp_config": mcp_config})
 
-print(f"  tools: {[t.name for t in agent.tools]}")
-print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
-condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
-print(f"  condenser: {condenser_name}")
+    print(f"  tools: {[t.name for t in agent.tools]}")
+    print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+    condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
+    print(f"  condenser: {condenser_name}")
 
-# Create conversation
-print("\n=== CONVERSATION ===")
-received_events: list = []
-last_event_time = {"ts": time.time()}
+    # Create conversation
+    print("\n=== CONVERSATION ===")
+    received_events: list = []
+    last_event_time = {"ts": time.time()}
 
+    def event_callback(event) -> None:
+        received_events.append(event)
+        last_event_time["ts"] = time.time()
 
-def event_callback(event) -> None:
-    received_events.append(event)
-    last_event_time["ts"] = time.time()
+    conversation = Conversation(
+        agent=agent, workspace=workspace, callbacks=[event_callback]
+    )
+    assert isinstance(conversation, RemoteConversation)
+    print(f"  conversation created: {type(conversation).__name__}")
 
+    # Inject secrets into the conversation (as LookupSecret references)
+    if secrets:
+        conversation.update_secrets(secrets)
+        print(f"  injected {len(secrets)} secrets into conversation")
 
-conversation = Conversation(
-    agent=agent, workspace=workspace, callbacks=[event_callback]
-)
-assert isinstance(conversation, RemoteConversation)
-print(f"  conversation created: {type(conversation).__name__}")
+    try:
+        print(f"  sending prompt: {USER_PROMPT[:80]}...")
+        conversation.send_message(USER_PROMPT)
+        conversation.run()
 
-# Inject secrets into the conversation (as LookupSecret references)
-if secrets:
-    conversation.update_secrets(secrets)
-    print(f"  injected {len(secrets)} secrets into conversation")
+        # Wait for the stream to settle
+        while time.time() - last_event_time["ts"] < 2.0:
+            time.sleep(0.1)
 
-try:
-    print(f"  sending prompt: {USER_PROMPT[:80]}...")
-    conversation.send_message(USER_PROMPT)
-    conversation.run()
+        cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
+        print(f"  cost: {cost}")
+        print(f"  events received: {len(received_events)}")
+    finally:
+        conversation.close()
 
-    # Wait for the stream to settle
-    while time.time() - last_event_time["ts"] < 2.0:
-        time.sleep(0.1)
+    print("  conversation completed successfully")
 
-    cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
-    print(f"  cost: {cost}")
-    print(f"  events received: {len(received_events)}")
-finally:
-    conversation.close()
-
-print("  conversation completed successfully")
-
-print("\n=== RESULT ===")
-print("ALL_OK")
+    print("\n=== RESULT ===")
+    print("ALL_OK")
