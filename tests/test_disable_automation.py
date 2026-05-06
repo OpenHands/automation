@@ -216,12 +216,12 @@ class TestDownloadInternalTarball:
 class TestExecuteRunDisablesAutomation:
     """Tests that _execute_run disables automation on permanent errors."""
 
-    @patch("automation.dispatcher.dispatch_automation")
+    @patch("automation.dispatcher.execute_in_context")
     @patch("automation.dispatcher.get_backend")
     async def test_disables_automation_on_internal_tarball_not_found(
         self,
         mock_get_backend,
-        mock_dispatch,
+        mock_execute,
         async_session_factory,
         mock_settings,
     ):
@@ -286,22 +286,23 @@ class TestExecuteRunDisablesAutomation:
             assert run.status == AutomationRunStatus.FAILED
             assert "not found" in run.error_detail.lower()
 
-    @patch("automation.dispatcher.dispatch_automation")
+    @patch("automation.dispatcher.execute_in_context")
     @patch("automation.dispatcher.get_backend")
     async def test_does_not_disable_on_transient_error(
         self,
         mock_get_backend,
-        mock_dispatch,
+        mock_execute,
         async_session_factory,
         mock_settings,
     ):
         """Automation is NOT disabled on transient errors like network failures."""
         from automation.dispatcher import _execute_run
+        from automation.execution import DispatchResult
         from automation.models import Automation, AutomationRun, AutomationRunStatus
 
         mock_get_backend.return_value = _create_mock_backend()
-        # Simulate a transient dispatch failure (e.g., sandbox creation failed)
-        mock_dispatch.return_value = AsyncMock(
+        # Simulate a transient execution failure
+        mock_execute.return_value = DispatchResult(
             success=False, sandbox_id=None, error="Connection timeout"
         )
 
