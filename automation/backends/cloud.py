@@ -123,9 +123,10 @@ class CloudSandboxBackend(ExecutionBackend):
                 return await operation()
             raise
 
-    async def acquire(self, client: httpx.AsyncClient) -> ExecutionContext:
+    async def get_execution_context(
+        self, client: httpx.AsyncClient
+    ) -> ExecutionContext:
         """Create a sandbox and wait for it to be ready."""
-        api_key = await self._ensure_api_key()
 
         async def _do_acquire() -> tuple[str, str, str]:
             return await self._create_and_wait(client, await self._ensure_api_key())
@@ -140,7 +141,9 @@ class CloudSandboxBackend(ExecutionBackend):
             api_key=await self._ensure_api_key(),
         )
 
-    async def release(self, client: httpx.AsyncClient, ctx: ExecutionContext) -> None:
+    async def release_context(
+        self, client: httpx.AsyncClient, ctx: ExecutionContext
+    ) -> None:
         """Delete the sandbox."""
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
@@ -175,8 +178,6 @@ class CloudSandboxBackend(ExecutionBackend):
                 error="No sandbox_id available for verification",
             )
 
-        api_key = await self._ensure_api_key()
-
         async def _do_verify() -> VerificationResult:
             return await verify_run_status(
                 api_url=self.api_url,
@@ -192,7 +193,6 @@ class CloudSandboxBackend(ExecutionBackend):
         """Clean up sandbox after verification failure."""
         sandbox_id = self._run.sandbox_id
         if not self._run.keep_alive and sandbox_id:
-            api_key = await self._ensure_api_key()
 
             async def _do_cleanup() -> None:
                 await cleanup_sandbox(

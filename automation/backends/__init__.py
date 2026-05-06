@@ -1,6 +1,6 @@
 """Execution backends for automation runs.
 
-Provides pluggable backends for acquiring and releasing execution contexts:
+Provides pluggable backends for getting and releasing execution contexts:
 - CloudSandboxBackend: Creates fresh Cloud sandboxes per run (default)
 - LocalAgentServerBackend: Uses a pre-configured local agent server
 
@@ -8,12 +8,12 @@ Usage:
     from automation.backends import get_backend
 
     backend = get_backend(run)  # Returns backend for this run
-    ctx = await backend.acquire(client)
+    ctx = await backend.get_execution_context(client)
     try:
         # Use ctx.agent_url and ctx.session_key
         ...
     finally:
-        await backend.release(client, ctx)
+        await backend.release_context(client, ctx)
 """
 
 from __future__ import annotations

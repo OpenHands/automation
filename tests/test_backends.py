@@ -69,22 +69,22 @@ class TestLocalAgentServerBackend:
         assert backend.agent_server_url == "http://localhost:3000"
 
     @pytest.mark.asyncio
-    async def test_acquire_returns_context(self, mock_run):
-        """acquire() returns ExecutionContext with configured values."""
+    async def test_get_execution_context_returns_context(self, mock_run):
+        """get_execution_context() returns ExecutionContext with configured values."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
             run=mock_run,
         )
-        # acquire() doesn't actually make HTTP calls in local mode
-        ctx = await backend.acquire(None)  # type: ignore
+        # get_execution_context() doesn't make HTTP calls in local mode
+        ctx = await backend.get_execution_context(None)  # type: ignore
         assert ctx.agent_url == "http://localhost:3000"
         assert ctx.session_key == "local-key"
         assert ctx.sandbox_id is None
 
     @pytest.mark.asyncio
-    async def test_release_is_noop(self, mock_run):
-        """release() is a no-op for local backend."""
+    async def test_release_context_is_noop(self, mock_run):
+        """release_context() is a no-op for local backend."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
@@ -95,7 +95,7 @@ class TestLocalAgentServerBackend:
             session_key="local-key",
         )
         # Should not raise
-        await backend.release(None, ctx)  # type: ignore
+        await backend.release_context(None, ctx)  # type: ignore
 
     @pytest.mark.asyncio
     async def test_get_api_key_returns_config_key(self, mock_run):

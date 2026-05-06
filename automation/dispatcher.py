@@ -137,9 +137,9 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
 
     try:
-        # 1. Get backend and API key (mode-specific logic encapsulated in backend)
-        backend = get_backend()
-        api_key = await backend.get_api_key(run)
+        # 1. Get backend for this run (mode-specific logic encapsulated in backend)
+        backend = get_backend(run)
+        api_key = await backend.get_api_key()
 
         # For dispatch_automation, we need the appropriate URL
         if backend.is_local_mode:
@@ -169,7 +169,7 @@ async def _execute_run(
             )
 
         # 3. Build env vars via backend (mode-specific logic encapsulated)
-        env_vars = backend.build_env_vars(api_key)
+        env_vars = backend.build_env_vars()
 
         # Add trigger context so the SDK script knows *why* it was invoked
         trigger_context = {

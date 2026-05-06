@@ -43,8 +43,10 @@ class ExecutionBackend(ABC):
     """
 
     @abstractmethod
-    async def acquire(self, client: httpx.AsyncClient) -> ExecutionContext:
-        """Acquire an execution context (agent server URL + credentials).
+    async def get_execution_context(
+        self, client: httpx.AsyncClient
+    ) -> ExecutionContext:
+        """Get the execution context (agent server URL + credentials).
 
         For Cloud mode: Creates a sandbox, waits for it to be RUNNING,
         and extracts the agent server URL from exposed_urls.
@@ -58,12 +60,14 @@ class ExecutionBackend(ABC):
             ExecutionContext with agent_url and session_key
 
         Raises:
-            RuntimeError: If acquisition fails
+            RuntimeError: If context cannot be obtained
             TimeoutError: If sandbox doesn't become ready in time (Cloud mode)
         """
 
     @abstractmethod
-    async def release(self, client: httpx.AsyncClient, ctx: ExecutionContext) -> None:
+    async def release_context(
+        self, client: httpx.AsyncClient, ctx: ExecutionContext
+    ) -> None:
         """Release the execution context (cleanup).
 
         For Cloud mode: Deletes the sandbox.

@@ -55,7 +55,7 @@ class LocalAgentServerBackend(ExecutionBackend):
     def is_local_mode(self) -> bool:
         return True
 
-    async def acquire(
+    async def get_execution_context(
         self,
         client: httpx.AsyncClient,  # noqa: ARG002
     ) -> ExecutionContext:
@@ -73,13 +73,13 @@ class LocalAgentServerBackend(ExecutionBackend):
             sandbox_id=None,  # No sandbox in local mode
         )
 
-    async def release(
+    async def release_context(
         self,
         client: httpx.AsyncClient,  # noqa: ARG002
         ctx: ExecutionContext,  # noqa: ARG002
     ) -> None:
         """No-op — local agent server is persistent."""
-        logger.debug("Local mode: skipping sandbox cleanup (persistent server)")
+        logger.debug("Local mode: skipping context release (persistent server)")
 
     async def get_api_key(self) -> str:
         """Return the pre-configured API key."""

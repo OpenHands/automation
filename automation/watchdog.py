@@ -45,13 +45,13 @@ async def _verify_and_mark_run(
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
 
-    # Get backend (mode-specific logic encapsulated)
-    backend = get_backend()
+    # Get backend for this run (mode-specific logic encapsulated)
+    backend = get_backend(run)
 
     # Verify run status via backend
     try:
         logger.info("Verifying run status via backend", extra=extra)
-        verification = await backend.verify_run(run, run_id)
+        verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
         stmt = (
@@ -158,7 +158,7 @@ async def _verify_and_mark_run(
     # Skip cleanup if keep_alive is True — user wants to inspect the sandbox
     if not run.keep_alive:
         try:
-            await backend.cleanup_after_verification(run, run_id)
+            await backend.cleanup_after_verification(run_id)
         except Exception as e:
             logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
