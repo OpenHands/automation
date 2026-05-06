@@ -130,49 +130,41 @@ async def _execute_run(
     automation_id = str(automation.id)
     tarball_path = automation.tarball_path
 
-    # Helper for consistent structured logging with run context
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
         return log_extra(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
+    async def _fail(error: str, disable: bool = False) -> None:
+        """Mark run as failed and optionally disable the automation."""
+        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        if disable:
+            await disable_automation(session_factory, automation.id, error)
+
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     http_timeout = get_config().http.http_long_timeout
+    backend = get_backend(run)
 
     try:
-        # 1. Get backend for this run (mode-specific logic encapsulated)
-        backend = get_backend(run)
-
-        # 2. Get execution context (creates sandbox in Cloud, returns config in local)
         async with httpx.AsyncClient(timeout=http_timeout) as client:
-            try:
-                ctx = await backend.get_execution_context(client)
-                logger.info(
-                    "Execution context ready: %s",
-                    ctx.agent_url,
-                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
-                )
-            except Exception as e:
-                logger.exception("Failed to get execution context", extra=_log_ctx())
-                await mark_run_terminal(
-                    session_factory, run, AutomationRunStatus.FAILED, str(e)
-                )
-                return
-
-            sandbox_id = ctx.sandbox_id
+            # 1. Get execution context (sandbox in Cloud, config in local)
+            ctx = await backend.get_execution_context(client)
+            logger.info(
+                "Execution context ready: %s",
+                ctx.agent_url,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
 
             try:
-                # 3. Determine tarball source
+                # 2. Determine tarball source
                 tarball_source: bytes | str
                 if is_http_url(tarball_path):
-                    # HTTP(S) URL: download directly inside environment
                     tarball_source = tarball_path
                     logger.info(
                         "HTTP URL tarball, will download in environment",
-                        extra=_log_ctx(sandbox_id=sandbox_id),
+                        extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                     )
                 else:
-                    # Internal (oh-internal://): download from storage, upload
                     upload_id = parse_internal_upload_id(tarball_path)
                     if upload_id is None:
                         raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
@@ -184,42 +176,34 @@ async def _execute_run(
                     logger.info(
                         "Internal tarball downloaded (%d bytes)",
                         len(tarball_source),
-                        extra=_log_ctx(sandbox_id=sandbox_id),
+                        extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                     )
 
-                # 4. Build env vars via backend (mode-specific)
+                # 3. Build env vars
                 env_vars = backend.build_env_vars()
-
-                # Add sandbox identity for SDK (Cloud mode)
                 if ctx.sandbox_id:
                     env_vars.setdefault("SANDBOX_ID", ctx.sandbox_id)
                     env_vars.setdefault("SESSION_API_KEY", ctx.session_key)
-
-                # Add callback info
                 env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
                 env_vars["AUTOMATION_RUN_ID"] = run_id
+                env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
+                    {
+                        "trigger": automation.trigger,
+                        "automation_id": str(automation.id),
+                        "automation_name": automation.name,
+                        **({"event": run.event_payload} if run.event_payload else {}),
+                    }
+                )
 
-                # Add trigger context so the SDK script knows *why* it was invoked
-                trigger_context = {
-                    "trigger": automation.trigger,
-                    "automation_id": str(automation.id),
-                    "automation_name": automation.name,
-                }
-
-                # Include webhook event payload if this is an event-triggered run
-                if run.event_payload is not None:
-                    trigger_context["event"] = run.event_payload
-
-                env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(trigger_context)
-
-                # 5. Calculate effective timeout
+                # 4. Calculate effective timeout
                 max_run_duration = get_config().sandbox.max_run_duration
-                if automation.timeout is not None:
-                    effective_timeout = min(automation.timeout, max_run_duration)
-                else:
-                    effective_timeout = max_run_duration
+                effective_timeout = (
+                    min(automation.timeout, max_run_duration)
+                    if automation.timeout
+                    else max_run_duration
+                )
 
-                # 6. Execute in context (upload tarball, start entrypoint)
+                # 5. Execute in context
                 result = await execute_in_context(
                     client=client,
                     agent_url=ctx.agent_url,
@@ -232,55 +216,47 @@ async def _execute_run(
                     sandbox_id=ctx.sandbox_id,
                 )
 
+                # 6. Handle result
                 if result.success:
-                    # Store sandbox_id for later verification by the watchdog
                     if ctx.sandbox_id:
                         await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
                     logger.info(
                         "Automation dispatched successfully, waiting for callback",
                         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                     )
-                    # Don't mark as COMPLETED here - wait for the callback
                 else:
                     logger.warning(
                         "Execution failed: %s",
                         result.error,
                         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                     )
-                    # Clean up on failure
                     await backend.release_context(client, ctx)
-                    await mark_run_terminal(
-                        session_factory, run, AutomationRunStatus.FAILED, result.error
-                    )
+                    await _fail(result.error or "Execution failed")
 
-            except PermanentDispatchError:
-                # Clean up before re-raising so caller can disable automation
+            except PermanentDispatchError as exc:
                 await backend.release_context(client, ctx)
-                raise
+                logger.error(
+                    "Permanent dispatch error, disabling automation: %s",
+                    exc,
+                    exc_info=True,
+                    extra=_log_ctx(),
+                )
+                await _fail(str(exc), disable=True)
 
-    except PermanentDispatchError as exc:
-        # Permanent configuration error - disable the automation
-        logger.error(
-            "Permanent dispatch error, disabling automation: %s",
-            exc,
-            exc_info=True,
-            extra=_log_ctx(),
-        )
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, str(exc)
-        )
-        await disable_automation(session_factory, automation.id, str(exc))
+            except (APIKeyError, ValueError) as exc:
+                await backend.release_context(client, ctx)
+                logger.error("Dispatch error: %s", exc, exc_info=True, extra=_log_ctx())
+                await _fail(str(exc))
 
-    except (APIKeyError, ValueError) as exc:
-        logger.error("Dispatch error: %s", exc, exc_info=True, extra=_log_ctx())
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, str(exc)
-        )
+            except Exception:
+                await backend.release_context(client, ctx)
+                logger.exception("Background execution failed", extra=_log_ctx())
+                await _fail("Internal error")
+
     except Exception:
-        logger.exception("Background execution failed", extra=_log_ctx())
-        await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
-        )
+        # Failed before getting execution context (e.g., sandbox creation failed)
+        logger.exception("Failed to get execution context", extra=_log_ctx())
+        await _fail("Failed to get execution context")
 
 
 async def dispatch_pending_runs(
