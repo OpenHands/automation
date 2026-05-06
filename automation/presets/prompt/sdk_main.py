@@ -3,21 +3,21 @@
 This script is auto-generated from a user's prompt. It supports two modes:
 
 **Cloud Mode** (default):
-  Uses Workspace connected to the sandbox's agent server with Cloud API features.
+  Uses Workspace connected to the sandbox's agent server (localhost:3000).
+  LLM/secrets/MCP fetched from user's Cloud account via workspace methods.
   Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
-  LLM/secrets/MCP fetched from user's Cloud account via agent server settings API.
 
 **Local Mode** (self-hosted):
-  Uses Workspace connected to a local agent server.
+  Uses Workspace connected to a local agent server (AGENT_SERVER_URL).
+  LLM/secrets/MCP fetched from agent server's settings API via workspace methods.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
-  LLM/secrets configured via agent server's settings API (pre-configured by admin).
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
   2. Creates a remote Workspace connected to the agent server
-  3. Gets LLM config from agent server settings API
-  4. Gets secrets from agent server settings API (if configured)
-  5. Gets MCP config from agent server settings API (if configured)
+  3. Gets LLM config via workspace.get_llm()
+  4. Gets secrets via workspace.get_secrets()
+  5. Gets MCP config via workspace.get_mcp_config()
   6. Gets default agent with tools and condenser
   7. Creates a RemoteConversation and injects secrets
   8. Sends the user's prompt (with event context if available) and runs
@@ -43,9 +43,6 @@ import os
 import sys
 import time
 
-import httpx
-from pydantic import SecretStr
-
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -53,7 +50,7 @@ IS_LOCAL_MODE = bool(agent_server_url)
 
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
-api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
+api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
@@ -62,7 +59,7 @@ print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
 
 print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
-    # Local mode: AGENT_SERVER_URL required, LLM config from agent server settings
+    # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
     print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
     if not agent_server_url:
@@ -87,7 +84,7 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports
-from openhands.sdk import Conversation, LLM, RemoteConversation, Workspace
+from openhands.sdk import Conversation, RemoteConversation, Workspace
 from openhands.tools.preset.default import get_default_agent
 
 # Determine agent server URL
@@ -145,68 +142,34 @@ if context_sections:
 
 {USER_PROMPT}"""
 
-# Get LLM config from agent server settings API
+# Get LLM config via workspace
 print("\n=== GET_LLM ===")
-llm = None
-try:
-    with httpx.Client(base_url=server_url, timeout=30.0) as client:
-        response = client.get("/api/settings/llm")
-        if response.status_code == 200:
-            llm_config = response.json()
-            llm = LLM(
-                model=llm_config.get("model", "anthropic/claude-sonnet-4-20250514"),
-                api_key=SecretStr(llm_config["api_key"]) if llm_config.get("api_key") else None,
-                base_url=llm_config.get("base_url"),
-            )
-            print(f"  model: {llm.model} (from agent server settings)")
-        else:
-            print(f"  warning: GET /api/settings/llm returned {response.status_code}")
-except Exception as e:
-    print(f"  warning: failed to get LLM config from agent server: {e}")
-
-if llm is None:
-    print("FAIL: Could not get LLM configuration from agent server", file=sys.stderr)
-    sys.exit(1)
-
+llm = workspace.get_llm()
+print(f"  model: {llm.model}")
 print(f"  api_key present: {bool(llm.api_key)}")
 
-# Get secrets from agent server settings API
+# Get secrets via workspace
 print("\n=== GET_SECRETS ===")
 secrets = {}
 try:
-    with httpx.Client(base_url=server_url, timeout=30.0) as client:
-        response = client.get("/api/settings/secrets")
-        if response.status_code == 200:
-            secrets_data = response.json()
-            # Build LookupSecret references for each secret
-            for secret_info in secrets_data.get("secrets", []):
-                secret_name = secret_info["name"]
-                secrets[secret_name] = {
-                    "kind": "LookupSecret",
-                    "url": f"{server_url}/api/settings/secrets/{secret_name}",
-                }
-            print(f"  available: {list(secrets.keys()) or '(none)'}")
-        else:
-            print(f"  warning: GET /api/settings/secrets returned {response.status_code}")
+    secrets = workspace.get_secrets()
+    print(f"  available: {list(secrets.keys()) or '(none)'}")
 except Exception as e:
-    print(f"  warning: failed to get secrets: {e}")
+    # Not a hard failure — user may not have secrets configured
+    print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-# Get MCP config from agent server settings API (if configured)
+# Get MCP config via workspace
 print("\n=== GET_MCP_CONFIG ===")
 mcp_config = None
 try:
-    with httpx.Client(base_url=server_url, timeout=30.0) as client:
-        response = client.get("/api/settings/mcp")
-        if response.status_code == 200:
-            mcp_config = response.json()
-            if mcp_config and mcp_config.get("mcpServers"):
-                print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
-            else:
-                print("  no MCP servers configured")
-        else:
-            print(f"  warning: GET /api/settings/mcp returned {response.status_code}")
+    mcp_config = workspace.get_mcp_config()
+    if mcp_config and mcp_config.get("mcpServers"):
+        print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
+    else:
+        print("  no MCP servers configured")
 except Exception as e:
-    print(f"  skipped (not configured or not available): {e}")
+    # Not a hard failure — user may not have MCP configured
+    print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
 # Get default agent with tools and condenser (CLI mode to disable browser)
 print("\n=== AGENT ===")
