@@ -260,7 +260,7 @@ async def complete_run(
         "status": new_status,
         "completed_at": now,
     }
-    if body.status == "COMPLETED" and body.conversation_id:
+    if body.conversation_id:
         values["conversation_id"] = body.conversation_id
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
