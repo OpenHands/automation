@@ -496,8 +496,8 @@ class TestExecuteRunEnvVarOrdering:
             )
             run = result.scalars().first()
 
-            # This should NOT raise "API key not initialized" error
-            # If it does, build_env_vars() is being called before get_execution_context()
+            # This should NOT raise "API key not initialized" error.
+            # If it does, build_env_vars() is called before get_execution_context()
             await _execute_run(run, mock_settings, sqlite_session_factory, mock_client)
 
         # Verify execute_in_context was called (execution proceeded normally)
