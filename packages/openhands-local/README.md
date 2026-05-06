@@ -5,129 +5,104 @@ Run OpenHands locally with a single command - no Docker required.
 ## Quick Start
 
 ```bash
-# Set your LLM credentials
-export LLM_MODEL=anthropic/claude-sonnet-4-20250514
-export LLM_API_KEY=sk-ant-xxxxx
-
-# Run OpenHands
 npx @openhands/local
 ```
 
-Then open http://localhost:8000 in your browser.
+Then open http://localhost:8000 in your browser:
+- **Main UI**: http://localhost:8000/
+- **Automations**: http://localhost:8000/automations/
+- **API Docs**: http://localhost:8000/api/automation/docs
 
-## Installation
+## How It Works
 
-```bash
-# Run directly with npx (recommended)
-npx @openhands/local
+This CLI leverages the same patterns as [agent-server-gui](https://github.com/OpenHands/agent-server-gui):
 
-# Or install globally
-npm install -g @openhands/local
-openhands-local
-```
+1. **Auto-installs uv** if not present
+2. **Uses uvx** for ephemeral agent-server installation (no global install)
+3. **Runs Vite dev servers** for both frontends with hot reload
+4. **Routes all requests** through a unified reverse proxy
 
 ## Usage
 
 ```bash
-# Basic usage with environment variables
-export LLM_MODEL=anthropic/claude-sonnet-4-20250514
-export LLM_API_KEY=sk-ant-xxxxx
+# Basic usage
 npx @openhands/local
 
-# Or pass credentials as arguments
-npx @openhands/local --model anthropic/claude-sonnet-4-20250514 --api-key sk-ant-xxxxx
-
 # Custom port
-npx @openhands/local --port 3000
+npx @openhands/local --port 12000
 
-# Custom workspace directory
+# Custom workspace directory  
 npx @openhands/local --workspace ./my-project
 
-# Skip setup (if already installed)
+# Skip setup (faster restart after first run)
 npx @openhands/local --skip-setup
+
+# Development mode (uses local automation repo)
+npx @openhands/local --dev
 ```
 
 ## Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--model <model>` | LLM model to use | `$LLM_MODEL` |
-| `--api-key <key>` | API key for the LLM | `$LLM_API_KEY` |
-| `--base-url <url>` | Custom LLM base URL | `$LLM_BASE_URL` |
-| `-p, --port <port>` | Port for the main UI | `8000` |
-| `-d, --data-dir <path>` | Data directory | `~/.openhands-local` |
-| `-w, --workspace <path>` | Workspace directory | Current directory |
-| `--skip-setup` | Skip dependency installation | `false` |
+| `-p, --port <port>` | Main entry port | `8000` |
+| `-w, --workspace <path>` | Working directory | Current directory |
+| `--skip-setup` | Skip cloning/installing dependencies | `false` |
 | `--verbose` | Show detailed output | `false` |
+| `--dev` | Use local automation repo (auto-detect) | `false` |
+| `--local-automation <path>` | Path to local automation repo | - |
+| `--local-gui <path>` | Path to local agent-server-gui repo | - |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OH_AGENT_SERVER_GIT_REF` | Git ref for agent-server SDK (default: `main`) |
+| `OH_AGENT_SERVER_VERSION` | PyPI version for agent-server (overrides git ref) |
 
 ## Requirements
 
-- **Node.js** >= 22
-- **Python** >= 3.12
-- **uv** - Python package manager ([install](https://docs.astral.sh/uv/))
-- **tmux** - Terminal multiplexer
-- **git**
+The CLI auto-installs `uv` if missing. You only need:
 
-### Installing requirements
+| Requirement | Install |
+|-------------|---------|
+| **Node.js** >= 22 | [nodejs.org](https://nodejs.org/) |
+| **git** | `apt install git` / `brew install git` |
+| **tmux** | `apt install tmux` / `brew install tmux` |
 
-```bash
-# macOS
-brew install node python uv tmux git
+## Architecture
 
-# Ubuntu/Debian
-sudo apt install nodejs python3 tmux git
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (WSL2 recommended)
-# Install WSL2, then follow Ubuntu instructions
 ```
-
-## What's included
-
-This package starts the full OpenHands local stack:
-
-- **Agent Server GUI** - Main conversation interface at `/`
-- **Automations UI** - Automation management at `/automations/`
-- **Agent Server** - Backend API for conversations
-- **Automation Service** - Backend API for automations
-
-All services are managed automatically. Press Ctrl+C to stop everything.
+http://localhost:PORT (Reverse Proxy)
+         |
+         +-- /*              -> Agent Server GUI (:PORT+30)
+         +-- /api/*          -> Agent Server (:PORT+2)
+         +-- /sockets        -> Agent Server (:PORT+2)
+         +-- /automations/*  -> Automation Frontend (:PORT+3)
+         +-- /api/automation -> Automation Backend (:PORT+1)
+```
 
 ## Data Storage
 
-By default, data is stored in `~/.openhands-local/`:
+All data is stored in `~/.openhands/local-PORT/`:
 
 ```
-~/.openhands-local/
-├── automations.db      # SQLite database for automations
-├── conversations/      # Conversation history
-├── storage/           # Uploaded files
-└── repos/             # Cloned repositories (agent-server-gui, automation)
+~/.openhands/local-8000/
++-- automations.db      # SQLite database
++-- conversations/      # Conversation history
++-- storage/            # Uploaded files
++-- workspaces/         # Agent working directories
++-- repos/              # Cloned repositories
 ```
 
-## Supported LLM Providers
-
-Any provider supported by LiteLLM works:
-
-- **Anthropic**: `anthropic/claude-sonnet-4-20250514`, `anthropic/claude-3-5-haiku-20241022`
-- **OpenAI**: `openai/gpt-4o`, `openai/gpt-4-turbo`
-- **Google**: `google/gemini-pro`
-- **Local**: Use `--base-url` to point to a local model server
+Using port-specific directories allows running multiple instances.
 
 ## Troubleshooting
 
 ### Port already in use
 
 ```bash
-# Use a different port
-npx @openhands/local --port 3000
-```
-
-### Permission denied for agent-server
-
-```bash
-# Make sure uv installed packages globally
-uv pip install --system openhands-agent-server
+npx @openhands/local --port 12000
 ```
 
 ### tmux not found
@@ -138,6 +113,13 @@ brew install tmux
 
 # Ubuntu/Debian
 sudo apt install tmux
+```
+
+### uv installation fails
+
+```bash
+# Manual install
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ## License

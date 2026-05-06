@@ -1,210 +1,149 @@
 # Running the Development Stack Without Docker
 
-This document explains how to run the full OpenHands local development stack (Agent Server GUI + Automations Frontend + Automations Backend + Agent Server) using npm and uv instead of Docker.
+This document explains how to run the full OpenHands local development stack using npm and uv instead of Docker.
 
-## Quick Summary
+## Quick Start
 
-**Yes, it's possible!** The current Docker setup can be replaced with npm/uv commands. Here's what each component needs:
+```bash
+# Single command to run everything
+npm run dev
 
-| Component | Docker Approach | npm/uv Approach |
-|-----------|-----------------|-----------------|
-| Agent Server GUI | Static files served by nginx | `npm run dev` in agent-server-gui repo |
-| Agent Server | Python package in container | `uv pip install openhands-agent-server && agent-server` |
-| Automations Frontend | Static files served by nginx | `npm run dev` in frontend/ |
-| Automations Backend | Python in virtualenv | `uv run uvicorn automation.app:app` |
-| Reverse Proxy | nginx | Node.js proxy (already exists in `scripts/dev-proxy.mjs`) |
+# Or with a custom port
+npm run dev -- --port 12000
 
-## Architecture Overview
+# Skip setup (faster restart after first run)
+npm run dev:skip-setup
+```
+
+Then open:
+- **Main UI**: http://localhost:8000/
+- **Automations**: http://localhost:8000/automations/
+- **API Docs**: http://localhost:8000/api/automation/docs
+
+## How It Works
+
+The development stack leverages the same patterns as [agent-server-gui](https://github.com/OpenHands/agent-server-gui)'s `npm run dev` command:
+
+1. **Auto-installs uv** if not present (via official installer)
+2. **Runs agent-server** using `uvx` (ephemeral, no global install)
+3. **Runs Vite dev servers** for both frontends with hot reload
+4. **Routes requests** via a unified reverse proxy
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     http://localhost:8000                            │
-│                        (Reverse Proxy)                               │
-└─────────────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         ▼                    ▼                    ▼
-    ┌─────────┐          ┌─────────┐         ┌─────────────┐
-    │  /      │          │/api/*   │         │/automations/│
-    │         │          │/sockets │         │/api/auto..  │
-    └────┬────┘          └────┬────┘         └──────┬──────┘
-         │                    │                     │
-         ▼                    ▼                     ▼
-┌─────────────────┐   ┌─────────────────┐   ┌──────────────────┐
-│ Agent Server GUI│   │  Agent Server   │   │  Automations     │
-│ (npm run dev)   │   │ (agent-server)  │   │  Frontend        │
-│ :3030           │   │ :3002           │   │  (npm run dev)   │
-└─────────────────┘   └─────────────────┘   │  :3003           │
-                                            └────────┬─────────┘
-                                                     │
-                                                     ▼
-                                            ┌──────────────────┐
-                                            │  Automations     │
-                                            │  Backend         │
-                                            │  (uvicorn)       │
-                                            │  :8001           │
-                                            └──────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      http://localhost:PORT                               │
+│                 (Unified Reverse Proxy)                                  │
+└──────────────────────────────────────────────────────────────────────────┘
+         │                      │                        │
+         ▼                      ▼                        ▼
+  ┌────────────┐         ┌────────────┐           ┌────────────────┐
+  │    /*      │         │   /api/*   │           │ /automations/* │
+  │            │         │  /sockets  │           │/api/automation │
+  └─────┬──────┘         └─────┬──────┘           └───────┬────────┘
+        │                      │                          │
+        ▼                      ▼                          ▼
+┌───────────────┐    ┌───────────────┐          ┌──────────────────┐
+│ Agent Server  │    │ Agent Server  │          │ Automation FE    │
+│ GUI (Vite)    │    │ (uvx)         │          │ (Vite, proxies   │
+│ :PORT+30      │    │ :PORT+2       │          │  to backend)     │
+└───────────────┘    └───────────────┘          │ :PORT+3          │
+                                                └────────┬─────────┘
+                                                         │
+                                                         ▼
+                                                ┌──────────────────┐
+                                                │ Automation       │
+                                                │ Backend (uvicorn)│
+                                                │ :PORT+1          │
+                                                └──────────────────┘
 ```
+
+**Port allocation** (relative to `--port` or default 8000):
+| Service | Port |
+|---------|------|
+| Reverse Proxy (main entry) | PORT |
+| Automation Backend | PORT+1 |
+| Agent Server | PORT+2 |
+| Automation Frontend | PORT+3 |
+| Agent Server GUI | PORT+30 |
 
 ## Prerequisites
 
-```bash
-# Node.js 22+
-node --version  # v22.12.0 or higher
+The script auto-installs `uv` if missing. You only need:
 
-# Python 3.12+
-python3 --version  # 3.12 or higher
+| Requirement | Check Command | Install |
+|-------------|---------------|---------|
+| Node.js 22+ | `node --version` | [nodejs.org](https://nodejs.org/) |
+| git | `git --version` | `apt install git` / `brew install git` |
+| tmux | `tmux -V` | `apt install tmux` / `brew install tmux` |
 
-# uv (Python package manager)
-uv --version
-
-# tmux (required by agent-server for local runtime)
-tmux -V
-
-# git
-git --version
-```
-
-## Step-by-Step Setup
-
-### 1. Clone agent-server-gui (one-time)
+## Command Line Options
 
 ```bash
-# From the automation repo root
-mkdir -p .dev
-git clone --depth 1 https://github.com/OpenHands/agent-server-gui.git .dev/agent-server-gui
-cd .dev/agent-server-gui && npm ci && cd ../..
+npm run dev -- [options]
+
+Options:
+  -p, --port <port>      Main entry port (default: 8000)
+  --gui-path <path>      Path to agent-server-gui repo (default: .dev/agent-server-gui)
+  --skip-setup           Skip cloning/installing dependencies
+  -v, --verbose          Show detailed output
+  -h, --help             Show help
 ```
 
-### 2. Install agent-server and SDK
+## Environment Variables
 
+| Variable | Description |
+|----------|-------------|
+| `OH_AGENT_SERVER_GIT_REF` | Git ref for agent-server SDK (default: `main`) |
+| `OH_AGENT_SERVER_VERSION` | PyPI version for agent-server (overrides git ref) |
+| `OH_SECRET_KEY` | Secret key for sessions |
+
+## What the Script Does
+
+### First Run
+1. Checks prerequisites (node, git, tmux)
+2. Auto-installs `uv` if missing
+3. Clones `agent-server-gui` to `.dev/agent-server-gui`
+4. Runs `npm ci` in both frontends
+5. Runs `uv sync` for the automation backend
+6. Creates state directories in `~/.openhands/dev-stack-PORT/`
+7. Starts all services
+
+### Subsequent Runs (with `--skip-setup`)
 ```bash
-# Install the latest versions
-uv pip install openhands-agent-server openhands-sdk openhands-tools openhands-workspace libtmux
-
-# Or install from a specific branch
-uv pip install \
-  "openhands-agent-server @ git+https://github.com/OpenHands/software-agent-sdk.git@main#subdirectory=openhands-agent-server" \
-  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@main#subdirectory=openhands-sdk" \
-  libtmux
+npm run dev:skip-setup
 ```
+Skips cloning and dependency installation for faster startup.
 
-### 3. Install frontend dependencies
+## Data Storage
 
-```bash
-cd frontend && npm ci && cd ..
-```
+All runtime data is stored in `~/.openhands/dev-stack-PORT/`:
+- `conversations/` - Agent conversation history
+- `storage/` - File uploads
+- `workspaces/` - Agent working directories
+- `automations.db` - SQLite database
 
-### 4. Sync automation backend dependencies
-
-```bash
-uv sync
-```
-
-### 5. Create data directories
-
-```bash
-mkdir -p .dev/data/{storage,conversations} .dev/workspace
-```
-
-## Running the Stack
-
-You'll need **5 terminal windows** (or use a process manager):
-
-### Terminal 1: Agent Server
-
-```bash
-export OH_CONVERSATIONS_PATH=$PWD/.dev/data/conversations
-cd .dev/workspace
-agent-server --host 127.0.0.1 --port 3002
-```
-
-### Terminal 2: Agent Server GUI
-
-```bash
-cd .dev/agent-server-gui
-export VITE_BACKEND_HOST=127.0.0.1:3002
-npm run dev:frontend
-# Runs on port 3030
-```
-
-### Terminal 3: Automations Backend
-
-```bash
-export AUTOMATION_AGENT_SERVER_URL=http://localhost:3002
-export AUTOMATION_DB_URL=sqlite+aiosqlite:///.dev/data/automations.db
-export AUTOMATION_BASE_URL=http://localhost:8000
-export AUTOMATION_WORKSPACE_BASE=$PWD/.dev/workspace
-export AUTOMATION_AUTH_DISABLED=true
-export FILE_STORE=local
-export LOCAL_STORAGE_PATH=$PWD/.dev/data/storage
-
-uv run uvicorn automation.app:app --host 127.0.0.1 --port 8001 --reload
-```
-
-### Terminal 4: Automations Frontend
-
-```bash
-cd frontend
-export VITE_AUTOMATION_HOST=127.0.0.1:8001
-export VITE_OPENHANDS_HOST=127.0.0.1:3002
-export VITE_FRONTEND_PORT=3003
-npm run dev
-```
-
-### Terminal 5: Reverse Proxy
-
-```bash
-node scripts/dev-proxy.mjs 8000 3030 3003
-# Routes:
-#   /automations/*, /api/automation/*  → :3003 (automations frontend, which proxies to backend)
-#   /*                                 → :3030 (agent-server-gui)
-```
-
-## Single-Command Approach
-
-You can use `concurrently` to run everything in one terminal:
-
-```bash
-npm install -g concurrently
-
-concurrently --names "agent-srv,agent-gui,auto-be,auto-fe,proxy" \
-  "cd .dev/workspace && OH_CONVERSATIONS_PATH=$PWD/../data/conversations agent-server --port 3002" \
-  "cd .dev/agent-server-gui && VITE_BACKEND_HOST=127.0.0.1:3002 npm run dev:frontend" \
-  "AUTOMATION_AGENT_SERVER_URL=http://localhost:3002 AUTOMATION_DB_URL=sqlite+aiosqlite:///.dev/data/automations.db AUTOMATION_AUTH_DISABLED=true FILE_STORE=local LOCAL_STORAGE_PATH=$PWD/.dev/data/storage uv run uvicorn automation.app:app --port 8001" \
-  "cd frontend && VITE_AUTOMATION_HOST=127.0.0.1:8001 npm run dev" \
-  "sleep 5 && node scripts/dev-proxy.mjs 8000 3030 3003"
-```
-
-Or use the included script:
-
-```bash
-node scripts/npm-dev-stack.mjs
-```
-
-## Updating the Enhanced Proxy
-
-The existing `frontend/scripts/dev-proxy.mjs` needs to be updated to handle all routes. A complete reverse proxy is provided in `scripts/npm-dev-stack.mjs`.
+Using port-specific directories allows running multiple instances.
 
 ## Comparison: Docker vs npm/uv
 
 | Aspect | Docker | npm/uv |
 |--------|--------|--------|
-| **Setup time** | ~5 min (build image) | ~3 min (install deps) |
+| **Setup time** | ~5 min (build image) | ~3 min (first run) |
 | **Hot reload** | ❌ Requires rebuild | ✅ Automatic |
-| **Debugging** | Harder (attach to container) | ✅ Easy |
-| **Resource usage** | Higher (container overhead) | Lower |
-| **Isolation** | ✅ Full isolation | Shared system |
+| **Debugging** | Harder | ✅ Easy |
+| **Resource usage** | Higher | Lower |
+| **Isolation** | ✅ Full | Shared system |
 | **Production parity** | ✅ Same as deploy | Different |
-| **CI reproducibility** | ✅ Deterministic | Depends on system |
-
-## Limitations
-
-1. **No isolation**: All services share the same system Python and Node.js
-2. **tmux dependency**: The agent-server requires tmux for its local runtime mode
-3. **Manual process management**: Need to manage 5 separate processes (or use concurrently/script)
-4. **No nginx features**: WebSocket upgrade handling is simpler; no gzip, caching headers, etc.
 
 ## When to Use Each Approach
+
+**Use npm/uv (this script) when:**
+- Active development with hot reload
+- Debugging backend/frontend code
+- Quick iteration on features
+- Don't want to rebuild containers
 
 **Use Docker when:**
 - Running in production or staging
@@ -212,18 +151,75 @@ The existing `frontend/scripts/dev-proxy.mjs` needs to be updated to handle all 
 - Testing the full containerized environment
 - CI/CD pipelines
 
-**Use npm/uv when:**
-- Active development with hot reload
-- Debugging backend/frontend code
-- Quick iteration on features
-- Don't want to rebuild containers
+## Manual Setup (Advanced)
 
-## Environment Variables Reference
+If you prefer running services individually, see the sections below.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_MODEL` | - | LLM model (e.g., `anthropic/claude-sonnet-4-20250514`) |
-| `LLM_API_KEY` | - | API key for the LLM |
-| `AUTOMATION_AUTH_DISABLED` | `true` | Bypass auth for local dev |
-| `AUTOMATION_DB_URL` | sqlite path | Database connection string |
-| `OH_CONVERSATIONS_PATH` | - | Where agent-server stores conversations |
+### Terminal 1: Agent Server
+
+```bash
+# Using uvx (ephemeral install)
+uvx --from git+https://github.com/OpenHands/software-agent-sdk@main#subdirectory=openhands-agent-server \
+    --with git+https://github.com/OpenHands/software-agent-sdk@main#subdirectory=openhands-tools \
+    --with git+https://github.com/OpenHands/software-agent-sdk@main#subdirectory=openhands-workspace \
+    agent-server --host 127.0.0.1 --port 3002
+```
+
+### Terminal 2: Agent Server GUI
+
+```bash
+cd .dev/agent-server-gui
+VITE_BACKEND_HOST=127.0.0.1:3002 npm run dev:frontend
+```
+
+### Terminal 3: Automation Backend
+
+```bash
+AUTOMATION_AGENT_SERVER_URL=http://localhost:3002 \
+AUTOMATION_DB_URL=sqlite+aiosqlite:///~/.openhands/dev-stack-8000/automations.db \
+AUTOMATION_AUTH_DISABLED=true \
+FILE_STORE=local \
+LOCAL_STORAGE_PATH=~/.openhands/dev-stack-8000/storage \
+uv run uvicorn automation.app:app --host 127.0.0.1 --port 8001 --reload
+```
+
+### Terminal 4: Automation Frontend
+
+```bash
+cd frontend
+VITE_AUTOMATION_HOST=127.0.0.1:8001 \
+VITE_OPENHANDS_HOST=127.0.0.1:3002 \
+VITE_FRONTEND_PORT=3003 \
+npm run dev
+```
+
+### Terminal 5: Reverse Proxy
+
+The unified script handles this, but you could also use nginx or another proxy.
+
+## Troubleshooting
+
+### "uv not found"
+The script auto-installs uv. If it fails, install manually:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### "tmux not found"
+Install tmux - it's required by agent-server for its local runtime mode:
+```bash
+# Debian/Ubuntu
+sudo apt install tmux
+
+# macOS
+brew install tmux
+```
+
+### Services don't start
+Check if ports are already in use:
+```bash
+lsof -i :8000 -i :8001 -i :8002 -i :8003 -i :8030
+```
+
+### WebSocket issues
+Ensure you're accessing via the proxy port (8000), not individual service ports.

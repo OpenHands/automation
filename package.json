@@ -1,0 +1,19 @@
+{
+  "name": "openhands-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenHands Automation Service - schedules and dispatches automation runs",
+  "scripts": {
+    "dev": "node scripts/npm-dev-stack.mjs",
+    "dev:skip-setup": "node scripts/npm-dev-stack.mjs --skip-setup"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpenHands/automation.git"
+  },
+  "license": "MIT"
+}
