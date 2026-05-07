@@ -70,8 +70,25 @@ async def lifespan(app: FastAPI):
 
         from automation.db import normalize_sqlite_url_for_alembic
 
+        # Find migrations folder relative to this package
+        # When installed via pip/uvx, migrations are bundled inside automation/migrations
+        package_dir = Path(__file__).parent
+        migrations_path = package_dir / "migrations"
+
+        if not migrations_path.is_dir():
+            # Fallback: check if running from source (migrations at repo root)
+            repo_root_migrations = package_dir.parent / "migrations"
+            if repo_root_migrations.is_dir():
+                migrations_path = repo_root_migrations
+            else:
+                msg = (
+                    f"Migrations directory not found. "
+                    f"Checked: {migrations_path}, {repo_root_migrations}"
+                )
+                raise RuntimeError(msg)
+
         alembic_cfg = Config()
-        alembic_cfg.set_main_option("script_location", "migrations")
+        alembic_cfg.set_main_option("script_location", str(migrations_path))
         # Set the database URL for Alembic to use (sync version)
         db_url = normalize_sqlite_url_for_alembic(settings.db_url)
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
@@ -79,7 +96,7 @@ async def lifespan(app: FastAPI):
         # Run migrations synchronously (Alembic doesn't support async)
         try:
             command.upgrade(alembic_cfg, "head")
-            logger.info("SQLite database migrations applied")
+            logger.info("SQLite database migrations applied successfully")
         except Exception as e:
             logger.error(f"Failed to apply SQLite migrations: {e}")
             msg = f"SQLite migration failed. Database may be inconsistent: {e}"

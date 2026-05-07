@@ -44,6 +44,11 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["automation"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Include migrations folder inside the automation package
+# This allows alembic migrations to run when installed via pip/uvx
+"migrations" = "automation/migrations"
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.3.0",
