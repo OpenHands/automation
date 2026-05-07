@@ -168,6 +168,20 @@ def _get_local_user() -> AuthenticatedUser:
 
     Used when authenticating with local_api_key in self-hosted deployments.
     Provides deterministic user/org IDs for consistent data ownership.
+
+    Security notes:
+    - Uses deterministic UUID5 based on DNS namespace, meaning every self-hosted
+      installation gets identical user/org IDs. This ensures consistent data
+      ownership tracking across service restarts.
+    - If logs or database exports containing these IDs are shared between
+      separate installations, data attribution could be ambiguous. For isolated
+      deployments (the typical self-hosted case), this is acceptable.
+
+    Access model:
+    - Grants admin role with manage_automations permission, giving full access.
+    - Self-hosted deployments typically have full trust in their environment,
+      so permissive defaults are appropriate. Read-only or restricted access
+      modes could be added later if needed via additional config options.
     """
     # Use deterministic UUIDs based on namespace (consistent across restarts)
     local_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")
