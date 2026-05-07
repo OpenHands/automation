@@ -109,7 +109,7 @@ class TestLocalAgentServerBackend:
         assert api_key == "local-key"
 
     def test_build_env_vars(self, mock_run):
-        """build_env_vars() includes AGENT_SERVER_URL, SESSION_API_KEY, WORKSPACE_BASE."""
+        """build_env_vars() returns required env vars for local mode."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
