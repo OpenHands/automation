@@ -91,6 +91,13 @@ class CloudSandboxBackend(ExecutionBackend):
     def is_local_mode(self) -> bool:
         return False
 
+    def get_work_dir(self, run_id: str) -> str:  # noqa: ARG002
+        """Return the standard container working directory.
+
+        In Cloud mode, sandboxes have a fresh filesystem with /workspace available.
+        """
+        return "/workspace/project"
+
     async def _ensure_api_key(self) -> str:
         """Ensure the per-user API key is minted and return it.
 

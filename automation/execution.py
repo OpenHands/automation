@@ -22,8 +22,12 @@ from tenacity import (
 )
 
 from automation.config import get_config
-from automation.constants import TARBALL_PATH, WORK_DIR
+from automation.constants import TARBALL_PATH
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
+
+# Default working directory for cloud/container mode
+DEFAULT_WORK_DIR = "/workspace/project"
+
 from automation.utils import log_extra
 from automation.utils.sandbox import delete_sandbox
 
@@ -325,6 +329,7 @@ async def execute_in_context(
     session_key: str,
     entrypoint: str,
     tarball_source: bytes | str,
+    work_dir: str,
     env_vars: dict[str, str] | None = None,
     timeout: int | None = None,
     run_id: str | None = None,
@@ -345,6 +350,7 @@ async def execute_in_context(
         session_key: API key for the agent server
         entrypoint: Command to run
         tarball_source: Either raw bytes or URL string
+        work_dir: Working directory for tarball extraction
         env_vars: Environment variables to export
         timeout: Max execution time
         run_id: Run ID for logging
@@ -378,9 +384,9 @@ async def execute_in_context(
             exports = " && ".join(parts) + " && "
 
         cmd = (
-            f"mkdir -p {WORK_DIR}"
-            f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
-            f" && cd {WORK_DIR}"
+            f"mkdir -p {work_dir}"
+            f" && tar xzf {TARBALL_PATH} -C {work_dir}"
+            f" && cd {work_dir}"
             f" && ([ ! -f setup.sh ] || bash setup.sh)"
             f" && {exports}{entrypoint}"
         )
@@ -508,9 +514,9 @@ async def run_automation(
                 exports = " && ".join(parts) + " && "
 
             cmd = (
-                f"mkdir -p {WORK_DIR}"
-                f" && tar xzf {TARBALL_PATH} -C {WORK_DIR}"
-                f" && cd {WORK_DIR}"
+                f"mkdir -p {DEFAULT_WORK_DIR}"
+                f" && tar xzf {TARBALL_PATH} -C {DEFAULT_WORK_DIR}"
+                f" && cd {DEFAULT_WORK_DIR}"
                 f" && ([ ! -f setup.sh ] || bash setup.sh)"
                 f" && {exports}{entrypoint}"
             )

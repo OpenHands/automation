@@ -224,6 +224,7 @@ async def _execute_run(
         return
 
     # 5. Execute in context
+    work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
             client=client,
@@ -231,6 +232,7 @@ async def _execute_run(
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
             tarball_source=tarball_source,
+            work_dir=work_dir,
             env_vars=env_vars,
             timeout=effective_timeout,
             run_id=run_id,

@@ -250,7 +250,7 @@ class ServiceSettings(BaseSettings):
         # Local agent-server mode (self-hosted deployments)
         AUTOMATION_AGENT_SERVER_URL: Local agent server URL (e.g., http://localhost:3000)
         AUTOMATION_AGENT_SERVER_API_KEY: Session API key for local agent server
-        AUTOMATION_WORKSPACE_BASE: Base workspace directory (default: /workspace)
+        AUTOMATION_WORKSPACE_BASE: Base workspace directory (default: ~/.openhands/workspaces in local mode)
 
         # Background workers
         AUTOMATION_SCHEDULER_INTERVAL_SECONDS: Scheduler poll interval (default: 60)

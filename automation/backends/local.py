@@ -6,6 +6,7 @@ Uses a pre-configured local agent server instead of creating Cloud sandboxes.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import httpx
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from automation.models import AutomationRun
 
 logger = logging.getLogger(__name__)
+
+# Default workspace base for local mode (used if not configured)
+DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
 class LocalAgentServerBackend(ExecutionBackend):
@@ -116,3 +120,18 @@ class LocalAgentServerBackend(ExecutionBackend):
     ) -> None:
         """No-op — local agent server is persistent."""
         logger.debug("Local mode: skipping cleanup (persistent server)")
+
+    def get_work_dir(self, run_id: str) -> str:
+        """Get an isolated working directory for this run.
+
+        In local mode, each run gets its own directory under workspace_base
+        to avoid conflicts between concurrent runs.
+
+        Returns:
+            Path like ~/.openhands/workspaces/automation-runs/{run_id}/
+        """
+        # Use configured workspace_base or default
+        base = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
+        # Expand ~ to home directory
+        base = os.path.expanduser(base)
+        return os.path.join(base, "automation-runs", run_id)
