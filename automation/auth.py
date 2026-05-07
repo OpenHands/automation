@@ -10,6 +10,7 @@ to get the user and organization identity.
 
 import hashlib
 import logging
+import secrets
 import uuid
 from enum import StrEnum
 
@@ -62,6 +63,7 @@ class AuthMethod(StrEnum):
 
     API_KEY = "api_key"
     COOKIE = "cookie"
+    LOCAL_API_KEY = "local_api_key"
 
 
 def create_http_client() -> httpx.AsyncClient:
@@ -162,6 +164,41 @@ async def _make_auth_request_with_retry(
     return await client.get(url, headers=headers)
 
 
+def _get_local_user() -> AuthenticatedUser:
+    """Return a default user for local mode authentication.
+
+    Used when authenticating with local_api_key in self-hosted deployments.
+    Provides deterministic user/org IDs for consistent data ownership.
+
+    Security notes:
+    - Uses deterministic UUID5 based on DNS namespace, meaning every self-hosted
+      installation gets identical user/org IDs. This ensures consistent data
+      ownership tracking across service restarts.
+    - If logs or database exports containing these IDs are shared between
+      separate installations, data attribution could be ambiguous. For isolated
+      deployments (the typical self-hosted case), this is acceptable.
+
+    Access model:
+    - Grants admin role with manage_automations permission, giving full access.
+    - Self-hosted deployments typically have full trust in their environment,
+      so permissive defaults are appropriate. Read-only or restricted access
+      modes could be added later if needed via additional config options.
+    """
+    # Use deterministic UUIDs based on namespace (consistent across restarts)
+    local_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")
+    local_org_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-org")
+
+    return AuthenticatedUser(
+        user_id=local_user_id,
+        org_id=local_org_id,
+        email="local@localhost",
+        role="admin",
+        permissions=["manage_automations"],
+        auth_method=AuthMethod.LOCAL_API_KEY,
+        api_key=None,
+    )
+
+
 def require_permission(permission: str):
     """Factory that returns a FastAPI dependency enforcing a permission.
 
@@ -194,14 +231,22 @@ async def authenticate_request(
 ) -> AuthenticatedUser:
     """Authenticate the request using API key or keycloak_auth cookie.
 
-    Supports two authentication methods (checked in priority order):
-    1. API key via Authorization: Bearer <api_key> header
-    2. Cookie via keycloak_auth cookie
+    Authentication modes:
 
-    Calls the OpenHands API GET /api/v1/users/me to verify credentials and get
-    user/org identity. Implements retry with exponential backoff for rate limiting.
-    Results are cached in-memory for 20 seconds to reduce API calls.
+    **Local mode with local_api_key configured:**
+    Only the configured local API key is accepted. SaaS authentication is
+    disabled. Matching Bearer tokens are authenticated as a default local
+    user without calling the OpenHands API. Non-matching keys are rejected
+    immediately.
+
+    **SaaS mode (local_api_key not configured):**
+    Supports API key via Authorization: Bearer header or keycloak_auth cookie.
+    Calls the OpenHands API GET /api/v1/users/me to verify credentials and
+    get user/org identity. Implements retry with exponential backoff for
+    rate limiting. Results are cached in-memory.
     """
+    settings = get_config().service
+
     # Determine authentication method (API key takes priority)
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -211,6 +256,20 @@ async def authenticate_request(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Empty API key",
             )
+
+        # In local mode with local_api_key configured, only accept that key
+        # (SaaS authentication is disabled when local_api_key is set)
+        if settings.is_local_mode and settings.local_api_key:
+            # Use constant-time comparison to prevent timing attacks
+            if secrets.compare_digest(api_key, settings.local_api_key):
+                logger.debug("Authenticated via local API key")
+                return _get_local_user()
+            # Key doesn't match - reject immediately in local mode
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+            )
+
         auth_method = AuthMethod.API_KEY
         credential = api_key
     else:
@@ -236,7 +295,6 @@ async def authenticate_request(
     logger.debug("Auth cache miss, validating with OpenHands API")
 
     # Build outbound headers based on auth method
-    settings = get_config().service
     if auth_method == AuthMethod.API_KEY:
         outbound_headers = {"Authorization": f"Bearer {credential}"}
     else:

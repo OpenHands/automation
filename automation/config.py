@@ -303,9 +303,16 @@ class ServiceSettings(BaseSettings):
     # - Uses a persistent local agent server instead of cloud sandboxes
     # - Skips per-user API key minting (uses agent_server_api_key instead)
     # - Supports SQLite database via db_url
+    # - Authenticates using local_api_key instead of OpenHands SaaS API
     agent_server_url: str = ""
     agent_server_api_key: str = ""
     workspace_base: str = "/workspace"
+
+    # Local API key for authentication in local mode (self-hosted deployments)
+    # When set and is_local_mode is True, requests with this Bearer token
+    # are authenticated as a default local user without calling OpenHands API.
+    # Generate a secure random key for production self-hosted deployments.
+    local_api_key: str = ""
 
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"

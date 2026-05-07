@@ -725,3 +725,160 @@ class TestRequirePermission:
             await checker(user=user)
 
         assert exc_info.value.status_code == 403
+
+
+class TestLocalApiKeyAuthentication:
+    """Tests for local API key authentication in self-hosted mode."""
+
+    @pytest.fixture
+    def local_mode_settings(self):
+        """Create mock settings for local mode with local_api_key configured."""
+        settings = MagicMock()
+        settings.is_local_mode = True
+        settings.local_api_key = "test-local-api-key"
+        settings.openhands_api_base_url = "https://app.openhands.ai"
+        return settings
+
+    @pytest.fixture
+    def non_local_mode_settings(self):
+        """Create mock settings for non-local (SaaS) mode."""
+        settings = MagicMock()
+        settings.is_local_mode = False
+        settings.local_api_key = ""
+        settings.openhands_api_base_url = "https://app.openhands.ai"
+        return settings
+
+    @pytest.fixture
+    def local_mode_no_key_settings(self):
+        """Create mock settings for local mode without local_api_key configured."""
+        settings = MagicMock()
+        settings.is_local_mode = True
+        settings.local_api_key = ""
+        settings.openhands_api_base_url = "https://app.openhands.ai"
+        return settings
+
+    async def test_local_api_key_matches_returns_local_user(
+        self, mock_request, mock_http_client, local_mode_settings
+    ):
+        """When local API key matches, should return local user without SaaS call."""
+        mock_request.headers.get.return_value = "Bearer test-local-api-key"
+
+        with patch("automation.auth.get_config") as mock_get_config:
+            mock_config = MagicMock()
+            mock_config.service = local_mode_settings
+            mock_get_config.return_value = mock_config
+
+            user = await authenticate_request(mock_request, client=mock_http_client)
+
+            # Should NOT have called SaaS API
+            mock_http_client.get.assert_not_called()
+
+            assert user.email == "local@localhost"
+            assert user.role == "admin"
+            assert "manage_automations" in user.permissions
+            assert user.auth_method == AuthMethod.LOCAL_API_KEY
+            # Verify deterministic UUIDs
+            expected_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")
+            expected_org_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-org")
+            assert user.user_id == expected_user_id
+            assert user.org_id == expected_org_id
+
+    async def test_local_api_key_mismatch_raises_401(
+        self, mock_request, mock_http_client, local_mode_settings
+    ):
+        """When local API key doesn't match, should raise 401 immediately."""
+        mock_request.headers.get.return_value = "Bearer wrong-key"
+
+        with patch("automation.auth.get_config") as mock_get_config:
+            mock_config = MagicMock()
+            mock_config.service = local_mode_settings
+            mock_get_config.return_value = mock_config
+
+            with pytest.raises(HTTPException) as exc_info:
+                await authenticate_request(mock_request, client=mock_http_client)
+
+            assert exc_info.value.status_code == 401
+            assert "Invalid API key" in exc_info.value.detail
+            # Should NOT have called SaaS API
+            mock_http_client.get.assert_not_called()
+
+    async def test_local_mode_without_key_falls_through_to_saas(
+        self, mock_request, mock_http_client, local_mode_no_key_settings
+    ):
+        """When local mode is enabled but no local_api_key, should use SaaS auth."""
+        mock_request.headers.get.return_value = "Bearer saas-api-key"
+
+        # Mock successful SaaS auth response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("automation.auth.get_config") as mock_get_config:
+            mock_config = MagicMock()
+            mock_config.service = local_mode_no_key_settings
+            mock_get_config.return_value = mock_config
+
+            user = await authenticate_request(mock_request, client=mock_http_client)
+
+            # Should have called SaaS API
+            mock_http_client.get.assert_called_once()
+            assert user.email == "test@example.com"
+            assert user.auth_method == AuthMethod.API_KEY
+
+    async def test_non_local_mode_uses_saas_auth(
+        self, mock_request, mock_http_client, non_local_mode_settings
+    ):
+        """When not in local mode, should always use SaaS auth."""
+        mock_request.headers.get.return_value = "Bearer any-key"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with patch("automation.auth.get_config") as mock_get_config:
+            mock_config = MagicMock()
+            mock_config.service = non_local_mode_settings
+            mock_get_config.return_value = mock_config
+
+            user = await authenticate_request(mock_request, client=mock_http_client)
+
+            mock_http_client.get.assert_called_once()
+            assert user.auth_method == AuthMethod.API_KEY
+
+    def test_get_local_user_returns_expected_structure(self):
+        """_get_local_user should return consistent, valid AuthenticatedUser."""
+        from automation.auth import _get_local_user
+
+        user = _get_local_user()
+
+        # Check basic structure
+        assert isinstance(user, AuthenticatedUser)
+        assert user.email == "local@localhost"
+        assert user.role == "admin"
+        assert user.permissions == ["manage_automations"]
+        assert user.auth_method == AuthMethod.LOCAL_API_KEY
+        assert user.api_key is None
+
+        # Check deterministic UUIDs are valid and consistent
+        assert isinstance(user.user_id, uuid.UUID)
+        assert isinstance(user.org_id, uuid.UUID)
+
+        # Call again to verify determinism
+        user2 = _get_local_user()
+        assert user.user_id == user2.user_id
+        assert user.org_id == user2.org_id
+
+    def test_get_local_user_uuid_determinism(self):
+        """Local user UUIDs should be deterministic across calls."""
+        from automation.auth import _get_local_user
+
+        # Expected values based on uuid5(NAMESPACE_DNS, "openhands-local-*")
+        expected_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")
+        expected_org_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-org")
+
+        user = _get_local_user()
+
+        assert user.user_id == expected_user_id
+        assert user.org_id == expected_org_id

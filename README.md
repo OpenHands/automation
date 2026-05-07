@@ -1,5 +1,7 @@
 # OpenHands Automation Service
 
+> ⚠️ **Beta**: This project is currently in beta. APIs and features may change without notice.
+
 Scheduled and event-driven automation execution for OpenHands Cloud. This service allows users to create automations that run on a schedule (cron) or in response to events (webhooks).
 
 ## Features
