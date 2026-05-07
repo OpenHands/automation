@@ -3,29 +3,31 @@
 This script is auto-generated from a plugin automation request. It supports two modes:
 
 **Cloud Mode** (default):
-  Uses Workspace connected to the sandbox's agent server (localhost:3000).
-  LLM/secrets/MCP fetched from user's Cloud account via workspace methods.
+  Uses OpenHandsCloudWorkspace connected to sandbox's agent server (localhost:3000).
+  Full functionality: repos, skills, LLM, secrets, MCP from user's Cloud account.
   Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
 
 **Local Mode** (self-hosted):
-  Uses Workspace connected to a local agent server (AGENT_SERVER_URL).
-  LLM/secrets/MCP fetched from agent server's settings API via workspace methods.
+  Uses RemoteWorkspace connected to a local agent server (AGENT_SERVER_URL).
+  LLM/secrets/MCP fetched from agent server's settings API.
+  Note: Repos and skills not yet supported in local mode (SDK limitation).
   Requires: AGENT_SERVER_URL (presence triggers local mode)
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
-  2. Opens the Workspace context EARLY (ensures callback on any failure)
-  3. Gets LLM config via workspace.get_llm()
-  4. Gets secrets via workspace.get_secrets()
-  5. Gets MCP config via workspace.get_mcp_config()
-  6. Gets default agent with tools and condenser
-  7. Loads plugins from plugins_config.json
-  8. Creates a RemoteConversation with all plugins
-  9. Sends the prompt (with event context if available) and runs
-  10. On context manager exit, the workspace sends a completion callback
+  2. Opens the workspace context EARLY (ensures callback on any failure)
+  3. Cloud mode: clones repos, loads skills
+  4. Gets LLM config via workspace.get_llm()
+  5. Gets secrets via workspace.get_secrets()
+  6. Gets MCP config via workspace.get_mcp_config()
+  7. Gets default agent with tools and condenser
+  8. Loads plugins from plugins_config.json
+  9. Creates a RemoteConversation with all plugins
+  10. Sends the prompt (with event context if available) and runs
+  11. On context manager exit, the workspace sends a completion callback
 
 IMPORTANT: The workspace context is entered early so that ANY exception
-(config loading, prompt parsing, etc.) triggers the __exit__ callback,
+(skill loading, prompt parsing, etc.) triggers the __exit__ callback,
 avoiding silent failures that require watchdog timeout.
 
 Env vars (Cloud mode - all required):
@@ -90,32 +92,35 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, RemoteConversation, Workspace
+from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
+from openhands.workspace import OpenHandsCloudWorkspace
 
-# Determine agent server URL
-# In local mode, use AGENT_SERVER_URL directly
-# In Cloud mode, agent server runs on localhost:3000 inside the sandbox
-if IS_LOCAL_MODE:
-    server_url = agent_server_url
-else:
-    server_url = "http://localhost:3000"
-
+# Create workspace based on mode
 print("\n=== SDK WORKSPACE ===")
-print(f"  connecting to agent server: {server_url}")
-
-# Create workspace context - use 'with' to ensure cleanup/callback on exit
-workspace_ctx = Workspace(host=server_url)
+if IS_LOCAL_MODE:
+    # Local mode: use RemoteWorkspace connected to local agent server
+    # Note: repos and skills not supported yet (SDK limitation)
+    print(f"  using RemoteWorkspace at {agent_server_url}")
+    workspace_ctx = RemoteWorkspace(
+        host=agent_server_url,
+        api_key=session_key if session_key else None,
+    )
+else:
+    # Cloud mode: use OpenHandsCloudWorkspace with full functionality
+    print(f"  using OpenHandsCloudWorkspace at {api_url}")
+    workspace_ctx = OpenHandsCloudWorkspace(
+        local_agent_server_mode=True,
+        cloud_api_url=api_url,
+        cloud_api_key=api_key,
+    )
 
 # Enter workspace context EARLY - any exception from here on triggers callback
 with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
-
-    # Verify connectivity
-    result = workspace.execute_command("pwd")
-    print(f"  workspace ready, cwd: {result.stdout.strip()}")
 
     # Parse event payload if present (for event-triggered automations)
     event_context = None
@@ -123,10 +128,47 @@ with workspace_ctx as workspace:
         try:
             event_context = json.loads(event_payload_json)
         except json.JSONDecodeError as e:
-            print(f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr)
+            print(
+                f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
+            )
+
+    # Clone repositories if repos_config.json exists (Cloud mode only)
+    # Note: RemoteWorkspace doesn't support clone_repos yet (SDK limitation)
+    SCRIPT_DIR = os.path.dirname(__file__)
+    REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
+    clone_result = None
+    repo_dirs = []
+
+    if os.path.exists(REPOS_CONFIG_FILE) and not IS_LOCAL_MODE:
+        print("\n=== CLONE REPOS ===")
+        with open(REPOS_CONFIG_FILE) as f:
+            repos_config = json.load(f)
+        if repos_config:
+            clone_result = workspace.clone_repos(repos_config)
+            print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
+            if clone_result.failed_repos:
+                print(f"  FAILED: {', '.join(clone_result.failed_repos)}")
+            # Collect cloned repo directories for skill loading
+            repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
+
+    # Load ALL skills via workspace.load_skills_from_agent_server() (Cloud mode only)
+    # If repos were cloned, project skills are loaded from EACH cloned repo
+    # Note: RemoteWorkspace doesn't support load_skills_from_agent_server yet
+    loaded_skills = []
+    agent_context = None
+    if not IS_LOCAL_MODE:
+        print("\n=== LOAD SKILLS ===")
+        loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+            project_dirs=repo_dirs if repo_dirs else None
+        )
+        print(f"  loaded {len(loaded_skills)} skills")
+
+    # Get repos context (mapping of URLs to local paths) - Cloud mode only
+    repos_context = ""
+    if clone_result and clone_result.repo_mappings and not IS_LOCAL_MODE:
+        repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
-    SCRIPT_DIR = os.path.dirname(__file__)
     PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
     PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 
@@ -138,6 +180,10 @@ with workspace_ctx as workspace:
 
     # Build prompt with context sections
     context_sections = []
+
+    # Add repos context if repos were cloned
+    if repos_context:
+        context_sections.append(repos_context)
 
     # Add event context if this is an event-triggered run
     if event_context and "event" in event_context:
@@ -202,13 +248,19 @@ This automation was triggered by a webhook event:
     print("\n=== AGENT ===")
     agent = get_default_agent(llm=llm, cli_mode=True)
 
-    # Add MCP config if configured
+    # Add MCP config and agent_context using model_copy if configured
     # (Plugin MCP configs will be merged when plugins are loaded)
+    agent_updates = {}
     if mcp_config:
-        agent = agent.model_copy(update={"mcp_config": mcp_config})
+        agent_updates["mcp_config"] = mcp_config
+    if agent_context:
+        agent_updates["agent_context"] = agent_context
+    if agent_updates:
+        agent = agent.model_copy(update=agent_updates)
 
     print(f"  tools: {[t.name for t in agent.tools]}")
     print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
     condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
     print(f"  condenser: {condenser_name}")
 

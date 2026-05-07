@@ -134,10 +134,13 @@ class TestGenerateTarball:
             # Verify key SDK imports and patterns are present
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
-            assert "Workspace" in main_content
+            assert "OpenHandsCloudWorkspace" in main_content
+            assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm()" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
@@ -711,9 +714,12 @@ class TestGeneratePluginTarball:
             assert "from openhands.sdk import" in main_content
             assert "from openhands.sdk.plugin import PluginSource" in main_content
             assert "Conversation" in main_content
-            assert "Workspace" in main_content
+            assert "OpenHandsCloudWorkspace" in main_content
+            assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm()" in main_content
             assert "workspace.get_secrets()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
             assert "PluginSource.model_validate" in main_content
             assert "plugins=plugin_sources" in main_content
