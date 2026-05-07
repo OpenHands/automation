@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Default workspace base for local mode (used if not configured)
+# Default workspace base for local mode when running natively (not in container).
+# Used as fallback when workspace_base is not explicitly configured.
+# - Containerized local mode typically uses /workspace (set explicitly)
+# - Native local mode (macOS/Linux) uses ~/.openhands/workspaces
 DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
@@ -42,7 +45,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         agent_server_url: str,
         api_key: str,
         run: AutomationRun,
-        workspace_base: str = "/workspace",
+        workspace_base: str | None = None,
     ):
         """Initialize the local agent-server backend for a specific run.
 
@@ -51,7 +54,8 @@ class LocalAgentServerBackend(ExecutionBackend):
                 (e.g., "http://localhost:3000")
             api_key: API key for authenticating with the agent server
             run: The automation run this backend will operate on
-            workspace_base: Base workspace directory (default: /workspace)
+            workspace_base: Base workspace directory. If None, defaults to
+                ~/.openhands/workspaces (suitable for native local mode).
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
@@ -100,10 +104,12 @@ class LocalAgentServerBackend(ExecutionBackend):
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Base workspace directory for SDK operations
         """
+        # Use configured workspace_base or fallback to default
+        workspace = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
         return {
             "AGENT_SERVER_URL": self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
-            "WORKSPACE_BASE": self.workspace_base,
+            "WORKSPACE_BASE": workspace,
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:

@@ -432,6 +432,7 @@ async def run_automation(
     callback_url: str | None = None,
     run_id: str | None = None,
     keep_sandbox: bool = False,
+    work_dir: str = DEFAULT_WORK_DIR,
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox (blocking).
 
@@ -454,6 +455,9 @@ async def run_automation(
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
+
+    *work_dir* is the working directory for tarball extraction
+    (default: /workspace/project).
     """
     if timeout is None:
         timeout = get_config().sandbox.max_run_duration
@@ -513,9 +517,9 @@ async def run_automation(
                 exports = " && ".join(parts) + " && "
 
             cmd = (
-                f"mkdir -p {DEFAULT_WORK_DIR}"
-                f" && tar xzf {TARBALL_PATH} -C {DEFAULT_WORK_DIR}"
-                f" && cd {DEFAULT_WORK_DIR}"
+                f"mkdir -p {work_dir}"
+                f" && tar xzf {TARBALL_PATH} -C {work_dir}"
+                f" && cd {work_dir}"
                 f" && ([ ! -f setup.sh ] || bash setup.sh)"
                 f" && {exports}{entrypoint}"
             )

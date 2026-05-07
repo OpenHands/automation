@@ -107,9 +107,10 @@ from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
 # Workspace base directory (for RemoteWorkspace working_dir)
-workspace_base = os.environ.get("WORKSPACE_BASE", "/workspace")
+# Expand ~ to home directory before validation
+workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
-# Validate workspace_base path
+# Validate workspace_base path (after expansion)
 if not os.path.isabs(workspace_base):
     print(f"WARNING: WORKSPACE_BASE is relative path: {workspace_base}", file=sys.stderr)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
