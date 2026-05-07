@@ -352,7 +352,7 @@ class TestCreateAutomationFromPrompt:
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -440,7 +440,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -856,7 +856,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -952,7 +952,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
