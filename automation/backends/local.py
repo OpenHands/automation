@@ -134,4 +134,6 @@ class LocalAgentServerBackend(ExecutionBackend):
         base = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
         # Expand ~ to home directory
         base = os.path.expanduser(base)
-        return os.path.join(base, "automation-runs", run_id)
+        work_dir = os.path.join(base, "automation-runs", run_id)
+        logger.debug(f"Local mode work directory: {work_dir}")
+        return work_dir

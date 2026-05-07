@@ -107,6 +107,15 @@ from openhands.workspace import OpenHandsCloudWorkspace
 # Workspace base directory (for RemoteWorkspace working_dir)
 workspace_base = os.environ.get("WORKSPACE_BASE", "/workspace")
 
+# Validate workspace_base path
+if not os.path.isabs(workspace_base):
+    print(f"WARNING: WORKSPACE_BASE is relative path: {workspace_base}", file=sys.stderr)
+if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
+    print(
+        f"WARNING: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
+
 # Create workspace based on mode
 # Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
 print("\n=== SDK WORKSPACE ===")
