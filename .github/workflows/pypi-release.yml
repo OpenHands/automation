@@ -1,0 +1,42 @@
+# Publishes the openhands-automation PyPI package.
+# Triggered when a tag is pushed or manually via workflow_dispatch.
+name: Publish PyPI Package
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual trigger"
+        required: true
+        default: ""
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [ -z "${UV_PUBLISH_TOKEN:-}" ]; then
+            echo "::error::Missing secret PYPI_TOKEN"
+            exit 1
+          fi
+          uv publish --token "$UV_PUBLISH_TOKEN"
