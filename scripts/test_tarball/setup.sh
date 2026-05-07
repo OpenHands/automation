@@ -2,7 +2,7 @@
 # Install the OpenHands SDK from PyPI.
 set -e
 
-SDK_VERSION="1.19.1"
+SDK_VERSION="1.21.0"
 echo "[setup] installing openhands SDK ($SDK_VERSION)"
 # Package order doesn't matter - pip resolves all dependencies together
 pip install -q --no-cache-dir \

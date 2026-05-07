@@ -24,13 +24,12 @@ from tenacity import (
 from automation.config import get_config
 from automation.constants import TARBALL_PATH
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
-
-# Default working directory for cloud/container mode
-DEFAULT_WORK_DIR = "/workspace/project"
-
 from automation.utils import log_extra
 from automation.utils.sandbox import delete_sandbox
 
+
+# Default working directory for cloud/container mode
+DEFAULT_WORK_DIR = "/workspace/project"
 
 logger = logging.getLogger(__name__)
 

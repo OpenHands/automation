@@ -13,6 +13,7 @@ import pytest
 from automation.config import get_config
 from automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from automation.execution import (
+    DEFAULT_WORK_DIR,
     AutomationResult,
     DispatchResult,
     _shell_quote,
@@ -228,6 +229,7 @@ class TestExecuteInContextErrors:
                 session_key="test-session-key",
                 entrypoint="python main.py",
                 tarball_source="https://example.com/missing.tar.gz",
+                work_dir=DEFAULT_WORK_DIR,
             )
 
         assert "not accessible" in str(exc_info.value)
@@ -247,6 +249,7 @@ class TestExecuteInContextErrors:
             session_key="test-session-key",
             entrypoint="python main.py",
             tarball_source="https://example.com/file.tar.gz",
+            work_dir=DEFAULT_WORK_DIR,
         )
 
         assert isinstance(result, DispatchResult)
@@ -268,6 +271,7 @@ class TestExecuteInContextErrors:
                 session_key="test-session-key",
                 entrypoint="python main.py",
                 tarball_source=b"fake tarball bytes",
+                work_dir=DEFAULT_WORK_DIR,
             )
 
         assert "permanently failed" in str(exc_info.value)
@@ -287,6 +291,7 @@ class TestExecuteInContextErrors:
             session_key="test-session-key",
             entrypoint="python main.py",
             tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
             sandbox_id="test-sandbox-id",
         )
 

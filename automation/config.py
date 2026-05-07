@@ -248,9 +248,9 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_GCP_REGION: GCP region (optional)
 
         # Local agent-server mode (self-hosted deployments)
-        AUTOMATION_AGENT_SERVER_URL: Local agent server URL (e.g., http://localhost:3000)
+        AUTOMATION_AGENT_SERVER_URL: Local agent server URL (e.g., localhost:3000)
         AUTOMATION_AGENT_SERVER_API_KEY: Session API key for local agent server
-        AUTOMATION_WORKSPACE_BASE: Base workspace directory (default: ~/.openhands/workspaces in local mode)
+        AUTOMATION_WORKSPACE_BASE: Base workspace directory (local mode default)
 
         # Background workers
         AUTOMATION_SCHEDULER_INTERVAL_SECONDS: Scheduler poll interval (default: 60)
