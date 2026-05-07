@@ -1,10 +1,10 @@
 #!/bin/bash
-# Install the OpenHands SDK from GitHub main branch.
+# Install the OpenHands SDK from GitHub.
 #
 # Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
 set -e
 
-SDK_BRANCH="main"
+SDK_BRANCH="openhands/add-remote-workspace-methods-3094"
 
 echo "[setup] Installing OpenHands SDK from GitHub (branch: $SDK_BRANCH)"
 pip install -q --no-cache-dir \

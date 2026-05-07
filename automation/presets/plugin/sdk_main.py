@@ -9,22 +9,30 @@ This script is auto-generated from a plugin automation request. It supports two 
 
 **Local Mode** (self-hosted):
   Uses RemoteWorkspace connected to a local agent server (AGENT_SERVER_URL).
-  LLM/secrets/MCP fetched from agent server's settings API.
-  Note: Repos and skills not yet supported in local mode (SDK limitation).
+  Full functionality: repos, skills, LLM, secrets, MCP from agent server settings.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
+
+Both workspace types share the same interface:
+  - clone_repos() - clone repositories with auto-fetched tokens
+  - load_skills_from_agent_server() - load skills via agent server API
+  - get_repos_context() - generate context string for cloned repos
+  - get_llm() - get LLM configuration
+  - get_secrets() - get user secrets
+  - get_mcp_config() - get MCP server configuration
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
   2. Opens the workspace context EARLY (ensures callback on any failure)
-  3. Cloud mode: clones repos, loads skills
-  4. Gets LLM config via workspace.get_llm()
-  5. Gets secrets via workspace.get_secrets()
-  6. Gets MCP config via workspace.get_mcp_config()
-  7. Gets default agent with tools and condenser
-  8. Loads plugins from plugins_config.json
-  9. Creates a RemoteConversation with all plugins
-  10. Sends the prompt (with event context if available) and runs
-  11. On context manager exit, the workspace sends a completion callback
+  3. Clones repos via workspace.clone_repos()
+  4. Loads skills via workspace.load_skills_from_agent_server()
+  5. Gets LLM config via workspace.get_llm()
+  6. Gets secrets via workspace.get_secrets()
+  7. Gets MCP config via workspace.get_mcp_config()
+  8. Gets default agent with tools and condenser
+  9. Loads plugins from plugins_config.json
+  10. Creates a RemoteConversation with all plugins
+  11. Sends the prompt (with event context if available) and runs
+  12. On context manager exit, the workspace sends a completion callback
 
 IMPORTANT: The workspace context is entered early so that ANY exception
 (skill loading, prompt parsing, etc.) triggers the __exit__ callback,
@@ -99,17 +107,17 @@ from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
 # Create workspace based on mode
+# Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
 print("\n=== SDK WORKSPACE ===")
 if IS_LOCAL_MODE:
     # Local mode: use RemoteWorkspace connected to local agent server
-    # Note: repos and skills not supported yet (SDK limitation)
     print(f"  using RemoteWorkspace at {agent_server_url}")
     workspace_ctx = RemoteWorkspace(
         host=agent_server_url,
         api_key=session_key if session_key else None,
     )
 else:
-    # Cloud mode: use OpenHandsCloudWorkspace with full functionality
+    # Cloud mode: use OpenHandsCloudWorkspace connected to sandbox's agent server
     print(f"  using OpenHandsCloudWorkspace at {api_url}")
     workspace_ctx = OpenHandsCloudWorkspace(
         local_agent_server_mode=True,
@@ -132,14 +140,13 @@ with workspace_ctx as workspace:
                 f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
             )
 
-    # Clone repositories if repos_config.json exists (Cloud mode only)
-    # Note: RemoteWorkspace doesn't support clone_repos yet (SDK limitation)
+    # Clone repositories if repos_config.json exists
     SCRIPT_DIR = os.path.dirname(__file__)
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
     clone_result = None
     repo_dirs = []
 
-    if os.path.exists(REPOS_CONFIG_FILE) and not IS_LOCAL_MODE:
+    if os.path.exists(REPOS_CONFIG_FILE):
         print("\n=== CLONE REPOS ===")
         with open(REPOS_CONFIG_FILE) as f:
             repos_config = json.load(f)
@@ -151,21 +158,17 @@ with workspace_ctx as workspace:
             # Collect cloned repo directories for skill loading
             repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
 
-    # Load ALL skills via workspace.load_skills_from_agent_server() (Cloud mode only)
+    # Load ALL skills via workspace.load_skills_from_agent_server()
     # If repos were cloned, project skills are loaded from EACH cloned repo
-    # Note: RemoteWorkspace doesn't support load_skills_from_agent_server yet
-    loaded_skills = []
-    agent_context = None
-    if not IS_LOCAL_MODE:
-        print("\n=== LOAD SKILLS ===")
-        loaded_skills, agent_context = workspace.load_skills_from_agent_server(
-            project_dirs=repo_dirs if repo_dirs else None
-        )
-        print(f"  loaded {len(loaded_skills)} skills")
+    print("\n=== LOAD SKILLS ===")
+    loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+        project_dirs=repo_dirs if repo_dirs else None
+    )
+    print(f"  loaded {len(loaded_skills)} skills")
 
-    # Get repos context (mapping of URLs to local paths) - Cloud mode only
+    # Get repos context (mapping of URLs to local paths)
     repos_context = ""
-    if clone_result and clone_result.repo_mappings and not IS_LOCAL_MODE:
+    if clone_result and clone_result.repo_mappings:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
