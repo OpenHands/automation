@@ -102,14 +102,17 @@ class LocalAgentServerBackend(ExecutionBackend):
         Provides the env vars needed for local mode:
         - AGENT_SERVER_URL: URL of the local agent server
         - SESSION_API_KEY: API key for authenticating with the agent server
-        - WORKSPACE_BASE: Base workspace directory for SDK operations
+        - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
+
+        The workspace is isolated per-run to avoid conflicts between concurrent
+        automations. Each run gets its own directory under the base workspace.
         """
-        # Use configured workspace_base or fallback to default
-        workspace = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
+        # Use run-specific workspace directory for isolation
+        run_workspace = self.get_work_dir(str(self._run.id))
         return {
             "AGENT_SERVER_URL": self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
-            "WORKSPACE_BASE": workspace,
+            "WORKSPACE_BASE": run_workspace,
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:
