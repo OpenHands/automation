@@ -70,8 +70,9 @@ async def lifespan(app: FastAPI):
 
         from automation.db import normalize_sqlite_url_for_alembic
 
-        # Find migrations folder relative to this package
-        # When installed via pip/uvx, migrations are bundled inside automation/migrations
+        # Find migrations folder relative to this package.
+        # When installed via pip/uvx, migrations are bundled inside
+        # automation/migrations.
         package_dir = Path(__file__).parent
         migrations_path = package_dir / "migrations"
 
