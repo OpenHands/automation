@@ -109,7 +109,7 @@ class TestLocalAgentServerBackend:
         assert api_key == "local-key"
 
     def test_build_env_vars(self, mock_run):
-        """build_env_vars() includes AGENT_SERVER_URL and SESSION_API_KEY."""
+        """build_env_vars() includes AGENT_SERVER_URL, SESSION_API_KEY, WORKSPACE_BASE."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
@@ -119,6 +119,22 @@ class TestLocalAgentServerBackend:
         assert env_vars == {
             "AGENT_SERVER_URL": "http://localhost:3000",
             "SESSION_API_KEY": "local-key",
+            "WORKSPACE_BASE": "/workspace",  # default value
+        }
+
+    def test_build_env_vars_custom_workspace_base(self, mock_run):
+        """build_env_vars() uses custom workspace_base when provided."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="local-key",
+            run=mock_run,
+            workspace_base="/custom/workspace",
+        )
+        env_vars = backend.build_env_vars()
+        assert env_vars == {
+            "AGENT_SERVER_URL": "http://localhost:3000",
+            "SESSION_API_KEY": "local-key",
+            "WORKSPACE_BASE": "/custom/workspace",
         }
 
     @pytest.mark.asyncio

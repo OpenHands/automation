@@ -38,6 +38,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         agent_server_url: str,
         api_key: str,
         run: AutomationRun,
+        workspace_base: str = "/workspace",
     ):
         """Initialize the local agent-server backend for a specific run.
 
@@ -46,10 +47,12 @@ class LocalAgentServerBackend(ExecutionBackend):
                 (e.g., "http://localhost:3000")
             api_key: API key for authenticating with the agent server
             run: The automation run this backend will operate on
+            workspace_base: Base workspace directory (default: /workspace)
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
         self._run = run
+        self.workspace_base = workspace_base
 
     @property
     def is_local_mode(self) -> bool:
@@ -88,13 +91,15 @@ class LocalAgentServerBackend(ExecutionBackend):
     def build_env_vars(self) -> dict[str, str]:
         """Build local mode environment variables.
 
-        Only provides the minimal env vars needed for local mode:
+        Provides the env vars needed for local mode:
         - AGENT_SERVER_URL: URL of the local agent server
         - SESSION_API_KEY: API key for authenticating with the agent server
+        - WORKSPACE_BASE: Base workspace directory for SDK operations
         """
         return {
             "AGENT_SERVER_URL": self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
+            "WORKSPACE_BASE": self.workspace_base,
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:

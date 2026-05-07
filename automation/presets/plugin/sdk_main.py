@@ -111,15 +111,20 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+# Workspace base directory (for RemoteWorkspace working_dir)
+workspace_base = os.environ.get("WORKSPACE_BASE", "/workspace")
+
 # Create workspace based on mode
 # Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
 print("\n=== SDK WORKSPACE ===")
 if IS_LOCAL_MODE:
     # Local mode: use RemoteWorkspace connected to local agent server
     print(f"  using RemoteWorkspace at {agent_server_url}")
+    print(f"  working_dir: {workspace_base}")
     workspace_ctx = RemoteWorkspace(
         host=agent_server_url,
         api_key=session_key if session_key else None,
+        working_dir=workspace_base,
     )
 else:
     # Cloud mode: use OpenHandsCloudWorkspace connected to sandbox's agent server
