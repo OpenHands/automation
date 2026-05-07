@@ -46,6 +46,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         api_key: str,
         run: AutomationRun,
         workspace_base: str | None = None,
+        callback_api_key: str | None = None,
     ):
         """Initialize the local agent-server backend for a specific run.
 
@@ -56,11 +57,15 @@ class LocalAgentServerBackend(ExecutionBackend):
             run: The automation run this backend will operate on
             workspace_base: Base workspace directory. If None, defaults to
                 ~/.openhands/workspaces (suitable for native local mode).
+            callback_api_key: API key for authenticating completion callbacks
+                to the automation service (local_api_key from config). If None,
+                callbacks will be sent without authentication.
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
         self._run = run
         self.workspace_base = workspace_base
+        self.callback_api_key = callback_api_key
 
     @property
     def is_local_mode(self) -> bool:
@@ -103,7 +108,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         - AGENT_SERVER_URL: URL of the local agent server
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
-        - AUTOMATION_CALLBACK_API_KEY: API key for callback auth (same as api_key)
+        - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service
 
         The workspace is isolated per-run to avoid conflicts between concurrent
         automations. Each run gets its own directory under the base workspace.
@@ -119,9 +124,10 @@ class LocalAgentServerBackend(ExecutionBackend):
             "WORKSPACE_BASE": run_workspace,
         }
         # Add callback API key for RemoteWorkspace completion callback auth
+        # This is the automation service's local_api_key, NOT the agent server key
         # (SDK PR #3110 adds support for AUTOMATION_CALLBACK_API_KEY)
-        if self.api_key:
-            env_vars["AUTOMATION_CALLBACK_API_KEY"] = self.api_key
+        if self.callback_api_key:
+            env_vars["AUTOMATION_CALLBACK_API_KEY"] = self.callback_api_key
         return env_vars
 
     async def verify_run(self, run_id: str) -> VerificationResult:

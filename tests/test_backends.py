@@ -113,49 +113,52 @@ class TestLocalAgentServerBackend:
         """build_env_vars() returns required env vars for local mode."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
-            api_key="local-key",
+            api_key="agent-server-key",
             run=mock_run,
+            callback_api_key="automation-service-key",
         )
         env_vars = backend.build_env_vars()
         # WORKSPACE_BASE should be run-isolated (includes run_id)
         assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
-        assert env_vars["SESSION_API_KEY"] == "local-key"
+        assert env_vars["SESSION_API_KEY"] == "agent-server-key"
         # Workspace should be isolated per-run and have ~ expanded
         assert "test-run-123" in env_vars["WORKSPACE_BASE"]
         assert env_vars["WORKSPACE_BASE"].endswith("/automation-runs/test-run-123")
         assert "~" not in env_vars["WORKSPACE_BASE"]  # ~ should be expanded
-        # Callback API key should be set for RemoteWorkspace callback auth
-        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "local-key"
+        # Callback API key should be the automation service's key (NOT agent server key)
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "automation-service-key"
 
     def test_build_env_vars_custom_workspace_base(self, mock_run):
         """build_env_vars() uses custom workspace_base when provided."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
-            api_key="local-key",
+            api_key="agent-key",
             run=mock_run,
             workspace_base="/custom/workspace",
+            callback_api_key="callback-key",
         )
         env_vars = backend.build_env_vars()
         # Custom workspace_base is used as the base, but still isolated per-run
         assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
-        assert env_vars["SESSION_API_KEY"] == "local-key"
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
         assert (
             env_vars["WORKSPACE_BASE"]
             == "/custom/workspace/automation-runs/test-run-123"
         )
-        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "local-key"
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "callback-key"
 
-    def test_build_env_vars_no_api_key(self, mock_run):
-        """build_env_vars() omits callback key when api_key is empty."""
+    def test_build_env_vars_no_callback_key(self, mock_run):
+        """build_env_vars() omits callback key when callback_api_key is not set."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
-            api_key="",  # Empty API key
+            api_key="agent-key",
             run=mock_run,
+            # No callback_api_key provided
         )
         env_vars = backend.build_env_vars()
         assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
-        assert env_vars["SESSION_API_KEY"] == ""
-        # No callback key when api_key is empty
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
+        # No callback key when callback_api_key is not set
         assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
 
     def test_get_work_dir_default_workspace(self, mock_run):
