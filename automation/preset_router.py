@@ -263,7 +263,7 @@ async def create_automation_from_prompt(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint="python main.py",
+            entrypoint=".venv/bin/python main.py",
             timeout=body.timeout,
         )
         session.add(automation)
@@ -495,7 +495,7 @@ async def create_automation_from_plugin(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint="python main.py",
+            entrypoint=".venv/bin/python main.py",
             timeout=body.timeout,
         )
         session.add(automation)
