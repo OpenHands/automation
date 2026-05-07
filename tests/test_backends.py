@@ -116,10 +116,11 @@ class TestLocalAgentServerBackend:
             run=mock_run,
         )
         env_vars = backend.build_env_vars()
+        # When workspace_base is None, uses DEFAULT_LOCAL_WORKSPACE_BASE
         assert env_vars == {
             "AGENT_SERVER_URL": "http://localhost:3000",
             "SESSION_API_KEY": "local-key",
-            "WORKSPACE_BASE": "/workspace",  # default value
+            "WORKSPACE_BASE": "~/.openhands/workspaces",
         }
 
     def test_build_env_vars_custom_workspace_base(self, mock_run):
