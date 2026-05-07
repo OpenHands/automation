@@ -124,6 +124,8 @@ class TestLocalAgentServerBackend:
         assert "test-run-123" in env_vars["WORKSPACE_BASE"]
         assert env_vars["WORKSPACE_BASE"].endswith("/automation-runs/test-run-123")
         assert "~" not in env_vars["WORKSPACE_BASE"]  # ~ should be expanded
+        # Callback API key should be set for RemoteWorkspace callback auth
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "local-key"
 
     def test_build_env_vars_custom_workspace_base(self, mock_run):
         """build_env_vars() uses custom workspace_base when provided."""
@@ -141,6 +143,20 @@ class TestLocalAgentServerBackend:
             env_vars["WORKSPACE_BASE"]
             == "/custom/workspace/automation-runs/test-run-123"
         )
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "local-key"
+
+    def test_build_env_vars_no_api_key(self, mock_run):
+        """build_env_vars() omits callback key when api_key is empty."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="",  # Empty API key
+            run=mock_run,
+        )
+        env_vars = backend.build_env_vars()
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == ""
+        # No callback key when api_key is empty
+        assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
 
     def test_get_work_dir_default_workspace(self, mock_run):
         """get_work_dir() returns isolated directory with ~ expanded."""

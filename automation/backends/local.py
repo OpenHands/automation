@@ -103,17 +103,26 @@ class LocalAgentServerBackend(ExecutionBackend):
         - AGENT_SERVER_URL: URL of the local agent server
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
+        - AUTOMATION_CALLBACK_API_KEY: API key for callback auth (same as api_key)
 
         The workspace is isolated per-run to avoid conflicts between concurrent
         automations. Each run gets its own directory under the base workspace.
+
+        Note: AUTOMATION_CALLBACK_URL and AUTOMATION_RUN_ID are added by the
+        dispatcher after calling this method.
         """
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))
-        return {
+        env_vars = {
             "AGENT_SERVER_URL": self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,
         }
+        # Add callback API key for RemoteWorkspace completion callback auth
+        # (SDK PR #3110 adds support for AUTOMATION_CALLBACK_API_KEY)
+        if self.api_key:
+            env_vars["AUTOMATION_CALLBACK_API_KEY"] = self.api_key
+        return env_vars
 
     async def verify_run(self, run_id: str) -> VerificationResult:
         """Verify run status by querying agent server directly."""
