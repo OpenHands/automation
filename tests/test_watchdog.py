@@ -12,7 +12,7 @@ import pytest
 
 from automation.models import Automation, AutomationRun, AutomationRunStatus
 from automation.utils import utcnow
-from automation.utils.sandbox import VerificationResult
+from automation.utils.agent_server import VerificationResult
 from automation.watchdog import _verify_and_mark_run
 
 
@@ -21,11 +21,12 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
-def create_mock_backend(verification_result: VerificationResult):
-    """Create a mock backend that returns the given verification result."""
+def _create_mock_backend(verification_result: VerificationResult) -> MagicMock:
+    """Create a mock backend with configured verification result."""
     mock_backend = MagicMock()
     mock_backend.verify_run = AsyncMock(return_value=verification_result)
     mock_backend.cleanup_after_verification = AsyncMock()
+    mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
     return mock_backend
 
 
@@ -78,8 +79,7 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -110,8 +110,7 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Command timed out after 60 seconds",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -143,8 +142,7 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -175,8 +173,7 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Error: something went wrong",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -209,8 +206,7 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="bash: command not found",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -242,8 +238,7 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -297,8 +292,7 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        mock_backend = create_mock_backend(verification)
-
+        mock_backend = _create_mock_backend(verification)
         with patch("automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)

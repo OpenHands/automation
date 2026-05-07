@@ -3,26 +3,33 @@
 This script is auto-generated from a user's prompt. It supports two modes:
 
 **Cloud Mode** (default):
-  Uses OpenHandsCloudWorkspace connected to OpenHands Cloud API.
+  Uses OpenHandsCloudWorkspace connected to sandbox's agent server (localhost:3000).
+  Full functionality: repos, skills, LLM, secrets, MCP from user's Cloud account.
   Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
-  LLM/secrets/MCP fetched from user's Cloud account via workspace methods.
 
 **Local Mode** (self-hosted):
-  Uses OpenHandsCloudWorkspace with local_agent_server_mode=True.
+  Uses RemoteWorkspace connected to a local agent server (AGENT_SERVER_URL).
+  Full functionality: repos, skills, LLM, secrets, MCP from agent server settings.
   Requires: AGENT_SERVER_URL (presence triggers local mode)
-  LLM/secrets/MCP fetched from agent-server's persisted settings via workspace methods.
-  Falls back to env vars: LLM_MODEL, LLM_API_KEY, LLM_BASE_URL if workspace.get_llm() fails.
+
+Both workspace types share the same interface:
+  - clone_repos() - clone repositories with auto-fetched tokens
+  - load_skills_from_agent_server() - load skills via agent server API
+  - get_repos_context() - generate context string for cloned repos
+  - get_llm() - get LLM configuration
+  - get_secrets() - get user secrets
+  - get_mcp_config() - get MCP server configuration
 
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
-  2. Opens the appropriate workspace EARLY (ensures callback on any failure)
-  3. Clones repositories if configured (via workspace.clone_repos())
-  4. Loads ALL skills via workspace.load_skills_from_agent_server()
-  5. Gets LLM config via workspace.get_llm() (works in both Cloud and Local modes)
-  6. Gets secrets via workspace.get_secrets() (works in both modes)
-  7. Gets MCP config via workspace.get_mcp_config() (works in both modes)
-  8. Gets default agent with tools and condenser via get_default_agent()
-  9. Creates a Conversation and injects secrets
+  2. Opens the workspace context EARLY (ensures callback on any failure)
+  3. Clones repos via workspace.clone_repos()
+  4. Loads skills via workspace.load_skills_from_agent_server()
+  5. Gets LLM config via workspace.get_llm()
+  6. Gets secrets via workspace.get_secrets()
+  7. Gets MCP config via workspace.get_mcp_config()
+  8. Gets default agent with tools and condenser
+  9. Creates a RemoteConversation and injects secrets
   10. Sends the user's prompt (with event context if available) and runs
   11. On context manager exit, the workspace sends a completion callback
 
@@ -39,9 +46,6 @@ Env vars (Cloud mode - all required):
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
   SESSION_API_KEY            - API key for agent server auth (optional)
-  LLM_MODEL                  - fallback LLM model if workspace.get_llm() fails
-  LLM_API_KEY                - fallback LLM API key if workspace.get_llm() fails
-  LLM_BASE_URL               - fallback LLM base URL if workspace.get_llm() fails
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
@@ -56,31 +60,23 @@ import time
 
 
 # Detect execution mode based on AGENT_SERVER_URL presence
-agent_server_url = os.environ.get("AGENT_SERVER_URL", "")
+agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
 IS_LOCAL_MODE = bool(agent_server_url)
 
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
-api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
+api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
-
-# Local mode env vars (fallbacks if not in saved settings)
-llm_model_env = os.environ.get("LLM_MODEL", "")
-llm_api_key_env = os.environ.get("LLM_API_KEY", "")
-llm_base_url_env = os.environ.get("LLM_BASE_URL", "")
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
 
 print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
-    # Local mode: AGENT_SERVER_URL required; LLM can come from saved settings or env
+    # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
     print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
-    print(f"  LLM_MODEL: {'OK (env fallback)' if llm_model_env else 'NONE (will use saved settings)'}")
-    print(f"  LLM_API_KEY: {'OK (env fallback)' if llm_api_key_env else 'NONE (will use saved settings)'}")
-    print(f"  LLM_BASE_URL: {'OK (env fallback)' if llm_base_url_env else 'NONE'}")
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
@@ -103,34 +99,23 @@ print(
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, LLM, RemoteConversation
-from openhands.tools import get_default_agent
+from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.workspace.remote.base import RemoteWorkspace
+from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
 # Create workspace based on mode
-# Both modes use OpenHandsCloudWorkspace with local_agent_server_mode=True
-# This provides full workspace functionality (skills, commands, etc.)
+# Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
 print("\n=== SDK WORKSPACE ===")
 if IS_LOCAL_MODE:
-    # Local mode: connect to local agent server with Cloud API features disabled
-    # Extract port from agent_server_url (e.g., "http://localhost:3000" -> 3000)
-    port = 3000
-    if ":" in agent_server_url:
-        port_str = agent_server_url.rsplit(":", 1)[-1].rstrip("/")
-        if port_str.isdigit():
-            port = int(port_str)
-    print(f"  using OpenHandsCloudWorkspace (local mode) on port {port}")
-    # Use SESSION_API_KEY for callback auth (auth is disabled in local mode,
-    # but the SDK still sends a Bearer token, so we need a non-empty value)
-    workspace_ctx = OpenHandsCloudWorkspace(
-        local_agent_server_mode=True,
-        agent_server_port=port,
-        # Empty URL (not used in local mode), but provide a key for callback auth
-        cloud_api_url="",
-        cloud_api_key=session_key or "local-mode",
+    # Local mode: use RemoteWorkspace connected to local agent server
+    print(f"  using RemoteWorkspace at {agent_server_url}")
+    workspace_ctx = RemoteWorkspace(
+        host=agent_server_url,
+        api_key=session_key if session_key else None,
     )
 else:
-    # Cloud mode: connect to sandbox's agent server with full Cloud API features
+    # Cloud mode: use OpenHandsCloudWorkspace connected to sandbox's agent server
     print(f"  using OpenHandsCloudWorkspace at {api_url}")
     workspace_ctx = OpenHandsCloudWorkspace(
         local_agent_server_mode=True,
@@ -153,7 +138,7 @@ with workspace_ctx as workspace:
                 f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
             )
 
-    # Clone repositories if repos_config.json exists (uses SDK workspace methods)
+    # Clone repositories if repos_config.json exists
     SCRIPT_DIR = os.path.dirname(__file__)
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
     clone_result = None
@@ -185,7 +170,7 @@ with workspace_ctx as workspace:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load user's prompt from file (placed during automation creation)
-    PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt.txt")
+    PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
     with open(PROMPT_FILE) as f:
         USER_PROMPT = f.read()
 
@@ -216,42 +201,13 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Get LLM config via workspace.get_llm() (works in both Cloud and Local modes)
-    # In local mode, workspace fetches from agent-server's /api/settings endpoint
-    # Falls back to env vars if workspace.get_llm() doesn't return valid config
+    # Get LLM config via workspace
     print("\n=== GET_LLM ===")
-    llm = None
-    try:
-        llm = workspace.get_llm()
-        if llm.model and llm.api_key:
-            source = "agent-server settings" if IS_LOCAL_MODE else "Cloud API"
-            print(f"  model: {llm.model} (from {source})")
-        else:
-            # workspace.get_llm() returned but missing required fields
-            llm = None
-    except Exception as e:
-        print(f"  workspace.get_llm() failed: {e}")
-
-    # Fallback to env vars in local mode if workspace.get_llm() didn't work
-    if llm is None and IS_LOCAL_MODE:
-        if llm_model_env and llm_api_key_env:
-            llm = LLM(
-                model=llm_model_env,
-                api_key=llm_api_key_env,
-                base_url=llm_base_url_env if llm_base_url_env else None,
-            )
-            print(f"  model: {llm.model} (from env vars fallback)")
-        else:
-            print("FAIL: LLM config not in saved settings and env vars not set", file=sys.stderr)
-            sys.exit(1)
-    elif llm is None:
-        print("FAIL: workspace.get_llm() failed and no fallback available", file=sys.stderr)
-        sys.exit(1)
-
+    llm = workspace.get_llm()
+    print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 
-    # Get secrets via workspace.get_secrets() (works in both modes)
-    # In local mode, fetches from agent-server's /api/settings/secrets endpoint
+    # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
     secrets = {}
     try:
@@ -261,8 +217,7 @@ This automation was triggered by a webhook event:
         # Not a hard failure — user may not have secrets configured
         print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    # Get MCP config via workspace.get_mcp_config() (works in both modes)
-    # In local mode, fetches from agent-server's /api/settings endpoint
+    # Get MCP config via workspace
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = None
     try:
@@ -312,7 +267,7 @@ This automation was triggered by a webhook event:
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
 
-    # Inject SaaS secrets into the conversation
+    # Inject secrets into the conversation (as LookupSecret references)
     if secrets:
         conversation.update_secrets(secrets)
         print(f"  injected {len(secrets)} secrets into conversation")
@@ -334,5 +289,5 @@ This automation was triggered by a webhook event:
 
     print("  conversation completed successfully")
 
-print("\n=== RESULT ===")
-print("ALL_OK")
+    print("\n=== RESULT ===")
+    print("ALL_OK")

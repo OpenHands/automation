@@ -1,12 +1,13 @@
 """Local filesystem storage backend for self-hosted deployments."""
 
 import logging
-import os
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 from automation.storage.file_store import FileStore
 from automation.storage.google_cloud import FileSizeLimitExceeded
+
 
 logger = logging.getLogger("automation.storage.local")
 
@@ -29,9 +30,21 @@ class LocalFileStore(FileStore):
         logger.info("LocalFileStore initialized at %s", self.base_path)
 
     def _full_path(self, path: str) -> Path:
-        """Get the full filesystem path for a storage path."""
+        """Get the full filesystem path for a storage path.
+
+        Raises:
+            ValueError: If the path attempts to escape the base directory.
+        """
         prefixed = self._prefixed_path(path)
-        return self.base_path / prefixed
+        full_path = (self.base_path / prefixed).resolve()
+
+        # Prevent path traversal - ensure resolved path is under base_path
+        try:
+            full_path.relative_to(self.base_path.resolve())
+        except ValueError as e:
+            raise ValueError(f"Path traversal attempt blocked: {path}") from e
+
+        return full_path
 
     def write(self, path: str, contents: str | bytes) -> None:
         """Write contents to a file at the given path."""
@@ -63,16 +76,13 @@ class LocalFileStore(FileStore):
 
         # If it's a directory, list all files recursively
         result = []
-        prefix_len = len(str(self.base_path)) + 1  # +1 for trailing slash
-        for root, _, files in os.walk(full_path):
-            for f in files:
-                file_path = os.path.join(root, f)
-                # Return path relative to base_path, without the automation/ prefix
-                rel_path = file_path[prefix_len:]
-                # Remove the BUCKET_PREFIX from the start
-                if rel_path.startswith("automation/"):
-                    rel_path = rel_path[len("automation/") :]
-                result.append(rel_path)
+        for file_path in full_path.rglob("*"):
+            if file_path.is_file():
+                # Get path relative to base_path, then remove automation prefix
+                rel_path = file_path.relative_to(self.base_path)
+                if rel_path.parts and rel_path.parts[0] == "automation":
+                    rel_path = Path(*rel_path.parts[1:])
+                result.append(str(rel_path).replace("\\", "/"))
         return result
 
     def delete(self, path: str) -> None:
@@ -84,8 +94,6 @@ class LocalFileStore(FileStore):
                 logger.debug("Deleted file %s", path)
             else:
                 # Delete directory and all contents
-                import shutil
-
                 shutil.rmtree(full_path)
                 logger.debug("Deleted directory %s", path)
 
@@ -94,7 +102,7 @@ class LocalFileStore(FileStore):
         path: str,
         stream: AsyncIterator[bytes],
         max_size: int | None = None,
-        content_type: str = "application/octet-stream",
+        content_type: str = "application/octet-stream",  # noqa: ARG002
     ) -> int:
         """Stream content to a file, enforcing an optional size limit."""
         full_path = self._full_path(path)
@@ -108,7 +116,7 @@ class LocalFileStore(FileStore):
                     f.close()
                     full_path.unlink(missing_ok=True)
                     raise FileSizeLimitExceeded(
-                        f"File exceeds maximum size of {max_size} bytes"
+                        max_size=max_size, actual_size=total_bytes + len(chunk)
                     )
                 f.write(chunk)
                 total_bytes += len(chunk)

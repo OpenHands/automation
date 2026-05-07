@@ -113,8 +113,8 @@ class StorageSettings(BaseSettings):
         AWS_S3_SECURE: Use HTTPS (default: "true")
         AWS_S3_AUTO_CREATE_BUCKET: Auto-create bucket if missing (default: "false")
 
-        # Local storage settings
-        LOCAL_STORAGE_PATH: Directory for local storage (required if FILE_STORE=local)
+        # Local settings
+        LOCAL_STORAGE_PATH: Base directory for local storage (required if local)
 
         # Size limits
         MAX_UPLOAD_SIZE: Max tarball upload size in bytes (default: 1MB)
@@ -137,7 +137,7 @@ class StorageSettings(BaseSettings):
     aws_s3_secure: bool = True
     aws_s3_auto_create_bucket: bool = False
 
-    # Local storage settings
+    # Local settings
     local_storage_path: str | None = None
 
     # Size limits

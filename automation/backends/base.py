@@ -8,7 +8,6 @@ import httpx
 
 
 if TYPE_CHECKING:
-    from automation.models import AutomationRun
     from automation.utils.agent_server import VerificationResult
 
 
@@ -44,8 +43,10 @@ class ExecutionBackend(ABC):
     """
 
     @abstractmethod
-    async def acquire(self, client: httpx.AsyncClient) -> ExecutionContext:
-        """Acquire an execution context (agent server URL + credentials).
+    async def get_execution_context(
+        self, client: httpx.AsyncClient
+    ) -> ExecutionContext:
+        """Get the execution context (agent server URL + credentials).
 
         For Cloud mode: Creates a sandbox, waits for it to be RUNNING,
         and extracts the agent server URL from exposed_urls.
@@ -59,12 +60,14 @@ class ExecutionBackend(ABC):
             ExecutionContext with agent_url and session_key
 
         Raises:
-            RuntimeError: If acquisition fails
+            RuntimeError: If context cannot be obtained
             TimeoutError: If sandbox doesn't become ready in time (Cloud mode)
         """
 
     @abstractmethod
-    async def release(self, client: httpx.AsyncClient, ctx: ExecutionContext) -> None:
+    async def release_context(
+        self, client: httpx.AsyncClient, ctx: ExecutionContext
+    ) -> None:
         """Release the execution context (cleanup).
 
         For Cloud mode: Deletes the sandbox.
@@ -76,46 +79,35 @@ class ExecutionBackend(ABC):
         """
 
     @abstractmethod
-    async def get_api_key(self, run: "AutomationRun") -> str:
+    async def get_api_key(self) -> str:
         """Get the API key for executing an automation run.
 
-        For Cloud mode: Mints a per-user API key via the service key.
+        For Cloud mode: Mints/returns the per-user API key.
         For Local mode: Returns the pre-configured API key.
-
-        Args:
-            run: The automation run (used for user context in Cloud mode)
 
         Returns:
             API key string
         """
 
     @abstractmethod
-    def build_env_vars(self, api_key: str) -> dict[str, str]:
+    def build_env_vars(self) -> dict[str, str]:
         """Build environment variables to inject into the execution environment.
 
         For Cloud mode: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL
-        For Local mode: AGENT_SERVER_URL, optionally OPENHANDS_CLOUD_API_URL
-
-        Args:
-            api_key: The API key from get_api_key()
+        For Local mode: AGENT_SERVER_URL, SESSION_API_KEY
 
         Returns:
             Dictionary of environment variable name -> value
         """
 
     @abstractmethod
-    async def verify_run(
-        self,
-        run: "AutomationRun",
-        run_id: str,
-    ) -> "VerificationResult":
+    async def verify_run(self, run_id: str) -> "VerificationResult":
         """Verify the status of a running automation.
 
         For Cloud mode: Discovers sandbox, queries agent server, cleans up.
         For Local mode: Queries agent server directly, no cleanup.
 
         Args:
-            run: The automation run to verify
             run_id: Run ID string for logging
 
         Returns:
@@ -123,18 +115,13 @@ class ExecutionBackend(ABC):
         """
 
     @abstractmethod
-    async def cleanup_after_verification(
-        self,
-        run: "AutomationRun",
-        run_id: str,
-    ) -> None:
+    async def cleanup_after_verification(self, run_id: str) -> None:
         """Clean up resources after verification fails.
 
         For Cloud mode: Deletes the sandbox (if not keep_alive).
         For Local mode: No-op (persistent server).
 
         Args:
-            run: The automation run
             run_id: Run ID string for logging
         """
 
