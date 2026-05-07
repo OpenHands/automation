@@ -10,6 +10,7 @@ to get the user and organization identity.
 
 import hashlib
 import logging
+import secrets
 import uuid
 from enum import StrEnum
 
@@ -230,17 +231,19 @@ async def authenticate_request(
 ) -> AuthenticatedUser:
     """Authenticate the request using API key or keycloak_auth cookie.
 
-    Supports three authentication methods (checked in priority order):
-    1. Local API key (in local mode only): Bearer token matching local_api_key
-    2. API key via Authorization: Bearer <api_key> header (validated via SaaS)
-    3. Cookie via keycloak_auth cookie (validated via SaaS)
+    Authentication modes:
 
-    In local mode with local_api_key configured, matching Bearer tokens are
-    authenticated as a default local user without calling OpenHands API.
+    **Local mode with local_api_key configured:**
+    Only the configured local API key is accepted. SaaS authentication is
+    disabled. Matching Bearer tokens are authenticated as a default local
+    user without calling the OpenHands API. Non-matching keys are rejected
+    immediately.
 
-    For SaaS authentication, calls the OpenHands API GET /api/v1/users/me to
-    verify credentials and get user/org identity. Implements retry with
-    exponential backoff for rate limiting. Results are cached in-memory.
+    **SaaS mode (local_api_key not configured):**
+    Supports API key via Authorization: Bearer header or keycloak_auth cookie.
+    Calls the OpenHands API GET /api/v1/users/me to verify credentials and
+    get user/org identity. Implements retry with exponential backoff for
+    rate limiting. Results are cached in-memory.
     """
     settings = get_config().service
 
@@ -255,8 +258,10 @@ async def authenticate_request(
             )
 
         # In local mode with local_api_key configured, only accept that key
+        # (SaaS authentication is disabled when local_api_key is set)
         if settings.is_local_mode and settings.local_api_key:
-            if api_key == settings.local_api_key:
+            # Use constant-time comparison to prevent timing attacks
+            if secrets.compare_digest(api_key, settings.local_api_key):
                 logger.debug("Authenticated via local API key")
                 return _get_local_user()
             # Key doesn't match - reject immediately in local mode
