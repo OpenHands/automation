@@ -274,7 +274,10 @@ This automation was triggered by a webhook event:
         last_event_time["ts"] = time.time()
 
     conversation = Conversation(
-        agent=agent, workspace=workspace, callbacks=[event_callback]
+        agent=agent,
+        workspace=workspace,
+        callbacks=[event_callback],
+        delete_on_close=False,  # Keep conversation history after completion
     )
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
