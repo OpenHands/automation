@@ -134,10 +134,10 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Add callback API key for RemoteWorkspace completion callback auth.
         # This is the automation service's local_api_key, NOT the agent server key.
         #
-        # Requires openhands-workspace >= 1.22.0 (SDK PR #3110).
-        # Earlier SDK versions will ignore AUTOMATION_CALLBACK_API_KEY and send
-        # callbacks without authentication, which is acceptable for local-only
-        # deployments but may fail if the automation service requires auth.
+        # Note: AUTOMATION_CALLBACK_API_KEY support was added in SDK PR #3110.
+        # Earlier SDK versions will ignore this env var and send callbacks without
+        # authentication, which is acceptable for local-only deployments but may
+        # fail if the automation service requires auth.
         #
         # See: https://github.com/All-Hands-AI/openhands-software-agent-sdk/pull/3110
         if self.callback_api_key:
