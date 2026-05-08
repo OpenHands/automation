@@ -1131,3 +1131,199 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+@requires_docker
+class TestPresetMetadata:
+    """Tests for preset_metadata field in automation responses."""
+
+    @pytest.fixture
+    def mock_file_store(self):
+        """Create a mock file store."""
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        store = MagicMock()
+        store._captured_content = None
+
+        async def mock_write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            content = b""
+            async for chunk in stream:
+                content += chunk
+            store._captured_content = content
+            return len(content)
+
+        store.write_stream = AsyncMock(side_effect=mock_write_stream)
+        store.delete = MagicMock()
+        return store
+
+    @pytest.fixture(autouse=True)
+    def setup_file_store_override(self, mock_file_store):
+        """Override file_store for all tests in this class."""
+        from automation.app import app
+        from automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: mock_file_store
+        yield
+        app.dependency_overrides.pop(get_file_store, None)
+
+    async def test_prompt_preset_sets_preset_metadata(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Prompt preset populates preset_metadata with type and prompt."""
+        payload = {
+            "name": "Prompt Metadata Test",
+            "prompt": "Test prompt for metadata",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+
+        # Verify preset_metadata is present and correct
+        assert data["preset_metadata"] is not None
+        assert data["preset_metadata"]["preset_type"] == "prompt"
+        assert data["preset_metadata"]["prompt"] == "Test prompt for metadata"
+        # No repos specified
+        assert "repos" not in data["preset_metadata"]
+
+    async def test_prompt_preset_with_repos_includes_repos_in_metadata(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Prompt preset with repos includes repos in preset_metadata."""
+        payload = {
+            "name": "Prompt With Repos Metadata",
+            "prompt": "Test prompt",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [
+                {"url": "https://github.com/owner/repo1"},
+                {"url": "https://github.com/owner/repo2", "ref": "main"},
+            ],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+
+        # Verify preset_metadata contains repos
+        assert data["preset_metadata"] is not None
+        assert data["preset_metadata"]["preset_type"] == "prompt"
+        assert data["preset_metadata"]["prompt"] == "Test prompt"
+        assert "repos" in data["preset_metadata"]
+        assert len(data["preset_metadata"]["repos"]) == 2
+        assert (
+            data["preset_metadata"]["repos"][0]["url"]
+            == "https://github.com/owner/repo1"
+        )
+        assert (
+            data["preset_metadata"]["repos"][1]["url"]
+            == "https://github.com/owner/repo2"
+        )
+        assert data["preset_metadata"]["repos"][1]["ref"] == "main"
+
+    async def test_plugin_preset_sets_preset_metadata(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Plugin preset populates preset_metadata with type, prompt, and plugins."""
+        payload = {
+            "name": "Plugin Metadata Test",
+            "plugins": [
+                {"source": "github:owner/plugin1", "ref": "v1.0.0"},
+                {"source": "github:owner/plugin2"},
+            ],
+            "prompt": "Test prompt for plugin",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+
+        # Verify preset_metadata is present and correct
+        assert data["preset_metadata"] is not None
+        assert data["preset_metadata"]["preset_type"] == "plugin"
+        assert data["preset_metadata"]["prompt"] == "Test prompt for plugin"
+        assert "plugins" in data["preset_metadata"]
+        assert len(data["preset_metadata"]["plugins"]) == 2
+        assert data["preset_metadata"]["plugins"][0]["source"] == "github:owner/plugin1"
+        assert data["preset_metadata"]["plugins"][0]["ref"] == "v1.0.0"
+        assert data["preset_metadata"]["plugins"][1]["source"] == "github:owner/plugin2"
+        assert "ref" not in data["preset_metadata"]["plugins"][1]
+        # No repos specified
+        assert "repos" not in data["preset_metadata"]
+
+    async def test_plugin_preset_with_repos_includes_repos_in_metadata(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Plugin preset with repos includes repos in preset_metadata."""
+        payload = {
+            "name": "Plugin With Repos Metadata",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Test prompt",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [{"url": "https://github.com/owner/repo", "ref": "develop"}],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+
+        # Verify preset_metadata contains repos
+        assert data["preset_metadata"] is not None
+        assert data["preset_metadata"]["preset_type"] == "plugin"
+        assert "plugins" in data["preset_metadata"]
+        assert "repos" in data["preset_metadata"]
+        assert len(data["preset_metadata"]["repos"]) == 1
+        assert (
+            data["preset_metadata"]["repos"][0]["url"]
+            == "https://github.com/owner/repo"
+        )
+        assert data["preset_metadata"]["repos"][0]["ref"] == "develop"
+
+    async def test_preset_metadata_stored_in_database(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Preset metadata is correctly stored in the database."""
+        payload = {
+            "name": "DB Storage Test",
+            "prompt": "Test prompt for DB",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        automation_id = uuid.UUID(data["id"])
+
+        # Verify the preset_metadata is stored in the database
+        from sqlalchemy import select
+
+        result = await async_session.execute(
+            select(Automation).where(Automation.id == automation_id)
+        )
+        automation = result.scalars().first()
+        assert automation is not None
+        assert automation.preset_metadata is not None
+        assert automation.preset_metadata["preset_type"] == "prompt"
+        assert automation.preset_metadata["prompt"] == "Test prompt for DB"

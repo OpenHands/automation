@@ -556,6 +556,7 @@ class AutomationResponse(BaseModel):
     org_id: uuid.UUID
     name: str
     prompt: str | None
+    preset_metadata: dict | None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None
