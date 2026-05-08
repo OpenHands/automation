@@ -2,7 +2,7 @@
 
 import pytest
 
-from automation.utils.agent_server import (
+from openhands.automation.utils.agent_server import (
     BashCommandResult,
     VerificationResult,
     get_last_bash_command_result,
@@ -190,7 +190,7 @@ class TestVerifyRunOnAgentServer:
         mock_result = BashCommandResult(found=False, error="Connection refused")
 
         with patch(
-            "automation.utils.agent_server.get_last_bash_command_result"
+            "openhands.automation.utils.agent_server.get_last_bash_command_result"
         ) as mock_get:
             mock_get.return_value = mock_result
 
@@ -213,7 +213,7 @@ class TestVerifyRunOnAgentServer:
         )
 
         with patch(
-            "automation.utils.agent_server.get_last_bash_command_result"
+            "openhands.automation.utils.agent_server.get_last_bash_command_result"
         ) as mock_get:
             mock_get.return_value = mock_result
 
@@ -236,7 +236,7 @@ class TestVerifyRunOnAgentServer:
         )
 
         with patch(
-            "automation.utils.agent_server.get_last_bash_command_result"
+            "openhands.automation.utils.agent_server.get_last_bash_command_result"
         ) as mock_get:
             mock_get.return_value = mock_result
 
@@ -261,7 +261,7 @@ class TestVerifyRunOnAgentServer:
         )
 
         with patch(
-            "automation.utils.agent_server.get_last_bash_command_result"
+            "openhands.automation.utils.agent_server.get_last_bash_command_result"
         ) as mock_get:
             mock_get.return_value = mock_result
 
@@ -285,7 +285,7 @@ class TestDispatcherLocalMode:
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "local-key")
 
-        from automation.config import clear_config_cache, get_config
+        from openhands.automation.config import clear_config_cache, get_config
 
         clear_config_cache()
         config = get_config()
@@ -300,7 +300,7 @@ class TestDispatcherLocalMode:
         monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
         monkeypatch.delenv("AUTOMATION_AGENT_SERVER_API_KEY", raising=False)
 
-        from automation.config import clear_config_cache, get_config
+        from openhands.automation.config import clear_config_cache, get_config
 
         clear_config_cache()
         config = get_config()
@@ -314,7 +314,7 @@ class TestWatchdogLocalMode:
 
     def test_watchdog_uses_backend_abstraction(self):
         """Verify watchdog uses backend abstraction for verification."""
-        from automation.watchdog import get_backend
+        from openhands.automation.watchdog import get_backend
 
         # Watchdog imports get_backend to delegate mode-specific logic
         assert callable(get_backend)
@@ -323,7 +323,7 @@ class TestWatchdogLocalMode:
         """Verify Settings has is_local_mode property."""
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
 
-        from automation.config import clear_config_cache, get_config
+        from openhands.automation.config import clear_config_cache, get_config
 
         clear_config_cache()
         settings = get_config().service

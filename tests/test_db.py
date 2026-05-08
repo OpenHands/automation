@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from automation.db import (
+from openhands.automation.db import (
     _create_sqlite_engine,
     is_sqlite_url,
     normalize_sqlite_url_for_alembic,
@@ -98,7 +98,7 @@ class TestEngineResult:
 
     def test_is_sqlite_default(self):
         """is_sqlite defaults to False."""
-        from automation.db import EngineResult
+        from openhands.automation.db import EngineResult
 
         # Can't easily create a real engine without a database,
         # so just test the default value logic

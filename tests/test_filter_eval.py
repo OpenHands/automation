@@ -2,7 +2,7 @@
 
 import pytest
 
-from automation.filter_eval import (
+from openhands.automation.filter_eval import (
     FilterEvaluationError,
     evaluate_filter,
     validate_filter,

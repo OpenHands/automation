@@ -24,7 +24,7 @@ RUN apt-get update && \
 # Copy everything and install
 COPY pyproject.toml ./
 COPY README.md ./
-COPY automation/ automation/
+COPY openhands/ openhands/
 COPY migrations/ migrations/
 COPY alembic.ini .
 
@@ -42,4 +42,4 @@ ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
 
 EXPOSE 8000
 
-CMD ["ddtrace-run", "uvicorn", "automation.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["ddtrace-run", "uvicorn", "openhands.automation.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -11,8 +11,8 @@ import time
 import pytest
 from testcontainers.core.container import DockerContainer
 
-from automation.storage import GoogleCloudFileStore
-from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.storage import GoogleCloudFileStore
+from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
 
 
 class FakeGCSContainer(DockerContainer):
@@ -64,7 +64,7 @@ def gcs_emulator():
 @pytest.fixture
 def file_store(gcs_emulator):
     """Create a GoogleCloudFileStore connected to the emulator."""
-    from automation.config import StorageSettings
+    from openhands.automation.config import StorageSettings
 
     emulator_host = gcs_emulator.get_emulator_host()
     # Set the emulator host environment variable
@@ -231,7 +231,7 @@ class TestGoogleCloudFileStoreIntegration:
 
     def test_bucket_created_automatically_for_emulator(self, gcs_emulator):
         """Verify bucket is created automatically when using emulator."""
-        from automation.config import StorageSettings
+        from openhands.automation.config import StorageSettings
 
         emulator_host = gcs_emulator.get_emulator_host()
         with pytest.MonkeyPatch.context() as mp:

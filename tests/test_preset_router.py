@@ -12,8 +12,8 @@ import pytest
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
-from automation.models import Automation, TarballUpload, UploadStatus
-from automation.preset_router import (
+from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
 )
@@ -324,8 +324,8 @@ class TestCreateAutomationFromPrompt:
     @pytest.fixture(autouse=True)
     def setup_file_store_override(self, mock_file_store):
         """Override file_store for all tests in this class."""
-        from automation.app import app
-        from automation.storage import get_file_store
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
 
         app.dependency_overrides[get_file_store] = lambda: mock_file_store
         yield
@@ -596,7 +596,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_single_plugin_normalized_to_list(self):
         """Single PluginSource is normalized to a list."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         request = CreatePluginAutomationRequest.model_validate(
             {
@@ -615,7 +615,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_plugin_list_preserved(self):
         """List of plugins is preserved as-is."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         request = CreatePluginAutomationRequest.model_validate(
             {
@@ -637,7 +637,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_empty_plugin_list_rejected(self):
         """Empty plugin list raises validation error."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         with pytest.raises(ValueError, match="At least one plugin is required"):
             CreatePluginAutomationRequest.model_validate(
@@ -825,8 +825,8 @@ class TestCreateAutomationFromPlugin:
     @pytest.fixture(autouse=True)
     def setup_file_store_override(self, mock_file_store):
         """Override file_store for all tests in this class."""
-        from automation.app import app
-        from automation.storage import get_file_store
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
 
         app.dependency_overrides[get_file_store] = lambda: mock_file_store
         yield

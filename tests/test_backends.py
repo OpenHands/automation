@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.backends import (
+from openhands.automation.backends import (
     CloudSandboxBackend,
     ExecutionContext,
     LocalAgentServerBackend,
@@ -195,7 +195,7 @@ class TestLocalAgentServerBackend:
         mock_result = MagicMock(verified=True, exit_code=0)
 
         with patch(
-            "automation.backends.local.verify_run_on_agent_server",
+            "openhands.automation.backends.local.verify_run_on_agent_server",
             new_callable=AsyncMock,
             return_value=mock_result,
         ) as mock_verify:
@@ -276,7 +276,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.get_api_key_for_automation_run",
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
             new_callable=AsyncMock,
             return_value="sk-user-minted",
         ) as mock_mint:
@@ -290,7 +290,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.get_api_key_for_automation_run",
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
             new_callable=AsyncMock,
             return_value="sk-user",
         ):
@@ -327,12 +327,12 @@ class TestCloudSandboxBackend:
 
         with (
             patch(
-                "automation.backends.cloud.get_api_key_for_automation_run",
+                "openhands.automation.backends.cloud.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="sk-user",
             ),
             patch(
-                "automation.backends.cloud.verify_run_status",
+                "openhands.automation.backends.cloud.verify_run_status",
                 new_callable=AsyncMock,
                 return_value=mock_result,
             ) as mock_verify,
@@ -354,12 +354,12 @@ class TestCloudSandboxBackend:
 
         with (
             patch(
-                "automation.backends.cloud.get_api_key_for_automation_run",
+                "openhands.automation.backends.cloud.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="sk-user",
             ),
             patch(
-                "automation.backends.cloud.cleanup_sandbox",
+                "openhands.automation.backends.cloud.cleanup_sandbox",
                 new_callable=AsyncMock,
             ) as mock_cleanup,
         ):
@@ -378,7 +378,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.cleanup_sandbox",
+            "openhands.automation.backends.cloud.cleanup_sandbox",
             new_callable=AsyncMock,
         ) as mock_cleanup:
             await backend.cleanup_after_verification("run-123")
@@ -402,7 +402,7 @@ class TestGetBackend:
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "local-key")
 
         # Clear config cache to pick up new env vars
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 
@@ -419,7 +419,7 @@ class TestGetBackend:
         )
 
         # Clear config cache
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 

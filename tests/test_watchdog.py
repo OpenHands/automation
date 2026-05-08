@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.utils import utcnow
-from automation.utils.agent_server import VerificationResult
-from automation.watchdog import _verify_and_mark_run
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.utils import utcnow
+from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.watchdog import _verify_and_mark_run
 
 
 # Test UUIDs
@@ -80,7 +80,7 @@ class TestVerifyAndMarkRunExitCodes:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -111,7 +111,7 @@ class TestVerifyAndMarkRunExitCodes:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -143,7 +143,7 @@ class TestVerifyAndMarkRunExitCodes:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -174,7 +174,7 @@ class TestVerifyAndMarkRunExitCodes:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -207,7 +207,7 @@ class TestVerifyAndMarkRunExitCodes:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -239,7 +239,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)
@@ -293,7 +293,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         )
 
         mock_backend = _create_mock_backend(verification)
-        with patch("automation.watchdog.get_backend", return_value=mock_backend):
+        with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
                 result = await _verify_and_mark_run(session, run, mock_settings)

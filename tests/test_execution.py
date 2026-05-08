@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.config import get_config
-from automation.exceptions import PermanentDispatchError, TarballNotFoundError
-from automation.execution import (
+from openhands.automation.config import get_config
+from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
+from openhands.automation.execution import (
     DEFAULT_WORK_DIR,
     AutomationResult,
     DispatchResult,
@@ -214,7 +214,7 @@ class TestExecuteInContextErrors:
     """Tests for execute_in_context error handling."""
 
     @pytest.mark.asyncio
-    @patch("automation.execution._download_in_sandbox")
+    @patch("openhands.automation.execution._download_in_sandbox")
     async def test_reraises_permanent_error(self, mock_download_in_sandbox):
         """PermanentDispatchError is re-raised for caller to handle."""
         mock_download_in_sandbox.side_effect = TarballNotFoundError(
@@ -235,7 +235,7 @@ class TestExecuteInContextErrors:
         assert "not accessible" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    @patch("automation.execution._download_in_sandbox")
+    @patch("openhands.automation.execution._download_in_sandbox")
     async def test_transient_error_returns_dispatch_result(
         self, mock_download_in_sandbox
     ):
@@ -258,7 +258,7 @@ class TestExecuteInContextErrors:
         assert "Connection timeout" in result.error
 
     @pytest.mark.asyncio
-    @patch("automation.execution._upload")
+    @patch("openhands.automation.execution._upload")
     async def test_permanent_error_with_bytes_tarball_reraises(self, mock_upload):
         """PermanentDispatchError during upload is also re-raised."""
         mock_upload.side_effect = PermanentDispatchError("Upload permanently failed")
@@ -277,8 +277,8 @@ class TestExecuteInContextErrors:
         assert "permanently failed" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    @patch("automation.execution._upload")
-    @patch("automation.execution._start_bash")
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
     async def test_success_returns_dispatch_result(self, mock_start_bash, mock_upload):
         """Successful execution returns DispatchResult with success=True."""
         mock_upload.return_value = None

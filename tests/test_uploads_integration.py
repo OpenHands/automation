@@ -17,9 +17,9 @@ import pytest
 from google.cloud.exceptions import NotFound
 from testcontainers.core.container import DockerContainer
 
-from automation.storage import GoogleCloudFileStore
-from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
-from automation.uploads import MAX_UPLOAD_SIZE
+from openhands.automation.storage import GoogleCloudFileStore
+from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.uploads import MAX_UPLOAD_SIZE
 
 
 class FakeGCSContainer(DockerContainer):
@@ -64,7 +64,7 @@ def gcs_emulator():
 @pytest.fixture
 def file_store(gcs_emulator):
     """Create a GoogleCloudFileStore connected to the emulator."""
-    from automation.config import StorageSettings
+    from openhands.automation.config import StorageSettings
 
     emulator_host = gcs_emulator.get_emulator_host()
     original_env = os.environ.get("STORAGE_EMULATOR_HOST")

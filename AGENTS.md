@@ -6,31 +6,32 @@ Self-contained microservice that schedules and dispatches automation runs inside
 
 ```
 automation/
-├── automation/              # Main application package
-│   ├── app.py              # FastAPI app, lifespan, background tasks
-│   ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
-│   ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
-│   ├── constants.py        # Timeouts, polling intervals, sandbox constants
-│   ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
-│   ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
-│   ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
-│   ├── logger.py           # JSON structured logging configuration
-│   ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
-│   ├── router.py           # API routes (CRUD, trigger, callback, runs list)
-│   ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
-│   ├── schemas.py          # Pydantic request/response schemas
-│   ├── uploads.py          # Tarball upload router
-│   ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
-│   ├── storage/            # File storage abstraction
-│   │   ├── file_store.py   # Abstract base class for file storage
-│   │   └── google_cloud.py # GCS implementation
-│   └── utils/              # Utility modules
-│       ├── api_key.py      # Per-user API key minting via service key
-│       ├── cron.py         # Cron schedule utilities (next/prev fire time)
-│       ├── run.py          # Run status transitions (create, mark, update)
-│       ├── sandbox.py      # Sandbox verification and cleanup
-│       ├── tarball_validation.py  # Tarball path validation (internal/external)
-│       └── time.py         # UTC time helpers
+├── openhands/
+│   └── automation/          # Main application package (openhands.automation namespace)
+│       ├── app.py              # FastAPI app, lifespan, background tasks
+│       ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
+│       ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
+│       ├── constants.py        # Timeouts, polling intervals, sandbox constants
+│       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
+│       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│       ├── logger.py           # JSON structured logging configuration
+│       ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
+│       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
+│       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
+│       ├── schemas.py          # Pydantic request/response schemas
+│       ├── uploads.py          # Tarball upload router
+│       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── storage/            # File storage abstraction
+│       │   ├── file_store.py   # Abstract base class for file storage
+│       │   └── google_cloud.py # GCS implementation
+│       └── utils/              # Utility modules
+│           ├── api_key.py      # Per-user API key minting via service key
+│           ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│           ├── run.py          # Run status transitions (create, mark, update)
+│           ├── sandbox.py      # Sandbox verification and cleanup
+│           ├── tarball_validation.py  # Tarball path validation (internal/external)
+│           └── time.py         # UTC time helpers
 ├── containers/
 │   └── Dockerfile          # Container image definition
 ├── migrations/              # Alembic migrations
@@ -70,7 +71,7 @@ After pushing to the automation repo, update both files in the deploy repo.
 
 ```bash
 # Pre-commit (run from repo root)
-pre-commit run --files automation/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
+pre-commit run --files openhands/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
 
 # Unit tests (no external deps, skips Docker-dependent tests)
 uv run pytest tests/ -v --ignore=tests/integration
@@ -190,9 +191,9 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 #### Files
 
-- `automation/preset_router.py` - Endpoint and tarball generation logic
-- `automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
-- `automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
+- `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
+- `openhands/automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
+- `openhands/automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
 
 #### Request Schema
 
@@ -209,4 +210,4 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
-- Future presets (e.g., plugins) can be added as additional subdirectories under `automation/presets/`
+- Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`

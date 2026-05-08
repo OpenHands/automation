@@ -26,7 +26,7 @@ Scheduled and event-driven automation execution for OpenHands Cloud. This servic
 uv sync --group dev
 
 # Run the service locally (requires PostgreSQL)
-uv run uvicorn automation.app:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn openhands.automation.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Testing
@@ -36,7 +36,7 @@ uv run uvicorn automation.app:app --host 0.0.0.0 --port 8000 --reload
 uv run pytest
 
 # Run with coverage
-uv run pytest --cov=automation --cov-report=term-missing
+uv run pytest --cov=openhands/automation --cov-report=term-missing
 ```
 
 ### Code Quality
@@ -78,14 +78,15 @@ docker run -p 8000:8000 automation
 ## Project Structure
 
 ```
-automation/
-├── app.py           # FastAPI application entry point
-├── router.py        # API routes for CRUD operations
-├── scheduler.py     # Background scheduler for cron jobs
-├── dispatcher.py    # Dispatches pending runs to OpenHands
-├── models.py        # SQLAlchemy models
-├── schemas.py       # Pydantic schemas for API
-└── utils/           # Utility functions
+openhands/
+└── automation/      # Main application package (openhands.automation namespace)
+    ├── app.py           # FastAPI application entry point
+    ├── router.py        # API routes for CRUD operations
+    ├── scheduler.py     # Background scheduler for cron jobs
+    ├── dispatcher.py    # Dispatches pending runs to OpenHands
+    ├── models.py        # SQLAlchemy models
+    ├── schemas.py       # Pydantic schemas for API
+    └── utils/           # Utility functions
 migrations/          # Alembic database migrations
 tests/               # Unit tests
 containers/          # Docker configuration

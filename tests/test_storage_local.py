@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from automation.config import StorageSettings, clear_config_cache
-from automation.storage import LocalFileStore, get_file_store
-from automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.config import StorageSettings, clear_config_cache
+from openhands.automation.storage import LocalFileStore, get_file_store
+from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
 
 
 def make_local_settings(base_path: str, **kwargs) -> StorageSettings:

@@ -9,8 +9,8 @@ from cachetools import TTLCache
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from automation.app import app
-from automation.auth import (
+from openhands.automation.app import app
+from openhands.automation.auth import (
     AuthenticatedUser,
     AuthMethod,
     _make_auth_request_with_retry,
@@ -18,8 +18,8 @@ from automation.auth import (
     clear_auth_cache,
     require_permission,
 )
-from automation.config import get_config
-from automation.db import get_session
+from openhands.automation.config import get_config
+from openhands.automation.db import get_session
 
 
 # Test UUIDs
@@ -426,7 +426,7 @@ class TestAuthCache:
         """Cache entry expires after TTL and API is called again."""
         import asyncio
 
-        import automation.auth as auth_module
+        import openhands.automation.auth as auth_module
 
         # Use a short TTL for testing (0.5 seconds)
         test_ttl = 0.5
@@ -763,7 +763,7 @@ class TestLocalApiKeyAuthentication:
         """When local API key matches, should return local user without SaaS call."""
         mock_request.headers.get.return_value = "Bearer test-local-api-key"
 
-        with patch("automation.auth.get_config") as mock_get_config:
+        with patch("openhands.automation.auth.get_config") as mock_get_config:
             mock_config = MagicMock()
             mock_config.service = local_mode_settings
             mock_get_config.return_value = mock_config
@@ -789,7 +789,7 @@ class TestLocalApiKeyAuthentication:
         """When local API key doesn't match, should raise 401 immediately."""
         mock_request.headers.get.return_value = "Bearer wrong-key"
 
-        with patch("automation.auth.get_config") as mock_get_config:
+        with patch("openhands.automation.auth.get_config") as mock_get_config:
             mock_config = MagicMock()
             mock_config.service = local_mode_settings
             mock_get_config.return_value = mock_config
@@ -814,7 +814,7 @@ class TestLocalApiKeyAuthentication:
         mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
         mock_http_client.get = AsyncMock(return_value=mock_response)
 
-        with patch("automation.auth.get_config") as mock_get_config:
+        with patch("openhands.automation.auth.get_config") as mock_get_config:
             mock_config = MagicMock()
             mock_config.service = local_mode_no_key_settings
             mock_get_config.return_value = mock_config
@@ -837,7 +837,7 @@ class TestLocalApiKeyAuthentication:
         mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
         mock_http_client.get = AsyncMock(return_value=mock_response)
 
-        with patch("automation.auth.get_config") as mock_get_config:
+        with patch("openhands.automation.auth.get_config") as mock_get_config:
             mock_config = MagicMock()
             mock_config.service = non_local_mode_settings
             mock_get_config.return_value = mock_config
@@ -849,7 +849,7 @@ class TestLocalApiKeyAuthentication:
 
     def test_get_local_user_returns_expected_structure(self):
         """_get_local_user should return consistent, valid AuthenticatedUser."""
-        from automation.auth import _get_local_user
+        from openhands.automation.auth import _get_local_user
 
         user = _get_local_user()
 
@@ -872,7 +872,7 @@ class TestLocalApiKeyAuthentication:
 
     def test_get_local_user_uuid_determinism(self):
         """Local user UUIDs should be deterministic across calls."""
-        from automation.auth import _get_local_user
+        from openhands.automation.auth import _get_local_user
 
         # Expected values based on uuid5(NAMESPACE_DNS, "openhands-local-*")
         expected_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")

@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock
 
-from automation.app import app
+from openhands.automation.app import app
 
 
 class TestHealthEndpoints:

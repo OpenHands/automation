@@ -8,9 +8,9 @@ from datetime import UTC
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from automation.db import set_sqlite_mode
-from automation.models import Automation, Base
-from automation.utils.webhook import get_event_automations, verify_signature
+from openhands.automation.db import set_sqlite_mode
+from openhands.automation.models import Automation, Base
+from openhands.automation.utils.webhook import get_event_automations, verify_signature
 
 
 class TestVerifySignature:

@@ -15,25 +15,25 @@ from testcontainers.postgres import PostgresContainer
 # works correctly with pytest's caplog fixture
 os.environ["LOG_JSON"] = "0"
 
-from automation.app import app  # noqa: E402
-from automation.auth import (  # noqa: E402
+from openhands.automation.app import app  # noqa: E402
+from openhands.automation.auth import (  # noqa: E402
     AuthenticatedUser,
     AuthMethod,
     authenticate_request,
     create_http_client,
 )
-from automation.config import Settings  # noqa: E402
-from automation.db import get_session  # noqa: E402
-from automation.models import Base  # noqa: E402
+from openhands.automation.config import Settings  # noqa: E402
+from openhands.automation.db import get_session  # noqa: E402
+from openhands.automation.models import Base  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def ensure_log_propagation():
     """Ensure automation loggers propagate to root for caplog capture."""
     loggers_to_fix = [
-        "automation",
-        "automation.scheduler",
-        "automation.dispatcher",
+        "openhands.automation",
+        "openhands.automation.scheduler",
+        "openhands.automation.dispatcher",
     ]
     original_propagate = {}
     for name in loggers_to_fix:
