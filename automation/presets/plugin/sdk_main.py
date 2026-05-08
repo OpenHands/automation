@@ -110,14 +110,13 @@ from openhands.workspace import OpenHandsCloudWorkspace
 # Expand ~ to home directory before validation
 workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
-# Validate workspace_base path (after expansion)
+# Validate workspace_base path (after expansion) - fail fast with clear errors
 if not os.path.isabs(workspace_base):
-    print(f"WARNING: WORKSPACE_BASE is relative path: {workspace_base}", file=sys.stderr)
+    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    sys.exit(1)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
-    print(
-        f"WARNING: WORKSPACE_BASE directory does not exist: {workspace_base}",
-        file=sys.stderr,
-    )
+    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    sys.exit(1)
 
 # Create workspace based on mode
 # Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
