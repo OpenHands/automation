@@ -26,7 +26,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from automation.execution import AutomationResult, run_automation
+from openhands.automation.execution import AutomationResult, run_automation
 
 
 logging.basicConfig(
