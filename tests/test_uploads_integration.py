@@ -18,7 +18,10 @@ from google.cloud.exceptions import NotFound
 from testcontainers.core.container import DockerContainer
 
 from openhands.automation.storage import GoogleCloudFileStore
-from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.storage.google_cloud import (
+    BUCKET_PREFIX,
+    FileSizeLimitExceeded,
+)
 from openhands.automation.uploads import MAX_UPLOAD_SIZE
 
 

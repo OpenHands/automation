@@ -31,7 +31,11 @@ from openhands.automation.config import ServiceSettings, get_config
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.execution import execute_in_context
-from openhands.automation.models import AutomationRun, AutomationRunStatus, TarballUpload
+from openhands.automation.models import (
+    AutomationRun,
+    AutomationRunStatus,
+    TarballUpload,
+)
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.run import (
@@ -40,7 +44,10 @@ from openhands.automation.utils.run import (
     mark_run_terminal,
     update_sandbox_id,
 )
-from openhands.automation.utils.tarball_validation import is_http_url, parse_internal_upload_id
+from openhands.automation.utils.tarball_validation import (
+    is_http_url,
+    parse_internal_upload_id,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")

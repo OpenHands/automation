@@ -11,7 +11,11 @@ from openhands.automation.auth import AuthenticatedUser, authenticate_request
 from openhands.automation.db import get_session
 from openhands.automation.logger import automation_logger
 from openhands.automation.models import TarballUpload, UploadStatus
-from openhands.automation.storage import FileSizeLimitExceeded, FileStore, get_file_store
+from openhands.automation.storage import (
+    FileSizeLimitExceeded,
+    FileStore,
+    get_file_store,
+)
 from openhands.automation.utils import utcnow
 
 

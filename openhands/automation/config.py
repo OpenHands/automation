@@ -19,7 +19,9 @@ Usage (preferred):
     config.log.log_level
 
 Legacy usage (backward compatible, emits deprecation warnings):
-    from openhands.automation.config import get_settings, get_storage_settings, get_log_settings
+    from openhands.automation.config import (
+        get_settings, get_storage_settings, get_log_settings
+    )
 
     settings = get_settings()        # Returns config.service
     storage = get_storage_settings() # Returns config.storage

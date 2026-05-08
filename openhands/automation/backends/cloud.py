@@ -23,7 +23,11 @@ from openhands.automation.backends.base import ExecutionBackend, ExecutionContex
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.api_key import get_api_key_for_automation_run
-from openhands.automation.utils.sandbox import cleanup_sandbox, delete_sandbox, verify_run_status
+from openhands.automation.utils.sandbox import (
+    cleanup_sandbox,
+    delete_sandbox,
+    verify_run_status,
+)
 
 
 if TYPE_CHECKING:

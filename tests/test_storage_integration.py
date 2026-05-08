@@ -12,7 +12,10 @@ import pytest
 from testcontainers.core.container import DockerContainer
 
 from openhands.automation.storage import GoogleCloudFileStore
-from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.storage.google_cloud import (
+    BUCKET_PREFIX,
+    FileSizeLimitExceeded,
+)
 
 
 class FakeGCSContainer(DockerContainer):

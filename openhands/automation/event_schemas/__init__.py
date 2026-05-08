@@ -100,7 +100,10 @@ def parse_event(
         return parser(payload)
 
     # Unknown source = custom webhook (no registration needed)
-    from openhands.automation.event_schemas.custom import CustomWebhookEvent, extract_event_key
+    from openhands.automation.event_schemas.custom import (
+        CustomWebhookEvent,
+        extract_event_key,
+    )
 
     # Extract event_key using JMESPath expression
     expr = event_key_expr or "type"

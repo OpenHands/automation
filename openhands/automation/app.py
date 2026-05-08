@@ -14,7 +14,11 @@ from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.config import get_settings
-from openhands.automation.db import create_engine, create_session_factory, set_sqlite_mode
+from openhands.automation.db import (
+    create_engine,
+    create_session_factory,
+    set_sqlite_mode,
+)
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
 from openhands.automation.logger import setup_all_loggers

@@ -244,7 +244,11 @@ class TestExecuteRunDisablesAutomation:
     ):
         """Automation is disabled when internal tarball upload is not found."""
         from openhands.automation.dispatcher import _execute_run
-        from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         mock_get_backend.return_value = _create_mock_backend()
 
@@ -316,7 +320,11 @@ class TestExecuteRunDisablesAutomation:
         """Automation is NOT disabled on transient errors like network failures."""
         from openhands.automation.dispatcher import _execute_run
         from openhands.automation.execution import DispatchResult
-        from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         mock_get_backend.return_value = _create_mock_backend()
         # Simulate a transient execution failure
@@ -456,7 +464,11 @@ class TestExecuteRunEnvVarOrdering:
         """
         from openhands.automation.dispatcher import _execute_run
         from openhands.automation.execution import DispatchResult
-        from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         # Use a mock backend that enforces the correct calling order
         mock_get_backend.return_value = _create_mock_backend_with_api_key_check()

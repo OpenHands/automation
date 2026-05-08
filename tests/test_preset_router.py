@@ -9,14 +9,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from openhands.sdk.plugin import PluginSource
-from openhands.workspace import RepoSource
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
 )
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 # Test UUIDs matching mock_authenticated_user fixture

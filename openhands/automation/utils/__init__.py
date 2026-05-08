@@ -1,6 +1,9 @@
 """Utility modules for the automation service."""
 
-from openhands.automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
+from openhands.automation.utils.api_key import (
+    APIKeyError,
+    get_api_key_for_automation_run,
+)
 from openhands.automation.utils.cron import (
     get_next_fire_time,
     get_prev_fire_time,

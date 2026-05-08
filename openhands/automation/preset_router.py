@@ -19,8 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from openhands.sdk.plugin import PluginSource
-from openhands.workspace import RepoSource
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +28,8 @@ from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.utils.tarball_validation import build_internal_url
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 logger = logging.getLogger(__name__)

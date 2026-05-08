@@ -14,7 +14,10 @@ import pytest
 
 from openhands.automation.config import StorageSettings
 from openhands.automation.storage import S3FileStore
-from openhands.automation.storage.google_cloud import BUCKET_PREFIX, FileSizeLimitExceeded
+from openhands.automation.storage.google_cloud import (
+    BUCKET_PREFIX,
+    FileSizeLimitExceeded,
+)
 
 
 def make_s3_settings(

@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 import httpx
 
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
-from openhands.automation.utils.agent_server import VerificationResult, verify_run_on_agent_server
+from openhands.automation.utils.agent_server import (
+    VerificationResult,
+    verify_run_on_agent_server,
+)
 
 
 if TYPE_CHECKING:

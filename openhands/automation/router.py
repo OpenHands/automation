@@ -23,7 +23,10 @@ from openhands.automation.schemas import (
     UpdateAutomationRequest,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.api_key import APIKeyError, get_api_key_for_automation_run
+from openhands.automation.utils.api_key import (
+    APIKeyError,
+    get_api_key_for_automation_run,
+)
 from openhands.automation.utils.run import create_pending_run
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import validate_tarball_path
