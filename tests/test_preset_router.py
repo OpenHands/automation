@@ -135,7 +135,12 @@ class TestGenerateTarball:
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
-            assert "get_mcp_config" in main_content
+            assert "RemoteWorkspace" in main_content
+            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_secrets()" in main_content
+            assert "workspace.get_mcp_config()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
@@ -347,7 +352,7 @@ class TestCreateAutomationFromPrompt:
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -435,7 +440,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -710,6 +715,11 @@ class TestGeneratePluginTarball:
             assert "from openhands.sdk.plugin import PluginSource" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "RemoteWorkspace" in main_content
+            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_secrets()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
             assert "PluginSource.model_validate" in main_content
             assert "plugins=plugin_sources" in main_content
@@ -846,7 +856,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -942,7 +952,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID

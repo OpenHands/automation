@@ -1,28 +1,54 @@
-"""Plugin-based automation script — runs inside an OpenHands Cloud sandbox.
+"""Plugin-based automation script — runs inside an OpenHands execution environment.
 
-This script is auto-generated from a plugin automation request. It:
-  1. Opens OpenHandsCloudWorkspace EARLY (ensures callback on any failure)
-  2. Clones repositories if configured (via workspace.clone_repos())
-  3. Loads ALL skills via workspace.load_skills_from_agent_server()
-     (public, user, project, org skills - mirrors V1 conversation behavior)
-  4. Fetches LLM config via workspace.get_llm()
-  5. Fetches secrets via workspace.get_secrets()
-  6. Fetches MCP config via workspace.get_mcp_config()
-  7. Gets default agent with tools and condenser via get_default_agent()
-  8. Loads plugins from plugins_config.json
-  9. Creates a Conversation with all plugins and skills
-  10. Sends the prompt (with event context if available) and runs
-  11. On context manager exit, the workspace sends a completion callback
+This script is auto-generated from a plugin automation request. It supports two modes:
+
+**Cloud Mode** (default):
+  Uses OpenHandsCloudWorkspace connected to sandbox's agent server (localhost:3000).
+  Full functionality: repos, skills, LLM, secrets, MCP from user's Cloud account.
+  Requires: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL, SANDBOX_ID, SESSION_API_KEY
+
+**Local Mode** (self-hosted):
+  Uses RemoteWorkspace connected to a local agent server (AGENT_SERVER_URL).
+  Full functionality: repos, skills, LLM, secrets, MCP from agent server settings.
+  Requires: AGENT_SERVER_URL (presence triggers local mode)
+
+Both workspace types share the same interface:
+  - clone_repos() - clone repositories with auto-fetched tokens
+  - load_skills_from_agent_server() - load skills via agent server API
+  - get_repos_context() - generate context string for cloned repos
+  - get_llm() - get LLM configuration
+  - get_secrets() - get user secrets
+  - get_mcp_config() - get MCP server configuration
+
+The script:
+  1. Detects mode based on AGENT_SERVER_URL presence
+  2. Opens the workspace context EARLY (ensures callback on any failure)
+  3. Clones repos via workspace.clone_repos()
+  4. Loads skills via workspace.load_skills_from_agent_server()
+  5. Gets LLM config via workspace.get_llm()
+  6. Gets secrets via workspace.get_secrets()
+  7. Gets MCP config via workspace.get_mcp_config()
+  8. Gets default agent with tools and condenser
+  9. Loads plugins from plugins_config.json
+  10. Creates a RemoteConversation with all plugins
+  11. Sends the prompt (with event context if available) and runs
+  12. On context manager exit, the workspace sends a completion callback
 
 IMPORTANT: The workspace context is entered early so that ANY exception
-(skill loading, plugin config parsing, etc.) triggers the __exit__ callback,
+(skill loading, prompt parsing, etc.) triggers the __exit__ callback,
 avoiding silent failures that require watchdog timeout.
 
-Env vars injected by the dispatcher (read by the SDK automatically):
+Env vars (Cloud mode - all required):
   OPENHANDS_API_KEY          - per-user automation API key
   OPENHANDS_CLOUD_API_URL    - SaaS API base URL
   SANDBOX_ID                 - this sandbox's Cloud API identifier
   SESSION_API_KEY            - session key for sandbox settings auth
+
+Env vars (Local mode):
+  AGENT_SERVER_URL           - local agent server URL (presence = local mode)
+  SESSION_API_KEY            - API key for agent server auth (optional)
+
+Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
@@ -34,23 +60,39 @@ import sys
 import time
 
 
+# Detect execution mode based on AGENT_SERVER_URL presence
+agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
+IS_LOCAL_MODE = bool(agent_server_url)
+
+# Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
-api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "")
+api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
 
-# Verify dispatcher-injected env vars (must happen before workspace context)
-print("=== ENV VARS ===")
-for name, val in [
-    ("OPENHANDS_API_KEY", api_key),
-    ("OPENHANDS_CLOUD_API_URL", api_url),
-    ("SANDBOX_ID", sandbox_id),
-    ("SESSION_API_KEY", session_key),
-]:
-    print(f"  {name}: {'OK' if val else 'MISSING'}")
-    if not val:
-        print(f"FAIL: {name} not set", file=sys.stderr)
+print("=== EXECUTION MODE ===")
+print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
+
+print("\n=== ENV VARS ===")
+if IS_LOCAL_MODE:
+    # Local mode: AGENT_SERVER_URL required
+    print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
+    print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
+    if not agent_server_url:
+        print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
+else:
+    # Cloud mode: all Cloud env vars are required
+    for name, val in [
+        ("OPENHANDS_API_KEY", api_key),
+        ("OPENHANDS_CLOUD_API_URL", api_url),
+        ("SANDBOX_ID", sandbox_id),
+        ("SESSION_API_KEY", session_key),
+    ]:
+        print(f"  {name}: {'OK' if val else 'MISSING'}")
+        if not val:
+            print(f"FAIL: {name} not set", file=sys.stderr)
+            sys.exit(1)
 
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
@@ -60,16 +102,45 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
-from openhands.tools import get_default_agent
+from openhands.sdk.workspace.remote.base import RemoteWorkspace
+from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
-# Enter workspace context EARLY - any exception from here on triggers callback
+# Workspace base directory (for RemoteWorkspace working_dir)
+# Expand ~ to home directory before validation
+workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
+
+# Validate workspace_base path (after expansion) - fail fast with clear errors
+if not os.path.isabs(workspace_base):
+    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    sys.exit(1)
+if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
+    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    sys.exit(1)
+
+# Create workspace based on mode
+# Both workspace types share the same interface for repos/skills/LLM/secrets/MCP
 print("\n=== SDK WORKSPACE ===")
-with OpenHandsCloudWorkspace(
-    local_agent_server_mode=True,
-    cloud_api_url=api_url,
-    cloud_api_key=api_key,
-) as workspace:
+if IS_LOCAL_MODE:
+    # Local mode: use RemoteWorkspace connected to local agent server
+    print(f"  using RemoteWorkspace at {agent_server_url}")
+    print(f"  working_dir: {workspace_base}")
+    workspace_ctx = RemoteWorkspace(
+        host=agent_server_url,
+        api_key=session_key if session_key else None,
+        working_dir=workspace_base,
+    )
+else:
+    # Cloud mode: use OpenHandsCloudWorkspace connected to sandbox's agent server
+    print(f"  using OpenHandsCloudWorkspace at {api_url}")
+    workspace_ctx = OpenHandsCloudWorkspace(
+        local_agent_server_mode=True,
+        cloud_api_url=api_url,
+        cloud_api_key=api_key,
+    )
+
+# Enter workspace context EARLY - any exception from here on triggers callback
+with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
 
@@ -83,7 +154,7 @@ with OpenHandsCloudWorkspace(
                 f"ERROR: Failed to parse AUTOMATION_EVENT_PAYLOAD: {e}", file=sys.stderr
             )
 
-    # Clone repositories if repos_config.json exists (uses SDK workspace methods)
+    # Clone repositories if repos_config.json exists
     SCRIPT_DIR = os.path.dirname(__file__)
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
     clone_result = None
@@ -161,13 +232,13 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # get_llm() — fetches LLM config from the user's SaaS account
+    # Get LLM config via workspace
     print("\n=== GET_LLM ===")
     llm = workspace.get_llm()
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 
-    # get_secrets() — builds LookupSecret references for the user's secrets
+    # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
     secrets = {}
     try:
@@ -177,7 +248,7 @@ This automation was triggered by a webhook event:
         # Not a hard failure — user may not have secrets configured
         print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    # get_mcp_config() — fetches MCP server configuration from user's account
+    # Get MCP config via workspace
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = None
     try:
@@ -225,12 +296,13 @@ This automation was triggered by a webhook event:
         workspace=workspace,
         plugins=plugin_sources,  # All plugins loaded here
         callbacks=[event_callback],
+        delete_on_close=False,  # Keep conversation history after completion
     )
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
 
-    # Inject SaaS secrets into the conversation
+    # Inject secrets into the conversation (as LookupSecret references)
     if secrets:
         conversation.update_secrets(secrets)
         print(f"  injected {len(secrets)} secrets into conversation")
@@ -252,5 +324,5 @@ This automation was triggered by a webhook event:
 
     print("  conversation completed successfully")
 
-print("\n=== RESULT ===")
-print("ALL_OK")
+    print("\n=== RESULT ===")
+    print("ALL_OK")

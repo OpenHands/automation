@@ -129,3 +129,17 @@ class ExecutionBackend(ABC):
     @abstractmethod
     def is_local_mode(self) -> bool:
         """Whether this backend operates in local mode."""
+
+    @abstractmethod
+    def get_work_dir(self, run_id: str) -> str:
+        """Get the working directory for tarball extraction and execution.
+
+        For Cloud mode: Returns /workspace/project (container filesystem).
+        For Local mode: Returns {workspace_base}/automation-runs/{run_id}/
+
+        Args:
+            run_id: The automation run ID (used for isolation in local mode)
+
+        Returns:
+            Absolute path to the working directory
+        """

@@ -48,6 +48,8 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
             agent_server_url=settings.agent_server_url,
             api_key=settings.agent_server_api_key,
             run=run,
+            workspace_base=settings.workspace_base,
+            callback_api_key=settings.local_api_key,
         )
     else:
         return CloudSandboxBackend(

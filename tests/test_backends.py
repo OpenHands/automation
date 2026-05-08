@@ -46,6 +46,7 @@ class TestLocalAgentServerBackend:
     def mock_run(self):
         """Create a mock AutomationRun."""
         run = MagicMock()
+        run.id = "test-run-123"
         run.sandbox_id = None
         run.keep_alive = False
         return run
@@ -109,17 +110,79 @@ class TestLocalAgentServerBackend:
         assert api_key == "local-key"
 
     def test_build_env_vars(self, mock_run):
-        """build_env_vars() includes AGENT_SERVER_URL and SESSION_API_KEY."""
+        """build_env_vars() returns required env vars for local mode."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
-            api_key="local-key",
+            api_key="agent-server-key",
             run=mock_run,
+            callback_api_key="automation-service-key",
         )
         env_vars = backend.build_env_vars()
-        assert env_vars == {
-            "AGENT_SERVER_URL": "http://localhost:3000",
-            "SESSION_API_KEY": "local-key",
-        }
+        # WORKSPACE_BASE should be run-isolated (includes run_id)
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-server-key"
+        # Workspace should be isolated per-run and have ~ expanded
+        assert "test-run-123" in env_vars["WORKSPACE_BASE"]
+        assert env_vars["WORKSPACE_BASE"].endswith("/automation-runs/test-run-123")
+        assert "~" not in env_vars["WORKSPACE_BASE"]  # ~ should be expanded
+        # Callback API key should be the automation service's key (NOT agent server key)
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "automation-service-key"
+
+    def test_build_env_vars_custom_workspace_base(self, mock_run):
+        """build_env_vars() uses custom workspace_base when provided."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            workspace_base="/custom/workspace",
+            callback_api_key="callback-key",
+        )
+        env_vars = backend.build_env_vars()
+        # Custom workspace_base is used as the base, but still isolated per-run
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
+        assert (
+            env_vars["WORKSPACE_BASE"]
+            == "/custom/workspace/automation-runs/test-run-123"
+        )
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "callback-key"
+
+    def test_build_env_vars_no_callback_key(self, mock_run):
+        """build_env_vars() omits callback key when callback_api_key is not set."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            # No callback_api_key provided
+        )
+        env_vars = backend.build_env_vars()
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
+        # No callback key when callback_api_key is not set
+        assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
+
+    def test_get_work_dir_default_workspace(self, mock_run):
+        """get_work_dir() returns isolated directory with ~ expanded."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="test-key",
+            run=mock_run,
+        )
+        work_dir = backend.get_work_dir("my-run-id")
+        # Should expand ~ and include run_id in isolation path
+        assert work_dir.endswith("/automation-runs/my-run-id")
+        assert "~" not in work_dir  # ~ should be expanded
+
+    def test_get_work_dir_custom_workspace(self, mock_run):
+        """get_work_dir() uses custom workspace_base when provided."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="test-key",
+            run=mock_run,
+            workspace_base="/my/custom/base",
+        )
+        work_dir = backend.get_work_dir("run-456")
+        assert work_dir == "/my/custom/base/automation-runs/run-456"
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_agent_server(self, mock_run):

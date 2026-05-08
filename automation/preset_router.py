@@ -40,6 +40,12 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
 PLUGIN_PRESET_DIR = Path(__file__).parent / "presets" / "plugin"
 
+# Venv Python entrypoint (Unix path format)
+# - Cloud mode: Always Linux sandboxes, so Unix paths work
+# - Local mode: Requires Unix-like environment (Linux, macOS, WSL)
+# - Native Windows is not currently supported for local mode
+VENV_ENTRYPOINT = ".venv/bin/python main.py"
+
 # Preset file caches to avoid I/O on every request
 _PROMPT_PRESET_CACHE: dict[str, str] | None = None
 _PLUGIN_PRESET_CACHE: dict[str, str] | None = None
@@ -263,7 +269,7 @@ async def create_automation_from_prompt(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint="python main.py",
+            entrypoint=VENV_ENTRYPOINT,
             timeout=body.timeout,
         )
         session.add(automation)
@@ -495,7 +501,7 @@ async def create_automation_from_plugin(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint="python main.py",
+            entrypoint=VENV_ENTRYPOINT,
             timeout=body.timeout,
         )
         session.add(automation)

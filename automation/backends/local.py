@@ -6,6 +6,7 @@ Uses a pre-configured local agent server instead of creating Cloud sandboxes.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import httpx
@@ -18,6 +19,20 @@ if TYPE_CHECKING:
     from automation.models import AutomationRun
 
 logger = logging.getLogger(__name__)
+
+# Default workspace base for local mode when running natively (not in container).
+# Used as fallback when workspace_base is not explicitly configured.
+#
+# Why ~/.openhands/workspaces (not /workspace)?
+# - Native local mode (macOS/Linux) runs outside containers; /workspace may not exist
+# - ~/.openhands/workspaces follows the SDK convention for local development
+# - Containerized local mode should explicitly set WORKSPACE_BASE=/workspace
+#
+# Note: The preset scripts (sdk_main.py) use the same fallback logic but have
+# /workspace as their default because they run inside containers where this
+# path is guaranteed to exist. The backend's WORKSPACE_BASE env var always
+# overrides the preset's default, so the effective path is consistent.
+DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
 class LocalAgentServerBackend(ExecutionBackend):
@@ -38,6 +53,8 @@ class LocalAgentServerBackend(ExecutionBackend):
         agent_server_url: str,
         api_key: str,
         run: AutomationRun,
+        workspace_base: str | None = None,
+        callback_api_key: str | None = None,
     ):
         """Initialize the local agent-server backend for a specific run.
 
@@ -46,10 +63,17 @@ class LocalAgentServerBackend(ExecutionBackend):
                 (e.g., "http://localhost:3000")
             api_key: API key for authenticating with the agent server
             run: The automation run this backend will operate on
+            workspace_base: Base workspace directory. If None, defaults to
+                ~/.openhands/workspaces (suitable for native local mode).
+            callback_api_key: API key for authenticating completion callbacks
+                to the automation service (local_api_key from config). If None,
+                callbacks will be sent without authentication.
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
         self._run = run
+        self.workspace_base = workspace_base
+        self.callback_api_key = callback_api_key
 
     @property
     def is_local_mode(self) -> bool:
@@ -88,14 +112,37 @@ class LocalAgentServerBackend(ExecutionBackend):
     def build_env_vars(self) -> dict[str, str]:
         """Build local mode environment variables.
 
-        Only provides the minimal env vars needed for local mode:
+        Provides the env vars needed for local mode:
         - AGENT_SERVER_URL: URL of the local agent server
         - SESSION_API_KEY: API key for authenticating with the agent server
+        - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
+        - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service
+
+        The workspace is isolated per-run to avoid conflicts between concurrent
+        automations. Each run gets its own directory under the base workspace.
+
+        Note: AUTOMATION_CALLBACK_URL and AUTOMATION_RUN_ID are added by the
+        dispatcher after calling this method.
         """
-        return {
+        # Use run-specific workspace directory for isolation
+        run_workspace = self.get_work_dir(str(self._run.id))
+        env_vars = {
             "AGENT_SERVER_URL": self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
+            "WORKSPACE_BASE": run_workspace,
         }
+        # Add callback API key for RemoteWorkspace completion callback auth.
+        # This is the automation service's local_api_key, NOT the agent server key.
+        #
+        # Note: AUTOMATION_CALLBACK_API_KEY support was added in SDK PR #3110.
+        # Earlier SDK versions will ignore this env var and send callbacks without
+        # authentication, which is acceptable for local-only deployments but may
+        # fail if the automation service requires auth.
+        #
+        # See: https://github.com/All-Hands-AI/openhands-software-agent-sdk/pull/3110
+        if self.callback_api_key:
+            env_vars["AUTOMATION_CALLBACK_API_KEY"] = self.callback_api_key
+        return env_vars
 
     async def verify_run(self, run_id: str) -> VerificationResult:
         """Verify run status by querying agent server directly."""
@@ -111,3 +158,20 @@ class LocalAgentServerBackend(ExecutionBackend):
     ) -> None:
         """No-op — local agent server is persistent."""
         logger.debug("Local mode: skipping cleanup (persistent server)")
+
+    def get_work_dir(self, run_id: str) -> str:
+        """Get an isolated working directory for this run.
+
+        In local mode, each run gets its own directory under workspace_base
+        to avoid conflicts between concurrent runs.
+
+        Returns:
+            Path like ~/.openhands/workspaces/automation-runs/{run_id}/
+        """
+        # Use configured workspace_base or default
+        base = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
+        # Expand ~ to home directory
+        base = os.path.expanduser(base)
+        work_dir = os.path.join(base, "automation-runs", run_id)
+        logger.debug(f"Local mode work directory: {work_dir}")
+        return work_dir

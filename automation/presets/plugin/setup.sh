@@ -1,15 +1,21 @@
 #!/bin/bash
-# Install the OpenHands SDK from PyPI.
+# Install the OpenHands SDK from PyPI into an isolated virtual environment.
 #
-# Note: Repository cloning is handled by the SDK's
-# OpenHandsCloudWorkspace.clone_repos() method inside main.py.
+# Each automation run gets its own venv in its work directory, ensuring:
+# - No conflicts between concurrent automation runs
+# - Clean isolation of dependencies
+# - No pollution of the system Python environment
+#
+# Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
 set -e
 
-SDK_VERSION="1.19.1"
+SDK_VERSION="1.21.1"
 
-echo "[setup] Installing OpenHands SDK (version: $SDK_VERSION)"
-# Package order doesn't matter - pip resolves all dependencies together
-pip install -q --no-cache-dir \
+echo "[setup] Creating isolated virtual environment"
+uv venv .venv --quiet
+
+echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+uv pip install --quiet \
   "openhands-sdk==${SDK_VERSION}" \
   "openhands-tools==${SDK_VERSION}" \
   "openhands-workspace==${SDK_VERSION}"
