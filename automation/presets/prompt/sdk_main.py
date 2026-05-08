@@ -20,6 +20,11 @@ Both workspace types share the same interface:
   - get_secrets() - get user secrets
   - get_mcp_config() - get MCP server configuration
 
+Architecture note: This script handles both modes in a single file because both
+workspace types share the same interface. If the scripts grow more complex with
+mode-specific logic, consider generating mode-specific scripts at creation time
+(e.g., cloud_main.py vs local_main.py) to eliminate runtime mode detection.
+
 The script:
   1. Detects mode based on AGENT_SERVER_URL presence
   2. Opens the workspace context EARLY (ensures callback on any failure)
@@ -104,8 +109,11 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
-# Workspace base directory (for RemoteWorkspace working_dir)
-# Expand ~ to home directory before validation
+# Workspace base directory (for RemoteWorkspace working_dir).
+# Default is /workspace because preset scripts run inside containers where this path
+# is guaranteed to exist. For native local mode (outside containers), the dispatcher
+# sets WORKSPACE_BASE from the backend's configured value (typically ~/.openhands/workspaces).
+# The env var always overrides this default, so the effective path is consistent.
 workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
 # Validate workspace_base path (after expansion)

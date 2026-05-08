@@ -22,8 +22,16 @@ logger = logging.getLogger(__name__)
 
 # Default workspace base for local mode when running natively (not in container).
 # Used as fallback when workspace_base is not explicitly configured.
-# - Containerized local mode typically uses /workspace (set explicitly)
-# - Native local mode (macOS/Linux) uses ~/.openhands/workspaces
+#
+# Why ~/.openhands/workspaces (not /workspace)?
+# - Native local mode (macOS/Linux) runs outside containers; /workspace may not exist
+# - ~/.openhands/workspaces follows the SDK convention for local development
+# - Containerized local mode should explicitly set WORKSPACE_BASE=/workspace
+#
+# Note: The preset scripts (sdk_main.py) use the same fallback logic but have
+# /workspace as their default because they run inside containers where this
+# path is guaranteed to exist. The backend's WORKSPACE_BASE env var always
+# overrides the preset's default, so the effective path is consistent.
 DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
@@ -123,9 +131,15 @@ class LocalAgentServerBackend(ExecutionBackend):
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,
         }
-        # Add callback API key for RemoteWorkspace completion callback auth
-        # This is the automation service's local_api_key, NOT the agent server key
-        # (SDK PR #3110 adds support for AUTOMATION_CALLBACK_API_KEY)
+        # Add callback API key for RemoteWorkspace completion callback auth.
+        # This is the automation service's local_api_key, NOT the agent server key.
+        #
+        # Requires openhands-workspace >= 1.22.0 (SDK PR #3110).
+        # Earlier SDK versions will ignore AUTOMATION_CALLBACK_API_KEY and send
+        # callbacks without authentication, which is acceptable for local-only
+        # deployments but may fail if the automation service requires auth.
+        #
+        # See: https://github.com/All-Hands-AI/openhands-software-agent-sdk/pull/3110
         if self.callback_api_key:
             env_vars["AUTOMATION_CALLBACK_API_KEY"] = self.callback_api_key
         return env_vars
