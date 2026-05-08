@@ -24,7 +24,7 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 # Path to preset files
-PRESETS_DIR = Path(__file__).parent.parent / "automation" / "presets"
+PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "presets"
 
 
 def _docker_available() -> bool:
