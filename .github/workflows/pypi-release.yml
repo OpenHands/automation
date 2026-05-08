@@ -18,7 +18,6 @@ on:
 jobs:
     release:
         runs-on: ubuntu-24.04
-        environment: pypi
         permissions:
             id-token: write
             contents: read
