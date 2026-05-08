@@ -9,9 +9,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from automation.models import TarballUpload, UploadStatus
-from automation.storage.google_cloud import FileSizeLimitExceeded
-from automation.uploads import (
+from openhands.automation.models import TarballUpload, UploadStatus
+from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
+from openhands.automation.uploads import (
     MAX_UPLOAD_SIZE,
     UploadResponse,
     _build_storage_path,
@@ -42,7 +42,7 @@ class TestUploadResponse:
 
     def test_from_model_completed(self):
         """Create response from completed upload."""
-        from automation.utils.tarball_validation import build_internal_url
+        from openhands.automation.utils.tarball_validation import build_internal_url
 
         upload = MagicMock(spec=TarballUpload)
         upload_id = uuid.uuid4()
@@ -96,7 +96,7 @@ class TestWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_success(self):
         """Stream upload completes successfully."""
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
@@ -108,8 +108,8 @@ class TestWriteStream:
             mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
             mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
-            from automation.config import StorageSettings
-            from automation.storage import GoogleCloudFileStore
+            from openhands.automation.config import StorageSettings
+            from openhands.automation.storage import GoogleCloudFileStore
 
             settings = StorageSettings(gcs_bucket_name="test-bucket")
             store = GoogleCloudFileStore(settings=settings)
@@ -134,7 +134,7 @@ class TestWriteStream:
     @pytest.mark.asyncio
     async def test_write_stream_exceeds_limit(self):
         """Stream upload fails when size limit exceeded; partial upload deleted."""
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
@@ -146,8 +146,8 @@ class TestWriteStream:
             mock_blob.open.return_value.__enter__ = MagicMock(return_value=mock_file)
             mock_blob.open.return_value.__exit__ = MagicMock(return_value=False)
 
-            from automation.config import StorageSettings
-            from automation.storage import GoogleCloudFileStore
+            from openhands.automation.config import StorageSettings
+            from openhands.automation.storage import GoogleCloudFileStore
 
             settings = StorageSettings(gcs_bucket_name="test-bucket")
             store = GoogleCloudFileStore(settings=settings)

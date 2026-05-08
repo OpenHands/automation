@@ -11,14 +11,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from automation.dispatcher import (
+from openhands.automation.dispatcher import (
     dispatch_pending_runs,
     dispatcher_loop,
 )
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.utils import utcnow
-from automation.utils.run import mark_run_status
-from automation.utils.tarball_validation import is_http_url
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.utils import utcnow
+from openhands.automation.utils.run import mark_run_status
+from openhands.automation.utils.tarball_validation import is_http_url
 
 
 # Test UUIDs
@@ -208,7 +208,7 @@ class TestMarkRunStatus:
 class TestDispatchPendingRuns:
     """Tests for dispatch_pending_runs function."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatches_pending_runs(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -249,7 +249,7 @@ class TestDispatchPendingRuns:
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -281,7 +281,7 @@ class TestDispatchPendingRuns:
 
         assert len(dispatched) == 0
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_completed_runs(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -314,7 +314,7 @@ class TestDispatchPendingRuns:
 
         assert len(dispatched) == 0
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_respects_batch_size(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -347,7 +347,7 @@ class TestDispatchPendingRuns:
 
         assert len(dispatched) == 2
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_orders_by_created_at(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -391,7 +391,7 @@ class TestDispatchPendingRuns:
 class TestDispatcherLoop:
     """Tests for dispatcher_loop function."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatcher_loop_exits_on_shutdown(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -416,7 +416,7 @@ class TestDispatcherLoop:
             task.cancel()
             pytest.fail("Dispatcher did not exit on shutdown signal")
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatcher_loop_dispatches_runs(
         self, mock_execute, async_session_factory, mock_settings, caplog
     ):
@@ -446,7 +446,7 @@ class TestDispatcherLoop:
 
         import logging
 
-        with caplog.at_level(logging.INFO, logger="automation.dispatcher"):
+        with caplog.at_level(logging.INFO, logger="openhands.automation.dispatcher"):
             task = asyncio.create_task(
                 dispatcher_loop(
                     async_session_factory,
@@ -479,7 +479,7 @@ class TestDispatcherLoop:
 class TestEffectiveTimeout:
     """Tests for effective timeout calculation in dispatcher."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_automation_timeout_when_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
@@ -515,7 +515,7 @@ class TestEffectiveTimeout:
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout == 120
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):

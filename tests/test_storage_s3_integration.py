@@ -15,9 +15,9 @@ import os
 import pytest
 from testcontainers.minio import MinioContainer
 
-from automation.config import StorageSettings
-from automation.storage import S3FileStore
-from automation.storage.google_cloud import FileSizeLimitExceeded
+from openhands.automation.config import StorageSettings
+from openhands.automation.storage import S3FileStore
+from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
 @pytest.fixture(scope="module")

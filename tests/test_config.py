@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from automation.config import (
+from openhands.automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
@@ -52,7 +52,7 @@ class TestDeprecatedConstants:
     def test_deprecated_constant_emits_warning(self):
         """Accessing deprecated constants emits DeprecationWarning."""
         # Reset the warned set to ensure we get a warning
-        from automation import constants
+        from openhands.automation import constants
 
         constants._warned_constants.clear()
 
@@ -65,7 +65,7 @@ class TestDeprecatedConstants:
 
     def test_deprecated_constant_warns_once(self):
         """Repeated access to same constant only warns once."""
-        from automation import constants
+        from openhands.automation import constants
 
         constants._warned_constants.clear()
 
@@ -82,8 +82,8 @@ class TestDeprecatedConstants:
 
     def test_deprecated_constant_returns_config_value(self):
         """Deprecated constants return values from config."""
-        from automation import constants
-        from automation.config import get_config
+        from openhands.automation import constants
+        from openhands.automation.config import get_config
 
         constants._warned_constants.clear()
 
@@ -96,7 +96,7 @@ class TestDeprecatedConstants:
 
     def test_nonexistent_constant_raises_attribute_error(self):
         """Accessing nonexistent constant raises AttributeError."""
-        from automation import constants
+        from openhands.automation import constants
 
         with pytest.raises(AttributeError, match="has no attribute"):
             _ = constants.DOES_NOT_EXIST
@@ -234,7 +234,7 @@ class TestAuthCacheReset:
 
     def test_auth_cache_reset_on_clear_config(self):
         """Auth cache is reset when clear_config_cache is called."""
-        from automation.auth import _get_auth_cache
+        from openhands.automation.auth import _get_auth_cache
 
         # Ensure cache exists
         cache1 = _get_auth_cache()
@@ -244,7 +244,7 @@ class TestAuthCacheReset:
         clear_config_cache()
 
         # Import again to get fresh reference
-        from automation.auth import _auth_cache as auth_cache_after
+        from openhands.automation.auth import _auth_cache as auth_cache_after
 
         # The module-level variable should be None after reset
         assert auth_cache_after is None
@@ -329,7 +329,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_get_settings_emits_warning(self):
         """get_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 
@@ -344,7 +344,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_get_storage_settings_emits_warning(self, monkeypatch):
         """get_storage_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
         monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
@@ -362,7 +362,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_get_log_settings_emits_warning(self):
         """get_log_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 
@@ -377,7 +377,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_deprecated_function_warns_once(self):
         """Repeated calls to deprecated function only warn once."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 

@@ -9,14 +9,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from openhands.sdk.plugin import PluginSource
-from openhands.workspace import RepoSource
 
-from automation.models import Automation, TarballUpload, UploadStatus
-from automation.preset_router import (
+from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
 )
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -24,7 +24,7 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 # Path to preset files
-PRESETS_DIR = Path(__file__).parent.parent / "automation" / "presets"
+PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "presets"
 
 
 def _docker_available() -> bool:
@@ -135,7 +135,12 @@ class TestGenerateTarball:
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
-            assert "get_mcp_config" in main_content
+            assert "RemoteWorkspace" in main_content
+            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_secrets()" in main_content
+            assert "workspace.get_mcp_config()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
@@ -319,8 +324,8 @@ class TestCreateAutomationFromPrompt:
     @pytest.fixture(autouse=True)
     def setup_file_store_override(self, mock_file_store):
         """Override file_store for all tests in this class."""
-        from automation.app import app
-        from automation.storage import get_file_store
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
 
         app.dependency_overrides[get_file_store] = lambda: mock_file_store
         yield
@@ -347,7 +352,7 @@ class TestCreateAutomationFromPrompt:
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -435,7 +440,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -591,7 +596,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_single_plugin_normalized_to_list(self):
         """Single PluginSource is normalized to a list."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         request = CreatePluginAutomationRequest.model_validate(
             {
@@ -610,7 +615,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_plugin_list_preserved(self):
         """List of plugins is preserved as-is."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         request = CreatePluginAutomationRequest.model_validate(
             {
@@ -632,7 +637,7 @@ class TestCreatePluginAutomationRequestValidation:
 
     def test_empty_plugin_list_rejected(self):
         """Empty plugin list raises validation error."""
-        from automation.preset_router import CreatePluginAutomationRequest
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
 
         with pytest.raises(ValueError, match="At least one plugin is required"):
             CreatePluginAutomationRequest.model_validate(
@@ -710,6 +715,11 @@ class TestGeneratePluginTarball:
             assert "from openhands.sdk.plugin import PluginSource" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "RemoteWorkspace" in main_content
+            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_secrets()" in main_content
+            assert "workspace.clone_repos" in main_content
+            assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
             assert "PluginSource.model_validate" in main_content
             assert "plugins=plugin_sources" in main_content
@@ -815,8 +825,8 @@ class TestCreateAutomationFromPlugin:
     @pytest.fixture(autouse=True)
     def setup_file_store_override(self, mock_file_store):
         """Override file_store for all tests in this class."""
-        from automation.app import app
-        from automation.storage import get_file_store
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
 
         app.dependency_overrides[get_file_store] = lambda: mock_file_store
         yield
@@ -846,7 +856,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == "python main.py"
+        assert data["entrypoint"] == ".venv/bin/python main.py"
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -942,7 +952,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == "python main.py"
+        assert automation.entrypoint == ".venv/bin/python main.py"
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID

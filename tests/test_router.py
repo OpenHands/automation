@@ -4,8 +4,8 @@ import uuid
 
 import pytest
 
-from automation.models import Automation
-from automation.utils import utcnow
+from openhands.automation.models import Automation
+from openhands.automation.utils import utcnow
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -1039,7 +1039,7 @@ class TestListAutomationRuns:
         """Runs are returned in descending order by creation time."""
         from datetime import timedelta
 
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1185,7 +1185,7 @@ class TestListAutomationRuns:
 
     async def test_list_runs_default_limit_is_50(self, async_client, async_session):
         """Default limit is 50 results."""
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1283,7 +1283,7 @@ class TestCompleteRun:
         self, async_client, async_session
     ):
         """Complete endpoint saves conversation_id when status is COMPLETED."""
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1324,7 +1324,7 @@ class TestCompleteRun:
         self, async_client, async_session
     ):
         """Complete endpoint saves conversation_id when status is FAILED."""
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1371,7 +1371,7 @@ class TestCompleteRun:
         self, async_client, async_session
     ):
         """Complete endpoint works without conversation_id."""
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1407,7 +1407,7 @@ class TestCompleteRun:
         self, async_client, async_session
     ):
         """Complete endpoint returns 409 if run is not in RUNNING state."""
-        from automation.models import AutomationRun, AutomationRunStatus
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,

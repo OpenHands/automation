@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.backends import (
+from openhands.automation.backends import (
     CloudSandboxBackend,
     ExecutionContext,
     LocalAgentServerBackend,
@@ -46,6 +46,7 @@ class TestLocalAgentServerBackend:
     def mock_run(self):
         """Create a mock AutomationRun."""
         run = MagicMock()
+        run.id = "test-run-123"
         run.sandbox_id = None
         run.keep_alive = False
         return run
@@ -109,17 +110,79 @@ class TestLocalAgentServerBackend:
         assert api_key == "local-key"
 
     def test_build_env_vars(self, mock_run):
-        """build_env_vars() includes AGENT_SERVER_URL and SESSION_API_KEY."""
+        """build_env_vars() returns required env vars for local mode."""
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
-            api_key="local-key",
+            api_key="agent-server-key",
             run=mock_run,
+            callback_api_key="automation-service-key",
         )
         env_vars = backend.build_env_vars()
-        assert env_vars == {
-            "AGENT_SERVER_URL": "http://localhost:3000",
-            "SESSION_API_KEY": "local-key",
-        }
+        # WORKSPACE_BASE should be run-isolated (includes run_id)
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-server-key"
+        # Workspace should be isolated per-run and have ~ expanded
+        assert "test-run-123" in env_vars["WORKSPACE_BASE"]
+        assert env_vars["WORKSPACE_BASE"].endswith("/automation-runs/test-run-123")
+        assert "~" not in env_vars["WORKSPACE_BASE"]  # ~ should be expanded
+        # Callback API key should be the automation service's key (NOT agent server key)
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "automation-service-key"
+
+    def test_build_env_vars_custom_workspace_base(self, mock_run):
+        """build_env_vars() uses custom workspace_base when provided."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            workspace_base="/custom/workspace",
+            callback_api_key="callback-key",
+        )
+        env_vars = backend.build_env_vars()
+        # Custom workspace_base is used as the base, but still isolated per-run
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
+        assert (
+            env_vars["WORKSPACE_BASE"]
+            == "/custom/workspace/automation-runs/test-run-123"
+        )
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "callback-key"
+
+    def test_build_env_vars_no_callback_key(self, mock_run):
+        """build_env_vars() omits callback key when callback_api_key is not set."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            # No callback_api_key provided
+        )
+        env_vars = backend.build_env_vars()
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+        assert env_vars["SESSION_API_KEY"] == "agent-key"
+        # No callback key when callback_api_key is not set
+        assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
+
+    def test_get_work_dir_default_workspace(self, mock_run):
+        """get_work_dir() returns isolated directory with ~ expanded."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="test-key",
+            run=mock_run,
+        )
+        work_dir = backend.get_work_dir("my-run-id")
+        # Should expand ~ and include run_id in isolation path
+        assert work_dir.endswith("/automation-runs/my-run-id")
+        assert "~" not in work_dir  # ~ should be expanded
+
+    def test_get_work_dir_custom_workspace(self, mock_run):
+        """get_work_dir() uses custom workspace_base when provided."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="test-key",
+            run=mock_run,
+            workspace_base="/my/custom/base",
+        )
+        work_dir = backend.get_work_dir("run-456")
+        assert work_dir == "/my/custom/base/automation-runs/run-456"
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_agent_server(self, mock_run):
@@ -132,7 +195,7 @@ class TestLocalAgentServerBackend:
         mock_result = MagicMock(verified=True, exit_code=0)
 
         with patch(
-            "automation.backends.local.verify_run_on_agent_server",
+            "openhands.automation.backends.local.verify_run_on_agent_server",
             new_callable=AsyncMock,
             return_value=mock_result,
         ) as mock_verify:
@@ -213,7 +276,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.get_api_key_for_automation_run",
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
             new_callable=AsyncMock,
             return_value="sk-user-minted",
         ) as mock_mint:
@@ -227,7 +290,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.get_api_key_for_automation_run",
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
             new_callable=AsyncMock,
             return_value="sk-user",
         ):
@@ -264,12 +327,12 @@ class TestCloudSandboxBackend:
 
         with (
             patch(
-                "automation.backends.cloud.get_api_key_for_automation_run",
+                "openhands.automation.backends.cloud.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="sk-user",
             ),
             patch(
-                "automation.backends.cloud.verify_run_status",
+                "openhands.automation.backends.cloud.verify_run_status",
                 new_callable=AsyncMock,
                 return_value=mock_result,
             ) as mock_verify,
@@ -291,12 +354,12 @@ class TestCloudSandboxBackend:
 
         with (
             patch(
-                "automation.backends.cloud.get_api_key_for_automation_run",
+                "openhands.automation.backends.cloud.get_api_key_for_automation_run",
                 new_callable=AsyncMock,
                 return_value="sk-user",
             ),
             patch(
-                "automation.backends.cloud.cleanup_sandbox",
+                "openhands.automation.backends.cloud.cleanup_sandbox",
                 new_callable=AsyncMock,
             ) as mock_cleanup,
         ):
@@ -315,7 +378,7 @@ class TestCloudSandboxBackend:
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with patch(
-            "automation.backends.cloud.cleanup_sandbox",
+            "openhands.automation.backends.cloud.cleanup_sandbox",
             new_callable=AsyncMock,
         ) as mock_cleanup:
             await backend.cleanup_after_verification("run-123")
@@ -339,7 +402,7 @@ class TestGetBackend:
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "local-key")
 
         # Clear config cache to pick up new env vars
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 
@@ -356,7 +419,7 @@ class TestGetBackend:
         )
 
         # Clear config cache
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 

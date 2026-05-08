@@ -23,7 +23,7 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, text
 
-from automation.models import Base
+from openhands.automation.models import Base
 
 
 target_metadata = Base.metadata

@@ -12,14 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from automation.config import StorageSettings, clear_config_cache
-from automation.storage import (
+from openhands.automation.config import StorageSettings, clear_config_cache
+from openhands.automation.storage import (
     FileStore,
     GoogleCloudFileStore,
     S3FileStore,
     get_file_store,
 )
-from automation.storage.google_cloud import BUCKET_PREFIX
+from openhands.automation.storage.google_cloud import BUCKET_PREFIX
 
 
 def make_gcs_settings(bucket_name: str = "test-bucket", **kwargs) -> StorageSettings:
@@ -57,7 +57,7 @@ class TestGetFileStoreFactory:
         with patch.dict(os.environ, {"GCS_BUCKET_NAME": "test-bucket"}, clear=False):
             os.environ.pop("FILE_STORE", None)
             clear_config_cache()
-            with patch("automation.storage.google_cloud.storage"):
+            with patch("openhands.automation.storage.google_cloud.storage"):
                 store = get_file_store()
                 assert isinstance(store, GoogleCloudFileStore)
 
@@ -67,7 +67,7 @@ class TestGetFileStoreFactory:
             os.environ, {"FILE_STORE": "gcs", "GCS_BUCKET_NAME": "test-bucket"}
         ):
             clear_config_cache()
-            with patch("automation.storage.google_cloud.storage"):
+            with patch("openhands.automation.storage.google_cloud.storage"):
                 store = get_file_store()
                 assert isinstance(store, GoogleCloudFileStore)
 
@@ -77,7 +77,7 @@ class TestGetFileStoreFactory:
             os.environ, {"FILE_STORE": "s3", "AWS_S3_BUCKET": "test-bucket"}
         ):
             clear_config_cache()
-            with patch("automation.storage.s3.boto3"):
+            with patch("openhands.automation.storage.s3.boto3"):
                 store = get_file_store()
                 assert isinstance(store, S3FileStore)
 
@@ -89,7 +89,7 @@ class TestGetFileStoreFactory:
             os.environ, {"FILE_STORE": "s3", "AWS_S3_BUCKET": "test-bucket"}
         ):
             clear_config_cache()
-            with patch("automation.storage.s3.boto3"):
+            with patch("openhands.automation.storage.s3.boto3"):
                 store = get_file_store()
                 assert isinstance(store, S3FileStore)
 
@@ -114,7 +114,7 @@ class TestGoogleCloudFileStore:
     def test_init_with_settings(self):
         """Initialize with StorageSettings."""
         settings = make_gcs_settings(bucket_name="test-bucket")
-        with patch("automation.storage.google_cloud.storage"):
+        with patch("openhands.automation.storage.google_cloud.storage"):
             store = GoogleCloudFileStore(settings)
             assert store.bucket_name == "test-bucket"
 
@@ -127,7 +127,7 @@ class TestGoogleCloudFileStore:
     def test_prefixed_path(self):
         """Paths are prefixed with automation/."""
         settings = make_gcs_settings()
-        with patch("automation.storage.google_cloud.storage"):
+        with patch("openhands.automation.storage.google_cloud.storage"):
             store = GoogleCloudFileStore(settings)
             assert store._prefixed_path("test/path.txt") == "automation/test/path.txt"
             assert store._prefixed_path("/test/path.txt") == "automation/test/path.txt"
@@ -135,7 +135,7 @@ class TestGoogleCloudFileStore:
     def test_write_string(self):
         """Write string content to storage with automation prefix."""
         settings = make_gcs_settings()
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
@@ -156,7 +156,7 @@ class TestGoogleCloudFileStore:
     def test_write_bytes(self):
         """Write bytes content to storage with automation prefix."""
         settings = make_gcs_settings()
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
@@ -177,7 +177,7 @@ class TestGoogleCloudFileStore:
     def test_list(self):
         """List files under a prefix, with automation prefix added and stripped."""
         settings = make_gcs_settings()
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             # Blobs have the full path including automation prefix
@@ -203,7 +203,7 @@ class TestGoogleCloudFileStore:
     def test_delete(self):
         """Delete a file from storage with automation prefix."""
         settings = make_gcs_settings()
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
             mock_blob = MagicMock()
@@ -222,7 +222,7 @@ class TestGoogleCloudFileStore:
     def test_emulator_creates_bucket(self):
         """When using emulator, bucket is created if it doesn't exist."""
         settings = make_gcs_settings(storage_emulator_host="http://localhost:4443")
-        with patch("automation.storage.google_cloud.storage") as mock_storage:
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
             mock_client = MagicMock()
             mock_bucket = MagicMock()
 

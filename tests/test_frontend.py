@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from httpx import ASGITransport, AsyncClient
 
-from automation.config import Settings
+from openhands.automation.config import Settings
 
 
 # ---------------------------------------------------------------------------

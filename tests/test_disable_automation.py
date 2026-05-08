@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from automation.exceptions import PermanentDispatchError, TarballNotFoundError
-from automation.execution import _is_permanent_http_error
+from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
+from openhands.automation.execution import _is_permanent_http_error
 
 
 # Test UUIDs
@@ -27,7 +27,7 @@ def mock_client():
 
 def _create_mock_backend() -> MagicMock:
     """Create a mock backend for dispatcher tests."""
-    from automation.backends.base import ExecutionContext
+    from openhands.automation.backends.base import ExecutionContext
 
     mock_backend = MagicMock()
     mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
@@ -141,8 +141,8 @@ class TestDisableAutomation:
 
     async def test_disables_enabled_automation(self, async_session_factory):
         """An enabled automation is disabled and returns True."""
-        from automation.models import Automation
-        from automation.utils.run import disable_automation
+        from openhands.automation.models import Automation
+        from openhands.automation.utils.run import disable_automation
 
         async with async_session_factory() as session:
             automation = Automation(
@@ -173,8 +173,8 @@ class TestDisableAutomation:
 
     async def test_returns_false_for_already_disabled(self, async_session_factory):
         """Already disabled automation returns False."""
-        from automation.models import Automation
-        from automation.utils.run import disable_automation
+        from openhands.automation.models import Automation
+        from openhands.automation.utils.run import disable_automation
 
         async with async_session_factory() as session:
             automation = Automation(
@@ -198,7 +198,7 @@ class TestDisableAutomation:
 
     async def test_returns_false_for_nonexistent(self, async_session_factory):
         """Non-existent automation returns False."""
-        from automation.utils.run import disable_automation
+        from openhands.automation.utils.run import disable_automation
 
         fake_id = uuid.uuid4()
         result = await disable_automation(
@@ -216,7 +216,7 @@ class TestDownloadInternalTarball:
         self, async_session_factory
     ):
         """TarballNotFoundError is raised when upload record doesn't exist."""
-        from automation.dispatcher import _download_internal_tarball
+        from openhands.automation.dispatcher import _download_internal_tarball
 
         fake_upload_id = uuid.uuid4()
 
@@ -232,8 +232,8 @@ class TestDownloadInternalTarball:
 class TestExecuteRunDisablesAutomation:
     """Tests that _execute_run disables automation on permanent errors."""
 
-    @patch("automation.dispatcher.execute_in_context")
-    @patch("automation.dispatcher.get_backend")
+    @patch("openhands.automation.dispatcher.execute_in_context")
+    @patch("openhands.automation.dispatcher.get_backend")
     async def test_disables_automation_on_internal_tarball_not_found(
         self,
         mock_get_backend,
@@ -243,8 +243,12 @@ class TestExecuteRunDisablesAutomation:
         mock_client,
     ):
         """Automation is disabled when internal tarball upload is not found."""
-        from automation.dispatcher import _execute_run
-        from automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.dispatcher import _execute_run
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         mock_get_backend.return_value = _create_mock_backend()
 
@@ -303,8 +307,8 @@ class TestExecuteRunDisablesAutomation:
             assert run.status == AutomationRunStatus.FAILED
             assert "not found" in run.error_detail.lower()
 
-    @patch("automation.dispatcher.execute_in_context")
-    @patch("automation.dispatcher.get_backend")
+    @patch("openhands.automation.dispatcher.execute_in_context")
+    @patch("openhands.automation.dispatcher.get_backend")
     async def test_does_not_disable_on_transient_error(
         self,
         mock_get_backend,
@@ -314,9 +318,13 @@ class TestExecuteRunDisablesAutomation:
         mock_client,
     ):
         """Automation is NOT disabled on transient errors like network failures."""
-        from automation.dispatcher import _execute_run
-        from automation.execution import DispatchResult
-        from automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.dispatcher import _execute_run
+        from openhands.automation.execution import DispatchResult
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         mock_get_backend.return_value = _create_mock_backend()
         # Simulate a transient execution failure
@@ -383,7 +391,7 @@ def _create_mock_backend_with_api_key_check() -> MagicMock:
     This simulates CloudSandboxBackend behavior where build_env_vars()
     requires get_execution_context() to be called first.
     """
-    from automation.backends.base import ExecutionContext
+    from openhands.automation.backends.base import ExecutionContext
 
     mock_backend = MagicMock()
     mock_backend._api_key_initialized = False
@@ -418,7 +426,7 @@ async def sqlite_session_factory():
         create_async_engine,
     )
 
-    from automation.models import Base
+    from openhands.automation.models import Base
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -438,8 +446,8 @@ class TestExecuteRunEnvVarOrdering:
     Note: This test class uses SQLite and doesn't require Docker.
     """
 
-    @patch("automation.dispatcher.execute_in_context")
-    @patch("automation.dispatcher.get_backend")
+    @patch("openhands.automation.dispatcher.execute_in_context")
+    @patch("openhands.automation.dispatcher.get_backend")
     async def test_build_env_vars_called_after_get_execution_context(
         self,
         mock_get_backend,
@@ -454,9 +462,13 @@ class TestExecuteRunEnvVarOrdering:
         get_execution_context(), causing 'API key not initialized' errors
         in CloudSandboxBackend.
         """
-        from automation.dispatcher import _execute_run
-        from automation.execution import DispatchResult
-        from automation.models import Automation, AutomationRun, AutomationRunStatus
+        from openhands.automation.dispatcher import _execute_run
+        from openhands.automation.execution import DispatchResult
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
 
         # Use a mock backend that enforces the correct calling order
         mock_get_backend.return_value = _create_mock_backend_with_api_key_check()
