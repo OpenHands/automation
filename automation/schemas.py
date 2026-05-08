@@ -364,7 +364,7 @@ class EventResponse(BaseModel):
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
 # Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"github"})
+RESERVED_SOURCES = frozenset({"github", "gitlab"})
 
 
 # Valid HTTP header name pattern

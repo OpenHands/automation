@@ -198,9 +198,13 @@ class TestReservedSources:
         """GitHub should be reserved."""
         assert "github" in RESERVED_SOURCES
 
-    def test_only_github_reserved(self):
-        """Only GitHub should be reserved (for now)."""
-        assert RESERVED_SOURCES == {"github"}
+    def test_gitlab_is_reserved(self):
+        """GitLab should be reserved."""
+        assert "gitlab" in RESERVED_SOURCES
+
+    def test_builtin_providers_reserved(self):
+        """Only builtin Git providers should be reserved."""
+        assert RESERVED_SOURCES == {"github", "gitlab"}
 
 
 class TestWebhookSecretGeneration:

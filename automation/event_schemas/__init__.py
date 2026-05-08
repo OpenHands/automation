@@ -116,8 +116,10 @@ def parse_event(
 def _register_builtin_parsers() -> None:
     """Register parsers for built-in sources. Called at module load."""
     from automation.event_schemas.github import parse_github_event_auto
+    from automation.event_schemas.gitlab import parse_gitlab_event_auto
 
     register_parser("github", parse_github_event_auto)
+    register_parser("gitlab", parse_gitlab_event_auto)
 
 
 _register_builtin_parsers()
