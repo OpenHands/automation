@@ -8,7 +8,7 @@ on:
     workflow_dispatch:
         inputs:
             version:
-                description: 'Version to release (e.g., 1.0.0, 1.0.0a3, 1.0.0b1)'
+                description: Version to release (e.g., 1.0.0, 1.0.0a3, 1.0.0b1)
                 required: true
                 type: string
 
@@ -81,7 +81,7 @@ jobs:
               run: |
                   VERSION="${{ inputs.version }}"
                   BRANCH_NAME="release/v$VERSION"
-                  
+
                   git checkout -b "$BRANCH_NAME" 2>/dev/null || {
                     echo "::error::Branch $BRANCH_NAME already exists. Delete it or use a different version."
                     exit 1
@@ -89,7 +89,7 @@ jobs:
                   git add pyproject.toml uv.lock
                   git commit -m "chore: bump version to $VERSION"
                   git push -u origin "$BRANCH_NAME"
-                  
+
                   echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
             - name: Create Pull Request
@@ -98,32 +98,32 @@ jobs:
               run: |
                   VERSION="${{ inputs.version }}"
                   CURRENT="${{ steps.current.outputs.version }}"
-                  
+
                   gh pr create \
                     --title "chore: release v$VERSION" \
                     --body "## Release v$VERSION
-                  
+
                   This PR bumps the version from \`$CURRENT\` to \`$VERSION\`.
-                  
+
                   ### Changes
                   - Updated \`pyproject.toml\` version to \`$VERSION\`
                   - Regenerated \`uv.lock\`
-                  
+
                   ### After Merging
-                  
+
                   Once this PR is merged, create and push the release tag:
-                  
+
                   \`\`\`bash
                   git checkout main
                   git pull origin main
                   git tag $VERSION
                   git push origin $VERSION
                   \`\`\`
-                  
+
                   This will trigger:
                   - \`pypi-release.yml\` — publishes \`openhands-automation\` to PyPI
                   - \`tag-image.yml\` — tags the Docker image with \`$VERSION\`
-                  
+
                   ---
                   *This PR was automatically created by the Prepare Release workflow.*" \
                     --base main \
