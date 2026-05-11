@@ -9,7 +9,7 @@
 # Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
 set -e
 
-SDK_VERSION="1.21.1"
+SDK_VERSION="1.22.0"
 
 echo "[setup] Creating isolated virtual environment"
 uv venv .venv --quiet
