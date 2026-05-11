@@ -55,11 +55,21 @@ jobs:
               run: |
                   VERSION="${{ inputs.version }}"
                   sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+                  if ! grep -q "^version = \"$VERSION\"" pyproject.toml; then
+                    echo "::error::Failed to update version in pyproject.toml"
+                    exit 1
+                  fi
                   echo "Updated pyproject.toml to version $VERSION"
                   grep '^version = ' pyproject.toml
 
             - name: Update lockfile
-              run: uv lock
+              run: |
+                  uv lock
+                  if ! git diff --quiet uv.lock; then
+                    echo "Lock file updated successfully"
+                  else
+                    echo "::warning::Lock file unchanged - verify dependencies are correct"
+                  fi
 
             - name: Configure git
               run: |
@@ -72,7 +82,10 @@ jobs:
                   VERSION="${{ inputs.version }}"
                   BRANCH_NAME="release/v$VERSION"
                   
-                  git checkout -b "$BRANCH_NAME"
+                  git checkout -b "$BRANCH_NAME" 2>/dev/null || {
+                    echo "::error::Branch $BRANCH_NAME already exists. Delete it or use a different version."
+                    exit 1
+                  }
                   git add pyproject.toml uv.lock
                   git commit -m "chore: bump version to $VERSION"
                   git push -u origin "$BRANCH_NAME"
