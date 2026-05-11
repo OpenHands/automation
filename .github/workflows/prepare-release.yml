@@ -54,6 +54,11 @@ jobs:
             - name: Bump version
               run: |
                   VERSION="${{ inputs.version }}"
+                  CURRENT="${{ steps.current.outputs.version }}"
+                  if [ "$CURRENT" = "$VERSION" ]; then
+                    echo "::error::Version $VERSION is already set in pyproject.toml"
+                    exit 1
+                  fi
                   sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
                   if ! grep -q "^version = \"$VERSION\"" pyproject.toml; then
                     echo "::error::Failed to update version in pyproject.toml"
