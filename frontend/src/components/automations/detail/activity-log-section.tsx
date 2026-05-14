@@ -7,11 +7,15 @@ import { ActivityLogItem } from "./activity-log-item";
 
 interface ActivityLogSectionProps {
   automationId: string;
+  timeZone?: string;
 }
 
 const PAGE_SIZE = 20;
 
-export function ActivityLogSection({ automationId }: ActivityLogSectionProps) {
+export function ActivityLogSection({
+  automationId,
+  timeZone,
+}: ActivityLogSectionProps) {
   const { t } = useTranslation();
   const [limit, setLimit] = useState(PAGE_SIZE);
   const { data, isLoading } = useAutomationRuns(automationId, limit, 0);
@@ -56,7 +60,7 @@ export function ActivityLogSection({ automationId }: ActivityLogSectionProps) {
               key={run.id}
               className={index > 0 ? "border-t border-border" : ""}
             >
-              <ActivityLogItem run={run} />
+              <ActivityLogItem run={run} timeZone={timeZone} />
             </div>
           ))}
 

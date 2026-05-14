@@ -2,6 +2,7 @@ export interface AutomationTrigger {
   type: string;
   schedule?: string;
   schedule_human?: string;
+  timezone?: string;
 }
 
 export interface Automation {
