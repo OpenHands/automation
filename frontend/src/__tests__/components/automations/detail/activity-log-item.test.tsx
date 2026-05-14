@@ -37,6 +37,17 @@ describe("ActivityLogItem", () => {
     ).toBeInTheDocument();
   });
 
+  it("formats the run timestamp in the automation timezone", () => {
+    const run = createRun();
+    render(<ActivityLogItem run={run} timeZone="America/Los_Angeles" />);
+
+    expect(
+      screen.getByText(
+        (content) => content.includes("2:00 AM") && content.includes("PDT"),
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("renders as a link when conversation_id exists", () => {
     const run = createRun({ conversation_id: "conv-abc123" });
     render(<ActivityLogItem run={run} />);
