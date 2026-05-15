@@ -274,3 +274,40 @@ def patch_github_transport(monkeypatch):
         return seen
 
     return install
+
+
+@pytest.fixture
+def patch_slack_transport(monkeypatch):
+    """Inject an ``httpx.MockTransport`` into ``SlackTrigger._build_client``.
+
+    Returns a callable: given a responder ``(httpx.Request) -> httpx.Response``,
+    installs it and returns the list of requests the trigger ends up issuing.
+    """
+    import httpx
+
+    from openhands.automation.schemas import SlackTrigger
+
+    def install(responder):
+        seen: list[httpx.Request] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return responder(request)
+
+        transport = httpx.MockTransport(capture)
+
+        def _patched(self: SlackTrigger) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                base_url="https://slack.com/api",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "openhands-automation",
+                    "Authorization": f"Bearer {self.slack_token.get_secret_value()}",
+                },
+                transport=transport,
+            )
+
+        monkeypatch.setattr(SlackTrigger, "_build_client", _patched)
+        return seen
+
+    return install

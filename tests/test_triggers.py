@@ -1,12 +1,14 @@
 """Tests for the trigger schemas and their ``create_pending_run`` methods.
 
 These tests exercise the real :class:`CronTrigger`/:class:`EventTrigger`/
-:class:`GithubTrigger` code paths against a real (SQLite in-memory) session,
-so :func:`openhands.automation.utils.run.create_pending_run` runs against a
-real database. Only the GitHub HTTP transport is replaced via
-``httpx.MockTransport`` (see the ``patch_github_transport`` fixture); the
-``GithubTrigger`` code — including header/auth construction, response
-parsing, timestamp filtering, and parallel repo fan-out — is untouched.
+:class:`GithubTrigger`/:class:`SlackTrigger` code paths against a real
+(SQLite in-memory) session, so
+:func:`openhands.automation.utils.run.create_pending_run` runs against a
+real database. Only the GitHub/Slack HTTP transports are replaced via
+``httpx.MockTransport`` (see the ``patch_github_transport`` /
+``patch_slack_transport`` fixtures); the trigger code — including
+header/auth construction, response parsing, timestamp filtering, and
+parallel resource fan-out — is untouched.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from openhands.automation.models import Automation, AutomationRun
 from openhands.automation.schemas import (
     EventTrigger,
     GithubTrigger,
+    SlackTrigger,
     TriggerAdapter,
 )
 
@@ -490,3 +493,346 @@ class TestGithubTriggerCreatesRun:
         # Both repos were polled (parallel fan-out).
         polled = {r.url.path for r in seen}
         assert polled == {"/repos/foo/bar/events", "/repos/foo/baz/events"}
+
+
+# ---------------------------------------------------------------------------
+# SlackTrigger
+# ---------------------------------------------------------------------------
+
+
+def _slack_message(
+    msg_id: str,
+    ts_dt: datetime,
+    *,
+    text: str = "hello",
+    user: str = "U0123ABC",
+    msg_type: str = "message",
+    subtype: str | None = None,
+) -> dict[str, Any]:
+    """Build a fake Slack message dict.
+
+    Slack ``ts`` is a string of unix seconds with microsecond precision.
+    """
+    msg: dict[str, Any] = {
+        "type": msg_type,
+        "user": user,
+        "text": text,
+        "ts": f"{ts_dt.timestamp():.6f}",
+        "client_msg_id": msg_id,
+    }
+    if subtype is not None:
+        msg["subtype"] = subtype
+    return msg
+
+
+def _slack_ok(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"ok": True, "messages": messages, "has_more": False}
+
+
+class TestSlackTriggerValidation:
+    def test_valid_channel_ids_are_accepted(self):
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC", "D0SOMEDM"],
+        )
+        assert trigger.channels == ["C0123ABC", "D0SOMEDM"]
+
+    def test_lowercase_channel_id_rejected(self):
+        with pytest.raises(ValidationError, match="Invalid Slack channel id"):
+            SlackTrigger(
+                slack_token=SecretStr("xoxb-xxx"),
+                channels=["c0123abc"],
+            )
+
+    def test_channel_name_rejected(self):
+        # '#general' isn't a stable id; ensure we reject names early.
+        with pytest.raises(ValidationError, match="Invalid Slack channel id"):
+            SlackTrigger(
+                slack_token=SecretStr("xoxb-xxx"),
+                channels=["#general"],
+            )
+
+    def test_empty_channels_rejected(self):
+        with pytest.raises(ValidationError):
+            SlackTrigger(slack_token=SecretStr("xoxb-xxx"), channels=[])
+
+    def test_invalid_jmespath_event_filter_rejected(self):
+        # The JMESPath validation lives on the shared polling base, so this
+        # also exercises that SlackTrigger inherits it correctly.
+        with pytest.raises(ValidationError, match="Invalid JMESPath expression"):
+            SlackTrigger(
+                slack_token=SecretStr("xoxb-xxx"),
+                channels=["C0123ABC"],
+                event_filter="not valid @@@",
+            )
+
+    def test_token_round_trips_through_model_dump(self):
+        """``model_dump`` must emit the raw string so the trigger can be
+        persisted in the AutomationsTrigger JSON column and rehydrated."""
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-supersecret"),
+            channels=["C0123ABC"],
+        )
+        dumped = trigger.model_dump(mode="python")
+        assert dumped["slack_token"] == "xoxb-supersecret"
+        # Round-trip through the discriminated union too.
+        roundtripped = TriggerAdapter.validate_python(dumped)
+        assert isinstance(roundtripped, SlackTrigger)
+        assert roundtripped.slack_token.get_secret_value() == "xoxb-supersecret"
+
+    def test_discriminated_union_dispatches_to_slack(self):
+        parsed = TriggerAdapter.validate_python(
+            {
+                "type": "slack",
+                "slack_token": "xoxb-xxx",
+                "channels": ["C0123ABC"],
+            }
+        )
+        assert isinstance(parsed, SlackTrigger)
+
+
+class TestSlackTriggerCreatesRun:
+    async def test_new_message_creates_run_with_payload(
+        self, sqlite_session, patch_slack_transport
+    ):
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        msg = _slack_message("m1", cutoff + timedelta(seconds=30))
+        seen = patch_slack_transport(
+            lambda req: httpx.Response(200, json=_slack_ok([msg]))
+        )
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+
+        run = await trigger.create_pending_run(sqlite_session, automation)
+        assert run is not None
+        assert run.event_payload["source"] == "slack_trigger"
+        kept = run.event_payload["messages"]
+        assert [m["client_msg_id"] for m in kept] == ["m1"]
+        # Channel was tagged onto the message.
+        assert kept[0]["_channel"] == "C0123ABC"
+        # The Slack `oldest` param uses unix seconds derived from the cutoff.
+        assert len(seen) == 1
+        assert seen[0].url.path == "/api/conversations.history"
+        assert seen[0].url.params["channel"] == "C0123ABC"
+        assert float(seen[0].url.params["oldest"]) == pytest.approx(cutoff.timestamp())
+        # And the run was persisted.
+        rows = (await sqlite_session.execute(select(AutomationRun))).scalars().all()
+        assert len(rows) == 1
+
+    async def test_no_new_messages_returns_none(
+        self, sqlite_session, patch_slack_transport
+    ):
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        patch_slack_transport(lambda req: httpx.Response(200, json=_slack_ok([])))
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+        rows = (await sqlite_session.execute(select(AutomationRun))).scalars().all()
+        assert rows == []
+
+    async def test_slack_ok_false_treated_as_no_messages(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """Slack returns HTTP 200 for app errors; ``ok=false`` must not fire."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        patch_slack_transport(
+            lambda req: httpx.Response(
+                200, json={"ok": False, "error": "channel_not_found"}
+            )
+        )
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+
+    async def test_rate_limit_treated_as_no_messages(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """HTTP 429 (rate limit) is logged and treated as no new messages."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        patch_slack_transport(
+            lambda req: httpx.Response(429, headers={"Retry-After": "5"}, json={})
+        )
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+
+    async def test_message_at_or_before_cutoff_excluded(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """A message exactly at the cutoff or older must not fire the trigger."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        # Slack's `oldest` is server-side exclusive — but it's perfectly
+        # reasonable for the API to still hand us a message at the cutoff
+        # (e.g. if the float rounds). Our client-side check must reject it.
+        stale = _slack_message("m_old", cutoff)
+        patch_slack_transport(lambda req: httpx.Response(200, json=_slack_ok([stale])))
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+
+    async def test_jmespath_filter_keeps_matching_messages(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """A truthy JMESPath result keeps the message and fires the trigger."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        msgs = [
+            _slack_message(
+                "join",
+                cutoff + timedelta(seconds=10),
+                subtype="channel_join",
+                text="<@U1> has joined",
+            ),
+            _slack_message(
+                "real",
+                cutoff + timedelta(seconds=20),
+                text="real user message",
+            ),
+        ]
+        patch_slack_transport(lambda req: httpx.Response(200, json=_slack_ok(msgs)))
+
+        # Filter out join/leave noise — only regular user messages.
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+            event_filter="subtype == null",
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        run = await trigger.create_pending_run(sqlite_session, automation)
+        assert run is not None
+        kept = run.event_payload["messages"]
+        assert [m["client_msg_id"] for m in kept] == ["real"]
+
+    async def test_jmespath_filter_excludes_all(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """A filter that matches nothing must not fire the trigger."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        msgs = [
+            _slack_message("a", cutoff + timedelta(seconds=10), user="U1"),
+            _slack_message("b", cutoff + timedelta(seconds=20), user="U2"),
+        ]
+        patch_slack_transport(lambda req: httpx.Response(200, json=_slack_ok(msgs)))
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+            event_filter="user == 'UNOBODY'",
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+
+    async def test_multiple_channels_polled_in_parallel(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """Two configured channels are each polled; both contribute messages."""
+        import httpx
+
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            ch = request.url.params["channel"]
+            msg = _slack_message(f"msg_{ch}", cutoff + timedelta(seconds=5))
+            return httpx.Response(200, json=_slack_ok([msg]))
+
+        seen = patch_slack_transport(responder)
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC", "C0456DEF"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+
+        run = await trigger.create_pending_run(sqlite_session, automation)
+        assert run is not None
+        kept = run.event_payload["messages"]
+        assert {m["_channel"] for m in kept} == {"C0123ABC", "C0456DEF"}
+        polled = {r.url.params["channel"] for r in seen}
+        assert polled == {"C0123ABC", "C0456DEF"}
+
+    async def test_disabled_short_circuits_without_calling_slack(
+        self, sqlite_session, patch_slack_transport
+    ):
+        """A disabled automation must not call Slack at all."""
+        import httpx
+
+        seen = patch_slack_transport(
+            lambda req: httpx.Response(200, json=_slack_ok([]))
+        )
+
+        trigger = SlackTrigger(
+            slack_token=SecretStr("xoxb-xxx"),
+            channels=["C0123ABC"],
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            enabled=False,
+        )
+        assert await trigger.create_pending_run(sqlite_session, automation) is None
+        assert seen == []
