@@ -1,15 +1,41 @@
 """Pydantic request/response schemas for the API."""
 
+from __future__ import annotations
+
+import logging
 import re
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
+import httpx
 from croniter import croniter
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    SecretStr,
+    Tag,
+    TypeAdapter,
+    field_serializer,
+    field_validator,
+)
 
 from openhands.automation.config import get_config
+
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from openhands.automation.models import Automation, AutomationRun
+
+
+logger = logging.getLogger(__name__)
+
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -37,10 +63,49 @@ def _validate_timeout(v: int | None) -> int | None:
     return v
 
 
-class CronTrigger(BaseModel):
-    """Cron-based trigger configuration."""
+class _TriggerBase(BaseModel):
+    """Common base for all trigger configurations.
+
+    Subclasses implement :meth:`create_pending_run` to decide — once per
+    scheduler poll cycle — whether the given automation should fire right now,
+    and if so, what (optional) event payload to attach to the resulting
+    ``AutomationRun``.
+
+    Concurrency note: the scheduler invokes this method **sequentially** for
+    each automation in a batch because they share a single
+    :class:`~sqlalchemy.ext.asyncio.AsyncSession`, which is not safe for
+    concurrent use. Triggers should still parallelize their *own* external
+    I/O (e.g. by using :func:`openhands.automation.utils.async_utils.wait_all`
+    to fan out HTTP calls across multiple resources).
+    """
 
     model_config = ConfigDict(extra="forbid")
+
+    type: str
+
+    async def create_pending_run(
+        self,
+        session: AsyncSession,
+        automation: Automation,
+        now: datetime | None = None,
+    ) -> AutomationRun | None:
+        """Return a PENDING ``AutomationRun`` if the trigger is due, else None.
+
+        Implementations that decide to fire MUST call
+        :func:`openhands.automation.utils.run.create_pending_run` (which
+        bumps ``last_triggered_at``/``last_polled_at`` and appends the run
+        to ``session``) and may then mutate the returned run — for example
+        to populate ``event_payload`` with the data that caused the fire.
+
+        Exceptions raised here are logged and treated as "not due" by the
+        scheduler so that one broken trigger cannot starve the rest of the
+        batch.
+        """
+        raise NotImplementedError
+
+
+class CronTrigger(_TriggerBase):
+    """Cron-based trigger configuration."""
 
     type: Literal["cron"] = "cron"
     schedule: str = Field(..., description="Cron expression, e.g. '0 9 * * 5'")
@@ -53,8 +118,26 @@ class CronTrigger(BaseModel):
             raise ValueError(f"Invalid cron expression: {v}")
         return v
 
+    async def create_pending_run(
+        self,
+        session: AsyncSession,
+        automation: Automation,
+        now: datetime | None = None,
+    ) -> AutomationRun | None:
+        """Fire if the cron's most recent slot has passed since last trigger."""
+        from openhands.automation.utils.cron import (
+            is_automation_due as _is_due_cron,
+        )
+        from openhands.automation.utils.run import (
+            create_pending_run as _create_run_util,
+        )
 
-class EventTrigger(BaseModel):
+        if not _is_due_cron(automation, now):
+            return None
+        return await _create_run_util(session, automation)
+
+
+class EventTrigger(_TriggerBase):
     """
     Event-based trigger configuration.
 
@@ -126,8 +209,6 @@ class EventTrigger(BaseModel):
     ```
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
@@ -172,19 +253,230 @@ class EventTrigger(BaseModel):
             return [self.on]
         return self.on
 
+    async def create_pending_run(
+        self,
+        session: AsyncSession,  # noqa: ARG002
+        automation: Automation,  # noqa: ARG002
+        now: datetime | None = None,  # noqa: ARG002
+    ) -> AutomationRun | None:
+        """Event triggers are fired by the webhook router, never by polling."""
+        return None
+
+
+class GithubTrigger(_TriggerBase):
+    """Poll-based trigger that fires when new events appear on GitHub repos.
+
+    On each scheduler poll, the trigger queries the
+    ``/repos/{owner}/{repo}/events`` endpoint for each configured repository
+    **concurrently** and collects any event created after the automation's
+    last fire time (or its ``created_at`` for the very first poll, mirroring
+    the no-backfill semantics of :class:`CronTrigger`).
+
+    If any matching events are found, :meth:`create_pending_run` creates a
+    PENDING ``AutomationRun`` and stores the collected events on
+    ``run.event_payload`` so the run's entrypoint can react to them; otherwise
+    it returns ``None``.
+
+    Optionally restrict the event types that count using ``event_types`` (e.g.
+    ``["PushEvent", "PullRequestEvent"]``); when omitted, any event type
+    triggers a fire.
+    """
+
+    type: Literal["github"] = "github"
+    github_access_token: SecretStr = Field(
+        ...,
+        description=(
+            "GitHub Personal Access Token used to authenticate against the "
+            "REST API. Authenticated requests have a 5000/hour rate limit "
+            "compared to 60/hour unauthenticated."
+        ),
+    )
+    repositories: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Repositories to poll, each as 'owner/name' "
+            "(e.g. 'All-Hands-AI/OpenHands')."
+        ),
+    )
+    event_types: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional allow-list of GitHub event types (e.g. 'PushEvent'). "
+            "When unset, any event type counts as new activity."
+        ),
+    )
+
+    @field_validator("repositories")
+    @classmethod
+    def validate_repositories(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for repo in v:
+            repo = repo.strip()
+            if not _GITHUB_REPO_RE.match(repo):
+                raise ValueError(f"Invalid repository {repo!r}: expected 'owner/name'")
+            cleaned.append(repo)
+        return cleaned
+
+    @field_validator("event_types")
+    @classmethod
+    def validate_event_types(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        cleaned = [t.strip() for t in v if t and t.strip()]
+        return cleaned or None
+
+    @field_serializer("github_access_token", when_used="always")
+    def _serialize_token(self, v: SecretStr) -> str:
+        """Emit the raw secret so the trigger can round-trip through the
+        JSON column.
+
+        The token must be stored in plain text because the scheduler needs
+        to read it back later to authenticate against GitHub. ``SecretStr``
+        is still useful at the application layer: it guards against
+        accidental logging via ``repr()`` and string interpolation. Treat
+        the on-disk JSON as sensitive (same trust level as the rest of the
+        automation config) — anyone with read access to the database can
+        see it.
+        """
+        return v.get_secret_value()
+
+    def _build_client(self) -> httpx.AsyncClient:
+        """Construct an authenticated GitHub REST client."""
+        return httpx.AsyncClient(
+            base_url="https://api.github.com",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "openhands-automation",
+                "Authorization": (
+                    f"Bearer {self.github_access_token.get_secret_value()}"
+                ),
+            },
+            timeout=30.0,
+        )
+
+    async def _fetch_new_events(
+        self,
+        client: httpx.AsyncClient,
+        repo: str,
+        cutoff: datetime,
+    ) -> list[dict[str, Any]]:
+        """Return all matching events for ``repo`` newer than ``cutoff``.
+
+        Honours :attr:`event_types`. Errors (HTTP/JSON/non-200) are logged
+        and treated as "no new events" so a single bad repo doesn't take
+        down the whole trigger.
+        """
+        try:
+            resp = await client.get(
+                f"/repos/{repo}/events",
+                params={"per_page": 30, "page": 1},
+            )
+        except httpx.HTTPError as e:
+            logger.warning("GitHub poll failed for %s: %s", repo, e)
+            return []
+
+        if resp.status_code != 200:
+            logger.warning(
+                "GitHub poll for %s returned status %s",
+                repo,
+                resp.status_code,
+            )
+            return []
+
+        try:
+            events = resp.json()
+        except ValueError:
+            logger.warning("GitHub poll for %s returned non-JSON body", repo)
+            return []
+        if not isinstance(events, list):
+            return []
+
+        allowed: set[str] | None = set(self.event_types) if self.event_types else None
+        new_events: list[dict[str, Any]] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            if allowed is not None and ev.get("type") not in allowed:
+                continue
+            created_raw = ev.get("created_at")
+            if not isinstance(created_raw, str):
+                continue
+            try:
+                created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=ZoneInfo("UTC"))
+            if created_at > cutoff:
+                # Tag with repo so downstream code knows where it came from.
+                tagged = dict(ev)
+                tagged.setdefault("_repository", repo)
+                new_events.append(tagged)
+        return new_events
+
+    async def create_pending_run(
+        self,
+        session: AsyncSession,
+        automation: Automation,
+        now: datetime | None = None,  # noqa: ARG002
+    ) -> AutomationRun | None:
+        """Fire if any configured repo has matching new events.
+
+        On fire, attaches the events that caused the fire to
+        ``run.event_payload`` as::
+
+            {
+                "source": "github_trigger",
+                "events": [<github event dict>, ...],
+            }
+        """
+        # Deferred imports avoid circular dependencies at module load time.
+        from openhands.automation.utils.async_utils import wait_all
+        from openhands.automation.utils.run import (
+            create_pending_run as _create_run_util,
+        )
+
+        if not automation.enabled or automation.deleted_at is not None:
+            return None
+
+        cutoff = automation.last_triggered_at or automation.created_at
+        if cutoff is None:
+            return None
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=ZoneInfo("UTC"))
+
+        async with self._build_client() as client:
+            per_repo: list[list[dict[str, Any]]] = await wait_all(
+                [
+                    self._fetch_new_events(client, repo, cutoff)
+                    for repo in self.repositories
+                ],
+                timeout=None,
+            )
+
+        all_events: list[dict[str, Any]] = [ev for batch in per_repo for ev in batch]
+        if not all_events:
+            return None
+
+        run = await _create_run_util(session, automation)
+        run.event_payload = {"source": "github_trigger", "events": all_events}
+        return run
+
 
 def _get_trigger_discriminator(v: dict | BaseModel) -> str:
     """Discriminator function for Pydantic's discriminated union.
 
     Returns the trigger type string, which Pydantic uses to select the
-    correct model (CronTrigger or EventTrigger) from the union.
+    correct model (CronTrigger, EventTrigger, or GithubTrigger) from the union.
 
     Why sentinel instead of raising ValueError:
         Pydantic discriminator functions must return a string - they cannot
         raise exceptions. By returning an invalid sentinel value, Pydantic
         generates a proper ValidationError with context like:
         "Input tag '__missing_trigger_type__' found using 'type' does not
-        match any of the expected tags: 'cron', 'event'"
+        match any of the expected tags: 'cron', 'event', 'github'"
         This produces a user-friendly 422 response via FastAPI.
     """
     if isinstance(v, dict):
@@ -197,9 +489,17 @@ def _get_trigger_discriminator(v: dict | BaseModel) -> str:
 
 # Union type for all triggers, using discriminated union
 Trigger = Annotated[
-    Annotated[CronTrigger, Tag("cron")] | Annotated[EventTrigger, Tag("event")],
+    Annotated[CronTrigger, Tag("cron")]
+    | Annotated[EventTrigger, Tag("event")]
+    | Annotated[GithubTrigger, Tag("github")],
     Discriminator(_get_trigger_discriminator),
 ]
+
+# Reusable adapter for parsing trigger dicts (e.g. ``automation.trigger`` JSON)
+# into the correct ``_TriggerBase`` subclass.
+TriggerAdapter: TypeAdapter[CronTrigger | EventTrigger | GithubTrigger] = TypeAdapter(
+    Trigger
+)
 
 
 class RunStatus(StrEnum):
