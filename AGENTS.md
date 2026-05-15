@@ -211,3 +211,50 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
 - Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
+
+## Release Procedure
+
+Releases publish `openhands-automation` to PyPI and retag the Docker image on GHCR. There are two paths:
+
+### Automated (preferred) — Prepare Release workflow
+
+1. Go to **Actions → Prepare Release** on GitHub and trigger it with the desired version (e.g. `1.0.0a3`).
+2. The workflow opens a PR that bumps `pyproject.toml` and regenerates `uv.lock`.
+3. Review and merge the PR.
+4. After merging, pull `main` and push a tag to trigger publishing:
+
+```bash
+git checkout main && git pull origin main
+git tag <version>          # e.g. git tag 1.0.0a3
+git push origin <version>
+```
+
+### Manual
+
+1. Edit `pyproject.toml` — set `version = "<new-version>"`.
+2. Regenerate the lock file: `uv lock`.
+3. Commit both files: `git commit -am "chore: bump version to <new-version>"`.
+4. Merge (or push directly to main if you have access).
+5. Tag and push (the tag can point to any commit, including a PR branch head):
+
+```bash
+git tag <version>          # e.g. git tag 1.0.0a3
+git push origin <version>
+```
+
+### What the tag triggers
+
+| Workflow | File | Action |
+|----------|------|--------|
+| Publish PyPI Package | `pypi-release.yml` | Builds and publishes `openhands-automation` to PyPI via OIDC trusted publishing |
+| Tag Docker images | `tag-image.yml` | Aliases the existing `sha-<commit>` GHCR image to the new tag (requires the Docker build for that commit to have run first) |
+
+### SDK dependency bumps
+
+When bumping `openhands-sdk` / `openhands-workspace` pins:
+1. Update both versions in `pyproject.toml` dependencies.
+2. Run `uv lock` to regenerate `uv.lock`.
+3. Bump the package version and follow the release procedure above.
+4. After publishing, update `AUTOMATION_SHA` in the deploy repo:
+   - `.github/workflows/deploy.yaml`
+   - `.github/workflows/deploy-automation.yaml`
