@@ -42,6 +42,14 @@ class AutomationRunStatus(enum.Enum):
     FAILED = "FAILED"
 
 
+class SessionStatus(enum.Enum):
+    """Status of an automation session."""
+
+    ACTIVE = "ACTIVE"  # Sandbox alive, accepting and processing events
+    EXPIRED = "EXPIRED"  # Timed out (idle timeout or max session lifetime reached)
+    DEAD = "DEAD"  # Sandbox died unexpectedly (watchdog detected)
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -309,4 +317,101 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class AutomationSession(Base):
+    """Tracks active sessions for event routing.
+
+    A session ties together a series of related events under a single sandbox run.
+    The session key (extracted from event payloads via a JMESPath expression) is
+    used to route incoming events to an existing session instead of creating a new
+    run for each event.
+
+    Lifecycle:
+    - ACTIVE: Sandbox is alive; new events are queued as PendingSessionEvent rows.
+    - EXPIRED: Idle timeout or max session lifetime reached (set by SDK/watchdog).
+    - DEAD: Sandbox died unexpectedly; watchdog transitions here.
+    """
+
+    __tablename__ = "automation_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The run that owns this session (the first run that created it)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Sandbox identifier (set by the dispatcher after sandbox creation)
+    sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Session status
+    status: Mapped[SessionStatus] = mapped_column(
+        Enum(SessionStatus, native_enum=False, length=20),
+        nullable=False,
+        default=SessionStatus.ACTIVE,
+        index=True,
+    )
+
+    # Lifecycle timestamps
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    # Pre-computed absolute expiry: started_at + session_timeout_seconds
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # Updated each time a new event is queued into this session
+    last_event_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Primary lookup: find active session for (automation, session_key)
+        Index("ix_session_lookup", "automation_id", "session_key", "status"),
+    )
+
+
+class PendingSessionEvent(Base):
+    """Events queued for delivery to an active session's sandbox.
+
+    When an event arrives for an existing ACTIVE session, it is stored here
+    instead of creating a new ``AutomationRun``.  The SDK script running inside
+    the sandbox polls for these events and processes them.
+
+    Events are also queued here when a sandbox dies and ``on_sandbox_death``
+    is set to ``"queue"`` or ``"restart"`` — allowing the next sandbox to
+    pick them up.
+    """
+
+    __tablename__ = "pending_session_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+    # The event payload (same format as AutomationRun.event_payload)
+    event_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )

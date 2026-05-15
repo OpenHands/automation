@@ -12,6 +12,84 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 from openhands.automation.config import get_config
 
 
+class SessionConfig(BaseModel):
+    """Configure session-based conversation reuse for event-triggered automations.
+
+    Sessions allow related events (e.g., comments on the same GitHub PR, messages
+    in the same Slack thread) to be routed to the same running sandbox instead of
+    creating a new sandbox for each event.
+
+    ## How It Works
+
+    1. A JMESPath expression (``key_expr``) extracts a unique identifier from each
+       event payload — the session key.
+    2. The first event with a new session key creates a new ``AutomationRun`` and
+       sandbox (normal dispatch flow).
+    3. Subsequent events with the same session key are queued as
+       ``PendingSessionEvent`` records and delivered to the running sandbox.
+    4. The SDK script polls for pending events via the workspace API and processes
+       them in a loop until idle timeout is reached.
+
+    ## Examples
+
+    ```json
+    // GitHub PR: route all events on the same PR to one session
+    {"key_expr": "pull_request.number || issue.number"}
+
+    // Slack thread: route thread replies to the originating session
+    {"key_expr": "thread_ts || ts"}
+    ```
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key_expr: str = Field(
+        ...,
+        description=(
+            "JMESPath expression to extract the session key from the event payload. "
+            "The extracted value (converted to string) uniquely identifies a session. "
+            "Examples: 'pull_request.number', 'thread_ts || ts'"
+        ),
+    )
+    idle_timeout_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description=(
+            "Session expires after this many seconds without a new event. "
+            "The SDK script should exit after this idle period (30–3600s)."
+        ),
+    )
+    session_timeout_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Maximum total session lifetime in seconds (60–86400s).",
+    )
+    on_sandbox_death: Literal["queue", "restart", "drop"] = Field(
+        default="queue",
+        description=(
+            "Behavior when the sandbox dies while events are pending: "
+            "'queue' stores events for the next sandbox launch, "
+            "'restart' immediately starts a new sandbox with the queued events, "
+            "'drop' discards pending events."
+        ),
+    )
+
+    @field_validator("key_expr")
+    @classmethod
+    def validate_key_expr(cls, v: str) -> str:
+        """Validate JMESPath expression syntax."""
+        import jmespath
+        from jmespath import exceptions as jmespath_exceptions
+
+        try:
+            jmespath.compile(v)
+        except jmespath_exceptions.JMESPathError as e:
+            raise ValueError(f"Invalid JMESPath expression: {e}") from e
+        return v
+
+
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
 _TARBALL_SCHEME_RE = re.compile(r"^(s3|gs|https?|oh-internal)://")
 
@@ -150,6 +228,15 @@ class EventTrigger(BaseModel):
             "Functions: contains(), glob(), icontains(), regex(). "
             "Example: glob(repository.full_name, 'org/*') && "
             "icontains(comment.body, '@openhands-resolver')"
+        ),
+    )
+    session: SessionConfig | None = Field(
+        default=None,
+        description=(
+            "Optional session configuration for routing related events to the same "
+            "running sandbox. When set, events with the same session key (extracted "
+            "from the payload via key_expr) are queued to the active session instead "
+            "of creating a new run."
         ),
     )
 
@@ -358,6 +445,7 @@ class EventResponse(BaseModel):
     received: bool
     matched: int
     runs_created: list[str]  # List of run IDs created
+    events_queued: int = 0  # Events routed to existing sessions
 
 
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars

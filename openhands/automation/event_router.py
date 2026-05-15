@@ -41,6 +41,11 @@ from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
 from openhands.automation.schemas import EventResponse
 from openhands.automation.trigger_matcher import matches_trigger
+from openhands.automation.utils.session import (
+    extract_session_key,
+    get_active_session,
+    queue_pending_event,
+)
 from openhands.automation.utils.webhook import (
     create_automation_run,
     get_event_automations,
@@ -151,25 +156,25 @@ async def receive_event(
         org_id,
     )
 
-    # 6. Find matching automations
+    # 6. Find matching automations (preserve trigger alongside each automation)
     automations = await get_event_automations(org_id, source, session)
-    matched_automations = []
+    matched: list[tuple] = []  # (Automation, EventTrigger)
 
     for automation, trigger in automations:
         # Match trigger against webhook payload using JMESPath filter
         if matches_trigger(trigger, source, event.event_key, webhook_payload):
-            matched_automations.append(automation)
+            matched.append((automation, trigger))
 
     logger.info(
         "Event matched %d/%d automations for org=%s",
-        len(matched_automations),
+        len(matched),
         len(automations),
         org_id,
     )
 
-    # 7. Create PENDING runs for matched automations
-    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
-    # For custom webhooks, use the webhook payload directly
+    # 7. Create PENDING runs or queue events for matched automations.
+    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields.
+    # For custom webhooks, use the webhook payload directly.
     event_payload = (
         event.model_dump(mode="json")
         if isinstance(event, BaseModel)
@@ -177,7 +182,49 @@ async def receive_event(
     )
 
     run_ids: list[str] = []
-    for automation in matched_automations:
+    events_queued: int = 0
+
+    for automation, trigger in matched:
+        session_cfg = trigger.session
+
+        if session_cfg:
+            # Session mode: route to existing session or start a new one
+            session_key = extract_session_key(session_cfg.key_expr, event_payload)
+
+            if session_key is None:
+                logger.warning(
+                    "Could not extract session key for automation %s "
+                    "using expr=%r; falling back to new run",
+                    automation.id,
+                    session_cfg.key_expr,
+                )
+            else:
+                active_session = await get_active_session(
+                    automation.id, session_key, session
+                )
+
+                if active_session is not None:
+                    # Route to existing session — queue event for the running sandbox
+                    await queue_pending_event(
+                        automation.id, session_key, event_payload, session
+                    )
+                    events_queued += 1
+                    logger.info(
+                        "Event queued to existing session key=%s "
+                        "automation=%s session_id=%s",
+                        session_key,
+                        automation.id,
+                        active_session.id,
+                    )
+                    continue  # Skip new run creation
+
+                # No active session — fall through to create a new run below
+                logger.info(
+                    "No active session for key=%s automation=%s; creating new run",
+                    session_key,
+                    automation.id,
+                )
+
         run = await create_automation_run(
             automation, session, event_payload=event_payload
         )
@@ -187,6 +234,7 @@ async def receive_event(
 
     return EventResponse(
         received=True,
-        matched=len(matched_automations),
+        matched=len(matched),
         runs_created=run_ids,
+        events_queued=events_queued,
     )

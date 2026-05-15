@@ -44,6 +44,7 @@ from openhands.automation.utils.run import (
     mark_run_terminal,
     update_sandbox_id,
 )
+from openhands.automation.utils.session import create_session, extract_session_key
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -112,6 +113,72 @@ async def _poll_pending_runs(
 
     result = await session.execute(select_query)
     return list(result.scalars().all())
+
+
+async def _maybe_create_session(
+    run: AutomationRun,
+    sandbox_id: str | None,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Create an AutomationSession if the run's trigger has session config.
+
+    Called after a run is successfully dispatched. If the trigger has a
+    ``session`` configuration, extract the session key from the event payload
+    and record the session so subsequent events are routed here.
+
+    Failures are logged but do not affect the run (best-effort).
+    """
+    from openhands.automation.schemas import EventTrigger
+
+    automation = run.automation
+    if not automation:
+        return
+
+    try:
+        trigger_data = automation.trigger
+        if trigger_data.get("type") != "event":
+            return
+
+        trigger = EventTrigger.model_validate(trigger_data)
+        if not trigger.session:
+            return
+
+        session_cfg = trigger.session
+        event_payload = run.event_payload or {}
+        session_key = extract_session_key(session_cfg.key_expr, event_payload)
+
+        if session_key is None:
+            logger.warning(
+                "Could not extract session key for run %s "
+                "using expr=%r; session not created",
+                run.id,
+                session_cfg.key_expr,
+            )
+            return
+
+        async with session_factory() as db_session:
+            session_record = await create_session(
+                automation_id=automation.id,
+                session_key=session_key,
+                run_id=run.id,
+                session_timeout_seconds=session_cfg.session_timeout_seconds,
+                db_session=db_session,
+            )
+            if sandbox_id:
+                session_record.sandbox_id = sandbox_id
+            await db_session.commit()
+
+        logger.info(
+            "Created session key=%s for run %s automation %s",
+            session_key,
+            run.id,
+            automation.id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to create session for run %s; continuing without session",
+            run.id,
+        )
 
 
 async def _execute_run(
@@ -268,6 +335,10 @@ async def _execute_run(
     if result.success:
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+        # If this run was triggered by an event with session config, create a
+        # session record so subsequent events with the same session key are
+        # routed to this sandbox instead of starting a new run.
+        await _maybe_create_session(run, ctx.sandbox_id, session_factory)
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
