@@ -14,8 +14,10 @@
 set -e
 
 echo "[setup] Fetching SDK version from automation service"
+set +e
 SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['version'])")
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+set -e
 if [ -z "$SDK_VERSION" ]; then
     echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
     exit 1
