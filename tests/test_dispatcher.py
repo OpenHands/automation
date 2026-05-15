@@ -679,4 +679,3 @@ class TestBuildEventPayload:
 
         assert payload["trigger"] == "unknown"
         assert payload["trigger_payload"] == {}
-
