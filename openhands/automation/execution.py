@@ -450,7 +450,7 @@ async def run_automation(
     untrusted/large files on the automation service.
 
     *env_vars* are exported before setup.sh and the entrypoint run,
-    so setup.sh can consume injected values such as ``OPENHANDS_SDK_VERSION``.
+    so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
     The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
     **always** injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
