@@ -8,12 +8,18 @@
 #
 # Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
 #
-# OPENHANDS_SDK_VERSION is injected by the automation dispatcher and matches
-# the SDK version the service is currently running, so the sandbox always
-# installs a compatible SDK without any hardcoded version pins here.
+# The SDK version is fetched from the automation service API on every run so
+# that deploying a new service version is the only step required to roll out a
+# new SDK — no tarball re-generation or hardcoded version pins needed.
 set -e
 
-SDK_VERSION="${OPENHANDS_SDK_VERSION}"
+echo "[setup] Fetching SDK version from automation service"
+SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['version'])")
+if [ -z "$SDK_VERSION" ]; then
+    echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
+    exit 1
+fi
 
 echo "[setup] Creating isolated virtual environment"
 uv venv .venv --quiet
