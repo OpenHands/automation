@@ -23,6 +23,7 @@ from openhands.automation.backends import get_backend
 from openhands.automation.config import Settings
 from openhands.automation.models import AutomationRun, AutomationRunStatus
 from openhands.automation.utils import log_extra
+from openhands.automation.utils.session import mark_session_dead
 from openhands.automation.utils.time import utcnow
 
 
@@ -231,6 +232,16 @@ async def mark_stale_runs(
             try:
                 if await _verify_and_mark_run(session, run, settings):
                     marked += 1
+                    # Mark any active session for this run as DEAD so the event
+                    # router stops routing new events to the dead sandbox.
+                    try:
+                        session_marked = await mark_session_dead(run, session)
+                        if session_marked:
+                            logger.info("Marked session dead for run", extra=extra)
+                    except Exception:
+                        logger.exception(
+                            "Failed to mark session dead for run", extra=extra
+                        )
                 else:
                     logger.info("Run already completed, skipping", extra=extra)
             except Exception:
