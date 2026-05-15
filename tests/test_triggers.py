@@ -189,6 +189,34 @@ class TestGithubTriggerValidation:
                 repositories=[],
             )
 
+    def test_valid_jmespath_event_filter_is_accepted(self):
+        trigger = GithubTrigger(
+            github_access_token=SecretStr("ghp_xxx"),
+            repositories=["foo/bar"],
+            event_filter="type == 'PushEvent' && payload.ref == 'refs/heads/main'",
+        )
+        assert (
+            trigger.event_filter
+            == "type == 'PushEvent' && payload.ref == 'refs/heads/main'"
+        )
+
+    def test_invalid_jmespath_event_filter_rejected(self):
+        with pytest.raises(ValidationError, match="Invalid JMESPath expression"):
+            GithubTrigger(
+                github_access_token=SecretStr("ghp_xxx"),
+                repositories=["foo/bar"],
+                event_filter="this is not valid jmespath @@@",
+            )
+
+    def test_empty_event_filter_becomes_none(self):
+        # Whitespace-only filter shouldn't error and shouldn't be retained.
+        trigger = GithubTrigger(
+            github_access_token=SecretStr("ghp_xxx"),
+            repositories=["foo/bar"],
+            event_filter="   ",
+        )
+        assert trigger.event_filter is None
+
     def test_discriminated_union_dispatches_to_github(self):
         parsed = TriggerAdapter.validate_python(
             {
@@ -269,9 +297,10 @@ class TestGithubTriggerCreatesRun:
         runs = (await sqlite_session.execute(select(AutomationRun))).scalars().all()
         assert runs == []
 
-    async def test_event_type_filter_excludes_non_matching(
+    async def test_jmespath_filter_excludes_non_matching(
         self, sqlite_session, patch_github_transport
     ):
+        """``event_filter`` drops events whose JMESPath expression is falsy."""
         cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
         events = [_gh_event(2, cutoff + timedelta(minutes=5), event_type="IssuesEvent")]
         patch_github_transport(
@@ -281,7 +310,7 @@ class TestGithubTriggerCreatesRun:
         trigger = GithubTrigger(
             github_access_token=SecretStr("ghp_xxx"),
             repositories=["foo/bar"],
-            event_types=["PushEvent"],
+            event_filter="type == 'PushEvent'",
         )
         automation = await _make_automation(
             sqlite_session,
@@ -289,6 +318,77 @@ class TestGithubTriggerCreatesRun:
             last_triggered_at=cutoff,
         )
         assert await trigger.create_pending_run(sqlite_session, automation) is None
+
+    async def test_jmespath_filter_keeps_matching(
+        self, sqlite_session, patch_github_transport
+    ):
+        """A truthy JMESPath result keeps the event and fires the trigger."""
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        events = [
+            _gh_event(7, cutoff + timedelta(minutes=1), event_type="IssuesEvent"),
+            _gh_event(8, cutoff + timedelta(minutes=2), event_type="PushEvent"),
+        ]
+        patch_github_transport(
+            lambda req: __import__("httpx").Response(200, json=events)
+        )
+
+        trigger = GithubTrigger(
+            github_access_token=SecretStr("ghp_xxx"),
+            repositories=["foo/bar"],
+            event_filter="type == 'PushEvent'",
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        run = await trigger.create_pending_run(sqlite_session, automation)
+        assert run is not None
+        # Only the PushEvent survived the filter.
+        kept = run.event_payload["events"]
+        assert [e["id"] for e in kept] == ["8"]
+
+    async def test_jmespath_filter_supports_nested_payload(
+        self, sqlite_session, patch_github_transport
+    ):
+        """JMESPath can match against the nested ``payload`` object."""
+        cutoff = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
+        events = [
+            {
+                "id": "9",
+                "type": "PullRequestEvent",
+                "created_at": (cutoff + timedelta(minutes=1)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "payload": {"action": "closed"},
+            },
+            {
+                "id": "10",
+                "type": "PullRequestEvent",
+                "created_at": (cutoff + timedelta(minutes=2)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "payload": {"action": "opened"},
+            },
+        ]
+        patch_github_transport(
+            lambda req: __import__("httpx").Response(200, json=events)
+        )
+
+        trigger = GithubTrigger(
+            github_access_token=SecretStr("ghp_xxx"),
+            repositories=["foo/bar"],
+            event_filter=("type == 'PullRequestEvent' && payload.action == 'opened'"),
+        )
+        automation = await _make_automation(
+            sqlite_session,
+            trigger=trigger.model_dump(mode="python"),
+            last_triggered_at=cutoff,
+        )
+        run = await trigger.create_pending_run(sqlite_session, automation)
+        assert run is not None
+        kept = run.event_payload["events"]
+        assert [e["id"] for e in kept] == ["10"]
 
     async def test_uses_created_at_when_never_triggered(
         self, sqlite_session, patch_github_transport

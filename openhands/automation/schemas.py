@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
+import jmespath
 from croniter import croniter
+from jmespath.exceptions import JMESPathError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -277,10 +279,22 @@ class GithubTrigger(_TriggerBase):
     ``run.event_payload`` so the run's entrypoint can react to them; otherwise
     it returns ``None``.
 
-    Optionally restrict the event types that count using ``event_types`` (e.g.
-    ``["PushEvent", "PullRequestEvent"]``); when omitted, any event type
-    triggers a fire.
+    Optionally narrow which events fire the trigger using
+    :attr:`event_filter` — a `JMESPath <https://jmespath.org/>`_ expression
+    evaluated against each event. An event is kept when the expression
+    returns a truthy value. Examples::
+
+        type == 'PushEvent'
+        type == 'PullRequestEvent' && payload.action == 'opened'
+        type == 'PushEvent' && payload.ref == 'refs/heads/main'
+
+    When ``event_filter`` is omitted, every event newer than the cutoff
+    fires the trigger.
     """
+
+    # Tell Pydantic that the cached compiled JMESPath object (a non-Pydantic
+    # type) is acceptable on the model; we expose it via a property.
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     type: Literal["github"] = "github"
     github_access_token: SecretStr = Field(
@@ -299,11 +313,15 @@ class GithubTrigger(_TriggerBase):
             "(e.g. 'All-Hands-AI/OpenHands')."
         ),
     )
-    event_types: list[str] | None = Field(
+    event_filter: str | None = Field(
         default=None,
         description=(
-            "Optional allow-list of GitHub event types (e.g. 'PushEvent'). "
-            "When unset, any event type counts as new activity."
+            "Optional JMESPath expression evaluated against each GitHub event "
+            "(see https://jmespath.org/). An event matches when the expression "
+            "returns a truthy value; non-matching events are dropped. The "
+            "trigger fires only if at least one event matches. Examples: "
+            "`type == 'PushEvent'`, "
+            "`type == 'PullRequestEvent' && payload.action == 'opened'`."
         ),
     )
 
@@ -318,13 +336,37 @@ class GithubTrigger(_TriggerBase):
             cleaned.append(repo)
         return cleaned
 
-    @field_validator("event_types")
+    @field_validator("event_filter")
     @classmethod
-    def validate_event_types(cls, v: list[str] | None) -> list[str] | None:
+    def validate_event_filter(cls, v: str | None) -> str | None:
+        """Parse the JMESPath at validation time so bad syntax fails fast.
+
+        The compiled expression itself is *not* stored on the field (so the
+        JSON round-trip is clean) — it's cached lazily on first use via
+        :attr:`_compiled_event_filter`.
+        """
         if v is None:
             return v
-        cleaned = [t.strip() for t in v if t and t.strip()]
-        return cleaned or None
+        expr = v.strip()
+        if not expr:
+            return None
+        try:
+            jmespath.compile(expr)
+        except JMESPathError as e:
+            raise ValueError(f"Invalid JMESPath expression: {e}") from e
+        return expr
+
+    @property
+    def _compiled_event_filter(self) -> jmespath.parser.ParsedResult | None:
+        """Compile and cache the JMESPath expression on first use."""
+        if self.event_filter is None:
+            return None
+        cached = self.__dict__.get("_compiled_filter")
+        if cached is None:
+            # Already validated in ``validate_event_filter`` — won't raise.
+            cached = jmespath.compile(self.event_filter)
+            self.__dict__["_compiled_filter"] = cached
+        return cached
 
     @field_serializer("github_access_token", when_used="always")
     def _serialize_token(self, v: SecretStr) -> str:
@@ -364,9 +406,12 @@ class GithubTrigger(_TriggerBase):
     ) -> list[dict[str, Any]]:
         """Return all matching events for ``repo`` newer than ``cutoff``.
 
-        Honours :attr:`event_types`. Errors (HTTP/JSON/non-200) are logged
-        and treated as "no new events" so a single bad repo doesn't take
-        down the whole trigger.
+        Applies :attr:`event_filter` (a JMESPath expression) if set: each
+        event is kept only when the expression evaluates to a truthy value.
+        Errors (HTTP/JSON/non-200) are logged and treated as "no new events"
+        so a single bad repo doesn't take down the whole trigger. A
+        JMESPath evaluation error on an individual event is logged and the
+        event is dropped (treated as non-matching).
         """
         try:
             resp = await client.get(
@@ -393,13 +438,22 @@ class GithubTrigger(_TriggerBase):
         if not isinstance(events, list):
             return []
 
-        allowed: set[str] | None = set(self.event_types) if self.event_types else None
+        compiled = self._compiled_event_filter
         new_events: list[dict[str, Any]] = []
         for ev in events:
             if not isinstance(ev, dict):
                 continue
-            if allowed is not None and ev.get("type") not in allowed:
-                continue
+            if compiled is not None:
+                try:
+                    if not compiled.search(ev):
+                        continue
+                except JMESPathError as e:
+                    logger.warning(
+                        "JMESPath evaluation failed for event in %s: %s",
+                        repo,
+                        e,
+                    )
+                    continue
             created_raw = ev.get("created_at")
             if not isinstance(created_raw, str):
                 continue
