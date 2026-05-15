@@ -386,8 +386,8 @@ async def execute_in_context(
             f"mkdir -p {work_dir}"
             f" && tar xzf {TARBALL_PATH} -C {work_dir}"
             f" && cd {work_dir}"
-            f" && ([ ! -f setup.sh ] || bash setup.sh)"
-            f" && {exports}{entrypoint}"
+            f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+            f" && {entrypoint}"
         )
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
@@ -449,8 +449,9 @@ async def run_automation(
     (downloaded directly inside sandbox via curl). URLs avoid downloading
     untrusted/large files on the automation service.
 
-    *env_vars* are exported before the entrypoint runs.  The sandbox
-    identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
+    *env_vars* are exported before setup.sh and the entrypoint run,
+    so setup.sh can consume injected values such as ``OPENHANDS_SDK_VERSION``.
+    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
     **always** injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
@@ -520,8 +521,8 @@ async def run_automation(
                 f"mkdir -p {work_dir}"
                 f" && tar xzf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
-                f" && {exports}{entrypoint}"
+                f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {entrypoint}"
             )
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())

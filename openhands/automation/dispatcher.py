@@ -15,6 +15,7 @@ in the ExecutionBackend (see automation/backends/).
 """
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import uuid
@@ -51,6 +52,12 @@ from openhands.automation.utils.tarball_validation import (
 
 
 logger = logging.getLogger("automation.dispatcher")
+
+try:
+    _SDK_VERSION = importlib.metadata.version("openhands-sdk")
+except importlib.metadata.PackageNotFoundError:
+    _SDK_VERSION = ""
+    logger.warning("openhands-sdk package not found; OPENHANDS_SDK_VERSION will be empty")
 
 
 async def _download_internal_tarball(
@@ -177,6 +184,7 @@ async def _execute_run(
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     env_vars["AUTOMATION_RUN_ID"] = run_id
+    env_vars["OPENHANDS_SDK_VERSION"] = _SDK_VERSION
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         {
             "trigger": automation.trigger,

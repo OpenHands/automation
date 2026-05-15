@@ -4,6 +4,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
 import asyncio
+import importlib.metadata
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,6 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from openhands.automation.dispatcher import (
+    _SDK_VERSION,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -30,6 +32,20 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def mock_client():
     """Mock httpx.AsyncClient for tests."""
     return MagicMock()
+
+
+class TestSDKVersion:
+    """Tests for OPENHANDS_SDK_VERSION injection into the sandbox environment."""
+
+    def test_sdk_version_resolved_from_installed_package(self):
+        """_SDK_VERSION matches the installed openhands-sdk package version."""
+        expected = importlib.metadata.version("openhands-sdk")
+        assert _SDK_VERSION == expected
+
+    def test_sdk_version_is_non_empty(self):
+        """_SDK_VERSION must be a non-empty string so setup.sh can pin a version."""
+        assert isinstance(_SDK_VERSION, str)
+        assert _SDK_VERSION != "", "_SDK_VERSION is empty; openhands-sdk may not be installed"
 
 
 class TestIsHttpUrl:

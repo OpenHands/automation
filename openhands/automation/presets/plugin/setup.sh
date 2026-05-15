@@ -7,9 +7,13 @@
 # - No pollution of the system Python environment
 #
 # Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
+#
+# OPENHANDS_SDK_VERSION is injected by the automation dispatcher and matches
+# the SDK version the service is currently running, so the sandbox always
+# installs a compatible SDK without any hardcoded version pins here.
 set -e
 
-SDK_VERSION="1.22.0"
+SDK_VERSION="${OPENHANDS_SDK_VERSION}"
 
 echo "[setup] Creating isolated virtual environment"
 uv venv .venv --quiet
