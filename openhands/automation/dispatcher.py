@@ -57,7 +57,9 @@ try:
     _SDK_VERSION = importlib.metadata.version("openhands-sdk")
 except importlib.metadata.PackageNotFoundError:
     _SDK_VERSION = ""
-    logger.warning("openhands-sdk package not found; OPENHANDS_SDK_VERSION will be empty")
+    logger.warning(
+        "openhands-sdk package not found; OPENHANDS_SDK_VERSION will be empty"
+    )
 
 
 async def _download_internal_tarball(

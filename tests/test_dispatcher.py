@@ -45,7 +45,9 @@ class TestSDKVersion:
     def test_sdk_version_is_non_empty(self):
         """_SDK_VERSION must be a non-empty string so setup.sh can pin a version."""
         assert isinstance(_SDK_VERSION, str)
-        assert _SDK_VERSION != "", "_SDK_VERSION is empty; openhands-sdk may not be installed"
+        assert _SDK_VERSION != "", (
+            "_SDK_VERSION is empty; openhands-sdk may not be installed"
+        )
 
 
 class TestIsHttpUrl:
