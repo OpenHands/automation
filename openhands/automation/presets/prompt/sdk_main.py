@@ -65,6 +65,9 @@ import json
 import os
 import sys
 import time
+from urllib.parse import quote
+
+import httpx
 
 
 # Detect execution mode based on AGENT_SERVER_URL presence
@@ -115,6 +118,59 @@ from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
+
+
+def _load_named_llm_profile_config(profile_name: str) -> dict[str, object]:
+    """Resolve an LLM profile using the same profile APIs as Agent Canvas."""
+    if IS_LOCAL_MODE:
+        headers = {"X-Expose-Secrets": "plaintext"}
+        if session_key:
+            headers["X-Session-API-Key"] = session_key
+        response = httpx.get(
+            f"{agent_server_url}/api/profiles/{quote(profile_name, safe='')}",
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code == 404:
+            raise FileNotFoundError(f"LLM profile `{profile_name}` not found")
+        response.raise_for_status()
+        config = response.json().get("config")
+    else:
+        response = httpx.get(
+            f"{api_url}/api/v1/users/me",
+            params={"expose_secrets": "true"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Session-API-Key": session_key,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        llm_profiles = response.json().get("llm_profiles") or {}
+        profiles = (
+            llm_profiles.get("profiles") if isinstance(llm_profiles, dict) else None
+        )
+        config = profiles.get(profile_name) if isinstance(profiles, dict) else None
+        if config is None:
+            available = sorted(profiles) if isinstance(profiles, dict) else []
+            raise FileNotFoundError(
+                f"LLM profile `{profile_name}` not found. "
+                f"Available profiles: {', '.join(available) or 'none'}"
+            )
+
+    if not isinstance(config, dict):
+        raise ValueError(f"LLM profile `{profile_name}` has invalid config")
+    return config
+
+
+def get_automation_llm(workspace):
+    if not llm_profile:
+        return workspace.get_llm()
+
+    from openhands.sdk.llm.llm import LLM
+
+    return LLM(**_load_named_llm_profile_config(llm_profile))
+
 
 # Workspace base directory (for RemoteWorkspace working_dir).
 # Default is /workspace because preset scripts run inside containers where this path
@@ -237,9 +293,9 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Get LLM config via workspace
+    # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm(profile_name=llm_profile)
+    llm = get_automation_llm(workspace)
     print(f"  profile: {llm_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")

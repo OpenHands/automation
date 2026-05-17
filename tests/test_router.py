@@ -727,10 +727,8 @@ class TestUpdateAutomation:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
-    async def test_update_automation_rejects_llm_profile(
-        self, async_client, async_session
-    ):
-        """PATCH does not allow changing the selected LLM profile."""
+    async def test_update_automation_llm_profile(self, async_client, async_session):
+        """PATCH can update the selected LLM profile."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -748,9 +746,11 @@ class TestUpdateAutomation:
             json={"llm_profile": "new-profile"},
         )
 
-        assert response.status_code == 422
+        assert response.status_code == 200
+        data = response.json()
+        assert data["llm_profile"] == "new-profile"
         await async_session.refresh(automation)
-        assert automation.llm_profile == "original-profile"
+        assert automation.llm_profile == "new-profile"
 
     async def test_update_automation_not_found(self, async_client):
         """PATCH on non-existent automation returns 404."""
