@@ -1,5 +1,3 @@
-# ruff: noqa: E402, I001
-
 """Plugin-based automation script — runs inside an OpenHands execution environment.
 
 This script is auto-generated from a plugin automation request. It supports two modes:

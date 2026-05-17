@@ -1,4 +1,3 @@
-# ruff: noqa: E402, I001
 """Prompt-based automation script — runs inside an OpenHands execution environment.
 
 This script is auto-generated from a user's prompt. It supports two modes:

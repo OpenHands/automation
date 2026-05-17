@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.constants import LLM_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
@@ -33,8 +34,6 @@ from openhands.workspace import RepoSource
 
 
 logger = logging.getLogger(__name__)
-
-LLM_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 

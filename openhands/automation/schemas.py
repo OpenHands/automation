@@ -10,13 +10,11 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from openhands.automation.config import get_config
+from openhands.automation.constants import LLM_PROFILE_PATTERN
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
 _TARBALL_SCHEME_RE = re.compile(r"^(s3|gs|https?|oh-internal)://")
-
-# LLM profile names mirror the SDK profile-store constraints.
-_LLM_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 
 # Shell metacharacters that should not appear in entrypoints or script paths
 _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
@@ -259,7 +257,7 @@ class CreateAutomationRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        pattern=_LLM_PROFILE_PATTERN,
+        pattern=LLM_PROFILE_PATTERN,
         description="Optional LLM profile name to use for automation runs.",
     )
 
@@ -318,7 +316,7 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        pattern=_LLM_PROFILE_PATTERN,
+        pattern=LLM_PROFILE_PATTERN,
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
