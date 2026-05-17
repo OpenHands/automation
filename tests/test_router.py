@@ -727,6 +727,55 @@ class TestUpdateAutomation:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
+    async def test_update_automation_llm_profile(self, async_client, async_session):
+        """PATCH can update the selected LLM profile."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            llm_profile="original-profile",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"llm_profile": "new-profile"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["llm_profile"] == "new-profile"
+        await async_session.refresh(automation)
+        assert automation.llm_profile == "new-profile"
+
+    async def test_update_automation_unknown_llm_profile_rejected(
+        self, async_client, async_session, mock_authenticated_user
+    ):
+        """PATCH rejects unknown LLM profiles when auth metadata includes names."""
+        mock_authenticated_user.llm_profile_names = frozenset({"allowed-profile"})
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"llm_profile": "missing-profile"},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "LLM profile `missing-profile` not found"
+
     async def test_update_automation_not_found(self, async_client):
         """PATCH on non-existent automation returns 404."""
         fake_id = uuid.uuid4()

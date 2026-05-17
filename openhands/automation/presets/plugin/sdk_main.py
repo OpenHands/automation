@@ -52,13 +52,14 @@ Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
+  AUTOMATION_LLM_PROFILE   - LLM profile name to load instead of default (optional)
+
 """
 
 import json
 import os
 import sys
 import time
-
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -69,6 +70,8 @@ api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
+llm_profile = os.environ.get("AUTOMATION_LLM_PROFILE") or None
+
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -97,6 +100,7 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
+print(f"  AUTOMATION_LLM_PROFILE: {llm_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
@@ -106,16 +110,25 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+from automation_llm import get_automation_llm
+
+
 # Workspace base directory (for RemoteWorkspace working_dir)
 # Expand ~ to home directory before validation
 workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
 # Validate workspace_base path (after expansion) - fail fast with clear errors
 if not os.path.isabs(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 # Create workspace based on mode
@@ -232,9 +245,18 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace
+    # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm()
+    llm = get_automation_llm(
+        workspace,
+        llm_profile,
+        is_local_mode=IS_LOCAL_MODE,
+        agent_server_url=agent_server_url,
+        api_url=api_url,
+        api_key=api_key,
+        session_key=session_key,
+    )
+    print(f"  profile: {llm_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 

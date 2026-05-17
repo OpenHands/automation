@@ -23,10 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.constants import LLM_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.utils.llm_profiles import validate_llm_profile_for_user
 from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -37,8 +39,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directories
-PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
-PLUGIN_PRESET_DIR = Path(__file__).parent / "presets" / "plugin"
+PRESETS_DIR = Path(__file__).parent / "presets"
+PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
+PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
 # Venv Python entrypoint (Unix path format)
 # - Cloud mode: Always Linux sandboxes, so Unix paths work
@@ -61,6 +64,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
+            "automation_llm.py": (PRESETS_DIR / "automation_llm.py").read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -75,6 +79,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "automation_llm.py": (PRESETS_DIR / "automation_llm.py").read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -101,6 +106,13 @@ class CreatePromptAutomationRequest(BaseModel):
         min_length=1,
         max_length=50000,
         description="The prompt to execute in the automation",
+    )
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
     )
     trigger: Trigger = Field(
         ...,
@@ -149,6 +161,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
+    - automation_llm.py: shared LLM profile resolver
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
     - repos_config.json: (optional) Repository configuration for cloning
@@ -169,6 +182,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "automation_llm.py", preset_files["automation_llm.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -215,6 +229,8 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
+    validate_llm_profile_for_user(body.llm_profile, user)
+
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
 
@@ -266,6 +282,7 @@ async def create_automation_from_prompt(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            llm_profile=body.llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -322,6 +339,14 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
+    )
+
     trigger: Trigger = Field(
         ...,
         description=(
@@ -369,6 +394,7 @@ def _generate_plugin_tarball(
 
     The tarball contains:
     - main.py: SDK boilerplate that loads plugins and runs conversation
+    - automation_llm.py: shared LLM profile resolver
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
@@ -396,6 +422,7 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "automation_llm.py", preset_files["automation_llm.py"])
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
@@ -444,6 +471,8 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
+    validate_llm_profile_for_user(body.llm_profile, user)
+
     # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
     tarball_content = _generate_plugin_tarball(
         body.plugins, body.prompt, repos=body.repos
@@ -498,6 +527,7 @@ async def create_automation_from_plugin(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            llm_profile=body.llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

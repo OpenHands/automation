@@ -95,6 +95,20 @@ class AuthenticatedUser:
     permissions: list[str]
     auth_method: AuthMethod
     api_key: str | None = None  # Set when auth_method == API_KEY
+    llm_profile_names: frozenset[str] | None = None
+
+
+def _extract_llm_profile_names(data: dict) -> frozenset[str] | None:  # type: ignore[type-arg]
+    """Extract LLM profile names from a users/me response when present."""
+    llm_profiles = data.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
+        return None
+
+    profiles = llm_profiles.get("profiles")
+    if not isinstance(profiles, dict):
+        return None
+
+    return frozenset(str(name) for name in profiles)
 
 
 def clear_auth_cache() -> None:
@@ -367,6 +381,7 @@ async def authenticate_request(
         permissions=permissions,
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
+        llm_profile_names=_extract_llm_profile_names(data),
     )
     auth_cache[cache_key] = user
     return user

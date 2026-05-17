@@ -83,13 +83,16 @@ async def lifespan(app: FastAPI):
 
         if not migrations_path.is_dir():
             # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
+            repo_root_migrations = package_dir.parent.parent / "migrations"
+            legacy_repo_root_migrations = package_dir.parent / "migrations"
             if repo_root_migrations.is_dir():
                 migrations_path = repo_root_migrations
+            elif legacy_repo_root_migrations.is_dir():
+                migrations_path = legacy_repo_root_migrations
             else:
                 msg = (
-                    f"Migrations directory not found. "
-                    f"Checked: {migrations_path}, {repo_root_migrations}"
+                    f"Migrations directory not found. Checked: {migrations_path}, "
+                    f"{repo_root_migrations}, {legacy_repo_root_migrations}"
                 )
                 raise RuntimeError(msg)
 

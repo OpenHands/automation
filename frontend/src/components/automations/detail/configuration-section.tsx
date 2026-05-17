@@ -62,12 +62,12 @@ export function ConfigurationSection({
           {scheduleDisplay}
         </ConfigField>
 
-        {automation.model && (
+        {(automation.llm_profile ?? automation.model) && (
           <ConfigField
             icon={<SparkleIcon className="size-3.5" />}
             label={t(I18nKey.AUTOMATIONS$DETAIL$MODEL)}
           >
-            {automation.model}
+            {automation.llm_profile ?? automation.model}
           </ConfigField>
         )}
 

@@ -10,6 +10,7 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from openhands.automation.config import get_config
+from openhands.automation.constants import LLM_PROFILE_PATTERN
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -252,6 +253,14 @@ class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
+    )
+
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
     )
@@ -303,6 +312,14 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
+    )
+
     prompt: str | None = Field(default=None, max_length=50000)
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
@@ -554,6 +571,8 @@ class AutomationResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID
+    llm_profile: str | None
+
     name: str
     prompt: str | None
     trigger: dict

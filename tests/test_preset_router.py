@@ -154,7 +154,7 @@ class TestGenerateTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "get_automation_llm" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -357,6 +357,7 @@ class TestCreateAutomationFromPrompt:
         payload = {
             "name": "My Prompt Automation",
             "prompt": test_prompt,
+            "llm_profile": "fast-profile",
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -367,6 +368,8 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
+        assert data["llm_profile"] == "fast-profile"
+
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
@@ -389,11 +392,31 @@ class TestCreateAutomationFromPrompt:
             assert "main.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
+            assert "automation_llm.py" in tar.getnames()
 
             # Verify prompt content matches what was sent
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_unknown_llm_profile_rejected(
+        self, async_client, mock_file_store, mock_authenticated_user
+    ):
+        """Prompt preset rejects unknown profiles when auth metadata includes names."""
+        mock_authenticated_user.llm_profile_names = frozenset({"allowed-profile"})
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "llm_profile": "missing-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "LLM profile `missing-profile` not found"
+        mock_file_store.write_stream.assert_not_called()
 
     async def test_create_from_prompt_creates_upload_record(
         self, async_client, async_session, mock_file_store
@@ -734,7 +757,7 @@ class TestGeneratePluginTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "get_automation_llm" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -797,6 +820,7 @@ class TestGeneratePluginTarball:
             # Note: clone_repos.py is no longer included - SDK handles cloning
             assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
+            assert "automation_llm.py" in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")
