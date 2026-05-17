@@ -34,6 +34,8 @@ from openhands.workspace import RepoSource
 
 logger = logging.getLogger(__name__)
 
+LLM_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directories
@@ -101,6 +103,13 @@ class CreatePromptAutomationRequest(BaseModel):
         min_length=1,
         max_length=50000,
         description="The prompt to execute in the automation",
+    )
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
     )
     trigger: Trigger = Field(
         ...,
@@ -266,6 +275,7 @@ async def create_automation_from_prompt(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            llm_profile=body.llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -322,6 +332,14 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
+    llm_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
+    )
+
     trigger: Trigger = Field(
         ...,
         description=(
@@ -498,6 +516,7 @@ async def create_automation_from_plugin(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            llm_profile=body.llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

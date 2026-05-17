@@ -66,6 +66,7 @@ async def create_automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
+        llm_profile=body.llm_profile,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,

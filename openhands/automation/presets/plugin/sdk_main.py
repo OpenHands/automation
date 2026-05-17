@@ -1,3 +1,5 @@
+# ruff: noqa: E402, I001
+
 """Plugin-based automation script — runs inside an OpenHands execution environment.
 
 This script is auto-generated from a plugin automation request. It supports two modes:
@@ -52,6 +54,8 @@ Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
+  AUTOMATION_LLM_PROFILE   - LLM profile name to load instead of default (optional)
+
 """
 
 import json
@@ -69,6 +73,8 @@ api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("SESSION_API_KEY", "")
+llm_profile = os.environ.get("AUTOMATION_LLM_PROFILE") or None
+
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -97,6 +103,7 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
+print(f"  AUTOMATION_LLM_PROFILE: {llm_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
@@ -112,10 +119,16 @@ workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace
 
 # Validate workspace_base path (after expansion) - fail fast with clear errors
 if not os.path.isabs(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 # Create workspace based on mode
@@ -234,7 +247,8 @@ This automation was triggered by a webhook event:
 
     # Get LLM config via workspace
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm()
+    llm = workspace.get_llm(profile_name=llm_profile)
+    print(f"  profile: {llm_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 

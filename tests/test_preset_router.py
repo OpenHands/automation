@@ -357,6 +357,7 @@ class TestCreateAutomationFromPrompt:
         payload = {
             "name": "My Prompt Automation",
             "prompt": test_prompt,
+            "llm_profile": "fast-profile",
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -367,6 +368,8 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
+        assert data["llm_profile"] == "fast-profile"
+
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"

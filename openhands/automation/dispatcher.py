@@ -184,8 +184,15 @@ async def _execute_run(
             "automation_id": str(automation.id),
             "automation_name": automation.name,
             **({"event": run.event_payload} if run.event_payload else {}),
+            **(
+                {"llm_profile": automation.llm_profile}
+                if automation.llm_profile
+                else {}
+            ),
         }
     )
+    if automation.llm_profile:
+        env_vars["AUTOMATION_LLM_PROFILE"] = automation.llm_profile
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
