@@ -317,6 +317,7 @@ class UpdateAutomationRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
+        description="Optional LLM profile name to use for automation runs.",
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
