@@ -727,6 +727,31 @@ class TestUpdateAutomation:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
+    async def test_update_automation_rejects_llm_profile(
+        self, async_client, async_session
+    ):
+        """PATCH does not allow changing the selected LLM profile."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            llm_profile="original-profile",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"llm_profile": "new-profile"},
+        )
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.llm_profile == "original-profile"
+
     async def test_update_automation_not_found(self, async_client):
         """PATCH on non-existent automation returns 404."""
         fake_id = uuid.uuid4()

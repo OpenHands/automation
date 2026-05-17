@@ -314,13 +314,6 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
-    llm_profile: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=64,
-        pattern=_LLM_PROFILE_PATTERN,
-    )
-
     prompt: str | None = Field(default=None, max_length=50000)
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
