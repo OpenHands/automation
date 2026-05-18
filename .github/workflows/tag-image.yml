@@ -46,10 +46,22 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
-                  if ! docker buildx imagetools inspect "$SRC" > /dev/null 2>&1; then
-                    echo "::error::Source image $SRC does not exist. The Docker workflow for commit ${{ github.sha }} may not have completed successfully. Re-run this workflow once the build finishes."
-                    exit 1
-                  fi
+                  # The Docker build workflow runs concurrently with this one, so the
+                  # source image may not be available yet. Retry for up to 5 minutes.
+                  MAX_ATTEMPTS=30
+                  SLEEP_SECS=10
+                  for i in $(seq 1 $MAX_ATTEMPTS); do
+                    if docker buildx imagetools inspect "$SRC" > /dev/null 2>&1; then
+                      echo "Source image available (attempt $i)"
+                      break
+                    fi
+                    if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
+                      echo "::error::Source image $SRC not found after $((MAX_ATTEMPTS * SLEEP_SECS))s. The Docker build for commit ${{ github.sha }} may have failed."
+                      exit 1
+                    fi
+                    echo "Waiting for source image (attempt $i/$MAX_ATTEMPTS)..."
+                    sleep $SLEEP_SECS
+                  done
                   args=()
                   while IFS= read -r tag; do
                     [[ -z "$tag" ]] && continue

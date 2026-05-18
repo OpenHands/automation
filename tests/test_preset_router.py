@@ -92,6 +92,24 @@ class TestPresetFileSyntax:
             "setup.sh doesn't look like a valid shell script"
         )
 
+    def test_prompt_setup_sh_fetches_sdk_version_from_api(self):
+        """Prompt setup.sh fetches SDK version from the automation service API."""
+        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "${AUTOMATION_API_URL}/sdk-version" in content, (
+            "setup.sh must call ${AUTOMATION_API_URL}/sdk-version "
+            "— do not hardcode the version"
+        )
+
+    def test_plugin_setup_sh_fetches_sdk_version_from_api(self):
+        """Plugin setup.sh fetches SDK version from the automation service API."""
+        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "${AUTOMATION_API_URL}/sdk-version" in content, (
+            "setup.sh must call ${AUTOMATION_API_URL}/sdk-version "
+            "— do not hardcode the version"
+        )
+
 
 class TestGenerateTarball:
     """Tests for the tarball generation function."""
