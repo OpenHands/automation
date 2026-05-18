@@ -6,6 +6,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 import asyncio
 import uuid
 from datetime import timedelta
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -560,7 +561,7 @@ class TestBuildEventPayload:
     See: https://github.com/OpenHands/automation/issues/111
     """
 
-    def _make_automation(self, trigger: dict, **kw) -> Automation:
+    def _make_automation(self, trigger: dict[str, Any] | None, **kw: Any) -> Automation:
         defaults = dict(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -570,7 +571,7 @@ class TestBuildEventPayload:
             enabled=True,
         )
         defaults.update(kw)
-        return Automation(trigger=trigger, **defaults)
+        return Automation(trigger=cast(Any, trigger), **defaults)
 
     def _make_run(self, automation: Automation, **kw) -> AutomationRun:
         return AutomationRun(
@@ -592,7 +593,7 @@ class TestBuildEventPayload:
         assert payload["automation_name"] == "Test"
 
     def test_event_trigger_uses_type_string(self):
-        """Event trigger → payload['trigger'] == 'event', full dict in trigger_payload."""
+        """Event trigger preserves full dict in trigger_payload."""
         trigger = {
             "type": "event",
             "source": "github",
@@ -616,7 +617,7 @@ class TestBuildEventPayload:
         assert len(str(payload["trigger"])) <= 256
 
     def test_long_filter_does_not_exceed_tag_limit(self):
-        """Trigger with a very long filter expression still produces a short tag value."""
+        """A very long filter still produces a short tag value."""
         long_filter = " && ".join([f"field_{i} == 'value_{i}'" for i in range(50)])
         trigger = {
             "type": "event",
@@ -661,7 +662,6 @@ class TestBuildEventPayload:
     def test_none_trigger_defaults_to_unknown(self):
         """None trigger → 'unknown' type, trigger_payload is None."""
         automation = self._make_automation(trigger=None)
-        automation.trigger = None
         run = self._make_run(automation)
 
         payload = _build_event_payload(automation, run)
