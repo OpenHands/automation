@@ -299,6 +299,10 @@ This automation was triggered by a webhook event:
         delete_on_close=False,  # Keep conversation history after completion
     )
     assert isinstance(conversation, RemoteConversation)
+
+    # Register conversation ID with workspace for completion callback
+    workspace.register_conversation(str(conversation.id))
+
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
 
