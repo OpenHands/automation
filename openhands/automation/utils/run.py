@@ -206,9 +206,7 @@ async def update_bash_command_id(
             )
             await session.commit()
     except Exception:
-        logger.exception(
-            "Failed to update bash_command_id for run %s", run_id
-        )
+        logger.exception("Failed to update bash_command_id for run %s", run_id)
 
 
 async def mark_run_terminal(
