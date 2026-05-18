@@ -42,6 +42,7 @@ from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    update_bash_command_id,
     update_sandbox_id,
 )
 from openhands.automation.utils.tarball_validation import (
@@ -268,6 +269,13 @@ async def _execute_run(
     if result.success:
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+        if result.bash_command_id:
+            # Persist the BashCommand id so the verifier can filter
+            # BashOutput events by exactly this command (avoids
+            # cross-command contamination on a shared agent server).
+            await update_bash_command_id(
+                session_factory, run.id, result.bash_command_id
+            )
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),

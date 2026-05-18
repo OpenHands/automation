@@ -184,6 +184,33 @@ async def update_sandbox_id(
         logger.exception("Failed to update sandbox_id for run %s", run_id)
 
 
+async def update_bash_command_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    bash_command_id: str,
+) -> None:
+    """Store the agent-server BashCommand id on the automation run.
+
+    The verifier reads this back later to filter BashOutput events by exactly
+    this command, so it doesn't pick up output from concurrent bash activity
+    on a shared agent server. Failure to record this is non-fatal — the run
+    will still execute — but verification may fall back to the (buggy)
+    most-recent-output behavior, which is what we're trying to avoid.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(bash_command_id=bash_command_id)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception(
+            "Failed to update bash_command_id for run %s", run_id
+        )
+
+
 async def mark_run_terminal(
     session_factory: async_sessionmaker[AsyncSession],
     run: AutomationRun,

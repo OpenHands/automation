@@ -196,6 +196,7 @@ class CloudSandboxBackend(ExecutionBackend):
                 sandbox_id=sandbox_id,
                 keep_alive=self._run.keep_alive,
                 run_id=run_id,
+                bash_command_id=self._run.bash_command_id,
             )
 
         return await self._with_auth_retry(_do_verify)

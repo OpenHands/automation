@@ -31,29 +31,45 @@ async def get_last_bash_command_result(
     client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
+    command_id: str | None = None,
 ) -> BashCommandResult:
-    """Query the agent server for the last bash command's result.
+    """Query the agent server for a bash command's result.
 
-    Returns the exit code and output of the most recent bash command.
-    Works with both Cloud sandboxes and local agent servers.
+    When *command_id* is supplied, returns the latest BashOutput for that
+    specific command. This is the correct path on shared agent servers
+    (local mode), where multiple bash commands from different runs — and
+    from the agent's own TerminalTool — can be in flight concurrently;
+    without the filter, "the latest BashOutput" can easily belong to
+    something else and produce nonsensical error_detail values on the
+    run record.
+
+    When *command_id* is None, falls back to the (legacy) most-recent-
+    output behavior. Callers that have a command id should always pass it.
 
     Args:
         client: HTTP client
         agent_url: Agent server URL
         session_key: API key for the agent server
+        command_id: Optional BashCommand id (hex) to filter by
 
     Returns:
         BashCommandResult with found=True if command result was retrieved
     """
     try:
-        # Search for the most recent BashOutput event
+        # Search for the most recent BashOutput event, scoped to this run's
+        # bash command whenever we know which one it is. The agent-server's
+        # search endpoint accepts ``command_id__eq`` and only matches
+        # BashOutput files whose embedded command_id matches.
+        params: dict[str, str | int] = {
+            "kind__eq": "BashOutput",
+            "sort_order": "TIMESTAMP_DESC",
+            "limit": 1,
+        }
+        if command_id:
+            params["command_id__eq"] = command_id
         resp = await client.get(
             f"{agent_url}/api/bash/bash_events/search",
-            params={
-                "kind__eq": "BashOutput",
-                "sort_order": "TIMESTAMP_DESC",
-                "limit": 1,
-            },
+            params=params,
             headers={"X-Session-API-Key": session_key},
             timeout=30.0,
         )
@@ -102,6 +118,7 @@ async def verify_run_on_agent_server(
     agent_url: str,
     session_key: str,
     run_id: str | None = None,
+    bash_command_id: str | None = None,
 ) -> VerificationResult:
     """Verify an automation run's status by querying an agent server directly.
 
@@ -115,6 +132,10 @@ async def verify_run_on_agent_server(
         agent_url: Agent server URL
         session_key: API key for the agent server
         run_id: Optional run ID for logging
+        bash_command_id: Optional BashCommand id (hex) recorded for this
+            run; when present, BashOutput lookups are scoped to it so the
+            verifier doesn't sample an unrelated command's output from a
+            shared agent server.
 
     Returns:
         VerificationResult with the verification outcome
@@ -123,8 +144,10 @@ async def verify_run_on_agent_server(
     extra = log_extra(run_id=run_id)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Get last bash command result
-        bash_result = await get_last_bash_command_result(client, agent_url, session_key)
+        # Get last bash command result, scoped to this run's command if known
+        bash_result = await get_last_bash_command_result(
+            client, agent_url, session_key, command_id=bash_command_id
+        )
 
         if not bash_result.found:
             logger.warning(

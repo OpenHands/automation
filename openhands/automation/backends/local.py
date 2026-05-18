@@ -148,11 +148,22 @@ class LocalAgentServerBackend(ExecutionBackend):
         return env_vars
 
     async def verify_run(self, run_id: str) -> VerificationResult:
-        """Verify run status by querying agent server directly."""
+        """Verify run status by querying agent server directly.
+
+        The stored ``bash_command_id`` (recorded right after dispatch) is
+        forwarded so the verifier reads BashOutput from *this run's* bash
+        chain only. Without it, the verifier samples the most recent
+        BashOutput on the agent server — which on a shared dev/local
+        server can easily belong to another run or to the agent's own
+        TerminalTool, producing misleading error_detail values like
+        "fatal: not a git repository" attributed to a run that never
+        ran a git command.
+        """
         return await verify_run_on_agent_server(
             agent_url=self.agent_server_url,
             session_key=self.api_key,
             run_id=run_id,
+            bash_command_id=self._run.bash_command_id,
         )
 
     async def cleanup_after_verification(
