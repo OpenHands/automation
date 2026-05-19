@@ -28,9 +28,7 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.utils.llm_profiles import (
-    resolve_llm_profile_for_user as resolve_model_for_user,
-)
+from openhands.automation.utils.llm_profiles import resolve_llm_profile_for_user
 from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -234,7 +232,7 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
-    model = resolve_model_for_user(body.model, user)
+    model = resolve_llm_profile_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -479,7 +477,7 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
-    model = resolve_model_for_user(body.model, user)
+    model = resolve_llm_profile_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
     tarball_content = _generate_plugin_tarball(
