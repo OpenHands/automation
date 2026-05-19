@@ -1,7 +1,7 @@
 """Add llm_profile column to automations table.
 
-Revision ID: 005
-Revises: 004
+Revision ID: 006
+Revises: 005
 Create Date: 2026-05-16
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "005"
-down_revision: str = "004"
+revision: str = "006"
+down_revision: str = "005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
