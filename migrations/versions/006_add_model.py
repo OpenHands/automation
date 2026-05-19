@@ -1,4 +1,4 @@
-"""Add llm_profile column to automations table.
+"""Add model column to automations table.
 
 Revision ID: 006
 Revises: 005
@@ -18,8 +18,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("automations", sa.Column("llm_profile", sa.String(64), nullable=True))
+    op.add_column("automations", sa.Column("model", sa.String(64), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("automations", "llm_profile")
+    op.drop_column("automations", "model")

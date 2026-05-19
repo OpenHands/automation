@@ -14,7 +14,7 @@ const mockAutomation: Automation = {
   },
   enabled: true,
   repository: "acme/frontend-app",
-  llm_profile: "triage-fast",
+  model: "triage-fast",
   created_at: "2026-01-10T00:00:00Z",
   updated_at: "2026-03-23T09:00:00Z",
   branch: "main",
@@ -45,7 +45,7 @@ describe("ConfigurationSection", () => {
     const automation = {
       ...mockAutomation,
       repository: "",
-      llm_profile: null,
+      model: null,
     };
 
     render(<ConfigurationSection automation={automation} />);

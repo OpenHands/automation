@@ -29,7 +29,7 @@ const mockAutomation: Automation = {
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",
-  llm_profile: "claude-opus",
+  model: "claude-opus",
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-03-01T00:00:00Z",
 };
@@ -108,7 +108,7 @@ describe("AutomationCard", () => {
     const automation = {
       ...mockAutomation,
       repository: "",
-      llm_profile: "",
+      model: "",
     };
     renderCard(automation);
 

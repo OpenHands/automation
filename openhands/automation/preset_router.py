@@ -28,7 +28,9 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.utils.llm_profiles import resolve_llm_profile_for_user
+from openhands.automation.utils.llm_profiles import (
+    resolve_llm_profile_for_user as resolve_model_for_user,
+)
 from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -107,13 +109,13 @@ class CreatePromptAutomationRequest(BaseModel):
         max_length=50000,
         description="The prompt to execute in the automation",
     )
-    llm_profile: str | None = Field(
+    model: str | None = Field(
         default=None,
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
         description=(
-            "LLM profile name to use for automation runs. Defaults to the active "
+            "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."
         ),
     )
@@ -164,7 +166,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
-    - automation_llm.py: shared LLM profile resolver
+    - automation_llm.py: shared Model profile resolver
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
     - repos_config.json: (optional) Repository configuration for cloning
@@ -232,7 +234,7 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
-    llm_profile = resolve_llm_profile_for_user(body.llm_profile, user)
+    model = resolve_model_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -285,7 +287,7 @@ async def create_automation_from_prompt(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
-            llm_profile=llm_profile,
+            model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -342,13 +344,13 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
-    llm_profile: str | None = Field(
+    model: str | None = Field(
         default=None,
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
         description=(
-            "LLM profile name to use for automation runs. Defaults to the active "
+            "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."
         ),
     )
@@ -400,7 +402,7 @@ def _generate_plugin_tarball(
 
     The tarball contains:
     - main.py: SDK boilerplate that loads plugins and runs conversation
-    - automation_llm.py: shared LLM profile resolver
+    - automation_llm.py: shared Model profile resolver
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
@@ -477,7 +479,7 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
-    llm_profile = resolve_llm_profile_for_user(body.llm_profile, user)
+    model = resolve_model_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
     tarball_content = _generate_plugin_tarball(
@@ -533,7 +535,7 @@ async def create_automation_from_plugin(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
-            llm_profile=llm_profile,
+            model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

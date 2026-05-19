@@ -357,7 +357,7 @@ class TestCreateAutomationFromPrompt:
         payload = {
             "name": "My Prompt Automation",
             "prompt": test_prompt,
-            "llm_profile": "fast-profile",
+            "model": "fast-profile",
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -368,7 +368,7 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
-        assert data["llm_profile"] == "fast-profile"
+        assert data["model"] == "fast-profile"
 
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
@@ -399,7 +399,7 @@ class TestCreateAutomationFromPrompt:
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
 
-    async def test_create_from_prompt_defaults_to_active_llm_profile(
+    async def test_create_from_prompt_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
         """Prompt preset stores the active profile name when none is requested."""
@@ -416,9 +416,9 @@ class TestCreateAutomationFromPrompt:
         )
 
         assert response.status_code == 201
-        assert response.json()["llm_profile"] == "active-profile"
+        assert response.json()["model"] == "active-profile"
 
-    async def test_create_from_prompt_unknown_llm_profile_rejected(
+    async def test_create_from_prompt_unknown_model_profile_rejected(
         self, async_client, mock_file_store, mock_authenticated_user
     ):
         """Prompt preset rejects unknown profiles when auth metadata includes names."""
@@ -428,7 +428,7 @@ class TestCreateAutomationFromPrompt:
             json={
                 "name": "My Prompt Automation",
                 "prompt": "Do something",
-                "llm_profile": "missing-profile",
+                "model": "missing-profile",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
             },
         )
@@ -947,7 +947,7 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
 
-    async def test_create_from_plugin_defaults_to_active_llm_profile(
+    async def test_create_from_plugin_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
         """Plugin preset stores the active profile name when none is requested."""
@@ -965,7 +965,7 @@ class TestCreateAutomationFromPlugin:
         )
 
         assert response.status_code == 201
-        assert response.json()["llm_profile"] == "active-profile"
+        assert response.json()["model"] == "active-profile"
 
     async def test_create_from_plugin_creates_upload_record(
         self, async_client, async_session, mock_file_store

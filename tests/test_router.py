@@ -130,7 +130,7 @@ class TestCreateAutomation:
         )
 
         assert response.status_code == 201
-        assert response.json()["llm_profile"] == "active-profile"
+        assert response.json()["model"] == "active-profile"
 
     async def test_create_automation_without_setup_script(self, async_client):
         """Automation can be created without setup_script_path."""
@@ -747,13 +747,13 @@ class TestUpdateAutomation:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
-    async def test_update_automation_llm_profile(self, async_client, async_session):
+    async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected LLM profile."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test",
-            llm_profile="original-profile",
+            model="original-profile",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -763,26 +763,26 @@ class TestUpdateAutomation:
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"llm_profile": "new-profile"},
+            json={"model": "new-profile"},
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["llm_profile"] == "new-profile"
+        assert data["model"] == "new-profile"
         await async_session.refresh(automation)
-        assert automation.llm_profile == "new-profile"
+        assert automation.model == "new-profile"
 
-    async def test_update_automation_null_llm_profile_resets_to_active(
+    async def test_update_automation_null_model_profile_resets_to_active(
         self, async_client, async_session, mock_authenticated_user
     ):
-        """PATCH llm_profile=null stores the current active profile name."""
+        """PATCH model=null stores the current active profile name."""
         mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
         mock_authenticated_user.active_llm_profile_name = "active-profile"
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test",
-            llm_profile="original-profile",
+            model="original-profile",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -792,15 +792,15 @@ class TestUpdateAutomation:
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"llm_profile": None},
+            json={"model": None},
         )
 
         assert response.status_code == 200
-        assert response.json()["llm_profile"] == "active-profile"
+        assert response.json()["model"] == "active-profile"
         await async_session.refresh(automation)
-        assert automation.llm_profile == "active-profile"
+        assert automation.model == "active-profile"
 
-    async def test_update_automation_unknown_llm_profile_rejected(
+    async def test_update_automation_unknown_model_profile_rejected(
         self, async_client, async_session, mock_authenticated_user
     ):
         """PATCH rejects unknown LLM profiles when auth metadata includes names."""
@@ -818,7 +818,7 @@ class TestUpdateAutomation:
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"llm_profile": "missing-profile"},
+            json={"model": "missing-profile"},
         )
 
         assert response.status_code == 422

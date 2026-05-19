@@ -27,7 +27,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       },
       enabled: true,
       repository: "acme/frontend-app",
-      llm_profile: "claude-opus",
+      model: "claude-opus",
       created_at: daysAgo(90),
       updated_at: now,
       prompt:
@@ -48,7 +48,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       },
       enabled: true,
       repository: "acme/backend-api",
-      llm_profile: "gpt-5",
+      model: "gpt-5",
       created_at: daysAgo(60),
       updated_at: now,
       prompt:
@@ -69,7 +69,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       },
       enabled: true,
       repository: "acme/docs",
-      llm_profile: "gpt-4o",
+      model: "gpt-4o",
       created_at: daysAgo(45),
       updated_at: now,
       prompt:
@@ -90,7 +90,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       },
       enabled: false,
       repository: "acme/realtime-service",
-      llm_profile: "gemini-2.5-pro",
+      model: "gemini-2.5-pro",
       created_at: daysAgo(80),
       updated_at: now,
       prompt:
@@ -111,7 +111,7 @@ export const MOCK_AUTOMATIONS_RESPONSE: AutomationsResponse = {
       },
       enabled: false,
       repository: "acme/incident-service",
-      llm_profile: "claude-sonnet",
+      model: "claude-sonnet",
       created_at: daysAgo(30),
       updated_at: now,
       prompt:

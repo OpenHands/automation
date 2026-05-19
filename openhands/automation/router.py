@@ -27,7 +27,9 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
-from openhands.automation.utils.llm_profiles import resolve_llm_profile_for_user
+from openhands.automation.utils.llm_profiles import (
+    resolve_llm_profile_for_user as resolve_model_for_user,
+)
 from openhands.automation.utils.run import create_pending_run
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import validate_tarball_path
@@ -62,13 +64,13 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    llm_profile = resolve_llm_profile_for_user(body.llm_profile, user)
+    model = resolve_model_for_user(body.model, user)
 
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
-        llm_profile=llm_profile,
+        model=model,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
@@ -137,10 +139,8 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
-    if "llm_profile" in update_data:
-        update_data["llm_profile"] = resolve_llm_profile_for_user(
-            body.llm_profile, user
-        )
+    if "model" in update_data:
+        update_data["model"] = resolve_model_for_user(body.model, user)
 
     for field, value in update_data.items():
         setattr(auto, field, value)

@@ -253,13 +253,13 @@ class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
-    llm_profile: str | None = Field(
+    model: str | None = Field(
         default=None,
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
         description=(
-            "LLM profile name to use for automation runs. Defaults to the active "
+            "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."
         ),
     )
@@ -315,13 +315,13 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
-    llm_profile: str | None = Field(
+    model: str | None = Field(
         default=None,
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
         description=(
-            "LLM profile name to use for automation runs. Defaults to the active "
+            "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."
         ),
     )
@@ -577,7 +577,7 @@ class AutomationResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID
-    llm_profile: str | None
+    model: str | None
 
     name: str
     prompt: str | None

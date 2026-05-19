@@ -481,7 +481,7 @@ class TestExecuteRunEnvVarOrdering:
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
                 name="Test Automation",
-                llm_profile="fast-profile",
+                model="fast-profile",
                 trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
                 tarball_path="https://example.com/valid.tar.gz",
                 entrypoint="uv run main.py",
