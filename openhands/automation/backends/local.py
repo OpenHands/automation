@@ -58,12 +58,14 @@ class LocalAgentServerBackend(ExecutionBackend):
         run: AutomationRun,
         workspace_base: str | None = None,
         callback_api_key: str | None = None,
+        sandbox_agent_server_url: str | None = None,
     ):
         """Initialize the local agent-server backend for a specific run.
 
         Args:
             agent_server_url: URL of the local agent server
-                (e.g., "http://localhost:3000")
+                (e.g., "http://localhost:3000"). Used by the backend itself
+                to upload tarballs and start bash commands.
             api_key: API key for authenticating with the agent server
             run: The automation run this backend will operate on
             workspace_base: Base workspace directory. If None, defaults to
@@ -71,12 +73,22 @@ class LocalAgentServerBackend(ExecutionBackend):
             callback_api_key: API key for authenticating completion callbacks
                 to the automation service (local_api_key from config). If None,
                 callbacks will be sent without authentication.
+            sandbox_agent_server_url: Optional override for the
+                AGENT_SERVER_URL env var exported into the in-sandbox bash
+                chain. Defaults to ``agent_server_url`` when None. Useful in
+                container-split setups (e.g. ``dev:docker``) where the
+                backend reaches the agent-server at one URL but the bash
+                chain runs inside the agent-server container and needs a
+                different one (e.g. ``http://127.0.0.1:8000``).
         """
         self.agent_server_url = agent_server_url.rstrip("/")
         self.api_key = api_key
         self._run = run
         self.workspace_base = workspace_base
         self.callback_api_key = callback_api_key
+        self.sandbox_agent_server_url = (
+            sandbox_agent_server_url.rstrip("/") if sandbox_agent_server_url else None
+        )
 
     @property
     def is_local_mode(self) -> bool:
@@ -116,7 +128,10 @@ class LocalAgentServerBackend(ExecutionBackend):
         """Build local mode environment variables.
 
         Provides the env vars needed for local mode:
-        - AGENT_SERVER_URL: URL of the local agent server
+        - AGENT_SERVER_URL: URL of the local agent server — from the
+          *sandbox's* point of view. Defaults to ``agent_server_url`` (the
+          URL the backend uses) but can be overridden via
+          ``sandbox_agent_server_url`` for container-split setups.
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
         - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service
@@ -130,7 +145,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))
         env_vars = {
-            "AGENT_SERVER_URL": self.agent_server_url,
+            "AGENT_SERVER_URL": self.sandbox_agent_server_url or self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,
         }

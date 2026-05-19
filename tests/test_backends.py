@@ -163,6 +163,34 @@ class TestLocalAgentServerBackend:
         # No callback key when callback_api_key is not set
         assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
 
+    def test_build_env_vars_sandbox_url_override(self, mock_run):
+        """sandbox_agent_server_url overrides AGENT_SERVER_URL only in the
+        sandbox export — the backend itself still uses agent_server_url."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:18000",
+            api_key="agent-key",
+            run=mock_run,
+            sandbox_agent_server_url="http://127.0.0.1:8000",
+        )
+        env_vars = backend.build_env_vars()
+        # In-sandbox bash chain sees the override
+        assert env_vars["AGENT_SERVER_URL"] == "http://127.0.0.1:8000"
+        # But the backend still uses the original URL for its own HTTP calls
+        assert backend.agent_server_url == "http://localhost:18000"
+
+    def test_build_env_vars_sandbox_url_falls_back(self, mock_run):
+        """When sandbox_agent_server_url is None or empty, the in-sandbox
+        AGENT_SERVER_URL falls back to agent_server_url (current behaviour)."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            sandbox_agent_server_url=None,
+        )
+        assert backend.sandbox_agent_server_url is None
+        env_vars = backend.build_env_vars()
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+
     def test_get_work_dir_default_workspace(self, mock_run):
         """get_work_dir() returns isolated directory with ~ expanded."""
         backend = LocalAgentServerBackend(
