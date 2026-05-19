@@ -34,6 +34,24 @@ from openhands.automation.webhook_router import router as webhook_router
 logger = logging.getLogger("automation.app")
 
 
+def _resolve_migrations_path(package_dir: Path | None = None) -> Path:
+    """Find Alembic migrations for packaged installs and source checkouts."""
+    package_dir = package_dir or Path(__file__).parent
+    candidates = [
+        package_dir / "migrations",  # Packaged wheel path
+        package_dir.parent.parent / "migrations",  # Source checkout repo root
+        package_dir.parent / "migrations",  # Legacy source fallback
+    ]
+
+    for migrations_path in candidates:
+        if migrations_path.is_dir():
+            return migrations_path
+
+    checked = ", ".join(str(path) for path in candidates)
+    msg = f"Migrations directory not found. Checked: {checked}"
+    raise RuntimeError(msg)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -75,23 +93,7 @@ async def lifespan(app: FastAPI):
 
         from openhands.automation.db import normalize_sqlite_url_for_alembic
 
-        # Find migrations folder relative to this package.
-        # When installed via pip/uvx, migrations are bundled inside
-        # automation/migrations.
-        package_dir = Path(__file__).parent
-        migrations_path = package_dir / "migrations"
-
-        if not migrations_path.is_dir():
-            # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
-            if repo_root_migrations.is_dir():
-                migrations_path = repo_root_migrations
-            else:
-                msg = (
-                    f"Migrations directory not found. "
-                    f"Checked: {migrations_path}, {repo_root_migrations}"
-                )
-                raise RuntimeError(msg)
+        migrations_path = _resolve_migrations_path()
 
         alembic_cfg = Config()
         alembic_cfg.set_main_option("script_location", str(migrations_path))
