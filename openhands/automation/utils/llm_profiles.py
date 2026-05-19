@@ -1,4 +1,4 @@
-"""Helpers for validating LLM profile selections."""
+"""Helpers for resolving and validating LLM profile selections."""
 
 from fastapi import HTTPException, status
 
@@ -22,3 +22,18 @@ def validate_llm_profile_for_user(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"LLM profile `{llm_profile}` not found",
         )
+
+
+def resolve_llm_profile_for_user(
+    requested_profile: str | None, user: AuthenticatedUser
+) -> str | None:
+    """Resolve the profile name an automation should persist.
+
+    Automations store LLM profile names, not raw LLM settings. If the request does
+    not specify a profile, use the user's active profile at creation/update time.
+    Older/local auth responses may not include profile metadata; in that case we
+    leave the value unset so existing fallback behavior can preserve compatibility.
+    """
+    llm_profile = requested_profile or user.active_llm_profile_name
+    validate_llm_profile_for_user(llm_profile, user)
+    return llm_profile

@@ -112,6 +112,26 @@ class TestCreateAutomation:
         assert "id" in data
         assert data["user_id"] == str(TEST_USER_ID)
 
+    async def test_create_automation_defaults_to_active_llm_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Create stores the active LLM profile when none is requested."""
+        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_llm_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "My Test Automation",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 5"},
+                "tarball_path": "s3://bucket/path/to/code.tar.gz",
+                "entrypoint": "uv run script.py",
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["llm_profile"] == "active-profile"
+
     async def test_create_automation_without_setup_script(self, async_client):
         """Automation can be created without setup_script_path."""
         payload = {
@@ -751,6 +771,34 @@ class TestUpdateAutomation:
         assert data["llm_profile"] == "new-profile"
         await async_session.refresh(automation)
         assert automation.llm_profile == "new-profile"
+
+    async def test_update_automation_null_llm_profile_resets_to_active(
+        self, async_client, async_session, mock_authenticated_user
+    ):
+        """PATCH llm_profile=null stores the current active profile name."""
+        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_llm_profile_name = "active-profile"
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            llm_profile="original-profile",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"llm_profile": None},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["llm_profile"] == "active-profile"
+        await async_session.refresh(automation)
+        assert automation.llm_profile == "active-profile"
 
     async def test_update_automation_unknown_llm_profile_rejected(
         self, async_client, async_session, mock_authenticated_user

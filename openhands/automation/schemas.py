@@ -258,7 +258,10 @@ class CreateAutomationRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
-        description="Optional LLM profile name to use for automation runs.",
+        description=(
+            "LLM profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
     )
 
     trigger: Trigger = Field(
@@ -317,7 +320,10 @@ class UpdateAutomationRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
-        description="Optional LLM profile name to use for automation runs.",
+        description=(
+            "LLM profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
     )
 
     prompt: str | None = Field(default=None, max_length=50000)

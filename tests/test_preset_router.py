@@ -399,6 +399,25 @@ class TestCreateAutomationFromPrompt:
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
 
+    async def test_create_from_prompt_defaults_to_active_llm_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Prompt preset stores the active profile name when none is requested."""
+        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_llm_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["llm_profile"] == "active-profile"
+
     async def test_create_from_prompt_unknown_llm_profile_rejected(
         self, async_client, mock_file_store, mock_authenticated_user
     ):
@@ -927,6 +946,26 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_defaults_to_active_llm_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Plugin preset stores the active profile name when none is requested."""
+        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_llm_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "My Plugin Automation",
+                "plugins": [{"source": "github:owner/plugin"}],
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["llm_profile"] == "active-profile"
 
     async def test_create_from_plugin_creates_upload_record(
         self, async_client, async_session, mock_file_store

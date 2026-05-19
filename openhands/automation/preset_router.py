@@ -28,7 +28,7 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.utils.llm_profiles import validate_llm_profile_for_user
+from openhands.automation.utils.llm_profiles import resolve_llm_profile_for_user
 from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -112,7 +112,10 @@ class CreatePromptAutomationRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
-        description="Optional LLM profile name to use for automation runs.",
+        description=(
+            "LLM profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
     )
     trigger: Trigger = Field(
         ...,
@@ -229,7 +232,7 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
-    validate_llm_profile_for_user(body.llm_profile, user)
+    llm_profile = resolve_llm_profile_for_user(body.llm_profile, user)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -282,7 +285,7 @@ async def create_automation_from_prompt(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
-            llm_profile=body.llm_profile,
+            llm_profile=llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -344,7 +347,10 @@ class CreatePluginAutomationRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=LLM_PROFILE_PATTERN,
-        description="Optional LLM profile name to use for automation runs.",
+        description=(
+            "LLM profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
     )
 
     trigger: Trigger = Field(
@@ -471,7 +477,7 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
-    validate_llm_profile_for_user(body.llm_profile, user)
+    llm_profile = resolve_llm_profile_for_user(body.llm_profile, user)
 
     # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
     tarball_content = _generate_plugin_tarball(
@@ -527,7 +533,7 @@ async def create_automation_from_plugin(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
-            llm_profile=body.llm_profile,
+            llm_profile=llm_profile,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

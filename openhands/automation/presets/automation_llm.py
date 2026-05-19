@@ -67,6 +67,8 @@ def get_automation_llm(
     session_key: str,
 ):
     if not profile_name:
+        # Legacy/local fallback: new automations persist an explicit profile name,
+        # but older rows may not have one if auth metadata was unavailable.
         return workspace.get_llm()
 
     from openhands.sdk.llm.llm import LLM

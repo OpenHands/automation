@@ -96,6 +96,7 @@ class AuthenticatedUser:
     auth_method: AuthMethod
     api_key: str | None = None  # Set when auth_method == API_KEY
     llm_profile_names: frozenset[str] | None = None
+    active_llm_profile_name: str | None = None
 
 
 def _extract_llm_profile_names(data: dict) -> frozenset[str] | None:  # type: ignore[type-arg]
@@ -105,10 +106,27 @@ def _extract_llm_profile_names(data: dict) -> frozenset[str] | None:  # type: ig
         return None
 
     profiles = llm_profiles.get("profiles")
-    if not isinstance(profiles, dict):
+    if isinstance(profiles, dict):
+        return frozenset(str(name) for name in profiles)
+    if isinstance(profiles, list):
+        names = {
+            str(profile["name"])
+            for profile in profiles
+            if isinstance(profile, dict) and isinstance(profile.get("name"), str)
+        }
+        return frozenset(names) if names else None
+
+    return None
+
+
+def _extract_active_llm_profile_name(data: dict) -> str | None:  # type: ignore[type-arg]
+    """Extract the active LLM profile name from a users/me response when present."""
+    llm_profiles = data.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
         return None
 
-    return frozenset(str(name) for name in profiles)
+    active_profile = llm_profiles.get("active_profile")
+    return active_profile if isinstance(active_profile, str) else None
 
 
 def clear_auth_cache() -> None:
@@ -382,6 +400,7 @@ async def authenticate_request(
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
         llm_profile_names=_extract_llm_profile_names(data),
+        active_llm_profile_name=_extract_active_llm_profile_name(data),
     )
     auth_cache[cache_key] = user
     return user
