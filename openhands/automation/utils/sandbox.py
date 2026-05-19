@@ -134,6 +134,7 @@ async def verify_run_status(
     sandbox_id: str,
     keep_alive: bool = False,
     run_id: str | None = None,
+    bash_command_id: str | None = None,
 ) -> VerificationResult:
     """Verify an automation run's status by querying its sandbox.
 
@@ -146,6 +147,11 @@ async def verify_run_status(
         sandbox_id: The sandbox to query
         keep_alive: If True, don't delete the sandbox after verification
         run_id: Optional run ID for logging
+        bash_command_id: Optional BashCommand id (hex) recorded for this
+            run; scopes the BashOutput lookup to this specific command.
+            In cloud mode each run owns its sandbox so contamination is
+            unlikely, but scoping is still safer when the agent inside
+            the sandbox runs other bash commands during the run.
 
     Returns:
         VerificationResult with the verification outcome
@@ -166,8 +172,10 @@ async def verify_run_status(
         agent_url, session_key = result
         logger.info("Connected to sandbox for verification", extra=extra)
 
-        # Get last bash command result
-        bash_result = await get_last_bash_command_result(client, agent_url, session_key)
+        # Get last bash command result, scoped to this run's command if known
+        bash_result = await get_last_bash_command_result(
+            client, agent_url, session_key, command_id=bash_command_id
+        )
 
         if not bash_result.found:
             logger.warning(

@@ -252,6 +252,13 @@ class ServiceSettings(BaseSettings):
         # Local agent-server mode (self-hosted deployments)
         AUTOMATION_AGENT_SERVER_URL: Local agent server URL (e.g., localhost:3000)
         AUTOMATION_AGENT_SERVER_API_KEY: Session API key for local agent server
+        AUTOMATION_SANDBOX_AGENT_SERVER_URL: Optional override for the
+            AGENT_SERVER_URL exported into the in-sandbox bash chain. Defaults
+            to AUTOMATION_AGENT_SERVER_URL when empty. Use this when the
+            backend reaches the agent-server at a different URL than the bash
+            chain does (e.g. agent-canvas `dev:docker`, where the backend
+            runs on the host and the bash chain runs inside the agent-server
+            container).
         AUTOMATION_WORKSPACE_BASE: Base workspace directory (local mode default)
 
         # Background workers
@@ -308,6 +315,15 @@ class ServiceSettings(BaseSettings):
     # - Authenticates using local_api_key instead of OpenHands SaaS API
     agent_server_url: str = ""
     agent_server_api_key: str = ""
+    # Optional override for the AGENT_SERVER_URL env var exported into the
+    # in-sandbox bash chain by LocalAgentServerBackend.build_env_vars.
+    # When empty, defaults to agent_server_url (the URL the backend itself
+    # uses). Needed in container-split dev setups (e.g. agent-canvas
+    # `dev:docker`) where the host-side backend reaches the agent-server at
+    # `localhost:<hostPort>` but the bash chain runs *inside* the
+    # agent-server container and needs `127.0.0.1:8000` or
+    # `host.docker.internal:<hostPort>` instead.
+    sandbox_agent_server_url: str = ""
     workspace_base: str = "/workspace"
 
     # Local API key for authentication in local mode (self-hosted deployments)

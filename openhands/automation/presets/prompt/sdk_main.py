@@ -46,11 +46,13 @@ Env vars (Cloud mode - all required):
   OPENHANDS_API_KEY          - per-user automation API key
   OPENHANDS_CLOUD_API_URL    - SaaS API base URL
   SANDBOX_ID                 - this sandbox's Cloud API identifier
-  SESSION_API_KEY            - session key for sandbox settings auth
+  OH_SESSION_API_KEYS_0      - session key for sandbox settings auth
+                               (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
-  SESSION_API_KEY            - API key for agent server auth (optional)
+  OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
+                               (legacy fallback: SESSION_API_KEY)
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
@@ -73,9 +75,17 @@ IS_LOCAL_MODE = bool(agent_server_url)
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
-session_key = os.environ.get("SESSION_API_KEY", "")
+# Prefer OH_SESSION_API_KEYS_0 — the canonical agent-server env var that is
+# inherited unmodified by bash subprocesses. The legacy SESSION_API_KEY name
+# is stripped by the SDK's sanitized_env() defense-in-depth filter, so it
+# may be missing here even when the agent-server has a valid session key.
+# We still fall back to SESSION_API_KEY for compatibility with cloud-mode
+# deployments and older agent-server versions that only set the bare name.
+session_key = (
+    os.environ.get("OH_SESSION_API_KEYS_0")
+    or os.environ.get("SESSION_API_KEY", "")
+)
 llm_profile = os.environ.get("AUTOMATION_LLM_PROFILE") or None
-
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -84,7 +94,10 @@ print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
     # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
-    print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
+    print(
+        f"  OH_SESSION_API_KEYS_0: "
+        f"{'OK' if session_key else 'NONE (may fail auth)'}"
+    )
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
@@ -94,7 +107,7 @@ else:
         ("OPENHANDS_API_KEY", api_key),
         ("OPENHANDS_CLOUD_API_URL", api_url),
         ("SANDBOX_ID", sandbox_id),
-        ("SESSION_API_KEY", session_key),
+        ("OH_SESSION_API_KEYS_0", session_key),
     ]:
         print(f"  {name}: {'OK' if val else 'MISSING'}")
         if not val:

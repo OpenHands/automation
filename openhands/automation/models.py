@@ -151,6 +151,13 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # The agent-server BashCommand id for this run's dispatched bash chain.
+    # Stored so the verifier can filter BashOutput events by this specific
+    # command and avoid sampling output from concurrent bash activity on a
+    # shared agent server (e.g., the agent's TerminalTool or other runs in
+    # local mode). Set immediately after `_start_bash` returns.
+    bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event

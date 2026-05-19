@@ -49,6 +49,8 @@ class TestLocalAgentServerBackend:
         run.id = "test-run-123"
         run.sandbox_id = None
         run.keep_alive = False
+        # Default to None — individual tests override when needed
+        run.bash_command_id = None
         return run
 
     def test_is_local_mode(self, mock_run):
@@ -161,6 +163,34 @@ class TestLocalAgentServerBackend:
         # No callback key when callback_api_key is not set
         assert "AUTOMATION_CALLBACK_API_KEY" not in env_vars
 
+    def test_build_env_vars_sandbox_url_override(self, mock_run):
+        """sandbox_agent_server_url overrides AGENT_SERVER_URL only in the
+        sandbox export — the backend itself still uses agent_server_url."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:18000",
+            api_key="agent-key",
+            run=mock_run,
+            sandbox_agent_server_url="http://127.0.0.1:8000",
+        )
+        env_vars = backend.build_env_vars()
+        # In-sandbox bash chain sees the override
+        assert env_vars["AGENT_SERVER_URL"] == "http://127.0.0.1:8000"
+        # But the backend still uses the original URL for its own HTTP calls
+        assert backend.agent_server_url == "http://localhost:18000"
+
+    def test_build_env_vars_sandbox_url_falls_back(self, mock_run):
+        """When sandbox_agent_server_url is None or empty, the in-sandbox
+        AGENT_SERVER_URL falls back to agent_server_url (current behaviour)."""
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:3000",
+            api_key="agent-key",
+            run=mock_run,
+            sandbox_agent_server_url=None,
+        )
+        assert backend.sandbox_agent_server_url is None
+        env_vars = backend.build_env_vars()
+        assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
+
     def test_get_work_dir_default_workspace(self, mock_run):
         """get_work_dir() returns isolated directory with ~ expanded."""
         backend = LocalAgentServerBackend(
@@ -186,7 +216,12 @@ class TestLocalAgentServerBackend:
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_agent_server(self, mock_run):
-        """verify_run() delegates to verify_run_on_agent_server."""
+        """verify_run() delegates to verify_run_on_agent_server and
+        forwards the stored bash_command_id so the verifier filters
+        BashOutput events by *this run's* command instead of sampling
+        the most recent BashOutput on a shared agent server.
+        """
+        mock_run.bash_command_id = "abc123def456"
         backend = LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
@@ -205,6 +240,7 @@ class TestLocalAgentServerBackend:
                 agent_url="http://localhost:3000",
                 session_key="local-key",
                 run_id="run-123",
+                bash_command_id="abc123def456",
             )
 
     @pytest.mark.asyncio
@@ -228,6 +264,8 @@ class TestCloudSandboxBackend:
         run = MagicMock()
         run.sandbox_id = "sandbox-123"
         run.keep_alive = False
+        # Default to None — individual tests override when needed
+        run.bash_command_id = None
         return run
 
     def test_is_local_mode(self, mock_run):
@@ -321,7 +359,11 @@ class TestCloudSandboxBackend:
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_verify_run_status(self, mock_run):
-        """verify_run() delegates to verify_run_status."""
+        """verify_run() delegates to verify_run_status and forwards the
+        stored bash_command_id so BashOutput lookups are scoped to this
+        run's specific command.
+        """
+        mock_run.bash_command_id = "deadbeefcafebabe"
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
         mock_result = MagicMock(verified=True, exit_code=0)
 
@@ -345,6 +387,7 @@ class TestCloudSandboxBackend:
                 sandbox_id="sandbox-123",
                 keep_alive=False,
                 run_id="run-123",
+                bash_command_id="deadbeefcafebabe",
             )
 
     @pytest.mark.asyncio

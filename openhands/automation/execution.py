@@ -320,6 +320,12 @@ class DispatchResult:
     success: bool
     sandbox_id: str | None = None
     error: str | None = None
+    # Agent-server BashCommand id assigned to this dispatch. Surfaced so the
+    # caller can persist it on the AutomationRun and the verifier can later
+    # filter BashOutput by exactly this command (see watchdog → backend.
+    # verify_run → get_last_bash_command_result(command_id=...)). Only set
+    # when dispatch reached `_start_bash`; remains None on earlier failures.
+    bash_command_id: str | None = None
 
 
 async def execute_in_context(
@@ -400,7 +406,11 @@ async def execute_in_context(
             extra=_log_ctx(),
         )
 
-        return DispatchResult(success=True, sandbox_id=sandbox_id)
+        return DispatchResult(
+            success=True,
+            sandbox_id=sandbox_id,
+            bash_command_id=command_id,
+        )
 
     except PermanentDispatchError:
         # Re-raise so caller can handle (e.g., disable automation)

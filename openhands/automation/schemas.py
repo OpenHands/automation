@@ -618,6 +618,7 @@ class AutomationRunResponse(BaseModel):
     timeout_at: datetime | None
     keep_alive: bool
     sandbox_id: str | None
+    bash_command_id: str | None = None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
