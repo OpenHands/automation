@@ -1149,3 +1149,322 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+@requires_docker
+class TestRegeneratePresetAutomation:
+    """Tests for POST /v1/preset/{automation_id}/regenerate endpoint."""
+
+    @pytest.fixture
+    def mock_file_store(self):
+        """Create a stateful mock file store that supports read and write."""
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        store = MagicMock()
+        store._storage: dict[str, bytes] = {}
+
+        async def mock_write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            content = b""
+            async for chunk in stream:
+                content += chunk
+            store._storage[path] = content
+            return len(content)
+
+        def mock_read(path: str) -> bytes:
+            if path not in store._storage:
+                raise FileNotFoundError(f"File not found: {path}")
+            return store._storage[path]
+
+        store.write_stream = AsyncMock(side_effect=mock_write_stream)
+        store.read = MagicMock(side_effect=mock_read)
+        store.delete = MagicMock()
+        return store
+
+    @pytest.fixture(autouse=True)
+    def setup_file_store_override(self, mock_file_store):
+        """Override file_store for all tests in this class."""
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: mock_file_store
+        yield
+        app.dependency_overrides.pop(get_file_store, None)
+
+    def _make_legacy_tarball(
+        self,
+        prompt: str,
+        repos_config: list | None = None,
+    ) -> bytes:
+        """Build a minimal legacy tarball with old template code."""
+        buf = io.BytesIO()
+        old_main = (
+            "from openhands.tools import get_default_agent\n"
+            "print('hello')\n"
+        )
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, content in [
+                ("main.py", old_main.encode()),
+                ("prompt.txt", prompt.encode()),
+                ("setup.sh", b"#!/bin/bash\npip install openhands-sdk\n"),
+            ]:
+                info = tarfile.TarInfo(name=name)
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+
+            if repos_config is not None:
+                rc = json.dumps(repos_config).encode()
+                info = tarfile.TarInfo(name="repos_config.json")
+                info.size = len(rc)
+                tar.addfile(info, io.BytesIO(rc))
+
+        buf.seek(0)
+        return buf.read()
+
+    async def test_regenerate_with_stored_prompt(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Regeneration uses the stored DB prompt and replaces the tarball."""
+        # 1. Create an automation via the preset endpoint (stores prompt in DB).
+        create_resp = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Echo Bot",
+                "prompt": "Reply hello echo world to every GitHub issue",
+                "trigger": {
+                    "type": "event",
+                    "source": "github",
+                    "on": "issues.labeled",
+                    "filter": "label.name == 'openhands-test'",
+                },
+            },
+        )
+        assert create_resp.status_code == 201
+        automation_id = create_resp.json()["id"]
+        original_tarball_path = create_resp.json()["tarball_path"]
+
+        # 2. Regenerate.
+        regen_resp = await async_client.post(
+            f"/api/automation/v1/preset/{automation_id}/regenerate"
+        )
+        assert regen_resp.status_code == 200
+        data = regen_resp.json()
+
+        # tarball_path must have changed.
+        assert data["tarball_path"] != original_tarball_path
+        assert data["tarball_path"].startswith("oh-internal://uploads/")
+
+        # 3. The new tarball must contain the current template (not the old import).
+        new_tarball_path = data["tarball_path"]
+        new_upload_id = new_tarball_path.removeprefix("oh-internal://uploads/")
+        storage_path = f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{new_upload_id}.tar"
+        new_tarball_bytes = mock_file_store._storage[storage_path]
+
+        with tarfile.open(fileobj=io.BytesIO(new_tarball_bytes), mode="r:gz") as tar:
+            main_file = tar.extractfile("main.py")
+            assert main_file is not None
+            main_content = main_file.read().decode()
+            # New template uses the scoped import, not the old bare import.
+            assert "from openhands.tools.preset.default import get_default_agent" in main_content
+            assert "from openhands.tools import get_default_agent" not in main_content
+
+            prompt_file = tar.extractfile("prompt.txt")
+            assert prompt_file is not None
+            assert prompt_file.read().decode() == "Reply hello echo world to every GitHub issue"
+
+    async def test_regenerate_legacy_automation_null_prompt(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Legacy automation (prompt=None in DB) is regenerated from tarball."""
+        # Build a legacy tarball and store it directly in the mock file store.
+        legacy_prompt = "Reply hello echo world to every GitHub issue"
+        legacy_tarball = self._make_legacy_tarball(legacy_prompt)
+
+        legacy_upload_id = uuid.uuid4()
+        legacy_storage_path = (
+            f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{legacy_upload_id}.tar"
+        )
+        mock_file_store._storage[legacy_storage_path] = legacy_tarball
+
+        # Insert matching TarballUpload and Automation records directly.
+        from openhands.automation.models import TarballUpload, UploadStatus, Automation
+
+        upload = TarballUpload(
+            id=legacy_upload_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="legacy-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path=legacy_storage_path,
+            size_bytes=len(legacy_tarball),
+        )
+        async_session.add(upload)
+
+        legacy_automation_id = uuid.uuid4()
+        automation = Automation(
+            id=legacy_automation_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Legacy Echo Bot",
+            prompt=None,  # Simulates pre-prompt-field automation.
+            trigger={"type": "event", "source": "github", "on": "issues.labeled"},
+            tarball_path=f"oh-internal://uploads/{legacy_upload_id}",
+            setup_script_path="setup.sh",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+
+        # Regenerate.
+        regen_resp = await async_client.post(
+            f"/api/automation/v1/preset/{legacy_automation_id}/regenerate"
+        )
+        assert regen_resp.status_code == 200
+        data = regen_resp.json()
+
+        # tarball_path must have changed to the new upload.
+        assert data["tarball_path"] != f"oh-internal://uploads/{legacy_upload_id}"
+        assert data["tarball_path"].startswith("oh-internal://uploads/")
+
+        # Prompt must be backfilled in the response.
+        assert data["prompt"] == legacy_prompt
+
+        # New tarball contains current template.
+        new_tarball_path = data["tarball_path"]
+        new_upload_id = new_tarball_path.removeprefix("oh-internal://uploads/")
+        storage_path = f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{new_upload_id}.tar"
+        new_tarball_bytes = mock_file_store._storage[storage_path]
+
+        with tarfile.open(fileobj=io.BytesIO(new_tarball_bytes), mode="r:gz") as tar:
+            main_file = tar.extractfile("main.py")
+            assert main_file is not None
+            main_content = main_file.read().decode()
+            assert "from openhands.tools.preset.default import get_default_agent" in main_content
+
+            prompt_file = tar.extractfile("prompt.txt")
+            assert prompt_file is not None
+            assert prompt_file.read().decode() == legacy_prompt
+
+    async def test_regenerate_preserves_repos(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Repos config in the original tarball is preserved after regeneration."""
+        repos_config = [{"url": "owner/my-repo", "provider": "github", "ref": "main"}]
+        legacy_prompt = "Analyze the repo"
+        legacy_tarball = self._make_legacy_tarball(legacy_prompt, repos_config=repos_config)
+
+        legacy_upload_id = uuid.uuid4()
+        legacy_storage_path = (
+            f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{legacy_upload_id}.tar"
+        )
+        mock_file_store._storage[legacy_storage_path] = legacy_tarball
+
+        from openhands.automation.models import TarballUpload, UploadStatus, Automation
+
+        upload = TarballUpload(
+            id=legacy_upload_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="legacy-repos-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path=legacy_storage_path,
+            size_bytes=len(legacy_tarball),
+        )
+        async_session.add(upload)
+
+        legacy_automation_id = uuid.uuid4()
+        automation = Automation(
+            id=legacy_automation_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Repo Analyzer",
+            prompt=None,
+            trigger={"type": "cron", "schedule": "0 9 * * 1"},
+            tarball_path=f"oh-internal://uploads/{legacy_upload_id}",
+            setup_script_path="setup.sh",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+
+        regen_resp = await async_client.post(
+            f"/api/automation/v1/preset/{legacy_automation_id}/regenerate"
+        )
+        assert regen_resp.status_code == 200
+
+        new_tarball_path = regen_resp.json()["tarball_path"]
+        new_upload_id = new_tarball_path.removeprefix("oh-internal://uploads/")
+        storage_path = f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{new_upload_id}.tar"
+        new_tarball_bytes = mock_file_store._storage[storage_path]
+
+        with tarfile.open(fileobj=io.BytesIO(new_tarball_bytes), mode="r:gz") as tar:
+            rc_file = tar.extractfile("repos_config.json")
+            assert rc_file is not None
+            restored = json.loads(rc_file.read().decode())
+            assert restored == repos_config
+
+    async def test_regenerate_automation_not_found(self, async_client):
+        """Returns 404 for an unknown automation ID."""
+        missing_id = uuid.uuid4()
+        response = await async_client.post(
+            f"/api/automation/v1/preset/{missing_id}/regenerate"
+        )
+        assert response.status_code == 404
+
+    async def test_regenerate_no_prompt_no_tarball_prompt(
+        self, async_client, async_session, mock_file_store
+    ):
+        """Returns 422 when automation has no stored prompt and no prompt.txt."""
+        # Build a tarball without prompt.txt.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            content = b"#!/bin/bash\necho hi\n"
+            info = tarfile.TarInfo(name="setup.sh")
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        buf.seek(0)
+        no_prompt_tarball = buf.read()
+
+        upload_id = uuid.uuid4()
+        storage_path = f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{upload_id}.tar"
+        mock_file_store._storage[storage_path] = no_prompt_tarball
+
+        from openhands.automation.models import TarballUpload, UploadStatus, Automation
+
+        upload = TarballUpload(
+            id=upload_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="no-prompt-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path=storage_path,
+            size_bytes=len(no_prompt_tarball),
+        )
+        async_session.add(upload)
+
+        automation_id = uuid.uuid4()
+        automation = Automation(
+            id=automation_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Non-Preset Automation",
+            prompt=None,
+            trigger={"type": "cron", "schedule": "0 0 * * *"},
+            tarball_path=f"oh-internal://uploads/{upload_id}",
+            setup_script_path="setup.sh",
+            entrypoint="python main.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+
+        response = await async_client.post(
+            f"/api/automation/v1/preset/{automation_id}/regenerate"
+        )
+        assert response.status_code == 422
+        assert "no prompt found" in response.json()["detail"]
+

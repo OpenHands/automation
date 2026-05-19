@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
@@ -27,7 +28,10 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.utils.tarball_validation import build_internal_url
+from openhands.automation.utils.tarball_validation import (
+    build_internal_url,
+    parse_internal_upload_id,
+)
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -529,3 +533,193 @@ async def create_automation_from_plugin(
     )
 
     return AutomationResponse.model_validate(automation)
+
+
+async def _read_tarball_files(
+    tarball_path: str,
+    session: AsyncSession,
+    file_store: FileStore,
+) -> dict[str, bytes]:
+    """Read all files from an internal preset tarball.
+
+    Returns a mapping of ``filename -> bytes`` for every file in the archive.
+    Used by the regenerate endpoint to recover ``prompt.txt`` (and an optional
+    ``repos_config.json``) from a legacy tarball when the DB ``prompt`` field
+    is ``None``.
+
+    Raises:
+        HTTPException 422: ``tarball_path`` is not an internal upload URL.
+        HTTPException 404: The ``TarballUpload`` record no longer exists.
+    """
+    upload_id = parse_internal_upload_id(tarball_path)
+    if upload_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Cannot regenerate: automation tarball is not an internal upload. "
+                "Only automations created via preset endpoints can be regenerated."
+            ),
+        )
+
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    upload = result.scalars().first()
+    if upload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tarball upload {upload_id} not found; it may have been deleted.",
+        )
+
+    tarball_bytes = file_store.read(upload.storage_path)
+
+    files: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if member.isfile():
+                f = tar.extractfile(member)
+                if f is not None:
+                    files[member.name] = f.read()
+
+    return files
+
+
+@router.post("/{automation_id}/regenerate", status_code=status.HTTP_200_OK)
+async def regenerate_preset_automation(
+    automation_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(authenticate_request),
+    session: AsyncSession = Depends(get_session),
+    file_store: FileStore = Depends(get_file_store),
+) -> AutomationResponse:
+    """Regenerate a preset automation's tarball using the current template.
+
+    Re-packages the automation with the latest ``sdk_main.py`` and
+    ``setup.sh`` while preserving the original prompt and any repository
+    configuration.  This is the fix for automations that break after an SDK
+    update — rather than deleting and recreating the automation, call this
+    endpoint to refresh it in place.
+
+    The prompt is taken from the DB ``prompt`` field when available.  For
+    legacy automations created before that field was added (where ``prompt``
+    is ``None``), the endpoint falls back to extracting ``prompt.txt`` from
+    the existing tarball.  ``repos_config.json`` is also restored from the
+    tarball when present.
+
+    Raises:
+        404: Automation not found (or belongs to a different user).
+        422: No prompt could be recovered (not a preset automation, or tarball
+             has been deleted).
+        500: New tarball upload failed.
+    """
+    result = await session.execute(
+        select(Automation).where(
+            Automation.id == automation_id,
+            Automation.user_id == user.user_id,
+            Automation.org_id == user.org_id,
+            Automation.deleted_at.is_(None),
+        )
+    )
+    auto = result.scalars().first()
+    if auto is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Automation not found",
+        )
+
+    # Determine prompt and repos.  Prefer stored prompt; fall back to tarball.
+    prompt = auto.prompt
+    repos: list[RepoSource] | None = None
+
+    if prompt is None:
+        # Legacy automation: extract prompt (and optional repos config) from tarball.
+        tarball_files = await _read_tarball_files(auto.tarball_path, session, file_store)
+        prompt_bytes = tarball_files.get("prompt.txt")
+        if prompt_bytes is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Cannot regenerate: no prompt found. "
+                    "This automation was not created via a preset endpoint, "
+                    "or its tarball has been deleted."
+                ),
+            )
+        prompt = prompt_bytes.decode("utf-8")
+
+        repos_bytes = tarball_files.get("repos_config.json")
+        if repos_bytes:
+            repos_config_list = json.loads(repos_bytes.decode("utf-8"))
+            repos = [RepoSource.model_validate(r) for r in repos_config_list]
+    else:
+        # Even when the prompt is stored, restore repos from the tarball so
+        # that repository configuration added at creation time is preserved.
+        try:
+            tarball_files = await _read_tarball_files(
+                auto.tarball_path, session, file_store
+            )
+            repos_bytes = tarball_files.get("repos_config.json")
+            if repos_bytes:
+                repos_config_list = json.loads(repos_bytes.decode("utf-8"))
+                repos = [RepoSource.model_validate(r) for r in repos_config_list]
+        except HTTPException:
+            # Non-fatal: if tarball is gone, regenerate without repos.
+            pass
+
+    # Re-generate with the current template.
+    tarball_content = _generate_tarball(prompt, repos=repos)
+
+    # Upload the regenerated tarball.
+    upload_id = uuid.uuid4()
+    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
+
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=user.user_id,
+        org_id=user.org_id,
+        name=f"prompt-automation-{_safe_truncate(auto.name, 50)}-regen",
+        description=f"Regenerated preset for: {_safe_truncate(auto.name, 100)}",
+        status=UploadStatus.UPLOADING,
+        storage_path=storage_path,
+    )
+    session.add(upload)
+    await session.flush()
+
+    try:
+        size_bytes = await file_store.write_stream(
+            path=storage_path,
+            stream=_bytes_to_async_iter(tarball_content),
+            content_type="application/x-tar",
+        )
+        upload.status = UploadStatus.COMPLETED
+        upload.size_bytes = size_bytes
+    except Exception as e:
+        logger.exception("Failed to upload regenerated tarball: %s", e)
+        upload.status = UploadStatus.FAILED
+        upload.error_message = f"Upload failed: {e!s}"
+        await session.flush()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload regenerated tarball: {e!s}",
+        )
+
+    await session.flush()
+
+    old_tarball_path = auto.tarball_path
+    auto.tarball_path = build_internal_url(upload_id)
+    # Backfill the prompt field for legacy automations so future regenerations
+    # don't need to touch the tarball.
+    if auto.prompt is None:
+        auto.prompt = prompt
+
+    await session.flush()
+    await session.refresh(auto)
+
+    logger.info(
+        "Regenerated preset automation tarball",
+        extra={
+            "automation_id": str(automation_id),
+            "old_tarball_path": old_tarball_path,
+            "new_tarball_path": auto.tarball_path,
+        },
+    )
+
+    return AutomationResponse.model_validate(auto)
