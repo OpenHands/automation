@@ -27,7 +27,7 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
-from openhands.automation.utils.llm_profiles import resolve_llm_profile_for_user
+from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import validate_tarball_path
@@ -62,7 +62,7 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    model = resolve_llm_profile_for_user(body.model, user)
+    model = resolve_model_profile_for_user(body.model, user)
 
     auto = Automation(
         user_id=user.user_id,
@@ -138,7 +138,7 @@ async def update_automation(
         update_data["trigger"] = body.trigger.model_dump()
 
     if "model" in update_data:
-        update_data["model"] = resolve_llm_profile_for_user(body.model, user)
+        update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
     for field, value in update_data.items():
         setattr(auto, field, value)

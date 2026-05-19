@@ -217,7 +217,7 @@ async def _execute_run(
         _build_event_payload(automation, run)
     )
     if automation.model:
-        env_vars["AUTOMATION_LLM_PROFILE"] = automation.model
+        env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key

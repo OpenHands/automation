@@ -112,12 +112,12 @@ class TestCreateAutomation:
         assert "id" in data
         assert data["user_id"] == str(TEST_USER_ID)
 
-    async def test_create_automation_defaults_to_active_llm_profile(
+    async def test_create_automation_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
-        """Create stores the active LLM profile when none is requested."""
-        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
-        mock_authenticated_user.active_llm_profile_name = "active-profile"
+        """Create stores the active model profile when none is requested."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
 
         response = await async_client.post(
             "/api/automation/v1",
@@ -748,7 +748,7 @@ class TestUpdateAutomation:
         assert response.json()["enabled"] is False
 
     async def test_update_automation_model_profile(self, async_client, async_session):
-        """PATCH can update the selected LLM profile."""
+        """PATCH can update the selected model profile."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -776,8 +776,8 @@ class TestUpdateAutomation:
         self, async_client, async_session, mock_authenticated_user
     ):
         """PATCH model=null stores the current active profile name."""
-        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
-        mock_authenticated_user.active_llm_profile_name = "active-profile"
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -803,8 +803,8 @@ class TestUpdateAutomation:
     async def test_update_automation_unknown_model_profile_rejected(
         self, async_client, async_session, mock_authenticated_user
     ):
-        """PATCH rejects unknown LLM profiles when auth metadata includes names."""
-        mock_authenticated_user.llm_profile_names = frozenset({"allowed-profile"})
+        """PATCH rejects unknown model profiles when auth metadata includes names."""
+        mock_authenticated_user.model_profile_names = frozenset({"allowed-profile"})
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -822,7 +822,7 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 422
-        assert response.json()["detail"] == "LLM profile `missing-profile` not found"
+        assert response.json()["detail"] == "Model profile `missing-profile` not found"
 
     async def test_update_automation_not_found(self, async_client):
         """PATCH on non-existent automation returns 404."""

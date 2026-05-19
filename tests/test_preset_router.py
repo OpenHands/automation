@@ -154,7 +154,7 @@ class TestGenerateTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "get_automation_llm" in main_content
+            assert "get_automation_model" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -392,7 +392,7 @@ class TestCreateAutomationFromPrompt:
             assert "main.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
-            assert "automation_llm.py" in tar.getnames()
+            assert "automation_model.py" in tar.getnames()
 
             # Verify prompt content matches what was sent
             prompt_file = tar.extractfile("prompt.txt")
@@ -403,8 +403,8 @@ class TestCreateAutomationFromPrompt:
         self, async_client, mock_authenticated_user
     ):
         """Prompt preset stores the active profile name when none is requested."""
-        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
-        mock_authenticated_user.active_llm_profile_name = "active-profile"
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
 
         response = await async_client.post(
             "/api/automation/v1/preset/prompt",
@@ -422,7 +422,7 @@ class TestCreateAutomationFromPrompt:
         self, async_client, mock_file_store, mock_authenticated_user
     ):
         """Prompt preset rejects unknown profiles when auth metadata includes names."""
-        mock_authenticated_user.llm_profile_names = frozenset({"allowed-profile"})
+        mock_authenticated_user.model_profile_names = frozenset({"allowed-profile"})
         response = await async_client.post(
             "/api/automation/v1/preset/prompt",
             json={
@@ -434,7 +434,7 @@ class TestCreateAutomationFromPrompt:
         )
 
         assert response.status_code == 422
-        assert response.json()["detail"] == "LLM profile `missing-profile` not found"
+        assert response.json()["detail"] == "Model profile `missing-profile` not found"
         mock_file_store.write_stream.assert_not_called()
 
     async def test_create_from_prompt_creates_upload_record(
@@ -776,7 +776,7 @@ class TestGeneratePluginTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "get_automation_llm" in main_content
+            assert "get_automation_model" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -839,7 +839,7 @@ class TestGeneratePluginTarball:
             # Note: clone_repos.py is no longer included - SDK handles cloning
             assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
-            assert "automation_llm.py" in names
+            assert "automation_model.py" in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")
@@ -951,8 +951,8 @@ class TestCreateAutomationFromPlugin:
         self, async_client, mock_authenticated_user
     ):
         """Plugin preset stores the active profile name when none is requested."""
-        mock_authenticated_user.llm_profile_names = frozenset({"active-profile"})
-        mock_authenticated_user.active_llm_profile_name = "active-profile"
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
 
         response = await async_client.post(
             "/api/automation/v1/preset/plugin",

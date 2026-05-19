@@ -518,6 +518,6 @@ class TestExecuteRunEnvVarOrdering:
 
         # Verify env vars include the API key from build_env_vars()
         call_kwargs = mock_execute.call_args.kwargs
-        assert call_kwargs["env_vars"]["AUTOMATION_LLM_PROFILE"] == "fast-profile"
+        assert call_kwargs["env_vars"]["AUTOMATION_MODEL"] == "fast-profile"
 
         assert "OPENHANDS_API_KEY" in call_kwargs["env_vars"]

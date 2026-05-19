@@ -10,7 +10,7 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from openhands.automation.config import get_config
-from openhands.automation.constants import LLM_PROFILE_PATTERN
+from openhands.automation.constants import MODEL_PROFILE_PATTERN
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -257,7 +257,7 @@ class CreateAutomationRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        pattern=LLM_PROFILE_PATTERN,
+        pattern=MODEL_PROFILE_PATTERN,
         description=(
             "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."
@@ -319,7 +319,7 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        pattern=LLM_PROFILE_PATTERN,
+        pattern=MODEL_PROFILE_PATTERN,
         description=(
             "Model profile name to use for automation runs. Defaults to the active "
             "profile at creation time when omitted."

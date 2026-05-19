@@ -1,11 +1,11 @@
-"""Shared LLM profile helpers for generated automation preset runtimes."""
+"""Shared model profile helpers for generated automation preset runtimes."""
 
 from urllib.parse import quote
 
 import httpx
 
 
-def _load_named_llm_profile_config(
+def _load_named_model_profile_config(
     profile_name: str,
     *,
     is_local_mode: bool,
@@ -14,7 +14,7 @@ def _load_named_llm_profile_config(
     api_key: str,
     session_key: str,
 ) -> dict[str, object]:
-    """Resolve an LLM profile using the same profile APIs as Agent Canvas."""
+    """Resolve a model profile using the same profile APIs as Agent Canvas."""
     if is_local_mode:
         headers = {"X-Expose-Secrets": "plaintext"}
         if session_key:
@@ -25,7 +25,7 @@ def _load_named_llm_profile_config(
             timeout=30,
         )
         if response.status_code == 404:
-            raise FileNotFoundError(f"LLM profile `{profile_name}` not found")
+            raise FileNotFoundError(f"Model profile `{profile_name}` not found")
         response.raise_for_status()
         config = response.json().get("config")
     else:
@@ -39,24 +39,24 @@ def _load_named_llm_profile_config(
             timeout=30,
         )
         response.raise_for_status()
-        llm_profiles = response.json().get("llm_profiles") or {}
+        profiles_payload = response.json().get("llm_profiles") or {}
         profiles = (
-            llm_profiles.get("profiles") if isinstance(llm_profiles, dict) else None
+            profiles_payload.get("profiles") if isinstance(profiles_payload, dict) else None
         )
         config = profiles.get(profile_name) if isinstance(profiles, dict) else None
         if config is None:
             available = sorted(profiles) if isinstance(profiles, dict) else []
             raise FileNotFoundError(
-                f"LLM profile `{profile_name}` not found. "
+                f"Model profile `{profile_name}` not found. "
                 f"Available profiles: {', '.join(available) or 'none'}"
             )
 
     if not isinstance(config, dict):
-        raise ValueError(f"LLM profile `{profile_name}` has invalid config")
+        raise ValueError(f"Model profile `{profile_name}` has invalid config")
     return config
 
 
-def get_automation_llm(
+def get_automation_model(
     workspace,
     profile_name: str | None,
     *,
@@ -74,7 +74,7 @@ def get_automation_llm(
     from openhands.sdk.llm.llm import LLM
 
     return LLM(
-        **_load_named_llm_profile_config(
+        **_load_named_model_profile_config(
             profile_name,
             is_local_mode=is_local_mode,
             agent_server_url=agent_server_url,
