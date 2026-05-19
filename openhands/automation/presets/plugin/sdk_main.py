@@ -123,7 +123,6 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
-from automation_model import get_automation_model
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -260,15 +259,10 @@ This automation was triggered by a webhook event:
 
     # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = get_automation_model(
-        workspace,
-        model_profile,
-        is_local_mode=IS_LOCAL_MODE,
-        agent_server_url=agent_server_url,
-        api_url=api_url,
-        api_key=api_key,
-        session_key=session_key,
-    )
+    if model_profile:
+        llm = workspace.get_llm(profile_name=model_profile)
+    else:
+        llm = workspace.get_llm()
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")

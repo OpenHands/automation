@@ -154,7 +154,7 @@ class TestGenerateTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "get_automation_model" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -392,7 +392,7 @@ class TestCreateAutomationFromPrompt:
             assert "main.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
-            assert "automation_model.py" in tar.getnames()
+            assert "automation_model.py" not in tar.getnames()
 
             # Verify prompt content matches what was sent
             prompt_file = tar.extractfile("prompt.txt")
@@ -776,7 +776,7 @@ class TestGeneratePluginTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "get_automation_model" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -839,7 +839,7 @@ class TestGeneratePluginTarball:
             # Note: clone_repos.py is no longer included - SDK handles cloning
             assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
-            assert "automation_model.py" in names
+            assert "automation_model.py" not in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")

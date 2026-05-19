@@ -64,7 +64,6 @@ def _load_prompt_preset_files() -> dict[str, str]:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
-            "automation_model.py": (PRESETS_DIR / "automation_model.py").read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -79,7 +78,6 @@ def _load_plugin_preset_files() -> dict[str, str]:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
-            "automation_model.py": (PRESETS_DIR / "automation_model.py").read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -164,7 +162,6 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
-    - automation_model.py: shared Model profile resolver
     - prompt.txt: The user's prompt text
     - setup.sh: Script to install the SDK
     - repos_config.json: (optional) Repository configuration for cloning
@@ -185,9 +182,6 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
-        _add_file_to_tar(
-            tar, "automation_model.py", preset_files["automation_model.py"]
-        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -402,7 +396,6 @@ def _generate_plugin_tarball(
 
     The tarball contains:
     - main.py: SDK boilerplate that loads plugins and runs conversation
-    - automation_model.py: shared Model profile resolver
     - plugins_config.json: List of plugin sources (serialized PluginSource models)
     - prompt.txt: The prompt to send
     - setup.sh: Script to install the SDK
@@ -430,9 +423,6 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
-        _add_file_to_tar(
-            tar, "automation_model.py", preset_files["automation_model.py"]
-        )
         _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
