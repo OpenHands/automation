@@ -40,7 +40,6 @@ from openhands.automation.db import get_session
 from openhands.automation.kv_router import get_token_claims
 from openhands.automation.models import Automation, AutomationKV
 from openhands.automation.utils.kv import (
-    DEFAULT_LOCK_TIMEOUT_MS,
     KVTokenClaims,
     decrypt_value,
     encrypt_value,
@@ -119,10 +118,7 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
         yield async_session
 
     async def override_get_token_claims():
-        return KVTokenClaims(
-            automation_id=TEST_AUTOMATION_ID,
-            lock_timeout_ms=DEFAULT_LOCK_TIMEOUT_MS,
-        )
+        return KVTokenClaims(automation_id=TEST_AUTOMATION_ID)
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_token_claims] = override_get_token_claims
@@ -142,7 +138,7 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
 
 @pytest.fixture(autouse=True)
 async def automation_with_kv(async_session):
-    """Create a test automation with KV store enabled."""
+    """Create a test automation (KV store is always available)."""
     automation = Automation(
         id=TEST_AUTOMATION_ID,
         user_id=TEST_USER_ID,
@@ -151,7 +147,6 @@ async def automation_with_kv(async_session):
         trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
         tarball_path="s3://bucket/code.tar.gz",
         entrypoint="uv run script.py",
-        enable_kv_store=True,
     )
     async_session.add(automation)
     await async_session.commit()

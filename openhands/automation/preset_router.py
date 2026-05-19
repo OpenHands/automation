@@ -121,10 +121,6 @@ class CreatePromptAutomationRequest(BaseModel):
             "Can be a single repo or a list of repos."
         ),
     )
-    enable_kv_store: bool = Field(
-        default=False,
-        description="Enable key-value store for state persistence between runs",
-    )
 
     @model_validator(mode="before")
     @classmethod
@@ -275,7 +271,6 @@ async def create_automation_from_prompt(
             setup_script_path="setup.sh",
             entrypoint=VENV_ENTRYPOINT,
             timeout=body.timeout,
-            enable_kv_store=body.enable_kv_store,
         )
         session.add(automation)
         await session.flush()
@@ -345,10 +340,6 @@ class CreatePluginAutomationRequest(BaseModel):
             "are automatically loaded from each cloned repository. "
             "Can be a single repo or a list of repos."
         ),
-    )
-    enable_kv_store: bool = Field(
-        default=False,
-        description="Enable key-value store for state persistence between runs",
     )
 
     @model_validator(mode="before")
@@ -512,7 +503,6 @@ async def create_automation_from_plugin(
             setup_script_path="setup.sh",
             entrypoint=VENV_ENTRYPOINT,
             timeout=body.timeout,
-            enable_kv_store=body.enable_kv_store,
         )
         session.add(automation)
         await session.flush()

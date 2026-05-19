@@ -232,18 +232,26 @@ class KVSettings(BaseSettings):
     """Key-value store configuration for automation state persistence.
 
     The KV store provides per-automation state storage with encryption and
-    JWT-based authentication. It must be explicitly enabled per-automation.
+    JWT-based authentication. It is available to every automation whenever
+    AUTOMATION_KV_SECRET is configured at the service level.
 
     Environment variables (AUTOMATION_ prefix):
         AUTOMATION_KV_SECRET: Secret for JWT signing and value encryption.
             Must be set to enable KV store. Generate with:
             python -c "import secrets; print(secrets.token_urlsafe(32))"
         AUTOMATION_KV_MAX_VALUE_SIZE: Max value size in bytes (default: 64KB)
+        AUTOMATION_KV_LOCK_TIMEOUT_MS: Row-lock timeout in ms (default: 5000)
     """
 
     # Secret key for signing KV store JWT tokens and encrypting KV values.
     # Must be set to enable the KV store feature.
     kv_secret: str = ""
+
+    # Row-lock timeout in milliseconds for KV operations.
+    # Applied via PostgreSQL `SET LOCAL lock_timeout` before FOR UPDATE.
+    # If the lock isn't acquired within this window we return 409 Conflict
+    # with Retry-After so clients can back off and retry.
+    kv_lock_timeout_ms: int = 5000
 
     # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
     #

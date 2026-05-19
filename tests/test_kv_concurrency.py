@@ -3,8 +3,6 @@
 Tests cover:
 - Statement timeout (safety net for runaway operations)
 - Retry-After header on 409 responses
-- Configurable lock timeout per-automation
-- KV token claims with lock_timeout_ms
 - Metrics recording
 """
 
@@ -24,16 +22,9 @@ from openhands.automation.kv_router import (
     _raise_lock_conflict,
     _raise_version_conflict,
 )
-from openhands.automation.utils.kv import (
-    DEFAULT_LOCK_TIMEOUT_MS,
-    KVTokenClaims,
-    create_kv_token,
-    verify_kv_token,
-)
 
 
 # --- Test Constants ---
-TEST_SECRET = "test-secret-key-for-testing-only"
 TEST_AUTOMATION_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 TEST_RUN_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
@@ -117,92 +108,6 @@ class TestRetryAfterHeader:
         assert detail["actual_version"] == 6
 
 
-class TestKVTokenClaims:
-    """Tests for KV token with lock_timeout_ms claim."""
-
-    def test_create_token_with_default_timeout(self):
-        """Token created with default lock timeout."""
-        token = create_kv_token(
-            secret=TEST_SECRET,
-            automation_id=TEST_AUTOMATION_ID,
-            run_id=TEST_RUN_ID,
-        )
-
-        claims = verify_kv_token(TEST_SECRET, token)
-        assert isinstance(claims, KVTokenClaims)
-        assert claims.automation_id == TEST_AUTOMATION_ID
-        assert claims.lock_timeout_ms == DEFAULT_LOCK_TIMEOUT_MS
-
-    def test_create_token_with_custom_timeout(self):
-        """Token created with custom lock timeout."""
-        token = create_kv_token(
-            secret=TEST_SECRET,
-            automation_id=TEST_AUTOMATION_ID,
-            run_id=TEST_RUN_ID,
-            lock_timeout_ms=2000,
-        )
-
-        claims = verify_kv_token(TEST_SECRET, token)
-        assert claims.lock_timeout_ms == 2000
-
-    def test_verify_token_backward_compatible(self):
-        """Old tokens without lock_timeout_ms use default."""
-        from datetime import UTC, datetime, timedelta
-
-        import jwt
-
-        # Create a token manually without lock_timeout_ms (simulating old token)
-        payload = {
-            "automation_id": str(TEST_AUTOMATION_ID),
-            "run_id": str(TEST_RUN_ID),
-            "iat": datetime.now(UTC),
-            "exp": datetime.now(UTC) + timedelta(hours=24),
-        }
-        old_token = jwt.encode(payload, TEST_SECRET, algorithm="HS256")
-
-        claims = verify_kv_token(TEST_SECRET, old_token)
-        assert claims.automation_id == TEST_AUTOMATION_ID
-        # Should use default when claim is missing
-        assert claims.lock_timeout_ms == DEFAULT_LOCK_TIMEOUT_MS
-
-    def test_verify_token_invalid_timeout_uses_default(self):
-        """Invalid lock_timeout_ms in token uses default."""
-        from datetime import UTC, datetime, timedelta
-
-        import jwt
-
-        # Create a token with invalid timeout
-        payload = {
-            "automation_id": str(TEST_AUTOMATION_ID),
-            "run_id": str(TEST_RUN_ID),
-            "lock_timeout_ms": "not_a_number",
-            "iat": datetime.now(UTC),
-            "exp": datetime.now(UTC) + timedelta(hours=24),
-        }
-        token = jwt.encode(payload, TEST_SECRET, algorithm="HS256")
-
-        claims = verify_kv_token(TEST_SECRET, token)
-        assert claims.lock_timeout_ms == DEFAULT_LOCK_TIMEOUT_MS
-
-    def test_verify_token_too_small_timeout_uses_default(self):
-        """Lock timeout < 100ms uses default."""
-        from datetime import UTC, datetime, timedelta
-
-        import jwt
-
-        payload = {
-            "automation_id": str(TEST_AUTOMATION_ID),
-            "run_id": str(TEST_RUN_ID),
-            "lock_timeout_ms": 50,  # Below minimum
-            "iat": datetime.now(UTC),
-            "exp": datetime.now(UTC) + timedelta(hours=24),
-        }
-        token = jwt.encode(payload, TEST_SECRET, algorithm="HS256")
-
-        claims = verify_kv_token(TEST_SECRET, token)
-        assert claims.lock_timeout_ms == DEFAULT_LOCK_TIMEOUT_MS
-
-
 class TestKVMetrics:
     """Tests for KV store Prometheus metrics."""
 
@@ -249,105 +154,3 @@ class TestKVMetrics:
         # Just verify it doesn't raise
         record_state_size(1000)
         record_state_size(50000)
-
-
-class TestLockTimeoutValidation:
-    """Tests for kv_lock_timeout_ms validation in schemas."""
-
-    def test_create_automation_default_timeout(self):
-        """CreateAutomationRequest has default lock timeout."""
-        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
-
-        req = CreateAutomationRequest(
-            name="test",
-            trigger=CronTrigger(schedule="0 9 * * *"),
-            tarball_path="gs://bucket/path.tar.gz",
-            entrypoint="python run.py",
-        )
-        assert req.kv_lock_timeout_ms == 5000
-
-    def test_create_automation_custom_timeout(self):
-        """CreateAutomationRequest accepts custom lock timeout."""
-        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
-
-        req = CreateAutomationRequest(
-            name="test",
-            trigger=CronTrigger(schedule="0 9 * * *"),
-            tarball_path="gs://bucket/path.tar.gz",
-            entrypoint="python run.py",
-            kv_lock_timeout_ms=2000,
-        )
-        assert req.kv_lock_timeout_ms == 2000
-
-    def test_create_automation_timeout_min_validation(self):
-        """CreateAutomationRequest rejects timeout < 100ms."""
-        from pydantic import ValidationError
-
-        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
-
-        with pytest.raises(ValidationError) as exc_info:
-            CreateAutomationRequest(
-                name="test",
-                trigger=CronTrigger(schedule="0 9 * * *"),
-                tarball_path="gs://bucket/path.tar.gz",
-                entrypoint="python run.py",
-                kv_lock_timeout_ms=50,  # Too low
-            )
-
-        assert "kv_lock_timeout_ms" in str(exc_info.value)
-
-    def test_create_automation_timeout_max_validation(self):
-        """CreateAutomationRequest rejects timeout > 30000ms."""
-        from pydantic import ValidationError
-
-        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
-
-        with pytest.raises(ValidationError) as exc_info:
-            CreateAutomationRequest(
-                name="test",
-                trigger=CronTrigger(schedule="0 9 * * *"),
-                tarball_path="gs://bucket/path.tar.gz",
-                entrypoint="python run.py",
-                kv_lock_timeout_ms=60000,  # Too high
-            )
-
-        assert "kv_lock_timeout_ms" in str(exc_info.value)
-
-    def test_update_automation_timeout(self):
-        """UpdateAutomationRequest accepts optional lock timeout."""
-        from openhands.automation.schemas import UpdateAutomationRequest
-
-        req = UpdateAutomationRequest(kv_lock_timeout_ms=10000)
-        assert req.kv_lock_timeout_ms == 10000
-
-    def test_update_automation_timeout_validation(self):
-        """UpdateAutomationRequest validates timeout bounds."""
-        from pydantic import ValidationError
-
-        from openhands.automation.schemas import UpdateAutomationRequest
-
-        with pytest.raises(ValidationError):
-            UpdateAutomationRequest(kv_lock_timeout_ms=99)  # Too low
-
-
-class TestAutomationModelTimeout:
-    """Tests for kv_lock_timeout_ms in Automation model."""
-
-    def test_model_has_default_timeout(self):
-        """Automation model has default lock timeout."""
-        from openhands.automation.models import Automation
-
-        # Check column default
-        col = Automation.__table__.columns["kv_lock_timeout_ms"]
-        assert col.default.arg == 5000
-
-
-class TestResponseSchema:
-    """Tests for kv_lock_timeout_ms in response schemas."""
-
-    def test_automation_response_includes_timeout(self):
-        """AutomationResponse includes kv_lock_timeout_ms."""
-        from openhands.automation.schemas import AutomationResponse
-
-        # Check field exists in model
-        assert "kv_lock_timeout_ms" in AutomationResponse.model_fields

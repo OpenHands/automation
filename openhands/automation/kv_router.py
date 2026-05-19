@@ -1,8 +1,9 @@
 """FastAPI router for the automation KV store API.
 
 Provides a Redis-like key-value store scoped per-automation for state persistence.
-All values are encrypted at the application level using AES-256-GCM.
-Authentication is via per-run JWT tokens (AUTOMATION_KV_TOKEN).
+Values are encrypted at the application level via the SDK's :class:`Cipher`
+helper (Fernet: AES-128-CBC + HMAC-SHA256) before storage. Authentication is
+via per-run JWT tokens (AUTOMATION_KV_TOKEN).
 
 Single-Document Backend Design
 ==============================
@@ -95,7 +96,7 @@ async def get_token_claims(
     """Extract and verify claims from the KV token.
 
     The token is passed via Authorization: Bearer <token> header.
-    It contains the automation_id and lock_timeout_ms as trusted claims.
+    It contains the automation_id as a trusted claim.
     """
     kv_config = get_config().kv
 
@@ -210,9 +211,10 @@ async def _get_state_row_for_update(
        query, including slow encryption, network issues, or unexpected operations.
        This catches problems AFTER the lock is acquired.
 
-    2. Lock Timeout (configurable): Fail fast if waiting too long for another
-       transaction to release the row lock. This catches contention BEFORE
-       the lock is acquired. Configurable per-automation via kv_lock_timeout_ms.
+    2. Lock Timeout (service-wide default): Fail fast if waiting too long for
+       another transaction to release the row lock. This catches contention
+       BEFORE the lock is acquired. Configured via AUTOMATION_KV_LOCK_TIMEOUT_MS
+       on the service (single global value — no per-automation knob).
 
     Statement timeout > lock timeout because:
     - If we're waiting for a lock, lock_timeout triggers first
@@ -228,7 +230,7 @@ async def _get_state_row_for_update(
     Args:
         session: Database session
         automation_id: UUID of the automation
-        lock_timeout_ms: Lock timeout in milliseconds (from token claims)
+        lock_timeout_ms: Lock timeout in milliseconds (from KVSettings)
     """
     # Statement timeout: 2x lock timeout as safety net for runaway operations
     statement_timeout_ms = lock_timeout_ms * 2
@@ -478,7 +480,7 @@ async def set_value(
     # Lock the state row for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -546,7 +548,7 @@ async def patch_value(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -614,7 +616,7 @@ async def delete_key(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -667,7 +669,7 @@ async def increment(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -711,7 +713,7 @@ async def decrement(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -751,7 +753,7 @@ async def lpush(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -790,7 +792,7 @@ async def rpush(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -828,7 +830,7 @@ async def lpop(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -868,7 +870,7 @@ async def rpop(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -1093,7 +1095,7 @@ async def batch(
     # Acquire lock for atomic batch execution
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, claims.lock_timeout_ms
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):

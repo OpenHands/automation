@@ -18,7 +18,7 @@ If external systems are required for such a prevalent use case, that erodes the 
 
 ## Solution
 
-Provide a built-in **key-value store API** scoped to each automation. Automations can opt-in to persistent storage that:
+Provide a built-in **key-value store API** scoped to each automation. Every automation has access to persistent storage that:
 
 - **Is easy to use** — simple GET/SET operations, familiar Redis-like semantics
 - **Is flexible** — supports JSON values, counters, lists/queues, nested paths
@@ -99,23 +99,32 @@ Following OpenHands conventions from the parent project:
 | Component | Approach |
 |-----------|----------|
 | **Auth tokens** | JWS (JSON Web Signature) with HS256 |
-| **KV values** | JWE (JSON Web Encryption) with A256GCM |
-| **Key management** | Single master key from `AUTOMATION_JWT_SECRET` env var |
-| **Libraries** | `pyjwt` + `jwcrypto` (matching OpenHands/OpenHands) |
+| **KV values** | Fernet (AES-128-CBC + HMAC-SHA256), via SDK `Cipher` helper |
+| **Key management** | Single master key from `AUTOMATION_KV_SECRET` env var |
+| **Libraries** | `pyjwt` for tokens; `openhands.sdk.utils.cipher.Cipher` for values |
 
-**Pattern from OpenHands:**
+**Pattern (mirrors the rest of the platform):**
 ```python
-# encrypt_utils.py pattern
-def encrypt_value(value: str) -> str:
-    return jwt_service.create_jwe_token({'v': value})
+# openhands/automation/utils/kv.py
+from openhands.sdk.utils.cipher import Cipher
+from pydantic import SecretStr
 
-def decrypt_value(encrypted: str) -> str:
-    return jwt_service.decrypt_jwe_token(encrypted)['v']
+def encrypt_value(secret: str, value) -> str:
+    plaintext = strict_json(value)  # validates + serializes
+    return Cipher(secret).encrypt(SecretStr(plaintext))
+
+def decrypt_value(secret: str, encrypted: str):
+    return json.loads(Cipher(secret).decrypt(encrypted).get_secret_value())
 ```
+
+Using the SDK's `Cipher` keeps this module thin and shares a vetted
+implementation with the rest of the OpenHands platform — we don't need to
+maintain our own AES code or worry about IV management, padding, or
+authentication tag handling.
 
 **What's stored in the database:**
 ```
-value_encrypted: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...<encrypted blob>"
+state_encrypted: "gAAAAABm...<Fernet token (URL-safe base64)>"
 ```
 
 **What the application sees after decryption:**
@@ -652,9 +661,10 @@ class AutomationKV(Base):
         unique=True,  # ONE row per automation
     )
     
-    # Encrypted JSON document containing all KV pairs
+    # Encrypted JSON document containing all KV pairs, stored as a Fernet
+    # token (URL-safe base64 text) produced by the SDK's Cipher helper.
     # Decrypted example: {"config": {...}, "counter": 42, "queue": [...]}
-    state_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     
     # Timestamps (foundation for future TTL support)
     created_at: Mapped[datetime] = mapped_column(
@@ -701,7 +711,8 @@ PUT /kv/session?ex=3600
 dependencies = [
     # ... existing ...
     "pyjwt>=2.8",
-    "jwcrypto>=1.5.6",
+    # Fernet encryption is provided by the SDK's Cipher helper, which is
+    # already pulled in via openhands-sdk — no extra crypto dependency needed.
 ]
 ```
 
@@ -710,8 +721,14 @@ dependencies = [
 ## Environment Variables
 
 ```bash
-# Required: Master key for JWT signing and JWE encryption
-AUTOMATION_JWT_SECRET=<random-secret-string>
+# Required: Master key for JWT signing and Fernet encryption of KV values.
+# When this is set the KV store is enabled service-wide; every automation
+# gets a token at dispatch time. When it's empty the feature is disabled.
+AUTOMATION_KV_SECRET=<random-secret-string>
+
+# Optional: Row-lock timeout in milliseconds for KV operations (default: 5000).
+# Applied via PostgreSQL `SET LOCAL lock_timeout` before each FOR UPDATE.
+AUTOMATION_KV_LOCK_TIMEOUT_MS=5000
 ```
 
 ---
@@ -792,23 +809,24 @@ if not created:
 
 ### Agent Tool
 
-The tool is conditionally loaded in the preset's `sdk_main.py`:
+The KV store is always available, so the preset's `sdk_main.py` loads the
+tool unconditionally whenever a KV token is present in the environment:
 
 ```python
 # In presets/prompt/sdk_main.py
 
-if os.environ.get("AUTOMATION_ENABLE_KV_STORE") == "true":
+if os.environ.get("AUTOMATION_KV_TOKEN"):
     from openhands.kv import KVStoreTool
     # Register tool with agent
 ```
 
 ### Environment Variables
 
-The dispatcher passes these env vars when KV is enabled:
+The dispatcher injects a token for every run whenever the service has a KV
+secret configured (i.e., whenever the feature is enabled service-wide):
 
 | Env Var | Purpose |
 |---------|---------|
-| `AUTOMATION_ENABLE_KV_STORE` | Feature flag (`"true"` to enable) |
 | `AUTOMATION_KV_TOKEN` | JWT token scoped to this automation |
 
 ### Environment Detection
@@ -857,16 +875,17 @@ These limits are generous for the intended use case (state persistence between a
 ### Implementation (TODO)
 
 **Automation Service (this repo):**
-1. [ ] Add `enable_kv_store` field to Automation model
-2. [ ] Update schemas for create/update requests
-3. [ ] Implement JwtService (port from OpenHands)
-4. [ ] Implement encrypt_utils.py
-5. [ ] Create database migration for `automation_kv` table
-6. [ ] Implement KV API router (`/api/automation/v1/kv/...`)
-7. [ ] Update dispatcher to generate and pass `AUTOMATION_KV_TOKEN`
-8. [ ] Update preset `sdk_main.py` to conditionally load KV tool
-9. [ ] Update preset `setup.sh` to install `openhands-kv`
-10. [ ] Frontend: Add KV toggle to automation create/edit form
+1. [x] Implement JWT signing for `AUTOMATION_KV_TOKEN` (`utils/kv.py`)
+2. [x] Implement value encryption via the SDK's `Cipher` helper
+3. [x] Create database migration for `automation_kv` table
+4. [x] Implement KV API router (`/api/automation/v1/kv/...`)
+5. [x] Update dispatcher to generate and pass `AUTOMATION_KV_TOKEN` whenever
+       the service has a KV secret configured (no per-automation toggle)
+6. [ ] Update preset `sdk_main.py` to load the KV tool when
+       `AUTOMATION_KV_TOKEN` is set
+7. [ ] Update preset `setup.sh` to install `openhands-kv`
+8. [ ] Update the `openhands-automation` skill so agents know the KV store
+       is available out of the box (follow-up)
 
 **New `openhands-kv` Package (new repo):**
 1. [ ] Create repo under OpenHands org

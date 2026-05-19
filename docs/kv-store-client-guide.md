@@ -42,7 +42,7 @@ All KV endpoints require a JWT token passed via the `Authorization` header:
 Authorization: Bearer <AUTOMATION_KV_TOKEN>
 ```
 
-The token is automatically provided to your automation via the `AUTOMATION_KV_TOKEN` environment variable when `enable_kv_store: true` is set.
+The token is automatically provided to your automation via the `AUTOMATION_KV_TOKEN` environment variable whenever the service has a KV secret configured. The KV store is always available — there is no per-automation toggle.
 
 ## Basic Operations
 
@@ -357,7 +357,6 @@ async def increment_counter():
 - **Design for idempotency** - operations may be retried
 - **Use batch endpoint** for multiple updates in one operation
 - **Implement proper retry logic** for concurrent event handlers
-- **Set appropriate `kv_lock_timeout_ms`** based on your use case
 
 ### DON'T ❌
 
@@ -367,26 +366,13 @@ async def increment_counter():
 - **Use KV as a queue** - use proper message queues for high-throughput
 - **Rely on ordering** across concurrent writes
 
-### Lock Timeout Configuration
+### Lock Timeout
 
-Configure `kv_lock_timeout_ms` based on your automation type:
-
-| Use Case | Recommended Timeout | Rationale |
-|----------|---------------------|-----------|
-| High-throughput event handlers | 2000ms | Fail fast, retry quickly |
-| Standard scheduled jobs | 5000ms (default) | Balanced wait/fail |
-| Long-running batch jobs | 10000ms | Allow more contention |
-| Critical single-run ops | 500-1000ms | Immediate feedback |
-
-Set via automation config:
-```json
-{
-  "name": "my-automation",
-  "enable_kv_store": true,
-  "kv_lock_timeout_ms": 2000,
-  ...
-}
-```
+The KV store uses a single service-wide row-lock timeout (default: 5000ms),
+configured via `AUTOMATION_KV_LOCK_TIMEOUT_MS` on the service. Operations
+that can't acquire the row lock within this window return HTTP 409 with a
+`Retry-After` header. Clients should always implement retry-with-backoff
+on 409 — see the example handler below.
 
 ## Error Handling
 
@@ -432,7 +418,8 @@ Both include a `Retry-After: 1` header suggesting initial backoff.
 - Solutions:
   - Reduce `max_concurrent_runs`
   - Use atomic operations instead of read-modify-write
-  - Lower `kv_lock_timeout_ms` to fail faster
+  - Ask an operator to lower `AUTOMATION_KV_LOCK_TIMEOUT_MS` so contended
+    operations fail fast and retry sooner
 
 **Slow operations:**
 - State document too large

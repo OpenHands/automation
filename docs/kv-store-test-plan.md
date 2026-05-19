@@ -7,19 +7,13 @@
 
 ---
 
-## ⚠️ CRITICAL BUG: Token Injection
+## Token Injection
 
-**Issue:** The `AUTOMATION_KV_TOKEN` environment variable is **NOT being injected** into the sandbox even when `enable_kv_store: true` is set on the automation.
-
-**Evidence:**
-- Created automation with `enable_kv_store: true`
-- Dispatched run, confirmed status = COMPLETED  
-- Agent output showed: `"Checking if token exists: 0 chars"` (token is empty)
-- All KV API calls failed with `"Invalid token: Not enough segments"`
-
-**Root Cause:** The dispatcher is not generating/injecting the KV token into the sandbox environment.
-
-**Workaround:** The E2E test script (`scripts/test_kv_e2e.py`) manually generates and injects the token, bypassing this bug.
+The dispatcher injects `AUTOMATION_KV_TOKEN` into the sandbox for every run
+whenever the service has `AUTOMATION_KV_SECRET` configured. The KV store is
+available to every automation by default — there is no per-automation
+toggle. When the service has no KV secret configured, no token is injected
+and the KV API responds with HTTP 503.
 
 ---
 
@@ -89,12 +83,6 @@ curl -X POST "${BASE_URL}/api/automation/v1/preset/prompt" \
     "trigger": {"type": "cron", "schedule": "0 0 1 1 *"}
   }'
 
-# Enable KV store
-curl -X PATCH "${BASE_URL}/api/automation/v1/${ID}" \
-  -H "Authorization: Bearer ${API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"enable_kv_store": true}'
-
 # Run 1: Should print "first run", counter = 1
 # Run 2: Should print "1", counter = 2
 # Run 3: Should print "2", counter = 3
@@ -137,12 +125,6 @@ curl -X POST "${BASE_URL}/api/automation/v1/preset/prompt" \
   -H "Content-Type: application/json" \
   -d '{"name": "Test", "prompt": "...", "trigger": {"type": "cron", "schedule": "0 0 1 1 *"}}'
 
-# Enable KV store
-curl -X PATCH "${BASE_URL}/api/automation/v1/${ID}" \
-  -H "Authorization: Bearer ${API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"enable_kv_store": true}'
-
 # Dispatch run
 curl -X POST "${BASE_URL}/api/automation/v1/${ID}/dispatch" \
   -H "Authorization: Bearer ${API_KEY}"
@@ -161,7 +143,5 @@ curl -X DELETE "${BASE_URL}/api/automation/v1/${ID}" \
 ## Notes
 
 1. **Token is sandbox-only:** `AUTOMATION_KV_TOKEN` is injected at runtime. You cannot extract it externally.
-
-2. **Preset API:** The prompt preset (`/preset/prompt`) does not expose `enable_kv_store` directly—use PATCH after creation.
 
 3. **Token scope:** Each token is scoped to a specific automation ID for strict isolation.

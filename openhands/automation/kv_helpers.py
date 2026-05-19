@@ -91,7 +91,7 @@ def validate_key(key: str) -> str:
 # --- HTTP Error Helpers ---
 
 
-def safe_encrypt(secret: str, value: Any) -> bytes:
+def safe_encrypt(secret: str, value: Any) -> str:
     """Encrypt a value with proper HTTP error handling.
 
     Wraps encrypt_value() to convert exceptions to appropriate HTTP errors:
@@ -109,7 +109,7 @@ def safe_encrypt(secret: str, value: Any) -> bytes:
         value: Any JSON-serializable value
 
     Returns:
-        Encrypted bytes
+        Encrypted Fernet token (URL-safe base64 string)
 
     Raises:
         HTTPException: 400 for invalid values, 500 for encryption errors
@@ -132,14 +132,14 @@ def safe_encrypt(secret: str, value: Any) -> bytes:
         )
 
 
-def safe_decrypt(secret: str, encrypted: bytes) -> Any:
+def safe_decrypt(secret: str, encrypted: str) -> Any:
     """Decrypt a value with proper HTTP error handling.
 
     Wraps decrypt_value() to convert KVEncryptionError to HTTP 500.
 
     Args:
         secret: The encryption secret
-        encrypted: Encrypted bytes from the database
+        encrypted: Encrypted Fernet token from the database
 
     Returns:
         The decrypted JSON value

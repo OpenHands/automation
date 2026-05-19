@@ -2,7 +2,7 @@
 """End-to-end test for KV store functionality with full stdout/stderr capture.
 
 This script:
-1. Creates a real automation via API (with enable_kv_store=true)
+1. Creates a real automation via API (KV store is always available)
 2. Generates a KV token for that automation
 3. Uses run_automation() to execute a test script with full output capture
 4. Cleans up the automation
@@ -785,8 +785,8 @@ KV_TEST_SCRIPT_THOROUGH = KV_TEST_SCRIPT.replace('mode = "quick"', 'mode = "thor
 async def create_automation(
     client: httpx.AsyncClient, api_url: str, api_key: str
 ) -> str:
-    """Create a test automation with KV store enabled. Returns automation_id."""
-    print("Creating automation with enable_kv_store=true...")
+    """Create a test automation (KV always available). Returns automation_id."""
+    print("Creating automation (KV store is always available)...")
 
     resp = await client.post(
         f"{api_url}/api/automation/v1/preset/prompt",
@@ -799,7 +799,6 @@ async def create_automation(
                 "schedule": "0 0 1 1 *",  # Once a year (won't actually trigger)
                 "timezone": "UTC",
             },
-            "enable_kv_store": True,
         },
     )
 
@@ -904,7 +903,6 @@ async def main():
                     "OPENHANDS_API_KEY": api_key,
                     "OPENHANDS_CLOUD_API_URL": api_url,
                     "AUTOMATION_KV_TOKEN": kv_token,
-                    "AUTOMATION_ENABLE_KV_STORE": "true",
                 },
                 timeout=600 if mode == "thorough" else 300,
                 keep_sandbox=False,

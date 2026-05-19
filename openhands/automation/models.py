@@ -11,7 +11,6 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
-    LargeBinary,
     String,
     Text,
     Uuid,
@@ -74,17 +73,6 @@ class Automation(Base):
 
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
-
-    # Whether this automation has access to the key-value store for state persistence
-    enable_kv_store: Mapped[bool] = mapped_column(default=False, nullable=False)
-
-    # Lock timeout in milliseconds for KV store operations.
-    # Controls how long to wait for the row lock before returning 409 Conflict.
-    # Default 5000ms (5s) is suitable for most cases. Lower values (e.g., 2000ms)
-    # help high-throughput event handlers fail fast. Higher values (e.g., 10000ms)
-    # may be needed for long-running batch operations.
-    # Valid range: 100ms - 30000ms (30s)
-    kv_lock_timeout_ms: Mapped[int] = mapped_column(default=5000, nullable=False)
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -349,11 +337,9 @@ class AutomationKV(Base):
         counters, configs) and access is infrequent (scheduled runs).
 
     Storage Design:
-        We store encrypted values as BYTEA (binary) rather than TEXT because:
-        - AES-GCM produces raw bytes, not text
-        - Avoids ~33% base64 encoding overhead that TEXT would require
-        - Better PostgreSQL TOAST behavior for binary data
-        - See automation/utils/kv.py for full encryption design rationale
+        We store encrypted state as a Fernet token (URL-safe base64 text)
+        produced by the SDK's :class:`Cipher`. See
+        ``openhands/automation/utils/kv.py`` for the full encryption rationale.
     """
 
     __tablename__ = "automation_kv"
@@ -366,11 +352,12 @@ class AutomationKV(Base):
         unique=True,  # ONE row per automation
     )
 
-    # Encrypted bytes containing the entire state document as JSON.
-    # Format: 12-byte nonce || AES-256-GCM(JSON) || 16-byte auth tag
-    # The decrypted JSON is a dict where keys are the "KV keys" from the API.
+    # Fernet token (URL-safe base64 text) containing the entire state document
+    # as JSON. Produced by openhands.sdk.utils.cipher.Cipher.encrypt and
+    # consumed by Cipher.decrypt. The decrypted JSON is a dict where keys are
+    # the "KV keys" exposed via the API.
     # Example decrypted: {"config": {...}, "counter": 42, "queue": [...]}
-    state_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
