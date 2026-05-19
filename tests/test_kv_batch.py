@@ -6,14 +6,14 @@ These tests focus on the batch operation logic without requiring a database.
 import pytest
 from fastapi import HTTPException
 
-from automation.kv_helpers import validate_key
-from automation.kv_router import (
+from openhands.automation.kv_helpers import validate_key
+from openhands.automation.kv_router import (
     KVOperationError,
     _execute_batch_operation,
     _get_version,
     _validate_batch_key,
 )
-from automation.kv_schemas import (
+from openhands.automation.kv_schemas import (
     KVBatchOpDecr,
     KVBatchOpDelete,
     KVBatchOpIncr,

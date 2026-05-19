@@ -6,19 +6,28 @@ with appropriate status based on sandbox verification results.
 
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.utils import utcnow
-from automation.utils.sandbox import VerificationResult
-from automation.watchdog import _verify_and_mark_run
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.utils import utcnow
+from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.watchdog import _verify_and_mark_run
 
 
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+def _create_mock_backend(verification_result: VerificationResult) -> MagicMock:
+    """Create a mock backend with configured verification result."""
+    mock_backend = MagicMock()
+    mock_backend.verify_run = AsyncMock(return_value=verification_result)
+    mock_backend.cleanup_after_verification = AsyncMock()
+    mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
+    return mock_backend
 
 
 @pytest.fixture
@@ -70,17 +79,9 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -111,17 +112,9 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Command timed out after 60 seconds",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -153,17 +146,9 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -194,17 +179,9 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="Error: something went wrong",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -237,17 +214,9 @@ class TestVerifyAndMarkRunExitCodes:
             stderr="bash: command not found",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -279,21 +248,9 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
-            patch(
-                "automation.watchdog.cleanup_sandbox",
-                new_callable=AsyncMock,
-            ) as mock_cleanup,
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -301,7 +258,7 @@ class TestVerifyAndMarkRunVerificationFailed:
                 await session.commit()
 
         assert result is True
-        mock_cleanup.assert_called_once()
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as FAILED with timeout message
         async with async_session_factory() as session:
@@ -347,21 +304,9 @@ class TestVerifyAndMarkRunVerificationFailed:
             error="Sandbox not available",
         )
 
-        with (
-            patch(
-                "automation.watchdog.verify_run_status",
-                new_callable=AsyncMock,
-                return_value=verification,
-            ),
-            patch(
-                "automation.watchdog.get_api_key_for_automation_run",
-                new_callable=AsyncMock,
-                return_value="test-api-key",
-            ),
-            patch(
-                "automation.watchdog.cleanup_sandbox",
-                new_callable=AsyncMock,
-            ) as mock_cleanup,
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
@@ -370,4 +315,4 @@ class TestVerifyAndMarkRunVerificationFailed:
 
         assert result is True
         # Cleanup should NOT be called when keep_alive is True
-        mock_cleanup.assert_not_called()
+        mock_backend.cleanup_after_verification.assert_not_called()

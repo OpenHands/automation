@@ -2,11 +2,11 @@
 
 import pytest
 
-from automation.event_schemas import (
+from openhands.automation.event_schemas import (
     parse_event,
 )
-from automation.event_schemas.detection import EventTypeDetector
-from automation.event_schemas.github import (
+from openhands.automation.event_schemas.detection import EventTypeDetector
+from openhands.automation.event_schemas.github import (
     GITHUB_DETECTION_RULES,
     IssueCommentPayload,
     IssuesPayload,
@@ -17,8 +17,8 @@ from automation.event_schemas.github import (
     detect_github_event_type,
     parse_github_event_auto,
 )
-from automation.schemas import EventTrigger
-from automation.trigger_matcher import matches_trigger
+from openhands.automation.schemas import EventTrigger
+from openhands.automation.trigger_matcher import matches_trigger
 
 
 class TestGitHubEventParsing:

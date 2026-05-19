@@ -35,11 +35,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from automation.app import app
-from automation.db import get_session
-from automation.kv_router import get_token_claims
-from automation.models import Automation, AutomationKV
-from automation.utils.kv import (
+from openhands.automation.app import app
+from openhands.automation.db import get_session
+from openhands.automation.kv_router import get_token_claims
+from openhands.automation.models import Automation, AutomationKV
+from openhands.automation.utils.kv import (
     DEFAULT_LOCK_TIMEOUT_MS,
     KVTokenClaims,
     decrypt_value,
@@ -111,7 +111,7 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
     """Create an async test client with KV token auth (shared session)."""
     monkeypatch.setenv("AUTOMATION_KV_SECRET", TEST_KV_SECRET)
 
-    from automation.config import clear_config_cache
+    from openhands.automation.config import clear_config_cache
 
     clear_config_cache()
 
@@ -168,7 +168,7 @@ class TestKVTokenAuth:
 
     def test_create_and_verify_token(self):
         """Token can be created and verified."""
-        from automation.utils.kv import create_kv_token, verify_kv_token
+        from openhands.automation.utils.kv import create_kv_token, verify_kv_token
 
         token = create_kv_token(
             secret=TEST_KV_SECRET,
@@ -181,7 +181,7 @@ class TestKVTokenAuth:
 
     def test_invalid_token_raises_error(self):
         """Invalid token raises KVTokenError."""
-        from automation.utils.kv import KVTokenError, verify_kv_token
+        from openhands.automation.utils.kv import KVTokenError, verify_kv_token
 
         with pytest.raises(KVTokenError):
             verify_kv_token(TEST_KV_SECRET, "invalid-token")

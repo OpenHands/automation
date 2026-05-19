@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from automation.config import (
+from openhands.automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
@@ -52,7 +52,7 @@ class TestDeprecatedConstants:
     def test_deprecated_constant_emits_warning(self):
         """Accessing deprecated constants emits DeprecationWarning."""
         # Reset the warned set to ensure we get a warning
-        from automation import constants
+        from openhands.automation import constants
 
         constants._warned_constants.clear()
 
@@ -65,7 +65,7 @@ class TestDeprecatedConstants:
 
     def test_deprecated_constant_warns_once(self):
         """Repeated access to same constant only warns once."""
-        from automation import constants
+        from openhands.automation import constants
 
         constants._warned_constants.clear()
 
@@ -82,8 +82,8 @@ class TestDeprecatedConstants:
 
     def test_deprecated_constant_returns_config_value(self):
         """Deprecated constants return values from config."""
-        from automation import constants
-        from automation.config import get_config
+        from openhands.automation import constants
+        from openhands.automation.config import get_config
 
         constants._warned_constants.clear()
 
@@ -96,7 +96,7 @@ class TestDeprecatedConstants:
 
     def test_nonexistent_constant_raises_attribute_error(self):
         """Accessing nonexistent constant raises AttributeError."""
-        from automation import constants
+        from openhands.automation import constants
 
         with pytest.raises(AttributeError, match="has no attribute"):
             _ = constants.DOES_NOT_EXIST
@@ -234,7 +234,7 @@ class TestAuthCacheReset:
 
     def test_auth_cache_reset_on_clear_config(self):
         """Auth cache is reset when clear_config_cache is called."""
-        from automation.auth import _get_auth_cache
+        from openhands.automation.auth import _get_auth_cache
 
         # Ensure cache exists
         cache1 = _get_auth_cache()
@@ -244,7 +244,7 @@ class TestAuthCacheReset:
         clear_config_cache()
 
         # Import again to get fresh reference
-        from automation.auth import _auth_cache as auth_cache_after
+        from openhands.automation.auth import _auth_cache as auth_cache_after
 
         # The module-level variable should be None after reset
         assert auth_cache_after is None
@@ -256,12 +256,80 @@ class TestAuthCacheReset:
         assert cache1 is not cache2
 
 
+class TestLocalModeSettings:
+    """Tests for local agent-server mode configuration."""
+
+    def test_is_local_mode_false_by_default(self):
+        """is_local_mode is False when agent_server_url is not set."""
+        settings = Settings()
+        assert settings.is_local_mode is False
+
+    def test_is_local_mode_false_when_empty_string(self):
+        """is_local_mode is False when agent_server_url is empty string."""
+        settings = Settings(agent_server_url="")
+        assert settings.is_local_mode is False
+
+    def test_is_local_mode_true_when_set(self):
+        """is_local_mode is True when agent_server_url is configured."""
+        settings = Settings(agent_server_url="http://localhost:3000")
+        assert settings.is_local_mode is True
+
+    def test_agent_server_url_default(self):
+        """agent_server_url defaults to empty string."""
+        settings = Settings()
+        assert settings.agent_server_url == ""
+
+    def test_agent_server_api_key_default(self):
+        """agent_server_api_key defaults to empty string."""
+        settings = Settings()
+        assert settings.agent_server_api_key == ""
+
+    def test_workspace_base_default(self):
+        """workspace_base defaults to /workspace."""
+        settings = Settings()
+        assert settings.workspace_base == "/workspace"
+
+    def test_db_url_default(self):
+        """db_url defaults to empty string."""
+        settings = Settings()
+        assert settings.db_url == ""
+
+    def test_local_mode_full_configuration(self):
+        """All local mode settings can be configured together."""
+        settings = Settings(
+            agent_server_url="http://localhost:3000",
+            agent_server_api_key="local-key",
+            workspace_base="/my/workspace",
+            db_url="sqlite+aiosqlite:////data/automations.db",
+        )
+        assert settings.is_local_mode is True
+        assert settings.agent_server_url == "http://localhost:3000"
+        assert settings.agent_server_api_key == "local-key"
+        assert settings.workspace_base == "/my/workspace"
+        assert settings.db_url == "sqlite+aiosqlite:////data/automations.db"
+
+    def test_local_mode_from_env(self, monkeypatch):
+        """Local mode settings are loaded from environment variables."""
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "env-key")
+        monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", "/env/workspace")
+        monkeypatch.setenv("AUTOMATION_DB_URL", "sqlite+aiosqlite:////data/test.db")
+        clear_config_cache()
+
+        settings = Settings()
+        assert settings.is_local_mode is True
+        assert settings.agent_server_url == "http://localhost:3000"
+        assert settings.agent_server_api_key == "env-key"
+        assert settings.workspace_base == "/env/workspace"
+        assert settings.db_url == "sqlite+aiosqlite:////data/test.db"
+
+
 class TestDeprecatedFunctionWarnings:
     """Tests for deprecation warnings on legacy functions."""
 
     def test_get_settings_emits_warning(self):
         """get_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 
@@ -276,7 +344,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_get_storage_settings_emits_warning(self, monkeypatch):
         """get_storage_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
         monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
@@ -294,7 +362,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_get_log_settings_emits_warning(self):
         """get_log_settings() emits DeprecationWarning."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 
@@ -309,7 +377,7 @@ class TestDeprecatedFunctionWarnings:
 
     def test_deprecated_function_warns_once(self):
         """Repeated calls to deprecated function only warn once."""
-        from automation import config
+        from openhands.automation import config
 
         config._warned_functions.clear()
 

@@ -5,7 +5,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from automation.schemas import (
+from openhands.automation.schemas import (
     RESERVED_SOURCES,
     CustomWebhookCreate,
     CustomWebhookUpdate,
@@ -208,7 +208,7 @@ class TestWebhookSecretGeneration:
 
     def test_secret_format(self):
         """Generated secrets should have correct format."""
-        from automation.webhook_router import _generate_webhook_secret
+        from openhands.automation.webhook_router import _generate_webhook_secret
 
         secret = _generate_webhook_secret()
         assert secret.startswith("whsec_")
@@ -217,7 +217,7 @@ class TestWebhookSecretGeneration:
 
     def test_secrets_are_unique(self):
         """Each generated secret should be unique."""
-        from automation.webhook_router import _generate_webhook_secret
+        from openhands.automation.webhook_router import _generate_webhook_secret
 
         secrets = [_generate_webhook_secret() for _ in range(100)]
         assert len(set(secrets)) == 100
@@ -228,12 +228,12 @@ class TestWebhookUrlGeneration:
 
     def test_url_format_with_base_url(self, monkeypatch):
         """Generated URLs use base_url when set."""
-        from automation.webhook_router import _build_webhook_url
+        from openhands.automation.webhook_router import _build_webhook_url
 
         monkeypatch.setenv("AUTOMATION_BASE_URL", "https://automation.example.com")
 
         # Clear cached settings
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 
@@ -250,13 +250,13 @@ class TestWebhookUrlGeneration:
 
     def test_url_fallback_to_localhost(self, monkeypatch):
         """Falls back to localhost when base_url not set."""
-        from automation.webhook_router import _build_webhook_url
+        from openhands.automation.webhook_router import _build_webhook_url
 
         monkeypatch.setenv("AUTOMATION_BASE_URL", "")
         monkeypatch.setenv("AUTOMATION_SERVER_PORT", "8000")
 
         # Clear cached settings
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 
@@ -273,12 +273,12 @@ class TestWebhookUrlGeneration:
 
     def test_url_trailing_slash_removed(self, monkeypatch):
         """Trailing slash in base URL should be removed."""
-        from automation.webhook_router import _build_webhook_url
+        from openhands.automation.webhook_router import _build_webhook_url
 
         monkeypatch.setenv("AUTOMATION_BASE_URL", "https://automation.example.com/")
 
         # Clear cached settings
-        from automation.config import clear_config_cache
+        from openhands.automation.config import clear_config_cache
 
         clear_config_cache()
 

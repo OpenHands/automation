@@ -1,8 +1,7 @@
 """Tests for the execution module — build_tarball, _shell_quote, and result types.
 
 Only tests pure logic that can run without a network.  The e2e flow
-(run_automation/dispatch_automation against a real sandbox) lives in
-scripts/test_automation.py.
+(run_automation against a real sandbox) lives in scripts/test_automation.py.
 """
 
 import io
@@ -11,15 +10,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from automation.config import get_config
-from automation.exceptions import PermanentDispatchError, TarballNotFoundError
-from automation.execution import (
+from openhands.automation.config import get_config
+from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
+from openhands.automation.execution import (
+    DEFAULT_WORK_DIR,
     AutomationResult,
     DispatchResult,
     _shell_quote,
     _upload,
     build_tarball,
-    dispatch_automation,
+    execute_in_context,
 )
 
 
@@ -210,178 +210,91 @@ class TestUploadUsesQueryParams:
         assert "%2Fworkspace" in url or "/workspace" in url.split("?")[1]
 
 
-class TestDispatchAutomationPermanentErrors:
-    """Tests for dispatch_automation handling of PermanentDispatchError."""
+class TestExecuteInContextErrors:
+    """Tests for execute_in_context error handling."""
 
     @pytest.mark.asyncio
-    @patch("automation.execution._create_and_wait")
-    @patch("automation.execution.delete_sandbox")
-    @patch("automation.execution._download_in_sandbox")
-    async def test_reraises_permanent_error_after_sandbox_cleanup(
-        self,
-        mock_download_in_sandbox,
-        mock_delete_sandbox,
-        mock_create_and_wait,
-    ):
-        """PermanentDispatchError is re-raised after cleaning up the sandbox."""
-        sandbox_id = "test-sandbox-123"
-        mock_create_and_wait.return_value = (
-            sandbox_id,
-            "session-key",
-            "https://agent.example.com",
-        )
+    @patch("openhands.automation.execution._download_in_sandbox")
+    async def test_reraises_permanent_error(self, mock_download_in_sandbox):
+        """PermanentDispatchError is re-raised for caller to handle."""
         mock_download_in_sandbox.side_effect = TarballNotFoundError(
             "External tarball URL is not accessible"
         )
-        mock_delete_sandbox.return_value = None
 
+        mock_client = AsyncMock()
         with pytest.raises(TarballNotFoundError) as exc_info:
-            await dispatch_automation(
-                api_url="https://api.example.com",
-                api_key="test-key",
+            await execute_in_context(
+                client=mock_client,
+                agent_url="https://agent.example.com",
+                session_key="test-session-key",
                 entrypoint="python main.py",
                 tarball_source="https://example.com/missing.tar.gz",
+                work_dir=DEFAULT_WORK_DIR,
             )
 
         assert "not accessible" in str(exc_info.value)
-        # Verify sandbox was deleted before re-raising
-        mock_delete_sandbox.assert_called_once()
-        call_args = mock_delete_sandbox.call_args
-        assert call_args[0][2] == "test-key"  # api_key
-        assert call_args[0][3] == sandbox_id  # sandbox_id
 
     @pytest.mark.asyncio
-    @patch("automation.execution._create_and_wait")
-    @patch("automation.execution.delete_sandbox")
-    @patch("automation.execution._download_in_sandbox")
+    @patch("openhands.automation.execution._download_in_sandbox")
     async def test_transient_error_returns_dispatch_result(
-        self,
-        mock_download_in_sandbox,
-        mock_delete_sandbox,
-        mock_create_and_wait,
+        self, mock_download_in_sandbox
     ):
         """Non-permanent errors return DispatchResult with success=False."""
-        sandbox_id = "test-sandbox-456"
-        mock_create_and_wait.return_value = (
-            sandbox_id,
-            "session-key",
-            "https://agent.example.com",
-        )
         mock_download_in_sandbox.side_effect = RuntimeError("Connection timeout")
-        mock_delete_sandbox.return_value = None
 
-        result = await dispatch_automation(
-            api_url="https://api.example.com",
-            api_key="test-key",
+        mock_client = AsyncMock()
+        result = await execute_in_context(
+            client=mock_client,
+            agent_url="https://agent.example.com",
+            session_key="test-session-key",
             entrypoint="python main.py",
             tarball_source="https://example.com/file.tar.gz",
+            work_dir=DEFAULT_WORK_DIR,
         )
 
-        # Should return DispatchResult, not raise
         assert isinstance(result, DispatchResult)
         assert result.success is False
         assert result.error is not None
         assert "Connection timeout" in result.error
-        # Verify sandbox was still cleaned up
-        mock_delete_sandbox.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("automation.execution._create_and_wait")
-    @patch("automation.execution.delete_sandbox")
-    @patch("automation.execution._download_in_sandbox")
-    async def test_permanent_error_without_sandbox_still_raises(
-        self,
-        mock_download_in_sandbox,
-        mock_delete_sandbox,
-        mock_create_and_wait,
-    ):
-        """PermanentDispatchError is re-raised even if sandbox_id is None."""
-        # Simulate sandbox creation started but failed before getting ID
-        mock_create_and_wait.return_value = (
-            "test-sandbox",
-            "session-key",
-            "https://agent.example.com",
-        )
-        mock_download_in_sandbox.side_effect = TarballNotFoundError("404 Not Found")
-
-        with pytest.raises(TarballNotFoundError):
-            await dispatch_automation(
-                api_url="https://api.example.com",
-                api_key="test-key",
-                entrypoint="python main.py",
-                tarball_source="https://example.com/missing.tar.gz",
-            )
-
-    @pytest.mark.asyncio
-    @patch("automation.execution._create_and_wait")
-    @patch("automation.execution.delete_sandbox")
-    @patch("automation.execution._upload")
-    async def test_permanent_error_with_bytes_tarball_reraises(
-        self,
-        mock_upload,
-        mock_delete_sandbox,
-        mock_create_and_wait,
-    ):
+    @patch("openhands.automation.execution._upload")
+    async def test_permanent_error_with_bytes_tarball_reraises(self, mock_upload):
         """PermanentDispatchError during upload is also re-raised."""
-        sandbox_id = "test-sandbox-789"
-        mock_create_and_wait.return_value = (
-            sandbox_id,
-            "session-key",
-            "https://agent.example.com",
-        )
-        # Simulate a permanent error during upload (unlikely but possible)
         mock_upload.side_effect = PermanentDispatchError("Upload permanently failed")
-        mock_delete_sandbox.return_value = None
 
+        mock_client = AsyncMock()
         with pytest.raises(PermanentDispatchError) as exc_info:
-            await dispatch_automation(
-                api_url="https://api.example.com",
-                api_key="test-key",
+            await execute_in_context(
+                client=mock_client,
+                agent_url="https://agent.example.com",
+                session_key="test-session-key",
                 entrypoint="python main.py",
                 tarball_source=b"fake tarball bytes",
+                work_dir=DEFAULT_WORK_DIR,
             )
 
         assert "permanently failed" in str(exc_info.value)
-        mock_delete_sandbox.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("automation.execution._create_and_wait")
-    @patch("automation.execution.delete_sandbox")
-    @patch("automation.execution._download_in_sandbox")
-    async def test_permanent_error_not_masked_by_cleanup_failure(
-        self,
-        mock_download_in_sandbox,
-        mock_delete_sandbox,
-        mock_create_and_wait,
-    ):
-        """PermanentDispatchError is re-raised even if sandbox cleanup fails.
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_success_returns_dispatch_result(self, mock_start_bash, mock_upload):
+        """Successful execution returns DispatchResult with success=True."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-123"
 
-        This tests the fix for review comment about exception masking:
-        if delete_sandbox() raises, we should still re-raise the original
-        PermanentDispatchError so the dispatcher can disable the automation.
-        """
-        sandbox_id = "test-sandbox-cleanup-fail"
-        mock_create_and_wait.return_value = (
-            sandbox_id,
-            "session-key",
-            "https://agent.example.com",
+        mock_client = AsyncMock()
+        result = await execute_in_context(
+            client=mock_client,
+            agent_url="https://agent.example.com",
+            session_key="test-session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            sandbox_id="test-sandbox-id",
         )
-        mock_download_in_sandbox.side_effect = TarballNotFoundError(
-            "External tarball URL is not accessible: 404"
-        )
-        # Simulate cleanup failure
-        mock_delete_sandbox.side_effect = RuntimeError("Failed to delete sandbox")
 
-        # Should still raise TarballNotFoundError, not RuntimeError
-        with pytest.raises(TarballNotFoundError) as exc_info:
-            await dispatch_automation(
-                api_url="https://api.example.com",
-                api_key="test-key",
-                entrypoint="python main.py",
-                tarball_source="https://example.com/missing.tar.gz",
-            )
-
-        # Verify we got the original error, not the cleanup error
-        assert "404" in str(exc_info.value)
-        # Cleanup was still attempted
-        mock_delete_sandbox.assert_called_once()
+        assert isinstance(result, DispatchResult)
+        assert result.success is True
+        assert result.sandbox_id == "test-sandbox-id"

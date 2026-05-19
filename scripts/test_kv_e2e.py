@@ -28,8 +28,8 @@ import httpx
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from automation.execution import build_tarball, run_automation  # noqa: E402
-from automation.utils.kv import create_kv_token  # noqa: E402
+from openhands.automation.execution import build_tarball, run_automation  # noqa: E402
+from openhands.automation.utils.kv import create_kv_token  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,9 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
-from automation.auth import AuthenticatedUser
-from automation.config import clear_config_cache
-from automation.models import Automation
+from openhands.automation.auth import AuthenticatedUser
+from openhands.automation.config import clear_config_cache
+from openhands.automation.models import Automation
 
 
 @pytest.fixture

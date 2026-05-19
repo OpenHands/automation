@@ -1,8 +1,9 @@
 """Tests for health check endpoints."""
 
-from unittest.mock import AsyncMock
+import importlib.metadata
+from unittest.mock import AsyncMock, patch
 
-from automation.app import app
+from openhands.automation.app import app
 
 
 class TestHealthEndpoints:
@@ -40,3 +41,37 @@ class TestHealthEndpoints:
             assert "error" in data
         finally:
             app.state.engine = original_engine
+
+
+class TestSdkVersionEndpoint:
+    """Tests for GET /sdk-version — called by setup.sh on every automation run."""
+
+    async def test_returns_installed_sdk_version(self, async_client):
+        """GET /sdk-version returns the currently installed openhands-sdk version."""
+        response = await async_client.get("/api/automation/sdk-version")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "version" in data
+        assert data["version"] == importlib.metadata.version("openhands-sdk")
+
+    async def test_no_auth_required(self, async_client):
+        """GET /sdk-version is accessible without any authentication token."""
+        # Use a raw client without the auth headers the fixture normally adds
+        response = await async_client.get(
+            "/api/automation/sdk-version",
+            headers={},
+        )
+        assert response.status_code == 200
+
+    async def test_returns_503_when_package_not_found(self, async_client):
+        """GET /sdk-version returns 503 when openhands-sdk is not installed."""
+        with patch(
+            "openhands.automation.app.importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError("openhands-sdk"),
+        ):
+            response = await async_client.get("/api/automation/sdk-version")
+
+        assert response.status_code == 503
+        data = response.json()
+        assert "error" in data

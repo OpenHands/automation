@@ -1,5 +1,7 @@
 """Add tarball_uploads table for storing upload metadata.
 
+Cross-database compatible: works with both PostgreSQL and SQLite.
+
 Revision ID: 002
 Revises: 001
 Create Date: 2026-03-20
@@ -7,9 +9,8 @@ Create Date: 2026-03-20
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import BigInteger, Column, DateTime, String, Text, Uuid, text
 
 
 revision: str = "002"
@@ -21,38 +22,38 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.create_table(
         "tarball_uploads",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", UUID(as_uuid=True), nullable=False),
-        sa.Column("org_id", UUID(as_uuid=True), nullable=False),
+        Column("id", Uuid, primary_key=True),
+        Column("user_id", Uuid, nullable=False),
+        Column("org_id", Uuid, nullable=False),
         # User-provided metadata
-        sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("description", sa.Text, nullable=True),
+        Column("name", String(255), nullable=False),
+        Column("description", Text, nullable=True),
         # Upload status
-        sa.Column(
+        Column(
             "status",
-            sa.String(20),
+            String(20),
             nullable=False,
             server_default="UPLOADING",
         ),
-        sa.Column("error_message", sa.Text, nullable=True),
+        Column("error_message", Text, nullable=True),
         # File metadata
-        sa.Column("size_bytes", sa.BigInteger, nullable=True),
-        sa.Column("storage_path", sa.Text, nullable=False),
+        Column("size_bytes", BigInteger, nullable=True),
+        Column("storage_path", Text, nullable=False),
         # Timestamps
-        sa.Column(
+        Column(
             "created_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
-        sa.Column(
+        Column(
             "updated_at",
-            sa.DateTime(timezone=True),
+            DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=text("CURRENT_TIMESTAMP"),
         ),
         # Soft delete
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_tarball_uploads_user_id", "tarball_uploads", ["user_id"])
     op.create_index("ix_tarball_uploads_org_id", "tarball_uploads", ["org_id"])

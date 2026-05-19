@@ -7,19 +7,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.scheduler import (
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
     poll_and_schedule,
     scheduler_loop,
 )
-from automation.utils import (
+from openhands.automation.utils import (
     get_next_fire_time,
     get_prev_fire_time,
     is_automation_due,
     utcnow,
 )
-from automation.utils.run import create_pending_run
+from openhands.automation.utils.run import create_pending_run
 
 
 UTC = UTC
@@ -824,7 +824,7 @@ class TestSchedulerLoop:
         # Run scheduler briefly with logging capture
         import logging
 
-        with caplog.at_level(logging.INFO, logger="automation.scheduler"):
+        with caplog.at_level(logging.INFO, logger="openhands.automation.scheduler"):
             task = asyncio.create_task(
                 scheduler_loop(
                     async_session_factory,

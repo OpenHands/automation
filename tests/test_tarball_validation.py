@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from automation.config import INTERNAL_URL_SCHEME
-from automation.models import TarballUpload, UploadStatus
-from automation.utils.tarball_validation import (
+from openhands.automation.config import INTERNAL_URL_SCHEME
+from openhands.automation.models import TarballUpload, UploadStatus
+from openhands.automation.utils.tarball_validation import (
     EXTERNAL_URL_SCHEMES,
     build_internal_url,
     get_internal_url_prefix,

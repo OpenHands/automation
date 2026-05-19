@@ -9,7 +9,7 @@ Tests cover:
 import pytest
 from fastapi import HTTPException
 
-from automation.kv_helpers import (
+from openhands.automation.kv_helpers import (
     _MAX_KEY_LENGTH,
     _MAX_PATH_DEPTH,
     get_nested_value,

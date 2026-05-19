@@ -12,19 +12,19 @@ import uuid
 
 import pytest
 
-from automation.kv_metrics import (
+from openhands.automation.kv_metrics import (
     kv_conflict_total,
     record_conflict,
     record_lock_wait,
     record_operation,
     record_state_size,
 )
-from automation.kv_router import (
+from openhands.automation.kv_router import (
     _is_lock_timeout_error,
     _raise_lock_conflict,
     _raise_version_conflict,
 )
-from automation.utils.kv import (
+from openhands.automation.utils.kv import (
     DEFAULT_LOCK_TIMEOUT_MS,
     KVTokenClaims,
     create_kv_token,
@@ -256,7 +256,7 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_default_timeout(self):
         """CreateAutomationRequest has default lock timeout."""
-        from automation.schemas import CreateAutomationRequest, CronTrigger
+        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
 
         req = CreateAutomationRequest(
             name="test",
@@ -268,7 +268,7 @@ class TestLockTimeoutValidation:
 
     def test_create_automation_custom_timeout(self):
         """CreateAutomationRequest accepts custom lock timeout."""
-        from automation.schemas import CreateAutomationRequest, CronTrigger
+        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
 
         req = CreateAutomationRequest(
             name="test",
@@ -283,7 +283,7 @@ class TestLockTimeoutValidation:
         """CreateAutomationRequest rejects timeout < 100ms."""
         from pydantic import ValidationError
 
-        from automation.schemas import CreateAutomationRequest, CronTrigger
+        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
@@ -300,7 +300,7 @@ class TestLockTimeoutValidation:
         """CreateAutomationRequest rejects timeout > 30000ms."""
         from pydantic import ValidationError
 
-        from automation.schemas import CreateAutomationRequest, CronTrigger
+        from openhands.automation.schemas import CreateAutomationRequest, CronTrigger
 
         with pytest.raises(ValidationError) as exc_info:
             CreateAutomationRequest(
@@ -315,7 +315,7 @@ class TestLockTimeoutValidation:
 
     def test_update_automation_timeout(self):
         """UpdateAutomationRequest accepts optional lock timeout."""
-        from automation.schemas import UpdateAutomationRequest
+        from openhands.automation.schemas import UpdateAutomationRequest
 
         req = UpdateAutomationRequest(kv_lock_timeout_ms=10000)
         assert req.kv_lock_timeout_ms == 10000
@@ -324,7 +324,7 @@ class TestLockTimeoutValidation:
         """UpdateAutomationRequest validates timeout bounds."""
         from pydantic import ValidationError
 
-        from automation.schemas import UpdateAutomationRequest
+        from openhands.automation.schemas import UpdateAutomationRequest
 
         with pytest.raises(ValidationError):
             UpdateAutomationRequest(kv_lock_timeout_ms=99)  # Too low
@@ -335,7 +335,7 @@ class TestAutomationModelTimeout:
 
     def test_model_has_default_timeout(self):
         """Automation model has default lock timeout."""
-        from automation.models import Automation
+        from openhands.automation.models import Automation
 
         # Check column default
         col = Automation.__table__.columns["kv_lock_timeout_ms"]
@@ -347,7 +347,7 @@ class TestResponseSchema:
 
     def test_automation_response_includes_timeout(self):
         """AutomationResponse includes kv_lock_timeout_ms."""
-        from automation.schemas import AutomationResponse
+        from openhands.automation.schemas import AutomationResponse
 
         # Check field exists in model
         assert "kv_lock_timeout_ms" in AutomationResponse.model_fields
