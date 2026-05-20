@@ -1,10 +1,12 @@
 """Authentication for the automations service API.
 
-Supports two authentication methods:
-1. API key: Bearer token in the Authorization header
-2. Cookie: keycloak_auth cookie from the OpenHands web UI
+Supports three authentication methods (checked in order):
+1. API key via Authorization: Bearer header
+2. API key via X-Session-API-Key header (matches agent-server convention,
+   useful behind reverse proxies that overwrite the Authorization header)
+3. Cookie: keycloak_auth cookie from the OpenHands web UI
 
-Both methods validate against the OpenHands API GET /api/v1/users/me endpoint
+All methods validate against the OpenHands API GET /api/v1/users/me endpoint
 to get the user and organization identity.
 """
 
@@ -257,119 +259,52 @@ def require_permission(permission: str):
     return _check
 
 
-async def authenticate_request(
-    request: Request,
-    client: httpx.AsyncClient = Depends(get_http_client),
-) -> AuthenticatedUser:
-    """Authenticate the request using API key or keycloak_auth cookie.
+def _extract_api_key(request: Request) -> str | None:
+    """Extract an API key from the request headers.
 
-    Authentication modes:
-
-    **Local mode with local_api_key configured:**
-    Only the configured local API key is accepted. SaaS authentication is
-    disabled. Matching Bearer tokens are authenticated as a default local
-    user without calling the OpenHands API. Non-matching keys are rejected
-    immediately.
-
-    **SaaS mode (local_api_key not configured):**
-    Supports API key via Authorization: Bearer header or keycloak_auth cookie.
-    Calls the OpenHands API GET /api/v1/users/me to verify credentials and
-    get user/org identity. Implements retry with exponential backoff for
-    rate limiting. Results are cached in-memory.
+    Checks Authorization: Bearer first, then X-Session-API-Key as a fallback
+    (useful behind reverse proxies that overwrite the Authorization header).
+    Returns None when neither header carries a key.
     """
-    settings = get_config().service
-
-    # Determine authentication method (API key takes priority)
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
-        api_key = auth_header.removeprefix("Bearer ").strip()
-        if not api_key:
+        key = auth_header.removeprefix("Bearer ").strip()
+        if not key:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Empty API key",
             )
+        return key
 
-        # In local mode with local_api_key configured, only accept that key
-        # (SaaS authentication is disabled when local_api_key is set)
-        if settings.is_local_mode and settings.local_api_key:
-            # Use constant-time comparison to prevent timing attacks
-            if secrets.compare_digest(api_key, settings.local_api_key):
-                logger.debug("Authenticated via local API key")
-                return _get_local_user()
-            # Key doesn't match - reject immediately in local mode
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-            )
+    session_key = request.headers.get("X-Session-API-Key", "").strip()
+    return session_key or None
 
-        auth_method = AuthMethod.API_KEY
-        credential = api_key
-    else:
-        cookie_value = request.cookies.get("keycloak_auth")
-        if cookie_value:
-            auth_method = AuthMethod.COOKIE
-            credential = cookie_value
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required: provide Bearer token "
-                "or keycloak_auth cookie",
-            )
 
-    # Check cache first
-    cache_key = _credential_cache_key(credential)
-    auth_cache = _get_auth_cache()
-    cached_user = auth_cache.get(cache_key)
-    if cached_user is not None:
-        logger.debug("Auth cache hit for user %s", cached_user.user_id)
-        return cached_user
+def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
+    """Extract a credential and its auth method from the request.
 
-    logger.debug("Auth cache miss, validating with OpenHands API")
+    Priority: Authorization: Bearer → X-Session-API-Key → keycloak_auth cookie.
+    Raises 401 if nothing usable is found.
+    """
+    api_key = _extract_api_key(request)
+    if api_key:
+        return api_key, AuthMethod.API_KEY
 
-    # Build outbound headers based on auth method
-    if auth_method == AuthMethod.API_KEY:
-        outbound_headers = {"Authorization": f"Bearer {credential}"}
-    else:
-        outbound_headers = {"Cookie": f"keycloak_auth={credential}"}
+    cookie = request.cookies.get("keycloak_auth")
+    if cookie:
+        return cookie, AuthMethod.COOKIE
 
-    try:
-        resp = await _make_auth_request_with_retry(
-            client,
-            f"{settings.openhands_api_base_url}/api/v1/users/me",
-            headers=outbound_headers,
-        )
-    except httpx.RequestError as e:
-        logger.error("Failed to reach OpenHands API for auth: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to reach OpenHands API for authentication",
-        )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required: provide Bearer token, "
+        "X-Session-API-Key header, or keycloak_auth cookie",
+    )
 
-    if resp.status_code == 401:
-        if auth_method == AuthMethod.API_KEY:
-            detail = "Invalid or expired API key"
-        else:
-            detail = "Invalid or expired session cookie"
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=detail,
-        )
-    if resp.status_code == 429:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limited by authentication service",
-        )
-    if resp.status_code != 200:
-        logger.error(
-            "Unexpected status from OpenHands /api/v1/users/me: %s",
-            resp.status_code,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Unexpected response from OpenHands API",
-        )
 
-    data = resp.json()
+def _parse_users_me(
+    data: dict, auth_method: AuthMethod, credential: str
+) -> AuthenticatedUser:  # type: ignore[type-arg]
+    """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response."""
     user_id_raw = data.get("id")
     org_id_raw = data.get("org_id")
     if not user_id_raw or not org_id_raw:
@@ -387,20 +322,99 @@ async def authenticate_request(
             detail="Invalid user_id or org_id format from OpenHands API",
         )
 
-    email = data.get("email", "")
-    role = data.get("role", "")
-    permissions = data.get("permissions", [])
-
-    user = AuthenticatedUser(
+    return AuthenticatedUser(
         user_id=user_uuid,
         org_id=org_uuid,
-        email=email,
-        role=role,
-        permissions=permissions,
+        email=data.get("email", ""),
+        role=data.get("role", ""),
+        permissions=data.get("permissions", []),
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
         model_profile_names=_extract_model_profile_names(data),
         active_model_profile_name=_extract_active_model_profile_name(data),
     )
+
+
+async def authenticate_request(
+    request: Request,
+    client: httpx.AsyncClient = Depends(get_http_client),
+) -> AuthenticatedUser:
+    """Authenticate via API key (Bearer / X-Session-API-Key) or cookie.
+
+    Local mode: only the configured ``local_api_key`` is accepted;
+    SaaS validation is skipped entirely.
+
+    SaaS mode: credentials are verified against ``GET /api/v1/users/me``
+    with retry + in-memory caching.
+    """
+    settings = get_config().service
+
+    # --- Local-mode fast path (no network call) ---
+    api_key = _extract_api_key(request)
+    if api_key and settings.is_local_mode and settings.local_api_key:
+        if secrets.compare_digest(api_key, settings.local_api_key):
+            logger.debug("Authenticated via local API key")
+            return _get_local_user()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+
+    # --- Resolve credential (API key or cookie) ---
+    credential, auth_method = _extract_credential(request)
+
+    # --- Cache lookup ---
+    cache_key = _credential_cache_key(credential)
+    auth_cache = _get_auth_cache()
+    cached_user = auth_cache.get(cache_key)
+    if cached_user is not None:
+        logger.debug("Auth cache hit for user %s", cached_user.user_id)
+        return cached_user
+
+    # --- Validate against OpenHands API ---
+    logger.debug("Auth cache miss, validating with OpenHands API")
+    outbound_headers = (
+        {"Authorization": f"Bearer {credential}"}
+        if auth_method == AuthMethod.API_KEY
+        else {"Cookie": f"keycloak_auth={credential}"}
+    )
+
+    try:
+        resp = await _make_auth_request_with_retry(
+            client,
+            f"{settings.openhands_api_base_url}/api/v1/users/me",
+            headers=outbound_headers,
+        )
+    except httpx.RequestError as e:
+        logger.error("Failed to reach OpenHands API for auth: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to reach OpenHands API for authentication",
+        )
+
+    if resp.status_code == 401:
+        detail = (
+            "Invalid or expired API key"
+            if auth_method == AuthMethod.API_KEY
+            else "Invalid or expired session cookie"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+    if resp.status_code == 429:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limited by authentication service",
+        )
+    if resp.status_code != 200:
+        logger.error(
+            "Unexpected status from OpenHands /api/v1/users/me: %s",
+            resp.status_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unexpected response from OpenHands API",
+        )
+
+    # --- Build user and cache ---
+    user = _parse_users_me(resp.json(), auth_method, credential)
     auth_cache[cache_key] = user
     return user
