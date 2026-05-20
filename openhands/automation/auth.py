@@ -301,7 +301,9 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     )
 
 
-def _parse_users_me(data: dict, auth_method: AuthMethod, credential: str) -> AuthenticatedUser:  # type: ignore[type-arg]
+def _parse_users_me(
+    data: dict, auth_method: AuthMethod, credential: str
+) -> AuthenticatedUser:  # type: ignore[type-arg]
     """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response."""
     user_id_raw = data.get("id")
     org_id_raw = data.get("org_id")
