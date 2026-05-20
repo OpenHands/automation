@@ -155,6 +155,7 @@ class TestGenerateTarball:
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -777,6 +778,7 @@ class TestGeneratePluginTarball:
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content

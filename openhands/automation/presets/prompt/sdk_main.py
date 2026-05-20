@@ -252,7 +252,16 @@ This automation was triggered by a webhook event:
 
     # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm(profile_name=model_profile)
+    try:
+        llm = workspace.get_llm(profile_name=model_profile)
+    except FileNotFoundError:
+        if not model_profile:
+            raise
+        print(
+            f"  profile {model_profile!r} not found; "
+            "falling back to active/default profile"
+        )
+        llm = workspace.get_llm()
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
