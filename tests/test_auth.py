@@ -91,6 +91,33 @@ class TestAuthentication:
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "valid-api-key"
 
+    async def test_authenticate_extracts_model_profile_metadata(
+        self, mock_request, mock_http_client
+    ):
+        """Auth stores available and active model profile names when present."""
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {
+            **MOCK_USERS_ME_RESPONSE,
+            "llm_profiles": {
+                "active_profile": "fast-profile",
+                "profiles": [
+                    {"name": "fast-profile"},
+                    {"name": "careful-profile"},
+                ],
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.model_profile_names == frozenset(
+            {"fast-profile", "careful-profile"}
+        )
+        assert result.active_model_profile_name == "fast-profile"
+
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header and no cookie raises 401."""
         mock_request.headers.get.return_value = ""

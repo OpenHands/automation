@@ -23,10 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -37,8 +39,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 # Preset files directories
-PROMPT_PRESET_DIR = Path(__file__).parent / "presets" / "prompt"
-PLUGIN_PRESET_DIR = Path(__file__).parent / "presets" / "plugin"
+PRESETS_DIR = Path(__file__).parent / "presets"
+PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
+PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
 # Venv Python entrypoint (Unix path format)
 # - Cloud mode: Always Linux sandboxes, so Unix paths work
@@ -101,6 +104,16 @@ class CreatePromptAutomationRequest(BaseModel):
         min_length=1,
         max_length=50000,
         description="The prompt to execute in the automation",
+    )
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=MODEL_PROFILE_PATTERN,
+        description=(
+            "Model profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
     )
     trigger: Trigger = Field(
         ...,
@@ -215,6 +228,8 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
+    model = resolve_model_profile_for_user(body.model, user)
+
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
 
@@ -266,6 +281,7 @@ async def create_automation_from_prompt(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -322,6 +338,17 @@ class CreatePluginAutomationRequest(BaseModel):
             "like /plugin-name:command or be a custom prompt."
         ),
     )
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=MODEL_PROFILE_PATTERN,
+        description=(
+            "Model profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
+    )
+
     trigger: Trigger = Field(
         ...,
         description=(
@@ -444,6 +471,8 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
+    model = resolve_model_profile_for_user(body.model, user)
+
     # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
     tarball_content = _generate_plugin_tarball(
         body.plugins, body.prompt, repos=body.repos
@@ -498,6 +527,7 @@ async def create_automation_from_plugin(
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

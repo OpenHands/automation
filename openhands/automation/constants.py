@@ -30,6 +30,9 @@ WORK_DIR = "/workspace/project"
 # DO NOT CHANGE: Would break tarball extraction in running sandboxes.
 TARBALL_PATH = "/tmp/automation.tar.gz"
 
+# model profile names mirror the agent-server profile-store constraints.
+MODEL_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility aliases (DEPRECATED)

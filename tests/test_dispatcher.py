@@ -659,6 +659,16 @@ class TestBuildEventPayload:
 
         assert "event" not in payload
 
+    def test_model_included_when_present(self):
+        """Automation model is passed through for preset scripts."""
+        trigger = {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"}
+        automation = self._make_automation(trigger, model="fast-profile")
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["model"] == "fast-profile"
+
     def test_none_trigger_defaults_to_unknown(self):
         """None trigger → 'unknown' type, trigger_payload is None."""
         automation = self._make_automation(trigger=None)

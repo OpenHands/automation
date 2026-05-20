@@ -481,6 +481,7 @@ class TestExecuteRunEnvVarOrdering:
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
                 name="Test Automation",
+                model="fast-profile",
                 trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
                 tarball_path="https://example.com/valid.tar.gz",
                 entrypoint="uv run main.py",
@@ -517,4 +518,6 @@ class TestExecuteRunEnvVarOrdering:
 
         # Verify env vars include the API key from build_env_vars()
         call_kwargs = mock_execute.call_args.kwargs
+        assert call_kwargs["env_vars"]["AUTOMATION_MODEL"] == "fast-profile"
+
         assert "OPENHANDS_API_KEY" in call_kwargs["env_vars"]

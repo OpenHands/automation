@@ -55,6 +55,10 @@ class Automation(Base):
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Model profile name to use for automation runs.
+    # None is only used for legacy/local fallback.
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)

@@ -154,7 +154,8 @@ class TestGenerateTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -357,6 +358,7 @@ class TestCreateAutomationFromPrompt:
         payload = {
             "name": "My Prompt Automation",
             "prompt": test_prompt,
+            "model": "fast-profile",
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -367,6 +369,8 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
+        assert data["model"] == "fast-profile"
+
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
@@ -389,11 +393,50 @@ class TestCreateAutomationFromPrompt:
             assert "main.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
+            assert "automation_model.py" not in tar.getnames()
 
             # Verify prompt content matches what was sent
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_defaults_to_active_model_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Prompt preset stores the active profile name when none is requested."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["model"] == "active-profile"
+
+    async def test_create_from_prompt_unknown_model_profile_rejected(
+        self, async_client, mock_file_store, mock_authenticated_user
+    ):
+        """Prompt preset rejects unknown profiles when auth metadata includes names."""
+        mock_authenticated_user.model_profile_names = frozenset({"allowed-profile"})
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "model": "missing-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Model profile `missing-profile` not found"
+        mock_file_store.write_stream.assert_not_called()
 
     async def test_create_from_prompt_creates_upload_record(
         self, async_client, async_session, mock_file_store
@@ -734,7 +777,8 @@ class TestGeneratePluginTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -797,6 +841,7 @@ class TestGeneratePluginTarball:
             # Note: clone_repos.py is no longer included - SDK handles cloning
             assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
+            assert "automation_model.py" not in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")
@@ -903,6 +948,26 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_defaults_to_active_model_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Plugin preset stores the active profile name when none is requested."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "My Plugin Automation",
+                "plugins": [{"source": "github:owner/plugin"}],
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["model"] == "active-profile"
 
     async def test_create_from_plugin_creates_upload_record(
         self, async_client, async_session, mock_file_store
