@@ -95,6 +95,38 @@ class AuthenticatedUser:
     permissions: list[str]
     auth_method: AuthMethod
     api_key: str | None = None  # Set when auth_method == API_KEY
+    model_profile_names: frozenset[str] | None = None
+    active_model_profile_name: str | None = None
+
+
+def _extract_model_profile_names(data: dict) -> frozenset[str] | None:  # type: ignore[type-arg]
+    """Extract model profile names from a users/me response when present."""
+    profiles_payload = data.get("llm_profiles")
+    if not isinstance(profiles_payload, dict):
+        return None
+
+    profiles = profiles_payload.get("profiles")
+    if isinstance(profiles, dict):
+        return frozenset(str(name) for name in profiles)
+    if isinstance(profiles, list):
+        names = {
+            str(profile["name"])
+            for profile in profiles
+            if isinstance(profile, dict) and isinstance(profile.get("name"), str)
+        }
+        return frozenset(names) if names else None
+
+    return None
+
+
+def _extract_active_model_profile_name(data: dict) -> str | None:  # type: ignore[type-arg]
+    """Extract the active model profile name from a users/me response when present."""
+    profiles_payload = data.get("llm_profiles")
+    if not isinstance(profiles_payload, dict):
+        return None
+
+    active_profile = profiles_payload.get("active_profile")
+    return active_profile if isinstance(active_profile, str) else None
 
 
 def clear_auth_cache() -> None:
@@ -367,6 +399,8 @@ async def authenticate_request(
         permissions=permissions,
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
+        model_profile_names=_extract_model_profile_names(data),
+        active_model_profile_name=_extract_active_model_profile_name(data),
     )
     auth_cache[cache_key] = user
     return user

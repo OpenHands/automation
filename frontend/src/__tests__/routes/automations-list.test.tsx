@@ -40,7 +40,7 @@ const mockAutomations: AutomationsResponse = {
       trigger: { type: "schedule", schedule_human: "Weekdays at 09:00" },
       enabled: true,
       repository: "acme/frontend-app",
-      model: "Claude Opus",
+      model: "claude-opus",
       created_at: "2026-01-10T00:00:00Z",
       updated_at: "2026-03-23T09:00:00Z",
     },
@@ -51,7 +51,7 @@ const mockAutomations: AutomationsResponse = {
       trigger: { type: "schedule", schedule_human: "Daily at 01:30" },
       enabled: true,
       repository: "acme/backend-api",
-      model: "GPT-5",
+      model: "gpt-5",
       created_at: "2026-02-01T00:00:00Z",
       updated_at: "2026-03-22T01:30:00Z",
     },
@@ -63,7 +63,7 @@ const mockAutomations: AutomationsResponse = {
       trigger: { type: "schedule", schedule_human: "Fridays at 11:00" },
       enabled: false,
       repository: "acme/realtime-service",
-      model: "Gemini 2.5 Pro",
+      model: "gemini-2.5-pro",
       created_at: "2026-01-20T00:00:00Z",
       updated_at: "2026-03-21T11:00:00Z",
     },
@@ -198,7 +198,7 @@ describe("AutomationsList", () => {
     expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
   });
 
-  it("matches search query against description, repository, and model fields", async () => {
+  it("matches search query against description, repository, and Model profile fields", async () => {
     const user = userEvent.setup();
     getAutomationsSpy.mockResolvedValue(mockAutomations);
     renderPage();
@@ -216,9 +216,9 @@ describe("AutomationsList", () => {
     expect(screen.getByText("Nightly Security Pass")).toBeInTheDocument();
     expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
 
-    // Clear and match by model
+    // Clear and match by Model profile
     await user.clear(searchInput);
-    await user.type(searchInput, "Gemini");
+    await user.type(searchInput, "gemini");
     expect(screen.getByText("Release Readiness Review")).toBeInTheDocument();
     expect(screen.queryByText("PR Triage Digest")).not.toBeInTheDocument();
   });
