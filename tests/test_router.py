@@ -1538,7 +1538,9 @@ class TestCompleteRun:
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
 
-    async def test_internal_url_returns_tarball_bytes(self, async_client, async_session):
+    async def test_internal_url_returns_tarball_bytes(
+        self, async_client, async_session
+    ):
         """Tarball bytes are returned for a completed internal upload."""
         from unittest.mock import MagicMock
 
@@ -1580,7 +1582,9 @@ class TestDownloadTarball:
         assert 'filename="My Automation.tar"' in response.headers["content-disposition"]
         mock_store.read.assert_called_once_with(upload.storage_path)
 
-    async def test_internal_url_upload_deleted_returns_404(self, async_client, async_session):
+    async def test_internal_url_upload_deleted_returns_404(
+        self, async_client, async_session
+    ):
         """404 is returned when the referenced internal upload has been soft-deleted."""
         from unittest.mock import MagicMock
 
@@ -1722,4 +1726,3 @@ class TestDownloadTarball:
         response = await async_client.get(f"/api/automation/v1/{uuid.uuid4()}/tarball")
 
         assert response.status_code == 404
-

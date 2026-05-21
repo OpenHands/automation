@@ -13,7 +13,12 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus, TarballUpload
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    TarballUpload,
+)
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
@@ -197,7 +202,7 @@ async def download_automation_tarball(
         if upload is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Tarball not found (the underlying upload may have been deleted)",
+                detail="Tarball not found (underlying upload may have been deleted)",
             )
         try:
             data = await asyncio.to_thread(file_store.read, upload.storage_path)
@@ -216,7 +221,9 @@ async def download_automation_tarball(
     if is_http_url(auto.tarball_path):
         return RedirectResponse(url=auto.tarball_path, status_code=302)
 
-    scheme = auto.tarball_path.split("://")[0] if "://" in auto.tarball_path else "unknown"
+    scheme = (
+        auto.tarball_path.split("://")[0] if "://" in auto.tarball_path else "unknown"
+    )
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail=(
