@@ -832,6 +832,23 @@
     "tr": "Kapat",
     "uk": "Вимкнути"
   },
+  "AUTOMATIONS$DOWNLOAD_TARBALL": {
+    "en": "Tarball",
+    "ja": "Tarball",
+    "zh-CN": "Tarball",
+    "zh-TW": "Tarball",
+    "ko-KR": "Tarball",
+    "no": "Tarball",
+    "ar": "Tarball",
+    "de": "Tarball",
+    "fr": "Tarball",
+    "it": "Tarball",
+    "pt": "Tarball",
+    "es": "Tarball",
+    "ca": "Tarball",
+    "tr": "Tarball",
+    "uk": "Tarball"
+  },
   "AUTOMATIONS$DELETE": {
     "en": "Delete",
     "ja": "削除",
