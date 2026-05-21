@@ -832,6 +832,23 @@
     "tr": "Kapat",
     "uk": "Вимкнути"
   },
+  "AUTOMATIONS$DOWNLOAD_TARBALL": {
+    "en": "Download tarball",
+    "ja": "tarball をダウンロード",
+    "zh-CN": "下载 tarball",
+    "zh-TW": "下載 tarball",
+    "ko-KR": "tarball 다운로드",
+    "no": "Last ned tarball",
+    "ar": "تنزيل tarball",
+    "de": "Tarball herunterladen",
+    "fr": "Télécharger le tarball",
+    "it": "Scarica tarball",
+    "pt": "Baixar tarball",
+    "es": "Descargar tarball",
+    "ca": "Descarrega tarball",
+    "tr": "Tarball indir",
+    "uk": "Завантажити tarball"
+  },
   "AUTOMATIONS$DELETE": {
     "en": "Delete",
     "ja": "削除",
