@@ -11,6 +11,12 @@ Scheduled and event-driven automation execution for OpenHands Cloud. This servic
 - **API Key Management**: Per-user API keys for secure automation access
 - **Run History**: Track automation runs with status and results
 
+## Recommended automations
+
+Reusable prompt-preset automation ideas live in [`examples/recommended-automations/`](examples/recommended-automations/).
+
+- [Slack+GitHub+Linear Daily Organization](examples/recommended-automations/slack-github-linear-daily-organization.md) — reconcile GitHub PRs/issues with Linear work and recent Slack context into a daily plan.
+
 ## Development
 
 ### Prerequisites
