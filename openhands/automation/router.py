@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -211,7 +212,13 @@ async def download_automation_tarball(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Tarball file not found in storage",
             )
-        safe_name = auto.name.replace('"', "").replace("/", "-")
+        except Exception as e:
+            logger.error("Failed to read tarball from storage: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve tarball from storage",
+            )
+        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
         return Response(
             content=data,
             media_type="application/x-tar",
