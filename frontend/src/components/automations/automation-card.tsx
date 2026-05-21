@@ -47,7 +47,10 @@ export function AutomationCard({
       icon: <DownloadIcon className="size-4" />,
       onClick: async () => {
         try {
-          await AutomationService.downloadTarball(automation.id, automation.name);
+          await AutomationService.downloadTarball(
+            automation.id,
+            automation.name,
+          );
         } catch {
           displayErrorToast(t(I18nKey.ERROR$GENERIC));
         }
