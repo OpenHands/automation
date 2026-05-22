@@ -346,11 +346,11 @@ class OutboundWebSocketSource(Base):
 
     Two kinds are supported, selected via the ``kind`` discriminator column:
 
-    ``"generic"``
+    ``"GenericWebSocketSource"``
         Connects to a static ``wss://`` URL with optional HTTP headers.
         Suitable for any service that exposes a plain WebSocket endpoint.
 
-    ``"slack"``
+    ``"SlackWebSocketSource"``
         Connects to Slack's Socket Mode API.  Requires a Slack App-Level Token
         (``xapp-…``).  The connection URL is fetched dynamically by calling
         ``apps.connections.open`` before each connect attempt; Slack-specific
@@ -381,7 +381,7 @@ class OutboundWebSocketSource(Base):
     # Must be unique per org (enforced by the unique index below).
     source: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    # Discriminator: "generic" or "slack"
+    # Discriminator: "GenericWebSocketSource" or "SlackWebSocketSource"
     kind: Mapped[str] = mapped_column(String(50), nullable=False)
 
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
@@ -390,13 +390,13 @@ class OutboundWebSocketSource(Base):
 
     # Extracts the event-type key used for trigger.on pattern matching.
     # Defaults differ per kind and are set at the schema layer:
-    #   generic → "type"
-    #   slack   → "payload.event.type"
+    #   GenericWebSocketSource → "type"
+    #   SlackWebSocketSource   → "payload.event.type"
     event_key_expr: Mapped[str] = mapped_column(String(500), nullable=False)
 
     # Unwraps outer envelopes so the stored/filtered payload is the inner event.
     # None means pass the raw message through unchanged.
-    #   slack default → "payload.event"
+    #   SlackWebSocketSource default → "payload.event"
     payload_expr: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # Connection-level pre-filter (JMESPath).  Evaluated against the raw message
@@ -404,7 +404,7 @@ class OutboundWebSocketSource(Base):
     # None means accept all events.
     filter_expr: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # --- kind = "generic" fields ---
+    # --- kind = "GenericWebSocketSource fields ---
 
     # Static wss:// URL to connect to.  Not encrypted (not a credential).
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -415,7 +415,7 @@ class OutboundWebSocketSource(Base):
     # OH_SECRET_KEY.  Non-sensitive headers are stored as-is.
     headers: Mapped[dict | None] = mapped_column(EncryptedJSONHeaders, nullable=True)
 
-    # --- kind = "slack" fields ---
+    # --- kind = "SlackWebSocketSource fields ---
 
     # Slack App-Level Token (xapp-…).  Required for Socket Mode.
     # Encrypted at rest via EncryptedString using AUTOMATION_SECRET_KEY /

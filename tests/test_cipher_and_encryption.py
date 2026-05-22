@@ -1,6 +1,7 @@
 """Tests for application-layer encryption.
 
-Covers Cipher, EncryptedString, and EncryptedJSONHeaders.
+Covers EncryptedString and EncryptedJSONHeaders TypeDecorators and the
+get_cipher() helper.  Uses the SDK Cipher (openhands.sdk.utils.cipher).
 Pure unit tests — no database or Docker required.
 """
 
@@ -8,83 +9,36 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
-from openhands.automation.utils.cipher import (
-    FERNET_TOKEN_PREFIX,
-    Cipher,
-    get_cipher,
-)
 from openhands.automation.utils.encrypted_fields import (
     EncryptedJSONHeaders,
     EncryptedString,
     _is_secret_header,
+    get_cipher,
 )
+from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 
 
 TEST_KEY = "test-secret-key-for-automation-service"
 
 
+def _encrypt(cipher: Cipher, plaintext: str) -> str:
+    """Thin wrapper: SDK Cipher.encrypt takes SecretStr; returns str."""
+    result = cipher.encrypt(SecretStr(plaintext))
+    assert result is not None
+    return result
+
+
 # ---------------------------------------------------------------------------
-# Cipher
+# get_cipher helper
 # ---------------------------------------------------------------------------
-
-
-class TestCipher:
-    def test_encrypt_decrypt_roundtrip(self):
-        cipher = Cipher(TEST_KEY)
-        plaintext = "xapp-1-AAAAAAAAA-1111111111-aaaaaaaaaaaaaaaa"
-        ciphertext = cipher.encrypt(plaintext)
-        assert cipher.decrypt(ciphertext) == plaintext
-
-    def test_ciphertext_is_string(self):
-        cipher = Cipher(TEST_KEY)
-        ct = cipher.encrypt("hello")
-        assert isinstance(ct, str)
-
-    def test_ciphertext_has_fernet_prefix(self):
-        cipher = Cipher(TEST_KEY)
-        ct = cipher.encrypt("hello")
-        assert cipher.is_ciphertext(ct)
-        assert ct.startswith(FERNET_TOKEN_PREFIX)
-
-    def test_plaintext_is_not_ciphertext(self):
-        cipher = Cipher(TEST_KEY)
-        assert not cipher.is_ciphertext("xapp-1-AAAAAAAAA")
-        assert not cipher.is_ciphertext("Bearer token123")
-        assert not cipher.is_ciphertext("")
-
-    def test_decrypt_invalid_returns_none(self):
-        cipher = Cipher(TEST_KEY)
-        result = cipher.decrypt("not-a-valid-fernet-token")
-        assert result is None
-
-    def test_decrypt_wrong_key_returns_none(self):
-        cipher1 = Cipher("key-one")
-        cipher2 = Cipher("key-two")
-        ct = cipher1.encrypt("secret")
-        assert cipher2.decrypt(ct) is None
-
-    def test_different_plaintexts_produce_different_ciphertexts(self):
-        cipher = Cipher(TEST_KEY)
-        ct1 = cipher.encrypt("secret-a")
-        ct2 = cipher.encrypt("secret-b")
-        assert ct1 != ct2
-
-    def test_same_plaintext_produces_different_ciphertexts(self):
-        # Fernet uses random nonces — two encryptions of the same plaintext differ
-        cipher = Cipher(TEST_KEY)
-        ct1 = cipher.encrypt("same")
-        ct2 = cipher.encrypt("same")
-        assert ct1 != ct2
-        assert cipher.decrypt(ct1) == cipher.decrypt(ct2) == "same"
 
 
 class TestGetCipher:
     def test_returns_cipher_when_automation_key_set(self):
         with patch.dict(os.environ, {"AUTOMATION_SECRET_KEY": TEST_KEY}, clear=False):
-            cipher = get_cipher()
-            assert cipher is not None
-            assert isinstance(cipher, Cipher)
+            assert isinstance(get_cipher(), Cipher)
 
     def test_falls_back_to_oh_secret_key(self):
         env = {
@@ -94,8 +48,7 @@ class TestGetCipher:
         }
         env["OH_SECRET_KEY"] = TEST_KEY
         with patch.dict(os.environ, env, clear=True):
-            cipher = get_cipher()
-            assert cipher is not None
+            assert get_cipher() is not None
 
     def test_returns_none_when_no_key_set(self):
         env = {
@@ -104,19 +57,17 @@ class TestGetCipher:
             if k not in ("AUTOMATION_SECRET_KEY", "OH_SECRET_KEY")
         }
         with patch.dict(os.environ, env, clear=True):
-            cipher = get_cipher()
-            assert cipher is None
+            assert get_cipher() is None
 
     def test_automation_key_takes_precedence_over_oh_key(self):
-        env = {k: v for k, v in os.environ.items()}
+        env = dict(os.environ)
         env["AUTOMATION_SECRET_KEY"] = "automation-key"
         env["OH_SECRET_KEY"] = "oh-key"
         with patch.dict(os.environ, env, clear=True):
             cipher = get_cipher()
             assert cipher is not None
-            # automation key should be used
-            ct = cipher.encrypt("value")
-            assert Cipher("automation-key").decrypt(ct) == "value"
+            ct = _encrypt(cipher, "value")
+            assert Cipher("automation-key").try_decrypt_str(ct) == "value"
 
 
 # ---------------------------------------------------------------------------
@@ -175,12 +126,12 @@ class TestEncryptedString:
             mock.return_value = cipher
             result = col.process_bind_param("xapp-token", None)
             assert result is not None
-            assert cipher.is_ciphertext(result)
+            assert result.startswith(FERNET_TOKEN_PREFIX)
 
     def test_decrypt_on_result_value(self):
         col = self._make_col()
         cipher = Cipher(TEST_KEY)
-        ciphertext = cipher.encrypt("xapp-token")
+        ciphertext = _encrypt(cipher, "xapp-token")
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
             result = col.process_result_value(ciphertext, None)
@@ -249,7 +200,7 @@ class TestEncryptedJSONHeaders:
             stored = col.process_bind_param(headers, None)
 
         assert stored is not None
-        assert cipher.is_ciphertext(stored["Authorization"])
+        assert stored["Authorization"].startswith(FERNET_TOKEN_PREFIX)
         assert stored["Content-Type"] == "application/json"
         assert stored["X-Request-ID"] == "req-123"
 
@@ -314,9 +265,9 @@ class TestEncryptedJSONHeaders:
             stored = col.process_bind_param(headers, None)
 
         assert stored is not None
-        assert cipher.is_ciphertext(stored["Authorization"])
-        assert cipher.is_ciphertext(stored["X-Api-Key"])
-        assert cipher.is_ciphertext(stored["Cookie"])
+        assert stored["Authorization"].startswith(FERNET_TOKEN_PREFIX)
+        assert stored["X-Api-Key"].startswith(FERNET_TOKEN_PREFIX)
+        assert stored["Cookie"].startswith(FERNET_TOKEN_PREFIX)
         assert stored["Accept"] == "application/json"
 
 

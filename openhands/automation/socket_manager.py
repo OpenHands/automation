@@ -266,7 +266,7 @@ class SocketManager:
             if source is None:
                 return
 
-        if kind == "slack":
+        if kind == "SlackWebSocketSource":
             await self._receive_slack(source, org_id)
         else:
             await self._receive_generic(source, org_id)

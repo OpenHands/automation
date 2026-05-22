@@ -13,7 +13,6 @@ dependencies = [
   "aiosqlite>=0.20",
   "alembic>=1.14",
   "asyncpg>=0.30",
-  "cryptography>=42",
   "boto3>=1.35",
   "cachetools>=7.0.5",
   "cloud-sql-python-connector[asyncpg]>=1.16",

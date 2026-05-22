@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from abc import ABC
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -11,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -587,8 +589,13 @@ def _validate_jmespath(v: str | None) -> str | None:
     return v
 
 
-class _WebSocketSourceBase(BaseModel):
-    """Shared fields for all WebSocket source schemas."""
+class WebSocketSourceCreate(DiscriminatedUnionMixin, ABC):
+    """Abstract base for all outbound WebSocket source create schemas.
+
+    Concrete subclasses (``GenericWebSocketSource``, ``SlackWebSocketSource``)
+    are selected automatically via ``DiscriminatedUnionMixin`` using the
+    ``kind`` computed field (equal to the class name).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -628,25 +635,6 @@ class _WebSocketSourceBase(BaseModel):
             )
         return v_lower
 
-    @field_validator("filter_expr")
-    @classmethod
-    def validate_filter_expr(cls, v: str | None) -> str | None:
-        return _validate_jmespath(v)
-
-
-class GenericWebSocketSourceCreate(_WebSocketSourceBase):
-    """Create a generic outbound WebSocket source with a static URL."""
-
-    kind: Literal["generic"] = "generic"
-    url: str = Field(..., description="The wss:// URL to connect to.")
-    headers: dict[str, str] | None = Field(
-        default=None,
-        description=(
-            "Optional HTTP headers for the WebSocket upgrade request "
-            "(e.g. {'Authorization': 'Bearer token'}). "
-            "Treat values as sensitive credentials."
-        ),
-    )
     event_key_expr: str = Field(
         default="type",
         max_length=500,
@@ -662,6 +650,25 @@ class GenericWebSocketSourceCreate(_WebSocketSourceBase):
         ),
     )
 
+    @field_validator("filter_expr", "event_key_expr", "payload_expr")
+    @classmethod
+    def validate_jmespath_exprs(cls, v: str | None) -> str | None:
+        return _validate_jmespath(v)
+
+
+class GenericWebSocketSource(WebSocketSourceCreate):
+    """Create a generic outbound WebSocket source with a static URL."""
+
+    url: str = Field(..., description="The wss:// URL to connect to.")
+    headers: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Optional HTTP headers for the WebSocket upgrade request "
+            "(e.g. {'Authorization': 'Bearer token'}). "
+            "Treat values as sensitive credentials."
+        ),
+    )
+
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
@@ -669,13 +676,8 @@ class GenericWebSocketSourceCreate(_WebSocketSourceBase):
             raise ValueError("url must start with wss:// or ws://")
         return v
 
-    @field_validator("event_key_expr", "payload_expr")
-    @classmethod
-    def validate_jmespath(cls, v: str | None) -> str | None:
-        return _validate_jmespath(v)
 
-
-class SlackWebSocketSourceCreate(_WebSocketSourceBase):
+class SlackWebSocketSource(WebSocketSourceCreate):
     """Create a Slack Socket Mode outbound WebSocket source.
 
     Uses ``apps.connections.open`` to obtain a fresh wss:// URL on each connect
@@ -687,7 +689,6 @@ class SlackWebSocketSourceCreate(_WebSocketSourceBase):
     as the payload available to ``trigger.filter``.
     """
 
-    kind: Literal["slack"] = "slack"
     app_token: str = Field(
         ...,
         description=(
@@ -703,7 +704,7 @@ class SlackWebSocketSourceCreate(_WebSocketSourceBase):
             "Default extracts the inner Slack event type (e.g. 'message')."
         ),
     )
-    payload_expr: str = Field(
+    payload_expr: str | None = Field(
         default="payload.event",
         max_length=500,
         description=(
@@ -720,18 +721,6 @@ class SlackWebSocketSourceCreate(_WebSocketSourceBase):
                 "app_token must be a Slack App-Level Token starting with 'xapp-'"
             )
         return v
-
-    @field_validator("event_key_expr", "payload_expr")
-    @classmethod
-    def validate_jmespath(cls, v: str | None) -> str | None:
-        return _validate_jmespath(v)
-
-
-# Discriminated union for the create request body
-WebSocketSourceCreate = Annotated[
-    GenericWebSocketSourceCreate | SlackWebSocketSourceCreate,
-    Field(discriminator="kind"),
-]
 
 
 class WebSocketSourceUpdate(BaseModel):

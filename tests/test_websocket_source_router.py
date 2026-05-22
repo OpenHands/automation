@@ -8,8 +8,8 @@ from pydantic import ValidationError
 
 from openhands.automation.models import OutboundWebSocketSource, WebSocketStatus
 from openhands.automation.schemas import (
-    GenericWebSocketSourceCreate,
-    SlackWebSocketSourceCreate,
+    GenericWebSocketSource,
+    SlackWebSocketSource,
     WebSocketSourceUpdate,
 )
 
@@ -25,39 +25,37 @@ BASE_URL = "/api/automation/v1/websocket-sources"
 # ---------------------------------------------------------------------------
 
 
-class TestGenericWebSocketSourceCreate:
+class TestGenericWebSocketSource:
     def test_valid_minimal(self):
-        s = GenericWebSocketSourceCreate(
+        s = GenericWebSocketSource(
             name="My WS",
             source="my-ws",
             url="wss://example.com/events",
         )
-        assert s.kind == "generic"
+        assert s.kind == "GenericWebSocketSource"
         assert s.event_key_expr == "type"
         assert s.payload_expr is None
         assert s.headers is None
 
     def test_url_must_be_wss(self):
         with pytest.raises(ValidationError, match="wss://"):
-            GenericWebSocketSourceCreate(
+            GenericWebSocketSource(
                 name="Bad URL", source="bad", url="http://example.com"
             )
 
     def test_ws_url_also_accepted(self):
-        s = GenericWebSocketSourceCreate(
-            name="WS", source="ws", url="ws://localhost:9000"
-        )
+        s = GenericWebSocketSource(name="WS", source="ws", url="ws://localhost:9000")
         assert s.url == "ws://localhost:9000"
 
     def test_reserved_source_rejected(self):
         with pytest.raises(ValidationError, match="reserved"):
-            GenericWebSocketSourceCreate(
+            GenericWebSocketSource(
                 name="GitHub WS", source="github", url="wss://example.com"
             )
 
     def test_invalid_jmespath_event_key_expr(self):
         with pytest.raises(ValidationError, match="JMESPath"):
-            GenericWebSocketSourceCreate(
+            GenericWebSocketSource(
                 name="Bad",
                 source="bad",
                 url="wss://example.com",
@@ -66,7 +64,7 @@ class TestGenericWebSocketSourceCreate:
 
     def test_invalid_jmespath_filter_expr(self):
         with pytest.raises(ValidationError, match="JMESPath"):
-            GenericWebSocketSourceCreate(
+            GenericWebSocketSource(
                 name="Bad",
                 source="bad",
                 url="wss://example.com",
@@ -74,13 +72,13 @@ class TestGenericWebSocketSourceCreate:
             )
 
     def test_source_normalised_to_lowercase(self):
-        s = GenericWebSocketSourceCreate(
+        s = GenericWebSocketSource(
             name="WS", source="MySource", url="wss://example.com"
         )
         assert s.source == "mysource"
 
     def test_with_headers_and_payload_expr(self):
-        s = GenericWebSocketSourceCreate(
+        s = GenericWebSocketSource(
             name="WS",
             source="my-ws",
             url="wss://example.com",
@@ -91,25 +89,25 @@ class TestGenericWebSocketSourceCreate:
         assert s.payload_expr == "event"
 
 
-class TestSlackWebSocketSourceCreate:
+class TestSlackWebSocketSource:
     def test_valid(self):
-        s = SlackWebSocketSourceCreate(
+        s = SlackWebSocketSource(
             name="Slack",
             source="slack",
             app_token="xapp-1-abc123",
         )
-        assert s.kind == "slack"
+        assert s.kind == "SlackWebSocketSource"
         assert s.event_key_expr == "payload.event.type"
         assert s.payload_expr == "payload.event"
 
     def test_app_token_must_start_with_xapp(self):
         with pytest.raises(ValidationError, match="xapp-"):
-            SlackWebSocketSourceCreate(
+            SlackWebSocketSource(
                 name="Slack", source="slack", app_token="xoxb-wrong-token"
             )
 
     def test_custom_event_key_expr(self):
-        s = SlackWebSocketSourceCreate(
+        s = SlackWebSocketSource(
             name="Slack",
             source="slack",
             app_token="xapp-1-abc123",
@@ -153,7 +151,7 @@ class TestCreateWebSocketSource:
         resp = await async_client.post(
             BASE_URL,
             json={
-                "kind": "generic",
+                "kind": "GenericWebSocketSource",
                 "name": "My Generic WS",
                 "source": "my-ws",
                 "url": "wss://example.com/events",
@@ -161,7 +159,7 @@ class TestCreateWebSocketSource:
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["kind"] == "generic"
+        assert data["kind"] == "GenericWebSocketSource"
         assert data["source"] == "my-ws"
         assert data["url"] == "wss://example.com/events"
         assert data["status"] == "DISCONNECTED"
@@ -173,7 +171,7 @@ class TestCreateWebSocketSource:
         resp = await async_client.post(
             BASE_URL,
             json={
-                "kind": "slack",
+                "kind": "SlackWebSocketSource",
                 "name": "Slack Events",
                 "source": "slack-prod",
                 "app_token": "xapp-1-AAAAAAAAA-1111111111-aaaaaaaaaaaaaaaa",
@@ -181,7 +179,7 @@ class TestCreateWebSocketSource:
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["kind"] == "slack"
+        assert data["kind"] == "SlackWebSocketSource"
         assert data["event_key_expr"] == "payload.event.type"
         assert data["payload_expr"] == "payload.event"
         # app_token is never returned
@@ -191,7 +189,7 @@ class TestCreateWebSocketSource:
         self, async_client, _no_socket_manager
     ):
         payload = {
-            "kind": "generic",
+            "kind": "GenericWebSocketSource",
             "name": "WS Source",
             "source": "dup-source",
             "url": "wss://example.com",
@@ -214,7 +212,7 @@ class TestCreateWebSocketSource:
             resp = await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": "Notify WS",
                     "source": "notify-ws",
                     "url": "wss://example.com",
@@ -237,7 +235,7 @@ class TestCreateWebSocketSource:
             resp = await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": "Disabled WS",
                     "source": "disabled-ws",
                     "url": "wss://example.com",
@@ -260,7 +258,7 @@ class TestCreateWebSocketSource:
         resp = await async_client.post(
             BASE_URL,
             json={
-                "kind": "slack",
+                "kind": "SlackWebSocketSource",
                 "name": "Slack",
                 "source": "bad-slack",
                 "app_token": "xoxb-not-an-app-token",
@@ -285,7 +283,7 @@ class TestListWebSocketSources:
             await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": f"WS {i}",
                     "source": f"ws-{i}",
                     "url": "wss://example.com",
@@ -297,7 +295,7 @@ class TestListWebSocketSources:
             org_id=OTHER_ORG_ID,
             name="Other WS",
             source="other-ws",
-            kind="generic",
+            kind="GenericWebSocketSource",
             url="wss://other.com",
             event_key_expr="type",
             status=WebSocketStatus.DISCONNECTED,
@@ -317,7 +315,7 @@ class TestGetWebSocketSource:
         create = await async_client.post(
             BASE_URL,
             json={
-                "kind": "generic",
+                "kind": "GenericWebSocketSource",
                 "name": "Get Me",
                 "source": "get-me",
                 "url": "wss://example.com",
@@ -334,7 +332,7 @@ class TestGetWebSocketSource:
             org_id=OTHER_ORG_ID,
             name="Other",
             source="other",
-            kind="generic",
+            kind="GenericWebSocketSource",
             url="wss://other.com",
             event_key_expr="type",
             status=WebSocketStatus.DISCONNECTED,
@@ -355,7 +353,7 @@ class TestUpdateWebSocketSource:
         create = await async_client.post(
             BASE_URL,
             json={
-                "kind": "generic",
+                "kind": "GenericWebSocketSource",
                 "name": "Old Name",
                 "source": "upd-ws",
                 "url": "wss://example.com",
@@ -384,7 +382,7 @@ class TestUpdateWebSocketSource:
             create = await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": "Reconnect Test",
                     "source": "recon-ws",
                     "url": "wss://example.com",
@@ -407,7 +405,7 @@ class TestDeleteWebSocketSource:
         create = await async_client.post(
             BASE_URL,
             json={
-                "kind": "generic",
+                "kind": "GenericWebSocketSource",
                 "name": "Delete Me",
                 "source": "del-ws",
                 "url": "wss://example.com",
@@ -433,7 +431,7 @@ class TestDeleteWebSocketSource:
             create = await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": "Del Notify",
                     "source": "del-notify",
                     "url": "wss://example.com",
@@ -459,7 +457,7 @@ class TestReconnectWebSocketSource:
             create = await async_client.post(
                 BASE_URL,
                 json={
-                    "kind": "generic",
+                    "kind": "GenericWebSocketSource",
                     "name": "Reconnect WS",
                     "source": "recon-ws2",
                     "url": "wss://example.com",
@@ -480,7 +478,7 @@ class TestReconnectWebSocketSource:
         create = await async_client.post(
             BASE_URL,
             json={
-                "kind": "generic",
+                "kind": "GenericWebSocketSource",
                 "name": "Disabled",
                 "source": "disabled-ws2",
                 "url": "wss://example.com",
@@ -513,7 +511,7 @@ class TestSocketManagerDispatch:
             org_id=TEST_ORG_ID,
             name="Test",
             source="test-ws",
-            kind="generic",
+            kind="GenericWebSocketSource",
             event_key_expr="type",
             filter_expr="type == 'allowed'",
             status=WebSocketStatus.CONNECTED,
@@ -540,7 +538,7 @@ class TestSocketManagerDispatch:
             org_id=TEST_ORG_ID,
             name="Test",
             source="test-ws",
-            kind="slack",
+            kind="SlackWebSocketSource",
             event_key_expr="payload.event.type",
             payload_expr="payload.event",
             status=WebSocketStatus.CONNECTED,
@@ -578,7 +576,7 @@ class TestSocketManagerDispatch:
             org_id=TEST_ORG_ID,
             name="Test",
             source="test-ws",
-            kind="generic",
+            kind="GenericWebSocketSource",
             event_key_expr="metadata",  # returns a dict, not a string
             status=WebSocketStatus.CONNECTED,
         )
