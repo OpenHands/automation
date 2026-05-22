@@ -82,7 +82,7 @@ class EncryptedString(TypeDecorator):
     impl = String
     cache_ok = True
 
-    def process_bind_param(self, value: str | None, dialect) -> str | None:
+    def process_bind_param(self, value: str | None, _dialect) -> str | None:
         """Encrypt on the way TO the database."""
         if value is None:
             return None
@@ -92,7 +92,7 @@ class EncryptedString(TypeDecorator):
             return value
         return cipher.encrypt(value)
 
-    def process_result_value(self, value: str | None, dialect) -> str | None:
+    def process_result_value(self, value: str | None, _dialect) -> str | None:
         """Decrypt on the way FROM the database."""
         if value is None:
             return None
@@ -117,9 +117,7 @@ class EncryptedJSONHeaders(TypeDecorator):
     impl = JSON
     cache_ok = True
 
-    def process_bind_param(
-        self, value: dict | None, dialect
-    ) -> dict | None:
+    def process_bind_param(self, value: dict | None, _dialect) -> dict | None:
         """Encrypt sensitive header values on the way TO the database."""
         if not value:
             return value
@@ -135,9 +133,7 @@ class EncryptedJSONHeaders(TypeDecorator):
                 result[k] = v
         return result
 
-    def process_result_value(
-        self, value: dict | None, dialect
-    ) -> dict | None:
+    def process_result_value(self, value: dict | None, _dialect) -> dict | None:
         """Decrypt sensitive header values on the way FROM the database."""
         if not value:
             return value
@@ -146,11 +142,7 @@ class EncryptedJSONHeaders(TypeDecorator):
             return value
         result: dict = {}
         for k, v in value.items():
-            if (
-                _is_secret_header(k)
-                and isinstance(v, str)
-                and cipher.is_ciphertext(v)
-            ):
+            if _is_secret_header(k) and isinstance(v, str) and cipher.is_ciphertext(v):
                 decrypted = cipher.decrypt(v)
                 result[k] = decrypted if decrypted is not None else v
             else:

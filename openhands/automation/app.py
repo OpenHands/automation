@@ -30,7 +30,9 @@ from openhands.automation.socket_manager import SocketManager
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
-from openhands.automation.websocket_source_router import router as websocket_source_router
+from openhands.automation.websocket_source_router import (
+    router as websocket_source_router,
+)
 
 
 logger = logging.getLogger("automation.app")

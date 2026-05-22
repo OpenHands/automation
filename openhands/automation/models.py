@@ -420,9 +420,7 @@ class OutboundWebSocketSource(Base):
     # Slack App-Level Token (xapp-…).  Required for Socket Mode.
     # Encrypted at rest via EncryptedString using AUTOMATION_SECRET_KEY /
     # OH_SECRET_KEY.
-    app_token: Mapped[str | None] = mapped_column(
-        EncryptedString(255), nullable=True
-    )
+    app_token: Mapped[str | None] = mapped_column(EncryptedString(255), nullable=True)
 
     # --- Runtime state (managed by SocketManager, not by the API) ---
 
@@ -452,7 +450,5 @@ class OutboundWebSocketSource(Base):
     )
 
     __table_args__ = (
-        Index(
-            "ix_outbound_ws_sources_org_source", "org_id", "source", unique=True
-        ),
+        Index("ix_outbound_ws_sources_org_source", "org_id", "source", unique=True),
     )

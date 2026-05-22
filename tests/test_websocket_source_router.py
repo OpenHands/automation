@@ -203,9 +203,7 @@ class TestCreateWebSocketSource:
         assert resp2.status_code == 409
         assert "already exists" in resp2.json()["detail"]
 
-    async def test_create_notifies_socket_manager(
-        self, async_client, async_session
-    ):
+    async def test_create_notifies_socket_manager(self, async_client, async_session):
         """When a socket manager is present, it should be notified on create."""
         from openhands.automation.app import app
 
@@ -258,9 +256,7 @@ class TestCreateWebSocketSource:
         )
         assert resp.status_code == 422
 
-    async def test_slack_bad_token_returns_422(
-        self, async_client, _no_socket_manager
-    ):
+    async def test_slack_bad_token_returns_422(self, async_client, _no_socket_manager):
         resp = await async_client.post(
             BASE_URL,
             json={
@@ -355,9 +351,7 @@ class TestGetWebSocketSource:
 
 
 class TestUpdateWebSocketSource:
-    async def test_update_name_and_enabled(
-        self, async_client, _no_socket_manager
-    ):
+    async def test_update_name_and_enabled(self, async_client, _no_socket_manager):
         create = await async_client.post(
             BASE_URL,
             json={
@@ -427,7 +421,9 @@ class TestDeleteWebSocketSource:
         get_resp = await async_client.get(f"{BASE_URL}/{source_id}")
         assert get_resp.status_code == 404
 
-    async def test_delete_notifies_socket_manager(self, async_client, _no_socket_manager):
+    async def test_delete_notifies_socket_manager(
+        self, async_client, _no_socket_manager
+    ):
         from openhands.automation.app import app
 
         mock_sm = AsyncMock()
@@ -447,9 +443,7 @@ class TestDeleteWebSocketSource:
             mock_sm.reset_mock()
 
             await async_client.delete(f"{BASE_URL}/{source_id}")
-            mock_sm.on_source_deleted.assert_awaited_once_with(
-                uuid.UUID(source_id)
-            )
+            mock_sm.on_source_deleted.assert_awaited_once_with(uuid.UUID(source_id))
         finally:
             del app.state.socket_manager
 
@@ -508,9 +502,7 @@ class TestReconnectWebSocketSource:
 class TestSocketManagerDispatch:
     """Unit tests for the dispatch pipeline without real WebSocket connections."""
 
-    async def test_dispatch_pre_filter_drops_non_matching(
-        self, async_session_factory
-    ):
+    async def test_dispatch_pre_filter_drops_non_matching(self, async_session_factory):
         """Events that fail filter_expr should be silently dropped."""
         from openhands.automation.socket_manager import SocketManager
 
@@ -532,9 +524,7 @@ class TestSocketManagerDispatch:
             "openhands.automation.socket_manager.get_event_automations",
             new_callable=AsyncMock,
         ) as mock_get:
-            await sm._dispatch(
-                source, TEST_ORG_ID, {"type": "blocked"}, None, None
-            )
+            await sm._dispatch(source, TEST_ORG_ID, {"type": "blocked"})
             mock_get.assert_not_called()
 
     async def test_dispatch_unwraps_payload_via_payload_expr(
@@ -568,8 +558,6 @@ class TestSocketManagerDispatch:
             },
         }
 
-        captured_payload = None
-
         async def fake_get_event_automations(org_id, source_name, session):
             return []
 
@@ -577,9 +565,8 @@ class TestSocketManagerDispatch:
             "openhands.automation.socket_manager.get_event_automations",
             side_effect=fake_get_event_automations,
         ):
-            await sm._dispatch(source, TEST_ORG_ID, raw_msg, None, None)
-            # No match, but the key extraction + unwrap path was exercised.
-            # Verify via a spy that matches_trigger would have received the inner event.
+            await sm._dispatch(source, TEST_ORG_ID, raw_msg)
+            # No automations match, but the key extraction + unwrap path ran.
 
     async def test_dispatch_drops_non_string_event_key(self, async_session_factory):
         """If event_key_expr returns a non-string, the event should be dropped."""
@@ -604,7 +591,5 @@ class TestSocketManagerDispatch:
                 source,
                 TEST_ORG_ID,
                 {"type": "message", "metadata": {"key": "val"}},
-                None,
-                None,
             )
             mock_get.assert_not_called()

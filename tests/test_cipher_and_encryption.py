@@ -1,6 +1,7 @@
-"""Tests for application-layer encryption: Cipher, EncryptedString, EncryptedJSONHeaders.
+"""Tests for application-layer encryption.
 
-All tests in this module are pure unit tests — no database or Docker required.
+Covers Cipher, EncryptedString, and EncryptedJSONHeaders.
+Pure unit tests — no database or Docker required.
 """
 
 import os
@@ -86,14 +87,22 @@ class TestGetCipher:
             assert isinstance(cipher, Cipher)
 
     def test_falls_back_to_oh_secret_key(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("AUTOMATION_SECRET_KEY", "OH_SECRET_KEY")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("AUTOMATION_SECRET_KEY", "OH_SECRET_KEY")
+        }
         env["OH_SECRET_KEY"] = TEST_KEY
         with patch.dict(os.environ, env, clear=True):
             cipher = get_cipher()
             assert cipher is not None
 
     def test_returns_none_when_no_key_set(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("AUTOMATION_SECRET_KEY", "OH_SECRET_KEY")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("AUTOMATION_SECRET_KEY", "OH_SECRET_KEY")
+        }
         with patch.dict(os.environ, env, clear=True):
             cipher = get_cipher()
             assert cipher is None
@@ -164,7 +173,7 @@ class TestEncryptedString:
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             cipher = Cipher(TEST_KEY)
             mock.return_value = cipher
-            result = col.process_bind_param("xapp-token", dialect=None)
+            result = col.process_bind_param("xapp-token", None)
             assert result is not None
             assert cipher.is_ciphertext(result)
 
@@ -174,24 +183,28 @@ class TestEncryptedString:
         ciphertext = cipher.encrypt("xapp-token")
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            result = col.process_result_value(ciphertext, dialect=None)
+            result = col.process_result_value(ciphertext, None)
             assert result == "xapp-token"
 
     def test_none_passthrough(self):
         col = self._make_col()
-        assert col.process_bind_param(None, dialect=None) is None
-        assert col.process_result_value(None, dialect=None) is None
+        assert col.process_bind_param(None, None) is None
+        assert col.process_result_value(None, None) is None
 
     def test_no_cipher_stores_plaintext(self):
         col = self._make_col()
-        with patch("openhands.automation.utils.encrypted_fields.get_cipher", return_value=None):
-            result = col.process_bind_param("xapp-token", dialect=None)
+        with patch(
+            "openhands.automation.utils.encrypted_fields.get_cipher", return_value=None
+        ):
+            result = col.process_bind_param("xapp-token", None)
             assert result == "xapp-token"
 
     def test_no_cipher_reads_plaintext(self):
         col = self._make_col()
-        with patch("openhands.automation.utils.encrypted_fields.get_cipher", return_value=None):
-            result = col.process_result_value("xapp-token", dialect=None)
+        with patch(
+            "openhands.automation.utils.encrypted_fields.get_cipher", return_value=None
+        ):
+            result = col.process_result_value("xapp-token", None)
             assert result == "xapp-token"
 
     def test_read_plaintext_row_with_cipher_present(self):
@@ -201,7 +214,7 @@ class TestEncryptedString:
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
             # Value does not have Fernet prefix → returned as-is
-            result = col.process_result_value("xapp-1-old-plaintext-token", dialect=None)
+            result = col.process_result_value("xapp-1-old-plaintext-token", None)
             assert result == "xapp-1-old-plaintext-token"
 
     def test_roundtrip_bind_then_result(self):
@@ -209,8 +222,8 @@ class TestEncryptedString:
         cipher = Cipher(TEST_KEY)
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            encrypted = col.process_bind_param("my-secret", dialect=None)
-            decrypted = col.process_result_value(encrypted, dialect=None)
+            encrypted = col.process_bind_param("my-secret", None)
+            decrypted = col.process_result_value(encrypted, None)
             assert decrypted == "my-secret"
 
 
@@ -233,7 +246,7 @@ class TestEncryptedJSONHeaders:
         }
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            stored = col.process_bind_param(headers, dialect=None)
+            stored = col.process_bind_param(headers, None)
 
         assert cipher.is_ciphertext(stored["Authorization"])
         assert stored["Content-Type"] == "application/json"
@@ -248,26 +261,28 @@ class TestEncryptedJSONHeaders:
         }
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            stored = col.process_bind_param(headers, dialect=None)
-            restored = col.process_result_value(stored, dialect=None)
+            stored = col.process_bind_param(headers, None)
+            restored = col.process_result_value(stored, None)
 
         assert restored["Authorization"] == "Bearer secret-token"
         assert restored["Content-Type"] == "application/json"
 
     def test_none_passthrough(self):
         col = self._make_col()
-        assert col.process_bind_param(None, dialect=None) is None
-        assert col.process_result_value(None, dialect=None) is None
+        assert col.process_bind_param(None, None) is None
+        assert col.process_result_value(None, None) is None
 
     def test_empty_dict_passthrough(self):
         col = self._make_col()
-        assert col.process_bind_param({}, dialect=None) == {}
+        assert col.process_bind_param({}, None) == {}
 
     def test_no_cipher_stores_plaintext(self):
         col = self._make_col()
         headers = {"Authorization": "Bearer token", "X-Api-Key": "key123"}
-        with patch("openhands.automation.utils.encrypted_fields.get_cipher", return_value=None):
-            result = col.process_bind_param(headers, dialect=None)
+        with patch(
+            "openhands.automation.utils.encrypted_fields.get_cipher", return_value=None
+        ):
+            result = col.process_bind_param(headers, None)
         assert result == headers
 
     def test_plaintext_headers_readable_after_key_introduced(self):
@@ -277,7 +292,7 @@ class TestEncryptedJSONHeaders:
         plaintext_stored = {"Authorization": "Bearer old-token"}
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            result = col.process_result_value(plaintext_stored, dialect=None)
+            result = col.process_result_value(plaintext_stored, None)
         # Value doesn't have Fernet prefix → returned as-is
         assert result["Authorization"] == "Bearer old-token"
 
@@ -292,7 +307,7 @@ class TestEncryptedJSONHeaders:
         }
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
-            stored = col.process_bind_param(headers, dialect=None)
+            stored = col.process_bind_param(headers, None)
 
         assert cipher.is_ciphertext(stored["Authorization"])
         assert cipher.is_ciphertext(stored["X-Api-Key"])

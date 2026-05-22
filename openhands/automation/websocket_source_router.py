@@ -186,12 +186,12 @@ async def update_websocket_source(
     if source.kind == "generic" and not source.url:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="url is required for generic WebSocket sources and cannot be cleared",
+            detail="url is required for generic sources and cannot be cleared",
         )
     if source.kind == "slack" and not source.app_token:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="app_token is required for Slack WebSocket sources and cannot be cleared",
+            detail="app_token is required for slack sources and cannot be cleared",
         )
 
     await session.commit()

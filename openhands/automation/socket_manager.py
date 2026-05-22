@@ -43,7 +43,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from openhands.automation.filter_eval import evaluate_filter
 from openhands.automation.models import OutboundWebSocketSource, WebSocketStatus
 from openhands.automation.trigger_matcher import matches_trigger
-from openhands.automation.utils.webhook import create_automation_run, get_event_automations
+from openhands.automation.utils.webhook import (
+    create_automation_run,
+    get_event_automations,
+)
 
 
 logger = logging.getLogger("automation.socket_manager")
@@ -121,9 +124,7 @@ class SocketManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _start_task(
-        self, source_id: uuid.UUID, org_id: uuid.UUID, kind: str
-    ) -> None:
+    def _start_task(self, source_id: uuid.UUID, org_id: uuid.UUID, kind: str) -> None:
         task = asyncio.create_task(
             self._run_source_loop(source_id, org_id, kind),
             name=f"ws-source-{source_id}",
@@ -193,8 +194,7 @@ class SocketManager:
             raise
         except Exception:
             logger.exception(
-                "Failed to update last_event_at source_id=%s — "
-                "non-fatal, continuing.",
+                "Failed to update last_event_at source_id=%s — non-fatal, continuing.",
                 source_id,
             )
 
@@ -231,8 +231,7 @@ class SocketManager:
 
                 if failures >= _MAX_FAILURES:
                     logger.error(
-                        "WebSocket source exceeded max failures, pausing "
-                        "source_id=%s",
+                        "WebSocket source exceeded max failures, pausing source_id=%s",
                         source_id,
                     )
                     await self._set_status(
@@ -297,11 +296,13 @@ class SocketManager:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    logger.debug("Non-JSON message from source_id=%s, skipping", source.id)
+                    logger.debug(
+                        "Non-JSON message from source_id=%s, skipping", source.id
+                    )
                     continue
 
                 await self._record_event(source.id)
-                await self._dispatch(source, org_id, msg, ack_ws=None, ack_id=None)
+                await self._dispatch(source, org_id, msg)
 
     async def _receive_slack(
         self, source: OutboundWebSocketSource, org_id: uuid.UUID
@@ -316,24 +317,18 @@ class SocketManager:
         """
         app_token = source.app_token
         if not app_token:
-            raise ValueError(
-                f"Slack source {source.id} has no app_token configured"
-            )
+            raise ValueError(f"Slack source {source.id} has no app_token configured")
 
         # Fetch a fresh connection URL from Slack
         wss_url = await _slack_open_connection(app_token)
-        logger.info(
-            "Obtained Slack Socket Mode URL for source_id=%s", source.id
-        )
+        logger.info("Obtained Slack Socket Mode URL for source_id=%s", source.id)
 
         async with websockets.connect(wss_url) as ws:
             # Slack sends a hello message immediately on connect
             hello_raw = await ws.recv()
             hello = json.loads(hello_raw)
             if hello.get("type") != "hello":
-                raise RuntimeError(
-                    f"Expected Slack hello, got: {hello.get('type')!r}"
-                )
+                raise RuntimeError(f"Expected Slack hello, got: {hello.get('type')!r}")
 
             await self._set_status(
                 source.id,
@@ -369,7 +364,7 @@ class SocketManager:
                     continue
 
                 await self._record_event(source.id)
-                await self._dispatch(source, org_id, msg, ack_ws=None, ack_id=None)
+                await self._dispatch(source, org_id, msg)
 
     # ------------------------------------------------------------------
     # Dispatch pipeline (shared by all kinds)
@@ -380,8 +375,6 @@ class SocketManager:
         source: OutboundWebSocketSource,
         org_id: uuid.UUID,
         raw_msg: dict[str, Any],
-        ack_ws: Any,  # reserved for future per-message ack callbacks
-        ack_id: str | None,
     ) -> None:
         """Apply pre-filter, extract event key, unwrap, find automations, run.
 
@@ -406,7 +399,8 @@ class SocketManager:
             event_key = jmespath.search(source.event_key_expr, raw_msg)
         except Exception:
             logger.debug(
-                "event_key_expr failed for source_id=%s, dropping", source.id,
+                "event_key_expr failed for source_id=%s, dropping",
+                source.id,
                 exc_info=True,
             )
             return
