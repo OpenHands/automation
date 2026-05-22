@@ -17,6 +17,7 @@ from openhands.automation.event_schemas.github import (
     detect_github_event_type,
     parse_github_event_auto,
 )
+from openhands.automation.event_schemas.jira_dc import JiraDcEvent
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.trigger_matcher import matches_trigger
 
@@ -618,6 +619,7 @@ class TestJiraDcEvent:
 
         event = parse_event("jira_dc", payload)
 
+        assert isinstance(event, JiraDcEvent)
         assert event.source == "jira_dc"
         assert event.event_key == "comment_created"
         assert event.payload == payload
