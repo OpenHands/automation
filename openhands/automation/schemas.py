@@ -370,7 +370,7 @@ class WebhookConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     secret: str
-    is_builtin: bool = False  # True for github
+    is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
 
@@ -387,7 +387,7 @@ class EventResponse(BaseModel):
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
 # Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"github"})
+RESERVED_SOURCES = frozenset({"github", "jira_dc"})
 
 
 # Valid HTTP header name pattern

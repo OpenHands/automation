@@ -119,8 +119,10 @@ def parse_event(
 def _register_builtin_parsers() -> None:
     """Register parsers for built-in sources. Called at module load."""
     from openhands.automation.event_schemas.github import parse_github_event_auto
+    from openhands.automation.event_schemas.jira_dc import parse_jira_dc_event
 
     register_parser("github", parse_github_event_auto)
+    register_parser("jira_dc", parse_jira_dc_event)
 
 
 _register_builtin_parsers()

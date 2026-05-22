@@ -34,6 +34,7 @@ BuiltinConfigFunc = Callable[[Settings], str | None]
 
 BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
     "github": lambda s: s.webhook_secret or None,
+    "jira_dc": lambda s: s.webhook_secret or None,
 }
 
 

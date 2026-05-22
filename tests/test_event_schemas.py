@@ -605,6 +605,58 @@ class TestCustomWebhookEvent:
         assert result is False
 
 
+class TestJiraDcEvent:
+    """Tests for Jira Data Center webhook events."""
+
+    def test_parse_jira_dc_comment_created(self):
+        """Jira DC event keys come from webhookEvent."""
+        payload = {
+            "webhookEvent": "comment_created",
+            "comment": {"body": "hello"},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        event = parse_event("jira_dc", payload)
+
+        assert event.source == "jira_dc"
+        assert event.event_key == "comment_created"
+        assert event.payload == payload
+
+    def test_parse_jira_dc_issue_updated(self):
+        """Jira DC issue update events are exposed as their webhookEvent."""
+        payload = {
+            "webhookEvent": "jira:issue_updated",
+            "changelog": {"items": []},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        event = parse_event("jira_dc", payload)
+
+        assert event.source == "jira_dc"
+        assert event.event_key == "jira:issue_updated"
+
+    def test_jira_dc_trigger_matching_with_filter(self):
+        """Jira DC events support normal trigger filters."""
+        payload = {
+            "webhookEvent": "comment_created",
+            "comment": {"body": "please review @openhands"},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        trigger = EventTrigger(
+            source="jira_dc",
+            on="comment_created",
+            filter="icontains(comment.body, '@openhands')",
+        )
+
+        assert matches_trigger(trigger, "jira_dc", "comment_created", payload) is True
+
+    def test_jira_dc_missing_webhook_event(self):
+        """Jira DC events require webhookEvent."""
+        with pytest.raises(ValueError, match="Cannot detect jira_dc event type"):
+            parse_event("jira_dc", {"issue": {"key": "PROJ-123"}})
+
+
 class TestMalformedPayloads:
     """Tests for handling malformed payloads."""
 

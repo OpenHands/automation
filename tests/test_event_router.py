@@ -83,6 +83,26 @@ def github_pr_payload() -> dict:
     }
 
 
+@pytest.fixture
+def jira_dc_comment_payload() -> dict:
+    """Sample OpenHands-forwarded Jira DC comment event payload."""
+    return {
+        "organization": {
+            "jira_dc_workspace": "jira.company.com",
+            "openhands_org_id": "00000000-0000-0000-0000-000000000123",
+        },
+        "payload": {
+            "webhookEvent": "comment_created",
+            "comment": {"body": "please review @openhands"},
+            "issue": {
+                "id": "12345",
+                "key": "PROJ-123",
+                "self": "https://jira.company.com/rest/api/2/issue/12345",
+            },
+        },
+    }
+
+
 def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
     """Generate HMAC signature for payload.
 
@@ -156,6 +176,53 @@ async def test_receive_github_event_with_matching_automation(
 
     response = await async_client.post(
         f"/api/automation/v1/events/{org_id}/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_jira_dc_event_with_matching_automation(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    jira_dc_comment_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving Jira DC event that matches an automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test Jira DC Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "jira_dc",
+            "on": "comment_created",
+            "filter": "icontains(comment.body, '@openhands')",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(jira_dc_comment_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/jira_dc",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
