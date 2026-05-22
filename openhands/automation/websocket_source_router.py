@@ -179,6 +179,21 @@ async def update_websocket_source(
     for field, value in update_data.items():
         setattr(source, field, value)
 
+    # Validate kind-specific required fields remain set after applying updates.
+    # This guards against a caller clearing url on a generic source or
+    # app_token on a slack source, which would cause runtime failures in the
+    # SocketManager on the next connect attempt.
+    if source.kind == "generic" and not source.url:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="url is required for generic WebSocket sources and cannot be cleared",
+        )
+    if source.kind == "slack" and not source.app_token:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="app_token is required for Slack WebSocket sources and cannot be cleared",
+        )
+
     await session.commit()
     await session.refresh(source)
 

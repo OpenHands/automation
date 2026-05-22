@@ -157,6 +157,9 @@ class SocketManager:
         detail: str | None = None,
         connected_at: datetime | None = None,
     ) -> None:
+        # DB write failures must not terminate the WebSocket connection —
+        # we log at ERROR (with traceback via logger.exception) and continue.
+        # CancelledError is re-raised so task shutdown is never masked.
         try:
             async with self._session_factory() as session:
                 source = await session.get(OutboundWebSocketSource, source_id)
@@ -167,21 +170,32 @@ class SocketManager:
                 if connected_at is not None:
                     source.connected_at = connected_at
                 await session.commit()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception(
-                "Failed to update status for source_id=%s", source_id
+                "Failed to update status source_id=%s status=%s — "
+                "DB write error; WebSocket connection continues.",
+                source_id,
+                status.value,
             )
 
     async def _record_event(self, source_id: uuid.UUID) -> None:
+        # Non-fatal: a missed last_event_at timestamp is acceptable.
+        # CancelledError is re-raised so task shutdown is never masked.
         try:
             async with self._session_factory() as session:
                 source = await session.get(OutboundWebSocketSource, source_id)
                 if source:
                     source.last_event_at = datetime.now(UTC)
                     await session.commit()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception(
-                "Failed to update last_event_at for source_id=%s", source_id
+                "Failed to update last_event_at source_id=%s — "
+                "non-fatal, continuing.",
+                source_id,
             )
 
     # ------------------------------------------------------------------

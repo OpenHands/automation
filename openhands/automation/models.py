@@ -19,6 +19,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.encrypted_fields import (
+    EncryptedJSONHeaders,
+    EncryptedString,
+)
 
 
 class WebSocketStatus(enum.Enum):
@@ -402,21 +406,23 @@ class OutboundWebSocketSource(Base):
 
     # --- kind = "generic" fields ---
 
-    # Static wss:// URL to connect to.
+    # Static wss:// URL to connect to.  Not encrypted (not a credential).
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # JSON object of HTTP headers to send on the WebSocket upgrade request.
-    # Values may contain ${SECRET_NAME} placeholders resolved at connect time
-    # from the automation service's secret store (future enhancement; stored
-    # verbatim for now — treat as sensitive and encrypt at rest in production).
-    headers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # HTTP headers for the WebSocket upgrade request.
+    # Sensitive header values (Authorization, X-Api-Key, Cookie, etc.) are
+    # encrypted at rest via EncryptedJSONHeaders using AUTOMATION_SECRET_KEY /
+    # OH_SECRET_KEY.  Non-sensitive headers are stored as-is.
+    headers: Mapped[dict | None] = mapped_column(EncryptedJSONHeaders, nullable=True)
 
     # --- kind = "slack" fields ---
 
     # Slack App-Level Token (xapp-…).  Required for Socket Mode.
-    # Used to call apps.connections.open to obtain a fresh wss:// URL on each
-    # connect attempt.  Treat as sensitive; encrypt at rest in production.
-    app_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Encrypted at rest via EncryptedString using AUTOMATION_SECRET_KEY /
+    # OH_SECRET_KEY.
+    app_token: Mapped[str | None] = mapped_column(
+        EncryptedString(255), nullable=True
+    )
 
     # --- Runtime state (managed by SocketManager, not by the API) ---
 
