@@ -248,6 +248,7 @@ class TestEncryptedJSONHeaders:
             mock.return_value = cipher
             stored = col.process_bind_param(headers, None)
 
+        assert stored is not None
         assert cipher.is_ciphertext(stored["Authorization"])
         assert stored["Content-Type"] == "application/json"
         assert stored["X-Request-ID"] == "req-123"
@@ -262,8 +263,10 @@ class TestEncryptedJSONHeaders:
         with patch("openhands.automation.utils.encrypted_fields.get_cipher") as mock:
             mock.return_value = cipher
             stored = col.process_bind_param(headers, None)
+            assert stored is not None
             restored = col.process_result_value(stored, None)
 
+        assert restored is not None
         assert restored["Authorization"] == "Bearer secret-token"
         assert restored["Content-Type"] == "application/json"
 
@@ -294,6 +297,7 @@ class TestEncryptedJSONHeaders:
             mock.return_value = cipher
             result = col.process_result_value(plaintext_stored, None)
         # Value doesn't have Fernet prefix → returned as-is
+        assert result is not None
         assert result["Authorization"] == "Bearer old-token"
 
     def test_multiple_secret_headers_encrypted(self):
@@ -309,6 +313,7 @@ class TestEncryptedJSONHeaders:
             mock.return_value = cipher
             stored = col.process_bind_param(headers, None)
 
+        assert stored is not None
         assert cipher.is_ciphertext(stored["Authorization"])
         assert cipher.is_ciphertext(stored["X-Api-Key"])
         assert cipher.is_ciphertext(stored["Cookie"])

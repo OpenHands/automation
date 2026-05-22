@@ -16,7 +16,7 @@ Create Date: 2026-05-21
 from collections.abc import Sequence
 
 from alembic import op
-from sqlalchemy import Boolean, Column, DateTime, Enum, JSON, String, Text, Uuid, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Enum, String, Text, Uuid, text
 
 
 revision: str = "007"

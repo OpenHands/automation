@@ -24,6 +24,7 @@ is emitted and values are stored as plaintext (preserving current behaviour).
 """
 
 import logging
+from typing import Any
 
 from sqlalchemy import String
 from sqlalchemy.types import JSON, TypeDecorator
@@ -82,7 +83,7 @@ class EncryptedString(TypeDecorator):
     impl = String
     cache_ok = True
 
-    def process_bind_param(self, value: str | None, _dialect) -> str | None:
+    def process_bind_param(self, value: str | None, dialect: Any) -> str | None:  # noqa: ARG002
         """Encrypt on the way TO the database."""
         if value is None:
             return None
@@ -92,7 +93,7 @@ class EncryptedString(TypeDecorator):
             return value
         return cipher.encrypt(value)
 
-    def process_result_value(self, value: str | None, _dialect) -> str | None:
+    def process_result_value(self, value: str | None, dialect: Any) -> str | None:  # noqa: ARG002
         """Decrypt on the way FROM the database."""
         if value is None:
             return None
@@ -117,7 +118,7 @@ class EncryptedJSONHeaders(TypeDecorator):
     impl = JSON
     cache_ok = True
 
-    def process_bind_param(self, value: dict | None, _dialect) -> dict | None:
+    def process_bind_param(self, value: dict | None, dialect: Any) -> dict | None:  # noqa: ARG002
         """Encrypt sensitive header values on the way TO the database."""
         if not value:
             return value
@@ -133,7 +134,7 @@ class EncryptedJSONHeaders(TypeDecorator):
                 result[k] = v
         return result
 
-    def process_result_value(self, value: dict | None, _dialect) -> dict | None:
+    def process_result_value(self, value: dict | None, dialect: Any) -> dict | None:  # noqa: ARG002
         """Decrypt sensitive header values on the way FROM the database."""
         if not value:
             return value
