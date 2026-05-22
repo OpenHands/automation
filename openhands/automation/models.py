@@ -21,6 +21,15 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from openhands.automation.utils import utcnow
 
 
+class WebSocketStatus(enum.Enum):
+    """Runtime connection status for an outbound WebSocket source."""
+
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    ERROR = "ERROR"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -320,4 +329,124 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class OutboundWebSocketSource(Base):
+    """An outbound WebSocket connection that receives events from an external service.
+
+    Unlike CustomWebhook (where the external service connects to us), this model
+    represents a connection WE initiate to an external service. A background
+    SocketManager maintains the connection and dispatches received events through
+    the same trigger-matching pipeline used by webhooks.
+
+    Two kinds are supported, selected via the ``kind`` discriminator column:
+
+    ``"generic"``
+        Connects to a static ``wss://`` URL with optional HTTP headers.
+        Suitable for any service that exposes a plain WebSocket endpoint.
+
+    ``"slack"``
+        Connects to Slack's Socket Mode API.  Requires a Slack App-Level Token
+        (``xapp-…``).  The connection URL is fetched dynamically by calling
+        ``apps.connections.open`` before each connect attempt; Slack-specific
+        envelope ACKs are handled automatically.
+
+    Event routing uses the same JMESPath machinery as webhooks:
+
+    - ``event_key_expr`` extracts the event-type string that is matched against
+      ``trigger.on`` patterns in automations (e.g. ``"payload.event.type"``
+      yields ``"message"`` for Slack message events).
+    - ``payload_expr`` unwraps outer envelopes before the payload is stored on
+      the run and handed to ``trigger.filter`` evaluation (e.g. ``"payload.event"``
+      for Slack strips the Socket Mode envelope).
+    - ``filter_expr`` is a *connection-level* pre-filter: events that do not match
+      are silently dropped before any automation matching occurs.  Use this to
+      avoid dispatching irrelevant high-volume events (e.g. bot messages).
+    """
+
+    __tablename__ = "outbound_websocket_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Human-readable label
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Slug used as the event ``source`` name in trigger matching and URLs.
+    # Must be unique per org (enforced by the unique index below).
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Discriminator: "generic" or "slack"
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    # --- JMESPath expressions (common to all kinds) ---
+
+    # Extracts the event-type key used for trigger.on pattern matching.
+    # Defaults differ per kind and are set at the schema layer:
+    #   generic → "type"
+    #   slack   → "payload.event.type"
+    event_key_expr: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # Unwraps outer envelopes so the stored/filtered payload is the inner event.
+    # None means pass the raw message through unchanged.
+    #   slack default → "payload.event"
+    payload_expr: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Connection-level pre-filter (JMESPath).  Evaluated against the raw message
+    # *before* payload unwrapping.  Events that do not match are dropped silently.
+    # None means accept all events.
+    filter_expr: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- kind = "generic" fields ---
+
+    # Static wss:// URL to connect to.
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # JSON object of HTTP headers to send on the WebSocket upgrade request.
+    # Values may contain ${SECRET_NAME} placeholders resolved at connect time
+    # from the automation service's secret store (future enhancement; stored
+    # verbatim for now — treat as sensitive and encrypt at rest in production).
+    headers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # --- kind = "slack" fields ---
+
+    # Slack App-Level Token (xapp-…).  Required for Socket Mode.
+    # Used to call apps.connections.open to obtain a fresh wss:// URL on each
+    # connect attempt.  Treat as sensitive; encrypt at rest in production.
+    app_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # --- Runtime state (managed by SocketManager, not by the API) ---
+
+    status: Mapped[WebSocketStatus] = mapped_column(
+        Enum(WebSocketStatus, native_enum=False, length=20),
+        nullable=False,
+        default=WebSocketStatus.DISCONNECTED,
+    )
+    status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_outbound_ws_sources_org_source", "org_id", "source", unique=True
+        ),
     )

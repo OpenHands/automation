@@ -26,9 +26,11 @@ from openhands.automation.logger import setup_all_loggers
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.socket_manager import SocketManager
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
+from openhands.automation.websocket_source_router import router as websocket_source_router
 
 
 logger = logging.getLogger("automation.app")
@@ -151,11 +153,18 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Socket manager: maintains outbound WebSocket connections
+    socket_manager = SocketManager(app.state.session_factory)
+    app.state.socket_manager = socket_manager
+    await socket_manager.start()
+    logger.info("Socket manager started")
+
     yield
 
     # Shutdown
     logger.info("Shutting down background tasks...")
     shutdown_event.set()
+    await socket_manager.stop()
 
     # Wait for all tasks to exit gracefully
     for task_name, task in [
@@ -224,6 +233,7 @@ app.include_router(uploads_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
+app.include_router(websocket_source_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 
