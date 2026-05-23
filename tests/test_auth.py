@@ -239,6 +239,30 @@ class TestCookieAuthentication:
         assert headers["Cookie"] == "keycloak_auth=valid-cookie-value"
         assert "Authorization" not in headers
 
+    async def test_authenticate_chunked_cookie(
+        self, mock_request, mock_http_client
+    ):
+        """Chunked keycloak_auth cookies are reassembled before validation."""
+        mock_request.headers.get.return_value = ""
+        mock_request.cookies = {
+            "keycloak_auth": "chunk-0.",
+            "keycloak_auth_1": "chunk-1.",
+            "keycloak_auth_2": "chunk-2",
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.COOKIE
+        call_args = mock_http_client.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers["Cookie"] == "keycloak_auth=chunk-0.chunk-1.chunk-2"
+        assert "Authorization" not in headers
+
     async def test_cookie_invalid_raises_401(self, mock_request, mock_http_client):
         """Invalid cookie (401 from OpenHands) raises 401."""
         mock_request.headers.get.return_value = ""

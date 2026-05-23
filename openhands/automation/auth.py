@@ -36,6 +36,8 @@ logger = logging.getLogger("automation.auth")
 
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
+SESSION_COOKIE_NAME = "keycloak_auth"
+MAX_SESSION_COOKIE_CHUNKS = 8
 
 
 def _get_auth_cache() -> TTLCache[str, "AuthenticatedUser"]:
@@ -280,6 +282,26 @@ def _extract_api_key(request: Request) -> str | None:
     return session_key or None
 
 
+def _extract_session_cookie(request: Request) -> str | None:
+    """Read OpenHands' possibly chunked session cookie.
+
+    OpenHands splits large keycloak_auth values across keycloak_auth,
+    keycloak_auth_1, keycloak_auth_2, etc. Automation validates by forwarding
+    the reassembled token back to OpenHands /api/v1/users/me.
+    """
+    first = request.cookies.get(SESSION_COOKIE_NAME)
+    if not first:
+        return None
+
+    parts = [first]
+    for index in range(1, MAX_SESSION_COOKIE_CHUNKS):
+        part = request.cookies.get(f"{SESSION_COOKIE_NAME}_{index}")
+        if part is None:
+            break
+        parts.append(part)
+    return "".join(parts)
+
+
 def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     """Extract a credential and its auth method from the request.
 
@@ -290,7 +312,7 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     if api_key:
         return api_key, AuthMethod.API_KEY
 
-    cookie = request.cookies.get("keycloak_auth")
+    cookie = _extract_session_cookie(request)
     if cookie:
         return cookie, AuthMethod.COOKIE
 
@@ -376,7 +398,7 @@ async def authenticate_request(
     outbound_headers = (
         {"Authorization": f"Bearer {credential}"}
         if auth_method == AuthMethod.API_KEY
-        else {"Cookie": f"keycloak_auth={credential}"}
+        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
     )
 
     try:
