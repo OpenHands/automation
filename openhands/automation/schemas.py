@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from abc import ABC
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -11,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -567,6 +569,220 @@ class CustomWebhookListResponse(BaseModel):
     """Response schema for listing webhooks."""
 
     webhooks: list[CustomWebhookResponse]
+    total: int
+
+
+# --- Outbound WebSocket Source Schemas ---
+
+
+def _validate_jmespath(v: str | None) -> str | None:
+    """Validate a JMESPath expression if provided."""
+    if v is None:
+        return v
+    import jmespath
+    from jmespath import exceptions as jmespath_exceptions
+
+    try:
+        jmespath.compile(v)
+    except jmespath_exceptions.JMESPathError as e:
+        raise ValueError(f"Invalid JMESPath expression: {e}") from e
+    return v
+
+
+class WebSocketSourceCreate(DiscriminatedUnionMixin, ABC):
+    """Abstract base for all outbound WebSocket source create schemas.
+
+    Concrete subclasses (``GenericWebSocketSource``, ``SlackWebSocketSource``)
+    are selected automatically via ``DiscriminatedUnionMixin`` using the
+    ``kind`` computed field (equal to the class name).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=255)
+    source: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description=(
+            "Unique source slug (lowercase, alphanumeric with hyphens). "
+            "Used as trigger.source in automations."
+        ),
+    )
+    enabled: bool = True
+    filter_expr: str | None = Field(
+        default=None,
+        description=(
+            "Optional JMESPath expression evaluated against each raw message "
+            "before payload unwrapping. Events that do not match are dropped "
+            "before any automation trigger matching occurs."
+        ),
+    )
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        v_lower = v.lower()
+        if v_lower in RESERVED_SOURCES:
+            raise ValueError(
+                f"'{v}' is a reserved source name. "
+                "Use the built-in integration instead."
+            )
+        if not _SOURCE_NAME_RE.match(v_lower):
+            raise ValueError(
+                "source must be lowercase alphanumeric with hyphens, 1-50 chars, "
+                "starting and ending with alphanumeric"
+            )
+        return v_lower
+
+    event_key_expr: str = Field(
+        default="type",
+        max_length=500,
+        description="JMESPath expression to extract the event type from each message.",
+    )
+    payload_expr: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Optional JMESPath expression to unwrap an outer envelope. "
+            "The result replaces the raw message as the event payload passed to "
+            "automations. None means use the raw message as-is."
+        ),
+    )
+
+    @field_validator("filter_expr", "event_key_expr", "payload_expr")
+    @classmethod
+    def validate_jmespath_exprs(cls, v: str | None) -> str | None:
+        return _validate_jmespath(v)
+
+
+class GenericWebSocketSource(WebSocketSourceCreate):
+    """Create a generic outbound WebSocket source with a static URL."""
+
+    url: str = Field(..., description="The wss:// URL to connect to.")
+    headers: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Optional HTTP headers for the WebSocket upgrade request "
+            "(e.g. {'Authorization': 'Bearer token'}). "
+            "Treat values as sensitive credentials."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not v.startswith(("wss://", "ws://")):
+            raise ValueError("url must start with wss:// or ws://")
+        return v
+
+
+class SlackWebSocketSource(WebSocketSourceCreate):
+    """Create a Slack Socket Mode outbound WebSocket source.
+
+    Uses ``apps.connections.open`` to obtain a fresh wss:// URL on each connect
+    attempt.  Slack-specific envelope ACKs are sent automatically before any
+    automation dispatch occurs.
+
+    Defaults are tuned for the most common use-case: routing on the inner Slack
+    event type (``message``, ``app_mention``, etc.) with the inner event object
+    as the payload available to ``trigger.filter``.
+    """
+
+    app_token: str = Field(
+        ...,
+        description=(
+            "Slack App-Level Token (xapp-…) used to call apps.connections.open. "
+            "Treat as a sensitive credential; do not log or expose."
+        ),
+    )
+    event_key_expr: str = Field(
+        default="payload.event.type",
+        max_length=500,
+        description=(
+            "JMESPath expression to extract the event type. "
+            "Default extracts the inner Slack event type (e.g. 'message')."
+        ),
+    )
+    payload_expr: str | None = Field(
+        default="payload.event",
+        max_length=500,
+        description=(
+            "JMESPath expression to unwrap the Slack Socket Mode envelope. "
+            "Default exposes the inner event object to trigger.filter."
+        ),
+    )
+
+    @field_validator("app_token")
+    @classmethod
+    def validate_app_token(cls, v: str) -> str:
+        if not v.startswith("xapp-"):
+            raise ValueError(
+                "app_token must be a Slack App-Level Token starting with 'xapp-'"
+            )
+        return v
+
+
+class WebSocketSourceUpdate(BaseModel):
+    """Request schema for updating a WebSocket source.
+
+    Only common fields and kind-specific credentials can be updated.
+    The ``kind`` and ``source`` slug are immutable after creation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    enabled: bool | None = None
+    event_key_expr: str | None = Field(default=None, max_length=500)
+    payload_expr: str | None = Field(default=None, max_length=500)
+    filter_expr: str | None = None
+    # generic-kind
+    url: str | None = None
+    headers: dict[str, str] | None = None
+    # slack-kind
+    app_token: str | None = None
+
+    @field_validator("event_key_expr", "payload_expr", "filter_expr")
+    @classmethod
+    def validate_jmespath(cls, v: str | None) -> str | None:
+        return _validate_jmespath(v)
+
+
+class WebSocketSourceStatus(StrEnum):
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    ERROR = "ERROR"
+
+
+class WebSocketSourceResponse(BaseModel):
+    """Response schema for a WebSocket source (credentials redacted)."""
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    name: str
+    source: str
+    kind: str
+    enabled: bool
+    event_key_expr: str
+    payload_expr: str | None
+    filter_expr: str | None
+    # generic-kind (url returned; headers omitted — may contain credentials)
+    url: str | None
+    # slack-kind: token is never returned
+    status: WebSocketSourceStatus
+    status_detail: str | None
+    connected_at: datetime | None
+    last_event_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WebSocketSourceListResponse(BaseModel):
+    sources: list[WebSocketSourceResponse]
     total: int
 
 
