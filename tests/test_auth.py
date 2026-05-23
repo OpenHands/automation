@@ -239,9 +239,7 @@ class TestCookieAuthentication:
         assert headers["Cookie"] == "keycloak_auth=valid-cookie-value"
         assert "Authorization" not in headers
 
-    async def test_authenticate_chunked_cookie(
-        self, mock_request, mock_http_client
-    ):
+    async def test_authenticate_chunked_cookie(self, mock_request, mock_http_client):
         """Chunked keycloak_auth cookies are reassembled before validation."""
         mock_request.headers.get.return_value = ""
         mock_request.cookies = {
