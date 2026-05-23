@@ -37,6 +37,8 @@ logger = logging.getLogger("automation.auth")
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
 SESSION_COOKIE_NAME = "keycloak_auth"
+# Keep parity with OpenHands' cookie chunking helper: 8 * 3000 bytes is
+# comfortably above expected session token sizes while staying bounded.
 MAX_SESSION_COOKIE_CHUNKS = 8
 
 
