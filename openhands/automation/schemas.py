@@ -387,7 +387,7 @@ class EventResponse(BaseModel):
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
 # Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"github", "jira_dc"})
+RESERVED_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
 
 
 # Valid HTTP header name pattern

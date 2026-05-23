@@ -60,6 +60,12 @@ class TestCustomWebhookCreateSchema:
             CustomWebhookCreate(name="Test", source="jira_dc")
         assert "reserved source name" in str(exc_info.value)
 
+    def test_reserved_source_bitbucket_data_center_rejected(self):
+        """Reserved source 'bitbucket_data_center' should be rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(name="Test", source="bitbucket_data_center")
+        assert "reserved source name" in str(exc_info.value)
+
     def test_reserved_source_case_insensitive(self):
         """Reserved source check is case-insensitive."""
         with pytest.raises(ValidationError) as exc_info:
@@ -206,7 +212,7 @@ class TestReservedSources:
 
     def test_builtin_sources_reserved(self):
         """Built-in sources should be reserved."""
-        assert RESERVED_SOURCES == {"github", "jira_dc"}
+        assert RESERVED_SOURCES == {"bitbucket_data_center", "github", "jira_dc"}
 
 
 class TestWebhookSecretGeneration:

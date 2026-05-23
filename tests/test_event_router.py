@@ -103,6 +103,30 @@ def jira_dc_comment_payload() -> dict:
     }
 
 
+@pytest.fixture
+def bitbucket_data_center_pr_payload() -> dict:
+    """Sample OpenHands-forwarded Bitbucket Data Center PR event payload."""
+    return {
+        "organization": {
+            "git_org": "PROJ",
+            "openhands_org_id": "00000000-0000-0000-0000-000000000123",
+        },
+        "payload": {
+            "eventKey": "pr:opened",
+            "pullRequest": {
+                "id": 1,
+                "title": "Test PR",
+                "toRef": {
+                    "repository": {
+                        "slug": "myrepo",
+                        "project": {"key": "PROJ"},
+                    }
+                },
+            },
+        },
+    }
+
+
 def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
     """Generate HMAC signature for payload.
 
@@ -223,6 +247,53 @@ async def test_receive_jira_dc_event_with_matching_automation(
 
     response = await async_client.post(
         f"/api/automation/v1/events/{org_id}/jira_dc",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_bitbucket_data_center_event_with_matching_automation(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    bitbucket_data_center_pr_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving Bitbucket Data Center event that matches an automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test Bitbucket DC Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "bitbucket_data_center",
+            "on": "pr:opened",
+            "filter": "pullRequest.toRef.repository.project.key == 'PROJ'",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(bitbucket_data_center_pr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/bitbucket_data_center",
         content=body,
         headers={
             "X-Hub-Signature-256": signature,
