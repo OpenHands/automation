@@ -55,6 +55,10 @@ class Automation(Base):
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Model profile name to use for automation runs.
+    # None is only used for legacy/local fallback.
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -147,6 +151,13 @@ class AutomationRun(Base):
 
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # The agent-server BashCommand id for this run's dispatched bash chain.
+    # Stored so the verifier can filter BashOutput events by this specific
+    # command and avoid sampling output from concurrent bash activity on a
+    # shared agent server (e.g., the agent's TerminalTool or other runs in
+    # local mode). Set immediately after `_start_bash` returns.
+    bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.

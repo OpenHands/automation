@@ -178,6 +178,58 @@ class TestGetLastBashCommandResult:
         assert result.exit_code == 0
         assert result.stdout == "Hello"
 
+    @pytest.mark.asyncio
+    async def test_adds_command_id_filter_when_provided(self):
+        """When command_id is provided, params include command_id__eq."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        mock_client = MagicMock(spec=httpx.AsyncClient)
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"items": []}
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        await get_last_bash_command_result(
+            mock_client,
+            "http://localhost:3000",
+            "test-key",
+            command_id="abc123",
+        )
+
+        # Verify the request was made with command_id__eq in params
+        mock_client.get.assert_called_once()
+        _, kwargs = mock_client.get.call_args
+        assert kwargs["params"]["command_id__eq"] == "abc123"
+        assert kwargs["params"]["kind__eq"] == "BashOutput"
+        assert kwargs["params"]["sort_order"] == "TIMESTAMP_DESC"
+        assert kwargs["params"]["limit"] == 1
+
+    @pytest.mark.asyncio
+    async def test_omits_command_id_filter_when_none(self):
+        """When command_id is None, params do NOT include command_id__eq."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        mock_client = MagicMock(spec=httpx.AsyncClient)
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"items": []}
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        await get_last_bash_command_result(
+            mock_client,
+            "http://localhost:3000",
+            "test-key",
+        )
+
+        mock_client.get.assert_called_once()
+        _, kwargs = mock_client.get.call_args
+        assert "command_id__eq" not in kwargs["params"]
+        assert kwargs["params"]["kind__eq"] == "BashOutput"
+
 
 class TestVerifyRunOnAgentServer:
     """Tests for verify_run_on_agent_server function."""

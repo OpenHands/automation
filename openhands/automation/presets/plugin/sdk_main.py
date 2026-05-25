@@ -42,23 +42,26 @@ Env vars (Cloud mode - all required):
   OPENHANDS_API_KEY          - per-user automation API key
   OPENHANDS_CLOUD_API_URL    - SaaS API base URL
   SANDBOX_ID                 - this sandbox's Cloud API identifier
-  SESSION_API_KEY            - session key for sandbox settings auth
+  OH_SESSION_API_KEYS_0      - session key for sandbox settings auth
+                               (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
   AGENT_SERVER_URL           - local agent server URL (presence = local mode)
-  SESSION_API_KEY            - API key for agent server auth (optional)
+  OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
+                               (legacy fallback: SESSION_API_KEY)
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
+  AUTOMATION_MODEL   - model profile name to load instead of default (optional)
+
 """
 
 import json
 import os
 import sys
 import time
-
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -68,7 +71,17 @@ IS_LOCAL_MODE = bool(agent_server_url)
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
 sandbox_id = os.environ.get("SANDBOX_ID", "")
-session_key = os.environ.get("SESSION_API_KEY", "")
+# Prefer OH_SESSION_API_KEYS_0 — the canonical agent-server env var that is
+# inherited unmodified by bash subprocesses. The legacy SESSION_API_KEY name
+# is stripped by the SDK's sanitized_env() defense-in-depth filter, so it
+# may be missing here even when the agent-server has a valid session key.
+# We still fall back to SESSION_API_KEY for compatibility with cloud-mode
+# deployments and older agent-server versions that only set the bare name.
+session_key = (
+    os.environ.get("OH_SESSION_API_KEYS_0")
+    or os.environ.get("SESSION_API_KEY", "")
+)
+model_profile = os.environ.get("AUTOMATION_MODEL") or None
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -77,7 +90,10 @@ print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
     # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
-    print(f"  SESSION_API_KEY: {'OK' if session_key else 'NONE (may fail auth)'}")
+    print(
+        f"  OH_SESSION_API_KEYS_0: "
+        f"{'OK' if session_key else 'NONE (may fail auth)'}"
+    )
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
@@ -87,7 +103,7 @@ else:
         ("OPENHANDS_API_KEY", api_key),
         ("OPENHANDS_CLOUD_API_URL", api_url),
         ("SANDBOX_ID", sandbox_id),
-        ("SESSION_API_KEY", session_key),
+        ("OH_SESSION_API_KEYS_0", session_key),
     ]:
         print(f"  {name}: {'OK' if val else 'MISSING'}")
         if not val:
@@ -97,6 +113,7 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
+print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
@@ -106,16 +123,24 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+
+
 # Workspace base directory (for RemoteWorkspace working_dir)
 # Expand ~ to home directory before validation
 workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
 # Validate workspace_base path (after expansion) - fail fast with clear errors
 if not os.path.isabs(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 # Create workspace based on mode
@@ -232,9 +257,19 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace
+    # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm()
+    try:
+        llm = workspace.get_llm(profile_name=model_profile)
+    except FileNotFoundError:
+        if not model_profile:
+            raise
+        print(
+            f"  profile {model_profile!r} not found; "
+            "falling back to active/default profile"
+        )
+        llm = workspace.get_llm()
+    print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 

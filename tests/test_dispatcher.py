@@ -6,12 +6,14 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 import asyncio
 import uuid
 from datetime import timedelta
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
 
 from openhands.automation.dispatcher import (
+    _build_event_payload,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -549,3 +551,141 @@ class TestEffectiveTimeout:
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout is None
+
+
+class TestBuildEventPayload:
+    """Tests for _build_event_payload — ensures generated payloads produce
+    tag-safe trigger values (≤256 chars) while preserving the full trigger
+    dict in trigger_payload for downstream consumers.
+
+    See: https://github.com/OpenHands/automation/issues/111
+    """
+
+    def _make_automation(self, trigger: dict[str, Any] | None, **kw: Any) -> Automation:
+        defaults = dict(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
+            enabled=True,
+        )
+        defaults.update(kw)
+        return Automation(trigger=cast(Any, trigger), **defaults)
+
+    def _make_run(self, automation: Automation, **kw) -> AutomationRun:
+        return AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+            **kw,
+        )
+
+    def test_cron_trigger_uses_type_string(self):
+        """Cron trigger → payload['trigger'] == 'cron' (not the full dict)."""
+        trigger = {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"}
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "cron"
+        assert payload["trigger_payload"] == trigger
+        assert payload["automation_name"] == "Test"
+
+    def test_event_trigger_uses_type_string(self):
+        """Event trigger preserves full dict in trigger_payload."""
+        trigger = {
+            "type": "event",
+            "source": "github",
+            "on": ["pull_request.labeled", "issues.labeled"],
+            "filter": (
+                "repository.full_name == 'OpenHands/software-agent-sdk' "
+                "&& label.name == 'oh-cloud-review' "
+                "&& (pull_request.number != null || issue.pull_request.url != null)"
+            ),
+        }
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "event"
+        assert payload["trigger_payload"] == trigger
+        assert payload["trigger_payload"]["source"] == "github"
+        assert payload["trigger_payload"]["filter"] == trigger["filter"]
+        # The trigger value must fit in a 256-char tag
+        assert len(str(payload["trigger"])) <= 256
+
+    def test_long_filter_does_not_exceed_tag_limit(self):
+        """A very long filter still produces a short tag value."""
+        long_filter = " && ".join([f"field_{i} == 'value_{i}'" for i in range(50)])
+        trigger = {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment.created",
+            "filter": long_filter,
+        }
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        # The full trigger dict string would be >256 chars
+        assert len(str(trigger)) > 256
+        # But payload['trigger'] is just the type string
+        assert payload["trigger"] == "event"
+        assert len(payload["trigger"]) <= 256
+        # Full dict is still available in trigger_payload
+        assert payload["trigger_payload"] == trigger
+
+    def test_event_payload_included_when_present(self):
+        """Run event_payload is passed through as 'event' key."""
+        trigger = {"type": "event", "source": "github", "on": "push"}
+        automation = self._make_automation(trigger)
+        event_data = {"action": "push", "ref": "refs/heads/main"}
+        run = self._make_run(automation, event_payload=event_data)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["event"] == event_data
+
+    def test_event_payload_omitted_when_none(self):
+        """No 'event' key when run has no event_payload."""
+        trigger = {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"}
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation, event_payload=None)
+
+        payload = _build_event_payload(automation, run)
+
+        assert "event" not in payload
+
+    def test_model_included_when_present(self):
+        """Automation model is passed through for preset scripts."""
+        trigger = {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"}
+        automation = self._make_automation(trigger, model="fast-profile")
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["model"] == "fast-profile"
+
+    def test_none_trigger_defaults_to_unknown(self):
+        """None trigger → 'unknown' type, trigger_payload is None."""
+        automation = self._make_automation(trigger=None)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "unknown"
+        assert payload["trigger_payload"] is None
+
+    def test_empty_dict_trigger(self):
+        """Empty dict trigger → 'unknown' type, trigger_payload is empty dict."""
+        automation = self._make_automation(trigger={})
+        automation.trigger = {}
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "unknown"
+        assert payload["trigger_payload"] == {}

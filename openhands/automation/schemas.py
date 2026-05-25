@@ -10,6 +10,7 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from openhands.automation.config import get_config
+from openhands.automation.constants import MODEL_PROFILE_PATTERN
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -252,6 +253,17 @@ class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=MODEL_PROFILE_PATTERN,
+        description=(
+            "Model profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
+    )
+
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
     )
@@ -303,6 +315,17 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=MODEL_PROFILE_PATTERN,
+        description=(
+            "Model profile name to use for automation runs. Defaults to the active "
+            "profile at creation time when omitted."
+        ),
+    )
+
     prompt: str | None = Field(default=None, max_length=50000)
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
@@ -347,7 +370,7 @@ class WebhookConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     secret: str
-    is_builtin: bool = False  # True for github
+    is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
 
@@ -364,7 +387,7 @@ class EventResponse(BaseModel):
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
 # Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"github"})
+RESERVED_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
 
 
 # Valid HTTP header name pattern
@@ -554,6 +577,8 @@ class AutomationResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID
+    model: str | None
+
     name: str
     prompt: str | None
     trigger: dict
@@ -599,6 +624,7 @@ class AutomationRunResponse(BaseModel):
     timeout_at: datetime | None
     keep_alive: bool
     sandbox_id: str | None
+    bash_command_id: str | None = None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

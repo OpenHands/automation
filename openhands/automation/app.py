@@ -1,6 +1,7 @@
 """FastAPI application entrypoint."""
 
 import asyncio
+import importlib.metadata
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -252,6 +253,26 @@ async def readiness():
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},
         )
+
+
+@app.get("/sdk-version")
+@app.get(f"{_base_path}/sdk-version")
+async def sdk_version():
+    """Return the SDK version this service is running.
+
+    Called by setup.sh inside every automation sandbox to determine which
+    openhands-sdk version to install.  No authentication required — the
+    version string is not sensitive and must be readable before credentials
+    are available in the sandbox.
+    """
+    try:
+        version = importlib.metadata.version("openhands-sdk")
+    except importlib.metadata.PackageNotFoundError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "openhands-sdk package not found"},
+        )
+    return {"version": version}
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import (
+    Automation,
     AutomationRun,
     AutomationRunStatus,
     TarballUpload,
@@ -42,6 +43,7 @@ from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    update_bash_command_id,
     update_sandbox_id,
 )
 from openhands.automation.utils.tarball_validation import (
@@ -114,6 +116,39 @@ async def _poll_pending_runs(
     return list(result.scalars().all())
 
 
+def _build_event_payload(
+    automation: Automation,
+    run: AutomationRun,
+) -> dict[str, Any]:
+    """Build the AUTOMATION_EVENT_PAYLOAD dict for an automation run.
+
+    The ``trigger`` field is set to the trigger *type* string (e.g. ``"cron"``,
+    ``"event"``) rather than the full trigger dict.  This keeps the value short
+    enough for use as a conversation tag (max 256 chars).  The complete trigger
+    configuration is preserved in ``trigger_payload`` so downstream code
+    (including user-authored tarballs) can still access all trigger fields.
+
+    See: https://github.com/OpenHands/automation/issues/111
+    """
+    trigger = automation.trigger or {}
+    if isinstance(trigger, dict):
+        trigger_type = trigger.get("type", "unknown")
+    else:
+        trigger_type = str(trigger)
+
+    payload: dict[str, Any] = {
+        "trigger": trigger_type,
+        "trigger_payload": automation.trigger,
+        "automation_id": str(automation.id),
+        "automation_name": automation.name,
+    }
+    if run.event_payload:
+        payload["event"] = run.event_payload
+    if automation.model:
+        payload["model"] = automation.model
+    return payload
+
+
 async def _execute_run(
     run: AutomationRun,
     settings: ServiceSettings,
@@ -177,14 +212,12 @@ async def _execute_run(
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     env_vars["AUTOMATION_RUN_ID"] = run_id
+    env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
-        {
-            "trigger": automation.trigger,
-            "automation_id": str(automation.id),
-            "automation_name": automation.name,
-            **({"event": run.event_payload} if run.event_payload else {}),
-        }
+        _build_event_payload(automation, run)
     )
+    if automation.model:
+        env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
@@ -267,6 +300,13 @@ async def _execute_run(
     if result.success:
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+        if result.bash_command_id:
+            # Persist the BashCommand id so the verifier can filter
+            # BashOutput events by exactly this command (avoids
+            # cross-command contamination on a shared agent server).
+            await update_bash_command_id(
+                session_factory, run.id, result.bash_command_id
+            )
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
