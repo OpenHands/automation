@@ -1,9 +1,12 @@
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import type { Automation } from "#/types/automation";
+import AutomationService from "#/api/automation-service";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import { ToggleSwitch } from "#/components/automations/toggle-switch";
 import { KebabMenu } from "#/components/automations/kebab-menu";
 import PowerIcon from "#/icons/power.svg?react";
+import DownloadIcon from "#/icons/download.svg?react";
 import TrashIcon from "#/icons/trash.svg?react";
 import { useHasPermission } from "#/hooks/use-has-permission";
 import { ActiveStatusBadge } from "./active-status-badge";
@@ -29,6 +32,20 @@ export function DetailHeader({
         : t(I18nKey.AUTOMATIONS$TURN_ON),
       icon: <PowerIcon className="size-4" />,
       onClick: onToggle,
+    },
+    {
+      label: t(I18nKey.AUTOMATIONS$DOWNLOAD_TARBALL),
+      icon: <DownloadIcon className="size-4" />,
+      onClick: async () => {
+        try {
+          await AutomationService.downloadTarball(
+            automation.id,
+            automation.name,
+          );
+        } catch {
+          displayErrorToast(t(I18nKey.ERROR$GENERIC));
+        }
+      },
     },
     {
       label: t(I18nKey.AUTOMATIONS$DELETE),

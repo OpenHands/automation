@@ -33,7 +33,9 @@ logger = logging.getLogger("automation.utils.webhook")
 BuiltinConfigFunc = Callable[[Settings], str | None]
 
 BUILTIN_SOURCES: dict[str, BuiltinConfigFunc] = {
+    "bitbucket_data_center": lambda s: s.webhook_secret or None,
     "github": lambda s: s.webhook_secret or None,
+    "jira_dc": lambda s: s.webhook_secret or None,
 }
 
 

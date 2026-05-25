@@ -1533,3 +1533,308 @@ class TestCompleteRun:
 
         assert response.status_code == 409
         assert "PENDING" in response.json()["detail"]
+
+
+class TestDownloadTarball:
+    """Tests for GET /{automation_id}/tarball endpoint."""
+
+    async def test_internal_url_returns_tarball_bytes(
+        self, async_client, async_session
+    ):
+        """Tarball bytes are returned for a completed internal upload."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.models import TarballUpload, UploadStatus
+        from openhands.automation.storage import get_file_store
+
+        upload = TarballUpload(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="test-tarball",
+            status=UploadStatus.COMPLETED,
+            storage_path=f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/upload.tar",
+        )
+        async_session.add(upload)
+        await async_session.commit()
+
+        tarball_bytes = b"fake tarball content"
+        mock_store = MagicMock()
+        mock_store.read.return_value = tarball_bytes
+        app.dependency_overrides[get_file_store] = lambda: mock_store
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="My Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=f"oh-internal://uploads/{upload.id}",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 200
+        assert response.content == tarball_bytes
+        assert response.headers["content-type"] == "application/x-tar"
+        assert 'filename="My Automation.tar"' in response.headers["content-disposition"]
+        mock_store.read.assert_called_once_with(upload.storage_path)
+
+    async def test_internal_url_upload_deleted_returns_404(
+        self, async_client, async_session
+    ):
+        """404 is returned when the referenced internal upload has been soft-deleted."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.models import TarballUpload, UploadStatus
+        from openhands.automation.storage import get_file_store
+
+        upload = TarballUpload(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="deleted-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/deleted.tar",
+            deleted_at=utcnow(),
+        )
+        async_session.add(upload)
+        await async_session.commit()
+
+        app.dependency_overrides[get_file_store] = lambda: MagicMock()
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="My Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=f"oh-internal://uploads/{upload.id}",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 404
+        assert "deleted" in response.json()["detail"].lower()
+
+    async def test_internal_url_file_missing_from_storage_returns_404(
+        self, async_client, async_session
+    ):
+        """404 is returned when the file is missing from the storage backend."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.models import TarballUpload, UploadStatus
+        from openhands.automation.storage import get_file_store
+
+        upload = TarballUpload(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="missing-file",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/missing.tar",
+        )
+        async_session.add(upload)
+        await async_session.commit()
+
+        mock_store = MagicMock()
+        mock_store.read.side_effect = FileNotFoundError("file not found")
+        app.dependency_overrides[get_file_store] = lambda: mock_store
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="My Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=f"oh-internal://uploads/{upload.id}",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 404
+        assert "not found in storage" in response.json()["detail"]
+
+    async def test_https_url_returns_redirect(self, async_client, async_session):
+        """302 redirect is returned for an https:// tarball URL."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: MagicMock()
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="External Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="https://example.com/tarball.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/tarball",
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 302
+        assert response.headers["location"] == "https://example.com/tarball.tar.gz"
+
+    async def test_s3_url_returns_422(self, async_client, async_session):
+        """422 is returned for an s3:// tarball URL that cannot be proxied."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: MagicMock()
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="S3 Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://my-bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 422
+        assert "s3" in response.json()["detail"]
+
+    async def test_automation_not_found_returns_404(self, async_client):
+        """404 is returned for an unknown automation ID."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: MagicMock()
+
+        response = await async_client.get(f"/api/automation/v1/{uuid.uuid4()}/tarball")
+
+        assert response.status_code == 404
+
+    async def test_http_url_returns_redirect(self, async_client, async_session):
+        """302 redirect is returned for an http:// tarball URL."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        app.dependency_overrides[get_file_store] = lambda: MagicMock()
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="HTTP External Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="http://example.com/tarball.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/tarball",
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 302
+        assert response.headers["location"] == "http://example.com/tarball.tar.gz"
+
+    async def test_internal_url_sanitizes_filename(self, async_client, async_session):
+        """Control characters and path separators in automation name are stripped."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.models import TarballUpload, UploadStatus
+        from openhands.automation.storage import get_file_store
+
+        upload = TarballUpload(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="test-tarball",
+            status=UploadStatus.COMPLETED,
+            storage_path=f"uploads/{TEST_ORG_ID}/{TEST_USER_ID}/upload.tar",
+        )
+        async_session.add(upload)
+        await async_session.commit()
+
+        mock_store = MagicMock()
+        mock_store.read.return_value = b"fake tarball"
+        app.dependency_overrides[get_file_store] = lambda: mock_store
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name='My"Auto/mation\nName',
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=f"oh-internal://uploads/{upload.id}",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 200
+        disposition = response.headers["content-disposition"]
+        # Extract just the filename value (between the wrapper quotes)
+        filename = disposition.split('filename="')[1].rstrip('"')
+        assert "\n" not in filename
+        assert "\r" not in filename
+        assert '"' not in filename
+        assert "/" not in filename
+
+    async def test_internal_url_storage_error_returns_500(
+        self, async_client, async_session
+    ):
+        """500 is returned when the storage backend raises an unexpected error."""
+        from unittest.mock import MagicMock
+
+        from openhands.automation.app import app
+        from openhands.automation.models import TarballUpload, UploadStatus
+        from openhands.automation.storage import get_file_store
+
+        upload = TarballUpload(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="error-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/error.tar",
+        )
+        async_session.add(upload)
+        await async_session.commit()
+
+        mock_store = MagicMock()
+        mock_store.read.side_effect = OSError("disk full")
+        app.dependency_overrides[get_file_store] = lambda: mock_store
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="My Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=f"oh-internal://uploads/{upload.id}",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 500
+        assert "retrieve" in response.json()["detail"].lower()

@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +14,12 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    TarballUpload,
+)
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
@@ -22,6 +29,7 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     UpdateAutomationRequest,
 )
+from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.api_key import (
     APIKeyError,
@@ -30,7 +38,11 @@ from openhands.automation.utils.api_key import (
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run
 from openhands.automation.utils.sandbox import cleanup_sandbox
-from openhands.automation.utils.tarball_validation import validate_tarball_path
+from openhands.automation.utils.tarball_validation import (
+    is_http_url,
+    parse_internal_upload_id,
+    validate_tarball_path,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +172,73 @@ async def delete_automation(
     auto.enabled = False
     auto.deleted_at = utcnow()
     await session.flush()
+
+
+@router.get("/{automation_id}/tarball")
+async def download_automation_tarball(
+    automation_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+    file_store: FileStore = Depends(get_file_store),
+) -> Response:
+    """Download the tarball for an automation.
+
+    - Internal uploads (oh-internal://): returns the raw tarball bytes as an
+      attachment.
+    - https:// URLs: returns a 302 redirect to the external URL.
+    - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
+    - 404 if the automation has no accessible tarball.
+    """
+    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+
+    upload_id = parse_internal_upload_id(auto.tarball_path)
+    if upload_id is not None:
+        result = await session.execute(
+            select(TarballUpload).where(
+                TarballUpload.id == upload_id,
+                TarballUpload.deleted_at.is_(None),
+            )
+        )
+        upload = result.scalars().first()
+        if upload is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tarball not found (underlying upload may have been deleted)",
+            )
+        try:
+            data = await asyncio.to_thread(file_store.read, upload.storage_path)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tarball file not found in storage",
+            )
+        except Exception as e:
+            logger.error("Failed to read tarball from storage: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve tarball from storage",
+            )
+        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        return Response(
+            content=data,
+            media_type="application/x-tar",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.tar"'},
+        )
+
+    if is_http_url(auto.tarball_path):
+        return RedirectResponse(url=auto.tarball_path, status_code=302)
+
+    scheme = (
+        auto.tarball_path.split("://")[0] if "://" in auto.tarball_path else "unknown"
+    )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"Cannot proxy {scheme}:// tarball URLs. "
+            "Retrieve the tarball_path from GET /api/automation/v1/{automation_id} "
+            "and access the file directly."
+        ),
+    )
 
 
 # --- Runs ---

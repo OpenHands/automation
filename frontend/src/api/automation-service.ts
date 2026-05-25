@@ -66,6 +66,18 @@ class AutomationService {
   ): Promise<Automation> {
     return AutomationService.updateAutomation(id, { enabled });
   }
+
+  static async downloadTarball(id: string, name: string): Promise<void> {
+    const { data } = await automationApi.get<Blob>(`/v1/${id}/tarball`, {
+      responseType: "blob",
+    });
+    const url = URL.createObjectURL(data);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}.tar`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 export default AutomationService;
