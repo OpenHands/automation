@@ -8,18 +8,22 @@ underlying ensure_utc helper) fix this at the serialisation layer.
 """
 
 import uuid
-from datetime import UTC, datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
-import pytest
-
+from openhands.automation.schemas import (
+    AutomationResponse,
+    AutomationRunResponse,
+    RunStatus,
+)
 from openhands.automation.utils.time import ensure_utc
-from openhands.automation.schemas import AutomationRunResponse, AutomationResponse
-from openhands.automation.schemas import RunStatus
 
 
 _NAIVE = datetime(2026, 3, 23, 9, 0, 0)  # no tzinfo — simulates SQLite output
 _UTC_AWARE = datetime(2026, 3, 23, 9, 0, 0, tzinfo=UTC)
-_OTHER_TZ = datetime(2026, 3, 23, 14, 30, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+_OTHER_TZ = datetime(
+    2026, 3, 23, 14, 30, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))
+)
 
 
 class TestEnsureUtc:
@@ -43,8 +47,8 @@ class TestEnsureUtc:
 class TestAutomationRunResponseUtcSerialisation:
     """AutomationRunResponse must include a UTC offset in all datetime fields."""
 
-    def _make_run(self, **overrides) -> AutomationRunResponse:
-        defaults = dict(
+    def _make_run(self, **overrides: Any) -> AutomationRunResponse:
+        defaults: dict[str, Any] = dict(
             id=uuid.uuid4(),
             automation_id=uuid.uuid4(),
             status=RunStatus.COMPLETED,
@@ -74,7 +78,9 @@ class TestAutomationRunResponseUtcSerialisation:
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
         data = run.model_dump(mode="json")
-        assert data["completed_at"].endswith("+00:00") or data["completed_at"].endswith("Z")
+        assert data["completed_at"].endswith("+00:00") or data["completed_at"].endswith(
+            "Z"
+        )
 
     def test_none_optional_fields_remain_none(self):
         run = self._make_run(started_at=None, completed_at=None, timeout_at=None)
@@ -92,8 +98,8 @@ class TestAutomationRunResponseUtcSerialisation:
 class TestAutomationResponseUtcSerialisation:
     """AutomationResponse datetime fields also emit UTC offsets."""
 
-    def _make_automation(self, **overrides) -> AutomationResponse:
-        defaults = dict(
+    def _make_automation(self, **overrides: Any) -> AutomationResponse:
+        defaults: dict[str, Any] = dict(
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
             org_id=uuid.uuid4(),
@@ -121,7 +127,9 @@ class TestAutomationResponseUtcSerialisation:
     def test_naive_last_triggered_at_serialises_with_utc_offset(self):
         automation = self._make_automation()
         data = automation.model_dump(mode="json")
-        assert data["last_triggered_at"].endswith("+00:00") or data["last_triggered_at"].endswith("Z")
+        assert data["last_triggered_at"].endswith("+00:00") or data[
+            "last_triggered_at"
+        ].endswith("Z")
 
     def test_none_last_triggered_at_remains_none(self):
         automation = self._make_automation(last_triggered_at=None)
