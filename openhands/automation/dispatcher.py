@@ -221,6 +221,12 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+        # Provide a pre-built conversation URL so automation scripts can link
+        # back to the session without reconstructing it from SANDBOX_ID +
+        # OPENHANDS_CLOUD_API_URL (which are stripped by sanitized_env() in
+        # bash subprocesses).
+        base_url = env_vars.get("OPENHANDS_CLOUD_API_URL", settings.resolved_base_url).rstrip("/")
+        env_vars["AUTOMATION_SESSION_URL"] = f"{base_url}/conversations/{ctx.sandbox_id}"
 
     # 4. Prepare tarball source
     try:

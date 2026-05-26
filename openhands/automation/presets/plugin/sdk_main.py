@@ -54,7 +54,9 @@ Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
-  AUTOMATION_MODEL   - model profile name to load instead of default (optional)
+  AUTOMATION_MODEL           - model profile name to load instead of default (optional)
+  AUTOMATION_SESSION_URL     - direct URL to this conversation in the OpenHands UI
+                               (Cloud mode only; omitted when SANDBOX_ID is unavailable)
 
 """
 
