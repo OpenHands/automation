@@ -2,7 +2,6 @@
 
 import re
 import uuid
-from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -11,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.utils.time import UtcDatetime
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -532,8 +532,8 @@ class CustomWebhookResponse(BaseModel):
     event_key_expr: str
     signature_header: str
     enabled: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -587,9 +587,9 @@ class AutomationResponse(BaseModel):
     entrypoint: str
     timeout: int | None
     enabled: bool
-    last_triggered_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+    last_triggered_at: UtcDatetime | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -621,13 +621,13 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     conversation_id: str | None
-    timeout_at: datetime | None
+    timeout_at: UtcDatetime | None
     keep_alive: bool
     sandbox_id: str | None
     bash_command_id: str | None = None
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
+    created_at: UtcDatetime
+    started_at: UtcDatetime | None
+    completed_at: UtcDatetime | None
 
     model_config = {"from_attributes": True}
 
