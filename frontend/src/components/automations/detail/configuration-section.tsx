@@ -20,10 +20,11 @@ export function ConfigurationSection({
 }: ConfigurationSectionProps) {
   const { t } = useTranslation();
 
+  const automationTimeZone = automation.trigger.timezone ?? automation.timezone;
   let scheduleDisplay = automation.trigger.schedule ?? "";
   if (automation.trigger.schedule_human) {
-    scheduleDisplay = automation.timezone
-      ? `${automation.trigger.schedule_human} (${automation.timezone})`
+    scheduleDisplay = automationTimeZone
+      ? `${automation.trigger.schedule_human} (${automationTimeZone})`
       : automation.trigger.schedule_human;
   }
 
