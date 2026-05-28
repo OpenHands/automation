@@ -10,7 +10,7 @@ from openhands.automation.utils.cron import (
     is_automation_due,
 )
 from openhands.automation.utils.log_context import log_extra
-from openhands.automation.utils.time import utcnow
+from openhands.automation.utils.time import UtcDatetime, ensure_utc, utcnow
 
 
 __all__ = [
@@ -20,5 +20,7 @@ __all__ = [
     "get_prev_fire_time",
     "is_automation_due",
     "log_extra",
+    "UtcDatetime",
+    "ensure_utc",
     "utcnow",
 ]

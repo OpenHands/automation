@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.0.0a4"
+version = "1.0.0a5"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
