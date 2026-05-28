@@ -854,6 +854,229 @@ class TestGeneratePluginTarball:
             assert repos_config[1]["ref"] == "develop"
 
 
+class TestExperimentVariantValidation:
+    """Tests for A/B test variant validation on CreatePluginAutomationRequest."""
+
+    def test_variants_accepted(self):
+        """Valid variants request is accepted."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        request = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "AB Test",
+                "experiment_id": "my-experiment",
+                "variants": [
+                    {"name": "control", "weight": 50, "plugins": [{"source": "github:owner/repo", "ref": "v1"}]},
+                    {"name": "treatment", "weight": 50, "plugins": [{"source": "github:owner/repo", "ref": "v2"}]},
+                ],
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
+        )
+        assert request.variants is not None
+        assert len(request.variants) == 2
+        assert request.plugins is None
+        assert request.experiment_id == "my-experiment"
+
+    def test_plugins_and_variants_mutually_exclusive(self):
+        """Providing both plugins and variants raises error."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Bad",
+                    "plugins": [{"source": "github:owner/repo"}],
+                    "variants": [
+                        {"name": "a", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_neither_plugins_nor_variants_rejected(self):
+        """Providing neither plugins nor variants raises error."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Bad",
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_experiment_id_required_with_variants(self):
+        """experiment_id is required when variants is used."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="experiment_id.*required"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "variants": [
+                        {"name": "a", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_experiment_id_rejected_with_plugins(self):
+        """experiment_id cannot be used with plugins (only variants)."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="experiment_id.*can only be used with"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "plugins": [{"source": "github:owner/repo"}],
+                    "experiment_id": "oops",
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_single_variant_rejected(self):
+        """At least two variants are required."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="At least two variants"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {"name": "only", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_duplicate_variant_names_rejected(self):
+        """Variant names must be unique."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="unique"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {"name": "same", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {"name": "same", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_zero_weight_rejected(self):
+        """Variant weight must be positive."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {"name": "a", "weight": 0, "plugins": [{"source": "github:owner/repo"}]},
+                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_too_many_variants_rejected(self):
+        """More than MAX_VARIANTS is rejected."""
+        from openhands.automation.preset_router import (
+            MAX_VARIANTS,
+            CreatePluginAutomationRequest,
+        )
+
+        variants = [
+            {"name": f"v{i}", "weight": 1, "plugins": [{"source": "github:owner/repo"}]}
+            for i in range(MAX_VARIANTS + 1)
+        ]
+        with pytest.raises(ValueError, match="At most"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": variants,
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+
+class TestExperimentTarball:
+    """Tests for experiment (A/B) tarball generation."""
+
+    def test_experiment_tarball_contains_experiment_config(self):
+        """Experiment tarball has experiment_config.json, not plugins_config.json."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        variants = [
+            ExperimentVariant(name="control", weight=50, plugins=[PluginSource(source="github:owner/repo", ref="v1")]),
+            ExperimentVariant(name="treatment", weight=50, plugins=[PluginSource(source="github:owner/repo", ref="v2")]),
+        ]
+        tarball_bytes = _generate_plugin_tarball(
+            None, "Test prompt", experiment_id="test-exp", variants=variants,
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "experiment_config.json" in names
+            assert "plugins_config.json" not in names
+            assert "main.py" in names
+            assert "prompt.txt" in names
+            assert "setup.sh" in names
+
+    def test_experiment_config_content(self):
+        """experiment_config.json has correct structure."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        variants = [
+            ExperimentVariant(name="control", weight=70, plugins=[PluginSource(source="github:owner/repo", ref="v1")]),
+            ExperimentVariant(name="treatment", weight=30, plugins=[PluginSource(source="github:owner/repo", ref="v2")]),
+        ]
+        tarball_bytes = _generate_plugin_tarball(
+            None, "Test prompt", experiment_id="my-exp", variants=variants,
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("experiment_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode("utf-8"))
+
+            assert config["experiment_id"] == "my-exp"
+            assert len(config["variants"]) == 2
+            assert config["variants"][0]["name"] == "control"
+            assert config["variants"][0]["weight"] == 70
+            assert config["variants"][0]["plugins"][0]["source"] == "github:owner/repo"
+            assert config["variants"][0]["plugins"][0]["ref"] == "v1"
+            assert config["variants"][1]["name"] == "treatment"
+            assert config["variants"][1]["weight"] == 30
+
+    def test_standard_tarball_unchanged(self):
+        """Non-experiment tarball still produces plugins_config.json."""
+        plugins = [PluginSource(source="github:owner/repo", ref="main")]
+        tarball_bytes = _generate_plugin_tarball(plugins, "Test prompt")
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "plugins_config.json" in names
+            assert "experiment_config.json" not in names
+
+
 @requires_docker
 class TestCreateAutomationFromPlugin:
     """Tests for POST /v1/preset/plugin endpoint."""

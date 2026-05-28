@@ -316,6 +316,21 @@ async def create_automation_from_prompt(
 
 # --- Plugin Preset ---
 
+MAX_VARIANTS = 10
+
+
+class ExperimentVariant(BaseModel):
+    """A single variant in an A/B test experiment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100)
+    weight: int = Field(..., gt=0, description="Relative selection weight (must be > 0)")
+    plugins: list[PluginSource] = Field(
+        ...,
+        description="Plugin(s) for this variant.",
+    )
+
 
 class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
@@ -323,11 +338,22 @@ class CreatePluginAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
-    plugins: list[PluginSource] = Field(
-        ...,
-        description="Plugin(s) to load. Can be a single plugin or a list of plugins. "
-        "Each plugin specifies a source (github:owner/repo, git URL, or local path), "
-        "optional ref (branch/tag/commit), and optional repo_path for monorepos.",
+    plugins: list[PluginSource] | None = Field(
+        default=None,
+        description="Plugin(s) to load. Mutually exclusive with 'variants'.",
+    )
+    variants: list[ExperimentVariant] | None = Field(
+        default=None,
+        description=(
+            "A/B test variants. Each variant specifies its own plugin set and a "
+            "relative weight. Mutually exclusive with 'plugins'."
+        ),
+    )
+    experiment_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Required when using variants. A human-readable experiment name.",
     )
     prompt: str = Field(
         ...,
@@ -375,7 +401,7 @@ class CreatePluginAutomationRequest(BaseModel):
         """Normalize plugins and repos to always be lists."""
         if isinstance(data, dict):
             # Normalize plugins
-            if "plugins" in data:
+            if "plugins" in data and data["plugins"] is not None:
                 plugins = data["plugins"]
                 if isinstance(plugins, dict):
                     data["plugins"] = [plugins]
@@ -388,46 +414,87 @@ class CreatePluginAutomationRequest(BaseModel):
                     data["repos"] = [repos]
         return data
 
+    @model_validator(mode="after")
+    def validate_plugins_or_variants(self) -> "CreatePluginAutomationRequest":
+        """Enforce mutual exclusivity between plugins and variants."""
+        has_plugins = self.plugins is not None
+        has_variants = self.variants is not None
+
+        if has_plugins == has_variants:
+            raise ValueError(
+                "Exactly one of 'plugins' or 'variants' must be provided."
+            )
+
+        if has_variants:
+            if self.experiment_id is None:
+                raise ValueError(
+                    "'experiment_id' is required when using 'variants'."
+                )
+            if len(self.variants) < 2:
+                raise ValueError("At least two variants are required for an A/B test.")
+            if len(self.variants) > MAX_VARIANTS:
+                raise ValueError(
+                    f"At most {MAX_VARIANTS} variants are allowed."
+                )
+            names = [v.name for v in self.variants]
+            if len(names) != len(set(names)):
+                raise ValueError("Variant names must be unique.")
+        else:
+            if self.experiment_id is not None:
+                raise ValueError(
+                    "'experiment_id' can only be used with 'variants', not 'plugins'."
+                )
+
+        return self
+
 
 def _generate_plugin_tarball(
-    plugins: list[PluginSource], prompt: str, repos: list[RepoSource] | None = None
+    plugins: list[PluginSource] | None,
+    prompt: str,
+    repos: list[RepoSource] | None = None,
+    *,
+    experiment_id: str | None = None,
+    variants: list[ExperimentVariant] | None = None,
 ) -> bytes:
     """Generate a tarball containing SDK code, plugin config, and prompt.
 
-    The tarball contains:
-    - main.py: SDK boilerplate that loads plugins and runs conversation
-    - plugins_config.json: List of plugin sources (serialized PluginSource models)
-    - prompt.txt: The prompt to send
-    - setup.sh: Script to install the SDK
-    - repos_config.json: (optional) Repository configuration for cloning
-
-    Note: Clone and skill loading functionality is now provided by the SDK's
-    OpenHandsCloudWorkspace.clone_repos() and load_skills_from_agent_server()
-    methods, so separate scripts are no longer needed.
-
-    Args:
-        plugins: List of plugins to load
-        prompt: The user's prompt text
-        repos: Optional list of repositories to clone
-
-    Returns:
-        bytes: The tarball content as bytes
+    When *variants* is provided the tarball contains ``experiment_config.json``
+    instead of ``plugins_config.json``.  The two are mutually exclusive.
     """
     preset_files = _load_plugin_preset_files()
-
-    # Serialize plugins using Pydantic (exclude None values for cleaner JSON)
-    plugins_config = [p.model_dump(exclude_none=True) for p in plugins]
-    plugins_config_json = json.dumps(plugins_config, indent=2)
 
     tarball_buffer = io.BytesIO()
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
-        _add_file_to_tar(tar, "plugins_config.json", plugins_config_json)
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
-        # Add repos config if repos specified (SDK workspace handles cloning)
+        if variants is not None:
+            experiment_config = {
+                "experiment_id": experiment_id,
+                "variants": [
+                    {
+                        "name": v.name,
+                        "weight": v.weight,
+                        "plugins": [
+                            p.model_dump(exclude_none=True) for p in v.plugins
+                        ],
+                    }
+                    for v in variants
+                ],
+            }
+            _add_file_to_tar(
+                tar,
+                "experiment_config.json",
+                json.dumps(experiment_config, indent=2),
+            )
+        else:
+            plugins_config = [p.model_dump(exclude_none=True) for p in plugins]  # type: ignore[union-attr]
+            _add_file_to_tar(
+                tar, "plugins_config.json", json.dumps(plugins_config, indent=2)
+            )
+
         if repos:
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
@@ -472,10 +539,15 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     model = resolve_model_profile_for_user(body.model, user)
+    is_experiment = body.variants is not None
 
-    # 1. Generate tarball with SDK code, plugin config, prompt, and repos config
+    # 1. Generate tarball with SDK code, plugin/experiment config, and prompt
     tarball_content = _generate_plugin_tarball(
-        body.plugins, body.prompt, repos=body.repos
+        body.plugins,
+        body.prompt,
+        repos=body.repos,
+        experiment_id=body.experiment_id,
+        variants=body.variants,
     )
 
     # 2. Upload tarball to storage
@@ -483,14 +555,19 @@ async def create_automation_from_plugin(
     storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
     # Create upload record
-    plugin_sources_str = _format_plugin_sources_for_description(body.plugins)
-    truncated_sources = _safe_truncate(plugin_sources_str, 100)
+    if is_experiment:
+        variant_names = ", ".join(v.name for v in body.variants)  # type: ignore[union-attr]
+        description = f"A/B experiment {body.experiment_id}: {variant_names}"
+    else:
+        plugin_sources_str = _format_plugin_sources_for_description(body.plugins)  # type: ignore[arg-type]
+        description = f"Auto-generated with plugins: {_safe_truncate(plugin_sources_str, 100)}"
+
     upload = TarballUpload(
         id=upload_id,
         user_id=user.user_id,
         org_id=user.org_id,
         name=f"plugin-automation-{_safe_truncate(body.name, 50)}",
-        description=f"Auto-generated with plugins: {truncated_sources}",
+        description=description,
         status=UploadStatus.UPLOADING,
         storage_path=storage_path,
     )
@@ -548,14 +625,17 @@ async def create_automation_from_plugin(
             detail=f"Failed to create automation: {e!s}",
         )
 
-    logger.info(
-        "Created automation from plugin",
-        extra={
-            "automation_id": str(automation.id),
-            "upload_id": str(upload_id),
-            "plugin_count": len(body.plugins),
-            "prompt_length": len(body.prompt),
-        },
-    )
+    log_extra: dict[str, Any] = {
+        "automation_id": str(automation.id),
+        "upload_id": str(upload_id),
+        "prompt_length": len(body.prompt),
+    }
+    if is_experiment:
+        log_extra["experiment_id"] = body.experiment_id
+        log_extra["variant_count"] = len(body.variants)  # type: ignore[arg-type]
+    else:
+        log_extra["plugin_count"] = len(body.plugins)  # type: ignore[arg-type]
+
+    logger.info("Created automation from plugin", extra=log_extra)
 
     return AutomationResponse.model_validate(automation)

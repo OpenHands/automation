@@ -64,6 +64,7 @@ Runtime-injected secrets (via conversation.update_secrets after Conversation cre
 
 import json
 import os
+import random
 import sys
 import time
 
@@ -215,11 +216,32 @@ with workspace_ctx as workspace:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
+    EXPERIMENT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "experiment_config.json")
     PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
     PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 
-    with open(PLUGINS_CONFIG_FILE) as f:
-        plugins_config = json.load(f)
+    # Experiment-aware variant selection
+    experiment_id: str | None = None
+    selected_variant: str | None = None
+
+    if os.path.exists(EXPERIMENT_CONFIG_FILE):
+        with open(EXPERIMENT_CONFIG_FILE) as f:
+            experiment_config = json.load(f)
+
+        experiment_id = experiment_config["experiment_id"]
+        variants = experiment_config["variants"]
+        weights = [v["weight"] for v in variants]
+        selected = random.choices(variants, weights=weights, k=1)[0]
+
+        selected_variant = selected["name"]
+        plugins_config = selected["plugins"]
+        print(f"\n=== EXPERIMENT ===")
+        print(f"  id: {experiment_id}")
+        print(f"  variant: {selected_variant}")
+        print(f"  weights: {dict(zip([v['name'] for v in variants], weights))}")
+    else:
+        with open(PLUGINS_CONFIG_FILE) as f:
+            plugins_config = json.load(f)
 
     with open(PROMPT_FILE) as f:
         USER_PROMPT = f.read()
@@ -330,16 +352,25 @@ This automation was triggered by a webhook event:
         received_events.append(event)
         last_event_time["ts"] = time.time()
 
+    # Build experiment tags (if running an A/B test)
+    experiment_tags: dict[str, str] = {}
+    if experiment_id:
+        experiment_tags["experiment_id"] = experiment_id
+        experiment_tags["variant"] = selected_variant  # type: ignore[assignment]
+
     conversation = Conversation(
         agent=agent,
         workspace=workspace,
         plugins=plugin_sources,  # All plugins loaded here
         callbacks=[event_callback],
         delete_on_close=False,  # Keep conversation history after completion
+        tags=experiment_tags or None,
     )
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
+    if experiment_tags:
+        print(f"  experiment tags: {experiment_tags}")
 
     # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
