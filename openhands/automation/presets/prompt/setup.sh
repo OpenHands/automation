@@ -24,7 +24,9 @@ if [ -z "$SDK_VERSION" ]; then
 fi
 
 echo "[setup] Creating isolated virtual environment"
-uv venv .venv --quiet
+# Pin >=3.12 so uv doesn't default to an older system Python (e.g. macOS
+# CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.
+uv venv .venv --python '>=3.12' --quiet
 
 echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
 uv pip install --quiet \
