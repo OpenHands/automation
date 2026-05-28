@@ -77,6 +77,7 @@ async def _fetch_enabled_automations(
 async def poll_and_schedule(
     session_factory: async_sessionmaker[AsyncSession],
     batch_size: int = DEFAULT_BATCH_SIZE,
+    now: datetime | None = None,
 ) -> list[AutomationRun]:
     """Poll for due automations and create pending runs atomically.
 
@@ -91,11 +92,13 @@ async def poll_and_schedule(
     Args:
         session_factory: SQLAlchemy async session factory
         batch_size: Maximum number of automations to poll per batch
+        now: Current time (defaults to utcnow()). Inject in tests for determinism.
 
     Returns:
         List of AutomationRun objects created
     """
-    now = utcnow()
+    if now is None:
+        now = utcnow()
     poll_threshold = now - timedelta(seconds=POLL_INTERVAL_SECONDS)
     created_runs: list[AutomationRun] = []
 
