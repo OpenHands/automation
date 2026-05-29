@@ -696,7 +696,9 @@ async def create_automation_from_plugin(
     # Create upload record
     if body.variants is not None:
         variant_names = ", ".join(v.name for v in body.variants)
-        description = f"A/B experiment {body.experiment_id}: {variant_names}"
+        description = _safe_truncate(
+            f"A/B experiment {body.experiment_id}: {variant_names}", 200
+        )
     else:
         assert body.plugins is not None  # guaranteed by validator
         plugin_sources_str = _format_plugin_sources_for_description(body.plugins)

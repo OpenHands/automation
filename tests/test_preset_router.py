@@ -1091,6 +1091,28 @@ class TestExperimentVariantValidation:
                 }
             )
 
+    def test_max_variants_accepted(self):
+        """Exactly MAX_VARIANTS variants is accepted."""
+        from openhands.automation.preset_router import (
+            MAX_VARIANTS,
+            CreatePluginAutomationRequest,
+        )
+
+        variants = [
+            {"name": f"v{i}", "weight": 1, "plugins": [{"source": "github:owner/repo"}]}
+            for i in range(MAX_VARIANTS)
+        ]
+        req = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "Test",
+                "experiment_id": "boundary-test",
+                "variants": variants,
+                "prompt": "Test",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
+        )
+        assert len(req.variants) == MAX_VARIANTS
+
     def test_too_many_variants_rejected(self):
         """More than MAX_VARIANTS is rejected."""
         from openhands.automation.preset_router import (
