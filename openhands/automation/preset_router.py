@@ -29,6 +29,7 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -327,6 +328,21 @@ async def regenerate_preset_prompt_tarball(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload regenerated tarball: {e!s}",
         )
+
+    # The old tarball is now superseded. Remove its file and soft-delete the
+    # upload record so repeated prompt edits don't accumulate orphaned storage,
+    # mirroring how delete_upload retires an upload.
+    try:
+        file_store.delete(source_upload.storage_path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.exception(
+            "Failed to delete superseded tarball at %s: %s",
+            source_upload.storage_path,
+            e,
+        )
+    source_upload.deleted_at = utcnow()
 
     await session.flush()
     return build_internal_url(new_upload_id)

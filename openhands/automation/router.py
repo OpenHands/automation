@@ -153,14 +153,20 @@ async def update_automation(
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
+    original_prompt = auto.prompt
     for field, value in update_data.items():
         setattr(auto, field, value)
 
     # A preset automation bakes its prompt into the tarball the dispatcher
-    # executes; the `prompt` column is metadata only. When the prompt changes,
-    # rebuild the tarball so the next dispatch runs the new prompt instead of
-    # the original baked one. Non-preset automations are left untouched.
-    if "prompt" in update_data and isinstance(auto.prompt, str):
+    # executes; the `prompt` column is metadata only. When the prompt actually
+    # changes, rebuild the tarball so the next dispatch runs the new prompt
+    # instead of the original baked one. Skipped when the value is unchanged (a
+    # no-op edit), or for non-preset automations.
+    if (
+        "prompt" in update_data
+        and isinstance(auto.prompt, str)
+        and auto.prompt != original_prompt
+    ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
             auto, auto.prompt, session
         )

@@ -52,6 +52,7 @@ def preset_store(monkeypatch):
 
     store.write_stream = AsyncMock(side_effect=_write_stream)
     store.read = MagicMock(side_effect=lambda path: store._storage[path])
+    store.delete = MagicMock(side_effect=lambda path: store._storage.pop(path, None))
     monkeypatch.setattr(preset_router, "get_file_store", lambda: store)
     return store
 
@@ -960,6 +961,9 @@ class TestUpdateAutomation:
             async_session, preset_store, "Original prompt"
         )
         original_tarball_path = automation.tarball_path
+        old_upload_id = parse_internal_upload_id(original_tarball_path)
+        assert old_upload_id is not None
+        old_storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, old_upload_id)
 
         # Act — edit the prompt.
         response = await async_client.patch(
@@ -983,6 +987,9 @@ class TestUpdateAutomation:
             assert prompt_file is not None
             assert prompt_file.read().decode() == "Updated prompt"
 
+        # The superseded tarball file is removed so storage doesn't grow unbounded.
+        assert old_storage_path not in preset_store._storage
+
     async def test_update_name_does_not_regenerate_preset_tarball(
         self, async_client, async_session, preset_store
     ):
@@ -1004,6 +1011,27 @@ class TestUpdateAutomation:
         data = response.json()
         assert data["name"] == "Renamed"
         assert data["tarball_path"] == original_tarball_path
+
+    async def test_update_unchanged_prompt_does_not_regenerate_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Re-sending the same prompt is a no-op: no tarball rebuild, no new upload."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Same prompt"
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act — PATCH the prompt with the value it already has.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Same prompt"},
+        )
+
+        # Assert — tarball untouched and no new upload was written.
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == original_tarball_path
+        preset_store.write_stream.assert_not_called()
 
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
