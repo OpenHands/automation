@@ -423,7 +423,7 @@ class CreatePluginAutomationRequest(BaseModel):
         if has_plugins == has_variants:
             raise ValueError("Exactly one of 'plugins' or 'variants' must be provided.")
 
-        if has_variants:
+        if has_variants and self.variants is not None:
             if self.experiment_id is None:
                 raise ValueError("'experiment_id' is required when using 'variants'.")
             if len(self.variants) < 2:
@@ -547,13 +547,12 @@ async def create_automation_from_plugin(
     storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
     # Create upload record
-    if is_experiment:
-        variant_names = ", ".join(v.name for v in body.variants)  # type: ignore[union-attr]
+    if is_experiment and body.variants is not None:
+        variant_names = ", ".join(v.name for v in body.variants)
         description = f"A/B experiment {body.experiment_id}: {variant_names}"
     else:
-        plugin_sources_str = _format_plugin_sources_for_description(
-            body.plugins  # type: ignore[arg-type]
-        )
+        assert body.plugins is not None
+        plugin_sources_str = _format_plugin_sources_for_description(body.plugins)
         truncated = _safe_truncate(plugin_sources_str, 100)
         description = f"Auto-generated with plugins: {truncated}"
 
@@ -625,11 +624,11 @@ async def create_automation_from_plugin(
         "upload_id": str(upload_id),
         "prompt_length": len(body.prompt),
     }
-    if is_experiment:
+    if is_experiment and body.variants is not None:
         log_extra["experiment_id"] = body.experiment_id
-        log_extra["variant_count"] = len(body.variants)  # type: ignore[arg-type]
-    else:
-        log_extra["plugin_count"] = len(body.plugins)  # type: ignore[arg-type]
+        log_extra["variant_count"] = len(body.variants)
+    elif body.plugins is not None:
+        log_extra["plugin_count"] = len(body.plugins)
 
     logger.info("Created automation from plugin", extra=log_extra)
 
