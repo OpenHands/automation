@@ -320,29 +320,37 @@ async def regenerate_preset_prompt_tarball(
         upload.status = UploadStatus.COMPLETED
         upload.size_bytes = size_bytes
     except Exception as e:
+        # The session is rolled back when the HTTPException propagates (see
+        # get_session), so don't flush here — the in-memory status/error_message
+        # are only for log/debug context and won't be persisted.
         logger.exception("Failed to upload regenerated tarball: %s", e)
         upload.status = UploadStatus.FAILED
         upload.error_message = f"Upload failed: {e!s}"
-        await session.flush()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload regenerated tarball: {e!s}",
         )
 
     # The old tarball is now superseded. Remove its file and soft-delete the
-    # upload record so repeated prompt edits don't accumulate orphaned storage,
-    # mirroring how delete_upload retires an upload.
+    # upload record so repeated prompt edits don't accumulate orphaned storage.
+    # Only soft-delete once the file is confirmed gone: if the delete fails the
+    # record stays live so the still-present file remains discoverable for a
+    # later retry/cleanup instead of becoming a hidden orphan (file on disk,
+    # record marked deleted).
+    file_removed = False
     try:
         file_store.delete(source_upload.storage_path)
+        file_removed = True
     except FileNotFoundError:
-        pass
+        file_removed = True
     except Exception as e:
         logger.exception(
             "Failed to delete superseded tarball at %s: %s",
             source_upload.storage_path,
             e,
         )
-    source_upload.deleted_at = utcnow()
+    if file_removed:
+        source_upload.deleted_at = utcnow()
 
     await session.flush()
     return build_internal_url(new_upload_id)

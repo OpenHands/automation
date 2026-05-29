@@ -1033,6 +1033,32 @@ class TestUpdateAutomation:
         assert response.json()["tarball_path"] == original_tarball_path
         preset_store.write_stream.assert_not_called()
 
+    async def test_update_prompt_upload_failure_returns_500(
+        self, async_client, async_session, preset_store
+    ):
+        """If the regenerated tarball fails to upload, the edit fails cleanly.
+
+        A 500 is returned and the automation still points at its original
+        tarball — no half-committed state leaks through.
+        """
+        # Arrange — make the upload step fail.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        original_tarball_path = automation.tarball_path
+        preset_store.write_stream = AsyncMock(side_effect=RuntimeError("storage down"))
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert
+        assert response.status_code == 500
+        await async_session.refresh(automation)
+        assert automation.tarball_path == original_tarball_path
+
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
         automation = Automation(
