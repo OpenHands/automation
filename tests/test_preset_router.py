@@ -231,12 +231,14 @@ class TestReplacePromptInTarball:
         assert updated is not None
 
         def _read(tarball_bytes):
+            files = {}
             with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
-                files = {
-                    m.name: tar.extractfile(m).read()
-                    for m in tar.getmembers()
-                    if m.isfile()
-                }
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    extracted = tar.extractfile(member)
+                    assert extracted is not None
+                    files[member.name] = extracted.read()
                 return files, tar.getmember("setup.sh").mode
 
         old_files, _ = _read(original)

@@ -974,11 +974,14 @@ class TestUpdateAutomation:
         assert data["tarball_path"] != original_tarball_path
 
         new_upload_id = parse_internal_upload_id(data["tarball_path"])
+        assert new_upload_id is not None
         new_storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, new_upload_id)
         with tarfile.open(
             fileobj=io.BytesIO(preset_store._storage[new_storage_path]), mode="r:gz"
         ) as tar:
-            assert tar.extractfile("prompt.txt").read().decode() == "Updated prompt"
+            prompt_file = tar.extractfile("prompt.txt")
+            assert prompt_file is not None
+            assert prompt_file.read().decode() == "Updated prompt"
 
     async def test_update_name_does_not_regenerate_preset_tarball(
         self, async_client, async_session, preset_store
