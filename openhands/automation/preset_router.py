@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
@@ -28,8 +29,12 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.tarball_validation import build_internal_url
+from openhands.automation.utils.tarball_validation import (
+    build_internal_url,
+    parse_internal_upload_id,
+)
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -205,6 +210,150 @@ def _build_storage_path(
     Note: The 'automation/' prefix is added by the FileStore implementation.
     """
     return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
+
+
+def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes | None:
+    """Return a copy of a preset tarball with ``prompt.txt`` swapped for ``new_prompt``.
+
+    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``,
+    ``repos_config.json``, ...) is copied through unchanged, so plugin and repo
+    configuration are preserved and the working template is untouched.
+
+    Returns ``None`` if the archive has no ``prompt.txt`` member — i.e. it is not a
+    regenerable preset tarball — so the caller can leave the tarball as-is.
+    """
+    out_buffer = io.BytesIO()
+    found = False
+    with (
+        tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as src,
+        tarfile.open(fileobj=out_buffer, mode="w:gz") as dst,
+    ):
+        for member in src.getmembers():
+            if member.name == "prompt.txt":
+                found = True
+                _add_file_to_tar(
+                    dst, "prompt.txt", new_prompt, mode=member.mode or 0o644
+                )
+                continue
+            if member.isfile():
+                extracted = src.extractfile(member)
+                data = extracted.read() if extracted is not None else b""
+                info = tarfile.TarInfo(name=member.name)
+                info.size = len(data)
+                info.mode = member.mode
+                info.mtime = member.mtime
+                dst.addfile(info, io.BytesIO(data))
+            else:
+                dst.addfile(member)
+
+    if not found:
+        return None
+
+    out_buffer.seek(0)
+    return out_buffer.read()
+
+
+async def regenerate_preset_prompt_tarball(
+    automation: Automation,
+    new_prompt: str,
+    session: AsyncSession,
+) -> str | None:
+    """Rebuild a preset automation's tarball with an updated prompt.
+
+    Preset automations bake the prompt into ``prompt.txt`` inside the tarball the
+    dispatcher executes; the stored ``prompt`` column is metadata only. When the
+    prompt is edited the tarball must be rewritten too, otherwise dispatching keeps
+    running the original prompt.
+
+    Reads the automation's current internal-upload tarball, swaps in ``new_prompt``
+    (leaving all other files untouched), uploads the result as a new internal upload,
+    and returns its ``oh-internal://`` URL for the caller to store on ``tarball_path``.
+
+    Returns ``None`` — leaving the tarball unchanged — when the automation is not a
+    regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
+    is missing, or the archive contains no ``prompt.txt``. The file store is resolved
+    lazily so that updates to non-preset automations never construct one.
+    """
+    upload_id = parse_internal_upload_id(automation.tarball_path)
+    if upload_id is None:
+        return None
+
+    file_store = get_file_store()
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    source_upload = result.scalars().first()
+    if source_upload is None:
+        return None
+
+    try:
+        current_tarball = file_store.read(source_upload.storage_path)
+    except FileNotFoundError:
+        return None
+
+    new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt)
+    if new_tarball is None:
+        return None
+
+    new_upload_id = uuid.uuid4()
+    storage_path = _build_storage_path(
+        automation.org_id, automation.user_id, new_upload_id
+    )
+    upload = TarballUpload(
+        id=new_upload_id,
+        user_id=automation.user_id,
+        org_id=automation.org_id,
+        name=f"prompt-automation-{_safe_truncate(automation.name, 50)}-edit",
+        description=f"Prompt updated for: {_safe_truncate(automation.name, 100)}",
+        status=UploadStatus.UPLOADING,
+        storage_path=storage_path,
+    )
+    session.add(upload)
+    await session.flush()
+
+    try:
+        size_bytes = await file_store.write_stream(
+            path=storage_path,
+            stream=_bytes_to_async_iter(new_tarball),
+            content_type="application/x-tar",
+        )
+        upload.status = UploadStatus.COMPLETED
+        upload.size_bytes = size_bytes
+    except Exception as e:
+        # The session is rolled back when the HTTPException propagates (see
+        # get_session), so don't flush here — the in-memory status/error_message
+        # are only for log/debug context and won't be persisted.
+        logger.exception("Failed to upload regenerated tarball: %s", e)
+        upload.status = UploadStatus.FAILED
+        upload.error_message = f"Upload failed: {e!s}"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload regenerated tarball: {e!s}",
+        )
+
+    # The old tarball is now superseded. Remove its file and soft-delete the
+    # upload record so repeated prompt edits don't accumulate orphaned storage.
+    # Only soft-delete once the file is confirmed gone: if the delete fails the
+    # record stays live so the still-present file remains discoverable for a
+    # later retry/cleanup instead of becoming a hidden orphan (file on disk,
+    # record marked deleted).
+    file_removed = False
+    try:
+        file_store.delete(source_upload.storage_path)
+        file_removed = True
+    except FileNotFoundError:
+        file_removed = True
+    except Exception as e:
+        logger.exception(
+            "Failed to delete superseded tarball at %s: %s",
+            source_upload.storage_path,
+            e,
+        )
+    if file_removed:
+        source_upload.deleted_at = utcnow()
+
+    await session.flush()
+    return build_internal_url(new_upload_id)
 
 
 @router.post("/prompt", status_code=status.HTTP_201_CREATED)

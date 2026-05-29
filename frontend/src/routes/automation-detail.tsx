@@ -64,6 +64,8 @@ export default function AutomationDetail() {
     });
   };
 
+  const automationTimeZone = automation.trigger.timezone ?? automation.timezone;
+
   return (
     <div className="flex flex-col gap-4">
       <BackLink />
@@ -81,7 +83,10 @@ export default function AutomationDetail() {
         createdAt={automation.created_at}
         lastRunAt={automation.last_triggered_at}
       />
-      <ActivityLogSection automationId={automation.id} />
+      <ActivityLogSection
+        automationId={automation.id}
+        timeZone={automationTimeZone}
+      />
       <DeleteConfirmationModal
         automationName={automation.name}
         isOpen={showDeleteModal}
