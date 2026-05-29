@@ -141,7 +141,6 @@ async def update_automation(
     body: UpdateAutomationRequest,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
-    file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
     """Partially update an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -160,10 +159,10 @@ async def update_automation(
     # A preset automation bakes its prompt into the tarball the dispatcher
     # executes; the `prompt` column is metadata only. When the prompt changes,
     # rebuild the tarball so the next dispatch runs the new prompt instead of
-    # the original baked one.
+    # the original baked one. Non-preset automations are left untouched.
     if "prompt" in update_data and isinstance(auto.prompt, str):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session, file_store
+            auto, auto.prompt, session
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path

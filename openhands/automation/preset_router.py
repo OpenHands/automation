@@ -256,7 +256,6 @@ async def regenerate_preset_prompt_tarball(
     automation: Automation,
     new_prompt: str,
     session: AsyncSession,
-    file_store: FileStore,
 ) -> str | None:
     """Rebuild a preset automation's tarball with an updated prompt.
 
@@ -271,12 +270,14 @@ async def regenerate_preset_prompt_tarball(
 
     Returns ``None`` — leaving the tarball unchanged — when the automation is not a
     regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
-    is missing, or the archive contains no ``prompt.txt``.
+    is missing, or the archive contains no ``prompt.txt``. The file store is resolved
+    lazily so that updates to non-preset automations never construct one.
     """
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
 
+    file_store = get_file_store()
     result = await session.execute(
         select(TarballUpload).where(TarballUpload.id == upload_id)
     )

@@ -1,11 +1,19 @@
 """Tests for API router endpoints."""
 
+import io
+import tarfile
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.preset_router import _build_storage_path, _generate_tarball
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.tarball_validation import (
+    build_internal_url,
+    parse_internal_upload_id,
+)
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -13,6 +21,70 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+
+@pytest.fixture
+def preset_store(monkeypatch):
+    """Stateful in-memory file store wired into the preset tarball helpers.
+
+    The PATCH handler resolves the file store lazily via
+    ``preset_router.get_file_store`` only when regenerating a preset tarball, so
+    tests patch that name rather than overriding a FastAPI dependency.
+    """
+    from collections.abc import AsyncIterator
+
+    from openhands.automation import preset_router
+
+    store = MagicMock()
+    store._storage = {}
+
+    async def _write_stream(
+        path: str,
+        stream: AsyncIterator[bytes],
+        max_size: int | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        content = b""
+        async for chunk in stream:
+            content += chunk
+        store._storage[path] = content
+        return len(content)
+
+    store.write_stream = AsyncMock(side_effect=_write_stream)
+    store.read = MagicMock(side_effect=lambda path: store._storage[path])
+    monkeypatch.setattr(preset_router, "get_file_store", lambda: store)
+    return store
+
+
+async def _seed_prompt_preset_automation(async_session, store, prompt):
+    """Insert a prompt-preset automation whose internal tarball bakes ``prompt``."""
+    upload_id = uuid.uuid4()
+    storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
+    store._storage[storage_path] = _generate_tarball(prompt)
+
+    async_session.add(
+        TarballUpload(
+            id=upload_id,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="seed-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path=storage_path,
+        )
+    )
+    automation = Automation(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Preset Automation",
+        prompt=prompt,
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path=build_internal_url(upload_id),
+        setup_script_path="setup.sh",
+        entrypoint=".venv/bin/python main.py",
+    )
+    async_session.add(automation)
+    await async_session.commit()
+    return automation
 
 
 @pytest.fixture
@@ -878,6 +950,57 @@ class TestUpdateAutomation:
 
         assert response.status_code == 200
         assert response.json()["prompt"] == "Updated prompt"
+
+    async def test_update_prompt_regenerates_preset_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing the prompt rebuilds the baked tarball the dispatcher executes."""
+        # Arrange — a prompt-preset automation whose tarball bakes "Original prompt".
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act — edit the prompt.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert — both the stored prompt and the executable tarball reflect the edit.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["prompt"] == "Updated prompt"
+        assert data["tarball_path"] != original_tarball_path
+
+        new_upload_id = parse_internal_upload_id(data["tarball_path"])
+        new_storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, new_upload_id)
+        with tarfile.open(
+            fileobj=io.BytesIO(preset_store._storage[new_storage_path]), mode="r:gz"
+        ) as tar:
+            assert tar.extractfile("prompt.txt").read().decode() == "Updated prompt"
+
+    async def test_update_name_does_not_regenerate_preset_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing a non-prompt field leaves the baked tarball untouched."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act — edit only the name.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Renamed"},
+        )
+
+        # Assert — name changes, tarball reference is preserved.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Renamed"
+        assert data["tarball_path"] == original_tarball_path
 
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
