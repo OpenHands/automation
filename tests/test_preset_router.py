@@ -1111,7 +1111,7 @@ class TestExperimentVariantValidation:
                 "trigger": {"type": "cron", "schedule": "0 0 * * *"},
             }
         )
-        assert len(req.variants) == MAX_VARIANTS
+        assert req.variants is not None and len(req.variants) == MAX_VARIANTS
 
     def test_too_many_variants_rejected(self):
         """More than MAX_VARIANTS is rejected."""
