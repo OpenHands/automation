@@ -866,8 +866,16 @@ class TestExperimentVariantValidation:
                 "name": "AB Test",
                 "experiment_id": "my-experiment",
                 "variants": [
-                    {"name": "control", "weight": 50, "plugins": [{"source": "github:owner/repo", "ref": "v1"}]},
-                    {"name": "treatment", "weight": 50, "plugins": [{"source": "github:owner/repo", "ref": "v2"}]},
+                    {
+                        "name": "control",
+                        "weight": 50,
+                        "plugins": [{"source": "github:owner/repo", "ref": "v1"}],
+                    },
+                    {
+                        "name": "treatment",
+                        "weight": 50,
+                        "plugins": [{"source": "github:owner/repo", "ref": "v2"}],
+                    },
                 ],
                 "prompt": "Test prompt",
                 "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -888,8 +896,16 @@ class TestExperimentVariantValidation:
                     "name": "Bad",
                     "plugins": [{"source": "github:owner/repo"}],
                     "variants": [
-                        {"name": "a", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
-                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
                     ],
                     "prompt": "Test",
                     "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -918,8 +934,16 @@ class TestExperimentVariantValidation:
                 {
                     "name": "Test",
                     "variants": [
-                        {"name": "a", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
-                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
                     ],
                     "prompt": "Test",
                     "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -951,7 +975,11 @@ class TestExperimentVariantValidation:
                     "name": "Test",
                     "experiment_id": "test",
                     "variants": [
-                        {"name": "only", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {
+                            "name": "only",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
                     ],
                     "prompt": "Test",
                     "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -968,8 +996,16 @@ class TestExperimentVariantValidation:
                     "name": "Test",
                     "experiment_id": "test",
                     "variants": [
-                        {"name": "same", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
-                        {"name": "same", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {
+                            "name": "same",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "same",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
                     ],
                     "prompt": "Test",
                     "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -986,8 +1022,16 @@ class TestExperimentVariantValidation:
                     "name": "Test",
                     "experiment_id": "test",
                     "variants": [
-                        {"name": "a", "weight": 0, "plugins": [{"source": "github:owner/repo"}]},
-                        {"name": "b", "weight": 1, "plugins": [{"source": "github:owner/repo"}]},
+                        {
+                            "name": "a",
+                            "weight": 0,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
                     ],
                     "prompt": "Test",
                     "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -1025,11 +1069,22 @@ class TestExperimentTarball:
         from openhands.automation.preset_router import ExperimentVariant
 
         variants = [
-            ExperimentVariant(name="control", weight=50, plugins=[PluginSource(source="github:owner/repo", ref="v1")]),
-            ExperimentVariant(name="treatment", weight=50, plugins=[PluginSource(source="github:owner/repo", ref="v2")]),
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
         ]
         tarball_bytes = _generate_plugin_tarball(
-            None, "Test prompt", experiment_id="test-exp", variants=variants,
+            None,
+            "Test prompt",
+            experiment_id="test-exp",
+            variants=variants,
         )
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
@@ -1045,11 +1100,22 @@ class TestExperimentTarball:
         from openhands.automation.preset_router import ExperimentVariant
 
         variants = [
-            ExperimentVariant(name="control", weight=70, plugins=[PluginSource(source="github:owner/repo", ref="v1")]),
-            ExperimentVariant(name="treatment", weight=30, plugins=[PluginSource(source="github:owner/repo", ref="v2")]),
+            ExperimentVariant(
+                name="control",
+                weight=70,
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=30,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
         ]
         tarball_bytes = _generate_plugin_tarball(
-            None, "Test prompt", experiment_id="my-exp", variants=variants,
+            None,
+            "Test prompt",
+            experiment_id="my-exp",
+            variants=variants,
         )
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:

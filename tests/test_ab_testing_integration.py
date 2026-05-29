@@ -15,11 +15,13 @@ import random
 import tarfile
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 
 os.environ["LOG_JSON"] = "0"
 
@@ -59,7 +61,9 @@ async def async_engine():
 @pytest.fixture
 async def async_session_factory(async_engine):
     return async_sessionmaker(
-        async_engine, class_=AsyncSession, expire_on_commit=False,
+        async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
     )
 
 
@@ -107,10 +111,14 @@ def mock_file_store():
 
 @pytest.fixture
 async def client(
-    async_engine, async_session_factory, async_session,
-    mock_authenticated_user, mock_file_store,
+    async_engine,
+    async_session_factory,
+    async_session,
+    mock_authenticated_user,
+    mock_file_store,
 ) -> AsyncGenerator[AsyncClient, None]:
     """Async test client with SQLite DB, mock auth, and mock file store."""
+
     async def override_get_session():
         yield async_session
 
@@ -123,7 +131,8 @@ async def client(
     app.state.http_client = create_http_client()
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test",
+        transport=ASGITransport(app=app),
+        base_url="http://test",
     ) as c:
         yield c
 
@@ -163,7 +172,7 @@ def _simulate_variant_selection(experiment_config: dict, seed: int = 42) -> str:
 class TestABTestAutomationCreation:
     """End-to-end: create an A/B test automation via the API."""
 
-    AB_PAYLOAD = {
+    AB_PAYLOAD: ClassVar[dict] = {
         "name": "PR Review A/B Test",
         "experiment_id": "pr-review-v2-test",
         "variants": [
@@ -171,16 +180,22 @@ class TestABTestAutomationCreation:
                 "name": "control",
                 "weight": 70,
                 "plugins": [
-                    {"source": "github:OpenHands/extensions",
-                     "repo_path": "plugins/pr-review", "ref": "v1.0.0"},
+                    {
+                        "source": "github:OpenHands/extensions",
+                        "repo_path": "plugins/pr-review",
+                        "ref": "v1.0.0",
+                    },
                 ],
             },
             {
                 "name": "treatment",
                 "weight": 30,
                 "plugins": [
-                    {"source": "github:OpenHands/extensions",
-                     "repo_path": "plugins/pr-review", "ref": "v2.0.0"},
+                    {
+                        "source": "github:OpenHands/extensions",
+                        "repo_path": "plugins/pr-review",
+                        "ref": "v2.0.0",
+                    },
                 ],
             },
         ],
@@ -195,7 +210,8 @@ class TestABTestAutomationCreation:
     async def test_create_ab_automation_returns_201(self, client, mock_file_store):
         """POST with variants returns 201 and correct metadata."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.AB_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.AB_PAYLOAD,
         )
         assert resp.status_code == 201, resp.text
         data = resp.json()
@@ -209,7 +225,8 @@ class TestABTestAutomationCreation:
     async def test_tarball_contains_experiment_config(self, client, mock_file_store):
         """Generated tarball has experiment_config.json, not plugins_config.json."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.AB_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.AB_PAYLOAD,
         )
         assert resp.status_code == 201
 
@@ -223,7 +240,8 @@ class TestABTestAutomationCreation:
     async def test_experiment_config_matches_request(self, client, mock_file_store):
         """experiment_config.json faithfully represents the request."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.AB_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.AB_PAYLOAD,
         )
         assert resp.status_code == 201
 
@@ -246,7 +264,8 @@ class TestABTestAutomationCreation:
     async def test_main_py_has_experiment_support(self, client, mock_file_store):
         """main.py template includes experiment detection and tagging code."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.AB_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.AB_PAYLOAD,
         )
         assert resp.status_code == 201
 
@@ -263,11 +282,19 @@ class TestABTestAutomationCreation:
 class TestVariantSelectionLogic:
     """Test the runtime variant selection as it would run in sdk_main.py."""
 
-    EXPERIMENT_CONFIG = {
+    EXPERIMENT_CONFIG: ClassVar[dict] = {
         "experiment_id": "test-experiment",
         "variants": [
-            {"name": "control", "weight": 80, "plugins": [{"source": "github:o/r", "ref": "v1"}]},
-            {"name": "treatment", "weight": 20, "plugins": [{"source": "github:o/r", "ref": "v2"}]},
+            {
+                "name": "control",
+                "weight": 80,
+                "plugins": [{"source": "github:o/r", "ref": "v1"}],
+            },
+            {
+                "name": "treatment",
+                "weight": 20,
+                "plugins": [{"source": "github:o/r", "ref": "v2"}],
+            },
         ],
     }
 
@@ -279,8 +306,12 @@ class TestVariantSelectionLogic:
             counts[name] += 1
 
         # 80/20 weights → expect ~800/200 with some variance
-        assert counts["control"] > 600, f"control selected only {counts['control']}/1000 times"
-        assert counts["treatment"] > 100, f"treatment selected only {counts['treatment']}/1000 times"
+        assert counts["control"] > 600, (
+            f"control selected only {counts['control']}/1000 times"
+        )
+        assert counts["treatment"] > 100, (
+            f"treatment selected only {counts['treatment']}/1000 times"
+        )
 
     def test_deterministic_with_same_seed(self):
         """Same seed always picks the same variant."""
@@ -315,7 +346,7 @@ class TestVariantSelectionLogic:
 class TestBackwardCompatibility:
     """Standard plugin automations still work exactly as before."""
 
-    STANDARD_PAYLOAD = {
+    STANDARD_PAYLOAD: ClassVar[dict] = {
         "name": "Standard Plugin Automation",
         "plugins": [
             {"source": "github:owner/plugin", "ref": "v1.0.0"},
@@ -324,10 +355,13 @@ class TestBackwardCompatibility:
         "trigger": {"type": "cron", "schedule": "0 9 * * *"},
     }
 
-    async def test_standard_plugin_automation_returns_201(self, client, mock_file_store):
+    async def test_standard_plugin_automation_returns_201(
+        self, client, mock_file_store
+    ):
         """Standard (non-experiment) request still works."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.STANDARD_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.STANDARD_PAYLOAD,
         )
         assert resp.status_code == 201, resp.text
         data = resp.json()
@@ -336,7 +370,8 @@ class TestBackwardCompatibility:
     async def test_standard_tarball_has_plugins_config(self, client, mock_file_store):
         """Standard tarball uses plugins_config.json, no experiment_config.json."""
         resp = await client.post(
-            "/api/automation/v1/preset/plugin", json=self.STANDARD_PAYLOAD,
+            "/api/automation/v1/preset/plugin",
+            json=self.STANDARD_PAYLOAD,
         )
         assert resp.status_code == 201
 
@@ -391,7 +426,11 @@ class TestABTestValidationViaAPI:
                 "name": "Bad",
                 "experiment_id": "test",
                 "variants": [
-                    {"name": "only", "weight": 1, "plugins": [{"source": "github:o/r"}]},
+                    {
+                        "name": "only",
+                        "weight": 1,
+                        "plugins": [{"source": "github:o/r"}],
+                    },
                 ],
                 "prompt": "Test",
                 "trigger": {"type": "cron", "schedule": "0 0 * * *"},
@@ -406,8 +445,16 @@ class TestABTestValidationViaAPI:
                 "name": "Bad",
                 "experiment_id": "test",
                 "variants": [
-                    {"name": "same", "weight": 1, "plugins": [{"source": "github:o/r"}]},
-                    {"name": "same", "weight": 1, "plugins": [{"source": "github:o/r"}]},
+                    {
+                        "name": "same",
+                        "weight": 1,
+                        "plugins": [{"source": "github:o/r"}],
+                    },
+                    {
+                        "name": "same",
+                        "weight": 1,
+                        "plugins": [{"source": "github:o/r"}],
+                    },
                 ],
                 "prompt": "Test",
                 "trigger": {"type": "cron", "schedule": "0 0 * * *"},

@@ -325,7 +325,7 @@ class ExperimentVariant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=100)
-    weight: int = Field(..., gt=0, description="Relative selection weight (must be > 0)")
+    weight: int = Field(..., gt=0, description="Relative selection weight (> 0)")
     plugins: list[PluginSource] = Field(
         ...,
         description="Plugin(s) for this variant.",
@@ -421,21 +421,15 @@ class CreatePluginAutomationRequest(BaseModel):
         has_variants = self.variants is not None
 
         if has_plugins == has_variants:
-            raise ValueError(
-                "Exactly one of 'plugins' or 'variants' must be provided."
-            )
+            raise ValueError("Exactly one of 'plugins' or 'variants' must be provided.")
 
         if has_variants:
             if self.experiment_id is None:
-                raise ValueError(
-                    "'experiment_id' is required when using 'variants'."
-                )
+                raise ValueError("'experiment_id' is required when using 'variants'.")
             if len(self.variants) < 2:
                 raise ValueError("At least two variants are required for an A/B test.")
             if len(self.variants) > MAX_VARIANTS:
-                raise ValueError(
-                    f"At most {MAX_VARIANTS} variants are allowed."
-                )
+                raise ValueError(f"At most {MAX_VARIANTS} variants are allowed.")
             names = [v.name for v in self.variants]
             if len(names) != len(set(names)):
                 raise ValueError("Variant names must be unique.")
@@ -477,9 +471,7 @@ def _generate_plugin_tarball(
                     {
                         "name": v.name,
                         "weight": v.weight,
-                        "plugins": [
-                            p.model_dump(exclude_none=True) for p in v.plugins
-                        ],
+                        "plugins": [p.model_dump(exclude_none=True) for p in v.plugins],
                     }
                     for v in variants
                 ],
@@ -559,8 +551,11 @@ async def create_automation_from_plugin(
         variant_names = ", ".join(v.name for v in body.variants)  # type: ignore[union-attr]
         description = f"A/B experiment {body.experiment_id}: {variant_names}"
     else:
-        plugin_sources_str = _format_plugin_sources_for_description(body.plugins)  # type: ignore[arg-type]
-        description = f"Auto-generated with plugins: {_safe_truncate(plugin_sources_str, 100)}"
+        plugin_sources_str = _format_plugin_sources_for_description(
+            body.plugins  # type: ignore[arg-type]
+        )
+        truncated = _safe_truncate(plugin_sources_str, 100)
+        description = f"Auto-generated with plugins: {truncated}"
 
     upload = TarballUpload(
         id=upload_id,
