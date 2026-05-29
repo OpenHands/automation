@@ -339,8 +339,8 @@ class TestVariantSelectionLogic:
         config = {
             "experiment_id": "equal",
             "variants": [
-                {"name": "a", "weight": 50, "plugins": []},
-                {"name": "b", "weight": 50, "plugins": []},
+                {"name": "a", "weight": 50, "plugins": [{"source": "github:o/r"}]},
+                {"name": "b", "weight": 50, "plugins": [{"source": "github:o/r"}]},
             ],
         }
         seen = {_simulate_variant_selection(config, seed=s) for s in range(100)}
