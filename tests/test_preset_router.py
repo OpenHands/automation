@@ -14,6 +14,7 @@ from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
+    _replace_prompt_in_tarball,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -208,6 +209,58 @@ class TestGenerateTarball:
             assert "ref" not in repos_config[0]  # None excluded
             assert repos_config[1]["url"] == "owner/repo2"
             assert repos_config[1]["ref"] == "main"
+
+
+class TestReplacePromptInTarball:
+    """Tests for swapping prompt.txt inside an existing preset tarball."""
+
+    def test_replaces_prompt_and_preserves_sibling_files(self):
+        """The prompt is swapped while every other file is left byte-for-byte intact."""
+        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
+        # plugins_config.json and repos_config.json; all but the prompt must survive.
+        original = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/repo")],
+            "Original prompt",
+            repos=[RepoSource(url="owner/repo", provider="github")],
+        )
+
+        # Act
+        updated = _replace_prompt_in_tarball(original, "New prompt")
+
+        # Assert
+        assert updated is not None
+
+        def _read(tarball_bytes):
+            files = {}
+            with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    extracted = tar.extractfile(member)
+                    assert extracted is not None
+                    files[member.name] = extracted.read()
+                return files, tar.getmember("setup.sh").mode
+
+        old_files, _ = _read(original)
+        new_files, new_setup_mode = _read(updated)
+
+        assert new_files["prompt.txt"].decode() == "New prompt"
+        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+            assert new_files[name] == old_files[name]
+        assert new_setup_mode & 0o100  # setup.sh stays executable
+
+    def test_returns_none_when_tarball_has_no_prompt(self):
+        """A tarball without prompt.txt is not regenerable, so None is returned."""
+        # Arrange — an archive that has no prompt.txt member.
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            data = b"print('hi')"
+            info = tarfile.TarInfo(name="main.py")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        # Act / Assert
+        assert _replace_prompt_in_tarball(buffer.getvalue(), "New prompt") is None
 
 
 class TestRepoSource:
