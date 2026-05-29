@@ -356,7 +356,8 @@ This automation was triggered by a webhook event:
     experiment_tags: dict[str, str] = {}
     if experiment_id:
         experiment_tags["experiment_id"] = experiment_id
-        experiment_tags["variant"] = selected_variant  # type: ignore[assignment]
+        assert selected_variant is not None  # set when experiment_id is set
+        experiment_tags["variant"] = selected_variant
 
     conversation = Conversation(
         agent=agent,

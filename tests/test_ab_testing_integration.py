@@ -158,7 +158,11 @@ def _extract_tarball(mock_store) -> dict[str, bytes]:
 
 
 def _simulate_variant_selection(experiment_config: dict, seed: int = 42) -> str:
-    """Run the same selection logic as sdk_main.py and return the variant name."""
+    """Select a variant using the same weighted-random logic as sdk_main.py.
+
+    Uses a seeded RNG for deterministic test assertions; production code
+    uses the global (unseeded) random module.
+    """
     rng = random.Random(seed)
     variants = experiment_config["variants"]
     weights = [v["weight"] for v in variants]

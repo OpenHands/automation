@@ -566,13 +566,10 @@ class CreatePluginAutomationRequest(BaseModel):
     @model_validator(mode="after")
     def validate_plugins_or_variants(self) -> "CreatePluginAutomationRequest":
         """Enforce mutual exclusivity between plugins and variants."""
-        has_plugins = self.plugins is not None
-        has_variants = self.variants is not None
-
-        if has_plugins == has_variants:
+        if (self.plugins is None) == (self.variants is None):
             raise ValueError("Exactly one of 'plugins' or 'variants' must be provided.")
 
-        if has_variants and self.variants is not None:
+        if self.variants is not None:
             if self.experiment_id is None:
                 raise ValueError("'experiment_id' is required when using 'variants'.")
             if len(self.variants) < 2:
@@ -631,7 +628,8 @@ def _generate_plugin_tarball(
                 json.dumps(experiment_config, indent=2),
             )
         else:
-            plugins_config = [p.model_dump(exclude_none=True) for p in plugins]  # type: ignore[union-attr]
+            assert plugins is not None  # guaranteed by caller
+            plugins_config = [p.model_dump(exclude_none=True) for p in plugins]
             _add_file_to_tar(
                 tar, "plugins_config.json", json.dumps(plugins_config, indent=2)
             )
@@ -680,7 +678,6 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     model = resolve_model_profile_for_user(body.model, user)
-    is_experiment = body.variants is not None
 
     # 1. Generate tarball with SDK code, plugin/experiment config, and prompt
     tarball_content = _generate_plugin_tarball(
@@ -696,11 +693,11 @@ async def create_automation_from_plugin(
     storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
     # Create upload record
-    if is_experiment and body.variants is not None:
+    if body.variants is not None:
         variant_names = ", ".join(v.name for v in body.variants)
         description = f"A/B experiment {body.experiment_id}: {variant_names}"
     else:
-        assert body.plugins is not None
+        assert body.plugins is not None  # guaranteed by validator
         plugin_sources_str = _format_plugin_sources_for_description(body.plugins)
         truncated = _safe_truncate(plugin_sources_str, 100)
         description = f"Auto-generated with plugins: {truncated}"
@@ -773,7 +770,7 @@ async def create_automation_from_plugin(
         "upload_id": str(upload_id),
         "prompt_length": len(body.prompt),
     }
-    if is_experiment and body.variants is not None:
+    if body.variants is not None:
         log_extra["experiment_id"] = body.experiment_id
         log_extra["variant_count"] = len(body.variants)
     elif body.plugins is not None:
