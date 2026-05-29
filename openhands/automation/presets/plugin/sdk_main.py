@@ -235,7 +235,7 @@ with workspace_ctx as workspace:
 
         selected_variant = selected["name"]
         plugins_config = selected["plugins"]
-        print(f"\n=== EXPERIMENT ===")
+        print("\n=== EXPERIMENT ===")
         print(f"  id: {experiment_id}")
         print(f"  variant: {selected_variant}")
         print(f"  weights: {dict(zip([v['name'] for v in variants], weights))}")
@@ -356,7 +356,11 @@ This automation was triggered by a webhook event:
     experiment_tags: dict[str, str] = {}
     if experiment_id:
         experiment_tags["experiment_id"] = experiment_id
-        assert selected_variant is not None  # set when experiment_id is set
+        if selected_variant is None:
+            raise RuntimeError(
+                "BUG: experiment_id is set but selected_variant is None — "
+                "experiment config may be malformed."
+            )
         experiment_tags["variant"] = selected_variant
 
     conversation = Conversation(

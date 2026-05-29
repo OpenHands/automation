@@ -477,6 +477,7 @@ class ExperimentVariant(BaseModel):
     weight: int = Field(..., gt=0, description="Relative selection weight (> 0)")
     plugins: list[PluginSource] = Field(
         ...,
+        min_length=1,
         description="Plugin(s) for this variant.",
     )
 
