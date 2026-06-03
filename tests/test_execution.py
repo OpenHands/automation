@@ -480,6 +480,6 @@ class TestPerRunTarballPath:
             run_id="../../etc/passwd",
         )
 
-        uploaded_dest = mock_upload.call_args.args[4]
+        uploaded_dest = mock_upload.call_args.args[4]  # dest positional arg
         assert uploaded_dest == TARBALL_PATH
         assert "etc/passwd" not in uploaded_dest

@@ -377,6 +377,7 @@ async def execute_in_context(
     # Use a per-run tarball path to avoid collisions when multiple automations
     # run concurrently on a shared filesystem (sandboxless/local mode).
     # Guard against path separators in run_id before embedding it in a shell command.
+    # run_id is always a UUID, so "/" is the only shell-unsafe character expected here.
     tarball_path = (
         f"/tmp/automation-{run_id}.tar.gz"
         if run_id and "/" not in run_id
@@ -401,8 +402,7 @@ async def execute_in_context(
 
         cmd = (
             f"mkdir -p {work_dir}"
-            f" && tar xzf {tarball_path} -C {work_dir}"
-            f" && rm -f {tarball_path}"
+            f" && tar xzf {tarball_path} -C {work_dir} ; rm -f {tarball_path}"
             f" && cd {work_dir}"
             f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
             f" && {entrypoint}"
