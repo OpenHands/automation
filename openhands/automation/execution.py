@@ -358,7 +358,9 @@ async def execute_in_context(
         work_dir: Working directory for tarball extraction
         env_vars: Environment variables to export
         timeout: Max execution time
-        run_id: Run ID for logging
+        run_id: Run ID — used for logging and to derive an isolated tarball
+            path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
+            when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
 
     Returns:
@@ -374,6 +376,7 @@ async def execute_in_context(
 
     # Use a per-run tarball path to avoid collisions when multiple automations
     # run concurrently on a shared filesystem (sandboxless/local mode).
+    # Guard against path separators in run_id before embedding it in a shell command.
     tarball_path = (
         f"/tmp/automation-{run_id}.tar.gz"
         if run_id and "/" not in run_id

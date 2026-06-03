@@ -333,7 +333,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        uploaded_dest = mock_upload.call_args[0][4]  # (client, url, key, data, dest)
+        uploaded_dest = mock_upload.call_args.args[4]  # (client, url, key, data, dest)
         assert uploaded_dest == f"/tmp/automation-{run_id}.tar.gz"
         assert uploaded_dest != TARBALL_PATH
 
@@ -358,7 +358,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        download_dest = mock_download_in_sandbox.call_args[0][4]
+        download_dest = mock_download_in_sandbox.call_args.args[4]
         assert download_dest == f"/tmp/automation-{run_id}.tar.gz"
         assert download_dest != TARBALL_PATH
 
@@ -384,7 +384,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        bash_cmd = mock_start_bash.call_args[0][3]  # positional: client,url,key,command
+        bash_cmd = mock_start_bash.call_args.args[3]  # (client, url, key, command)
         assert f"tar xzf {expected_path}" in bash_cmd
         assert f"rm -f {expected_path}" in bash_cmd
         assert TARBALL_PATH not in bash_cmd
@@ -409,9 +409,9 @@ class TestPerRunTarballPath:
             run_id=None,
         )
 
-        uploaded_dest = mock_upload.call_args[0][4]
+        uploaded_dest = mock_upload.call_args.args[4]
         assert uploaded_dest == TARBALL_PATH
-        bash_cmd = mock_start_bash.call_args[0][3]
+        bash_cmd = mock_start_bash.call_args.args[3]
         assert f"tar xzf {TARBALL_PATH}" in bash_cmd
 
     @pytest.mark.asyncio
@@ -455,7 +455,31 @@ class TestPerRunTarballPath:
             ),
         )
 
-        upload_dests = {c[0][4] for c in mock_upload.call_args_list}
+        upload_dests = {c.args[4] for c in mock_upload.call_args_list}
         assert f"/tmp/automation-{run_id_a}.tar.gz" in upload_dests
         assert f"/tmp/automation-{run_id_b}.tar.gz" in upload_dests
         assert len(upload_dests) == 2, "Each run must upload to its own unique path"
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_run_id_with_slash_falls_back_to_shared_constant(
+        self, mock_start_bash, mock_upload
+    ):
+        """A run_id containing '/' falls back to TARBALL_PATH (path traversal guard)."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            run_id="../../etc/passwd",
+        )
+
+        uploaded_dest = mock_upload.call_args.args[4]
+        assert uploaded_dest == TARBALL_PATH
+        assert "etc/passwd" not in uploaded_dest
