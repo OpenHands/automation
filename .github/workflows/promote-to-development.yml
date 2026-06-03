@@ -1,0 +1,91 @@
+---
+# Continuously promotes each main build's automation image to development by
+# bumping the tag in OpenHands/saas-deploy, which ArgoCD syncs.
+#
+# Runs after the "Docker" workflow finishes building + pushing the image for a
+# main commit, so the promoted tag always points at an image that exists. It can
+# also be run manually to re-promote a known-good image tag.
+# Requires org secrets SAAS_DEPLOY_APP_ID and SAAS_DEPLOY_APP_PRIVATE_KEY from
+# the saas-deploy-bot GitHub App (installed on OpenHands/saas-deploy).
+
+name: Promote to development
+
+on:
+    workflow_dispatch:
+        inputs:
+            image-tag:
+                description: "Image tag to promote (defaults to sha-<short SHA> for the selected ref)"
+                required: false
+                type: string
+    workflow_run:
+        workflows: ["Docker"]
+        types: [completed]
+        branches: [main]
+
+# Queue promotions so an earlier main commit deploys before a later one.
+concurrency:
+    group: promote-to-development
+    cancel-in-progress: false
+
+jobs:
+    promote:
+        # Only promote when the Docker build actually succeeded, or when run manually.
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        permissions:
+            contents: read
+        steps:
+            - name: Compute image tag
+              id: tag
+              # Matches docker/metadata-action type=sha (7-char short SHA) in ghcr-build.yml.
+              env:
+                  DISPATCH_IMAGE_TAG: ${{ github.event.inputs['image-tag'] }}
+                  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+              run: |
+                  if [ -n "$DISPATCH_IMAGE_TAG" ]; then
+                    echo "tag=$DISPATCH_IMAGE_TAG" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "tag=sha-${SHA::7}" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Mint saas-deploy token
+              id: app-token
+              uses: actions/create-github-app-token@7bd03711494f032dfa3be3558f7dc8787b0be333  # v3.1.0
+              with:
+                  app-id: ${{ secrets.SAAS_DEPLOY_APP_ID }}
+                  private-key: ${{ secrets.SAAS_DEPLOY_APP_PRIVATE_KEY }}
+                  owner: OpenHands
+                  repositories: saas-deploy
+
+            # Attribute the bump commit to the App's bot identity (saas-deploy-bot[bot]).
+            - name: Resolve app bot identity
+              id: bot
+              env:
+                  GH_TOKEN: ${{ steps.app-token.outputs.token }}
+                  SLUG: ${{ steps.app-token.outputs.app-slug }}
+              run: |
+                  id=$(gh api "/users/${SLUG}[bot]" --jq .id)
+                  echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+                  echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+            - name: Promote image to development
+              uses: OpenHands/saas-deploy/.github/actions/promote-to-development@e2674531ad9d691a5b2a57dabe8126fc50fce205
+              with:
+                  release: automation
+                  tag-path: .openhands.automation.image.tag
+                  image-tag: ${{ steps.tag.outputs.tag }}
+                  token: ${{ steps.app-token.outputs.token }}
+                  git-user-name: ${{ steps.bot.outputs.name }}
+                  git-user-email: ${{ steps.bot.outputs.email }}
+
+            - name: Annotate promotion failure
+              if: ${{ failure() }}
+              env:
+                  HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+                  SOURCE_RUN_URL: ${{ github.event.workflow_run.html_url }}
+              run: |
+                  image_tag="${IMAGE_TAG:-sha-${HEAD_SHA::7}}"
+                  source="${SOURCE_RUN_URL:-manual workflow_dispatch run}"
+                  echo "::error title=Promote to development failed::Failed to promote automation ${image_tag} (${HEAD_SHA}) to development. Source: ${source}"
