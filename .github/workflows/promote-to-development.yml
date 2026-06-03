@@ -14,11 +14,11 @@ on:
     workflow_dispatch:
         inputs:
             image-tag:
-                description: "Image tag to promote (defaults to sha-<short SHA> for the selected ref)"
+                description: Image tag to promote (defaults to sha-<short SHA> for the selected ref)
                 required: false
                 type: string
     workflow_run:
-        workflows: ["Docker"]
+        workflows: [Docker]
         types: [completed]
         branches: [main]
 
