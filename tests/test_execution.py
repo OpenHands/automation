@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openhands.automation.config import get_config
+from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.execution import (
     DEFAULT_WORK_DIR,
@@ -298,3 +299,163 @@ class TestExecuteInContextErrors:
         assert isinstance(result, DispatchResult)
         assert result.success is True
         assert result.sandbox_id == "test-sandbox-id"
+
+
+class TestPerRunTarballPath:
+    """Tests that execute_in_context uses an isolated per-run tarball path.
+
+    In sandboxless/local mode all automation runs share the same host
+    filesystem.  Using the shared TARBALL_PATH constant causes a race
+    condition when two automations fire at the same cron tick: the second
+    upload overwrites the first before extraction, so both runs execute the
+    wrong script.
+
+    The fix derives a unique path from the run_id so concurrent uploads
+    cannot collide.
+    """
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_bytes_upload_uses_per_run_path(self, mock_start_bash, mock_upload):
+        """When run_id is provided, tarball is uploaded to a run-scoped path."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            run_id=run_id,
+        )
+
+        uploaded_dest = mock_upload.call_args[0][4]  # positional: client,url,key,data,dest
+        assert uploaded_dest == f"/tmp/automation-{run_id}.tar.gz"
+        assert uploaded_dest != TARBALL_PATH
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._download_in_sandbox")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_url_download_uses_per_run_path(
+        self, mock_start_bash, mock_download_in_sandbox
+    ):
+        """When run_id is provided, URL tarball is downloaded to a run-scoped path."""
+        mock_download_in_sandbox.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python main.py",
+            tarball_source="https://example.com/script.tar.gz",
+            work_dir=DEFAULT_WORK_DIR,
+            run_id=run_id,
+        )
+
+        download_dest = mock_download_in_sandbox.call_args[0][4]
+        assert download_dest == f"/tmp/automation-{run_id}.tar.gz"
+        assert download_dest != TARBALL_PATH
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_bash_cmd_uses_per_run_path_and_cleans_up(
+        self, mock_start_bash, mock_upload
+    ):
+        """The bash command extracts from the per-run path and removes it afterwards."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        expected_path = f"/tmp/automation-{run_id}.tar.gz"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            run_id=run_id,
+        )
+
+        bash_cmd = mock_start_bash.call_args[0][3]  # positional: client,url,key,command
+        assert f"tar xzf {expected_path}" in bash_cmd
+        assert f"rm -f {expected_path}" in bash_cmd
+        assert TARBALL_PATH not in bash_cmd
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_no_run_id_falls_back_to_shared_constant(
+        self, mock_start_bash, mock_upload
+    ):
+        """Without a run_id the shared TARBALL_PATH constant is used as a fallback."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python main.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            run_id=None,
+        )
+
+        uploaded_dest = mock_upload.call_args[0][4]
+        assert uploaded_dest == TARBALL_PATH
+        bash_cmd = mock_start_bash.call_args[0][3]
+        assert f"tar xzf {TARBALL_PATH}" in bash_cmd
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_concurrent_runs_use_distinct_paths(
+        self, mock_start_bash, mock_upload
+    ):
+        """Two concurrent calls with different run_ids upload to different paths.
+
+        This is the core race condition that the fix prevents: if both runs
+        wrote to the same path the second upload would silently overwrite the
+        first, causing both runs to execute the wrong script.
+        """
+        import asyncio
+
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-abc"
+
+        run_id_a = "11111111-0000-0000-0000-000000000000"
+        run_id_b = "22222222-0000-0000-0000-000000000000"
+
+        await asyncio.gather(
+            execute_in_context(
+                client=AsyncMock(),
+                agent_url="https://agent.example.com",
+                session_key="key",
+                entrypoint="python main.py",
+                tarball_source=b"script A",
+                work_dir=DEFAULT_WORK_DIR,
+                run_id=run_id_a,
+            ),
+            execute_in_context(
+                client=AsyncMock(),
+                agent_url="https://agent.example.com",
+                session_key="key",
+                entrypoint="python main.py",
+                tarball_source=b"script B",
+                work_dir=DEFAULT_WORK_DIR,
+                run_id=run_id_b,
+            ),
+        )
+
+        upload_dests = {c[0][4] for c in mock_upload.call_args_list}
+        assert f"/tmp/automation-{run_id_a}.tar.gz" in upload_dests
+        assert f"/tmp/automation-{run_id_b}.tar.gz" in upload_dests
+        assert len(upload_dests) == 2, "Each run must upload to its own unique path"
