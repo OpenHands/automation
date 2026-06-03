@@ -333,7 +333,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        uploaded_dest = mock_upload.call_args[0][4]  # positional: client,url,key,data,dest
+        uploaded_dest = mock_upload.call_args[0][4]  # (client, url, key, data, dest)
         assert uploaded_dest == f"/tmp/automation-{run_id}.tar.gz"
         assert uploaded_dest != TARBALL_PATH
 
