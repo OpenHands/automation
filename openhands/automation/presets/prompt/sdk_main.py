@@ -58,7 +58,11 @@ Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
-  AUTOMATION_MODEL   - model profile name to load instead of default (optional)
+  AUTOMATION_MODEL           - model profile name to load instead of default (optional)
+
+Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
+  AUTOMATION_SESSION_URL     - direct URL to this conversation in the OpenHands UI
+                               (Cloud mode only; built from conversation.id)
 
 """
 
@@ -326,10 +330,17 @@ This automation was triggered by a webhook event:
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
 
-    # Inject secrets into the conversation (as LookupSecret references)
+    # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
         conversation.update_secrets(secrets)
         print(f"  injected {len(secrets)} secrets into conversation")
+
+    # Build session URL from conversation ID and inject as a secret so
+    # the agent can use $AUTOMATION_SESSION_URL in bash commands.
+    if not IS_LOCAL_MODE and api_url:
+        session_url = f"{api_url}/conversations/{conversation.id}"
+        conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
+        print(f"  session URL: {session_url}")
 
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
