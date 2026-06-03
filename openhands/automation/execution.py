@@ -374,7 +374,11 @@ async def execute_in_context(
 
     # Use a per-run tarball path to avoid collisions when multiple automations
     # run concurrently on a shared filesystem (sandboxless/local mode).
-    tarball_path = f"/tmp/automation-{run_id}.tar.gz" if run_id else TARBALL_PATH
+    tarball_path = (
+        f"/tmp/automation-{run_id}.tar.gz"
+        if run_id and "/" not in run_id
+        else TARBALL_PATH
+    )
 
     try:
         # Get tarball into environment: upload bytes or download from URL
