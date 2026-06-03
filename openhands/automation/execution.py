@@ -372,15 +372,19 @@ async def execute_in_context(
     def _log_ctx() -> dict[str, Any]:
         return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
+    # Use a per-run tarball path to avoid collisions when multiple automations
+    # run concurrently on a shared filesystem (sandboxless/local mode).
+    tarball_path = f"/tmp/automation-{run_id}.tar.gz" if run_id else TARBALL_PATH
+
     try:
         # Get tarball into environment: upload bytes or download from URL
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
-            await _upload(client, agent_url, session_key, tarball_source, TARBALL_PATH)
+            await _upload(client, agent_url, session_key, tarball_source, tarball_path)
         else:
             logger.info("Downloading tarball from URL", extra=_log_ctx())
             await _download_in_sandbox(
-                client, agent_url, session_key, tarball_source, TARBALL_PATH
+                client, agent_url, session_key, tarball_source, tarball_path
             )
 
         exports = ""
@@ -390,7 +394,8 @@ async def execute_in_context(
 
         cmd = (
             f"mkdir -p {work_dir}"
-            f" && tar xzf {TARBALL_PATH} -C {work_dir}"
+            f" && tar xzf {tarball_path} -C {work_dir}"
+            f" && rm -f {tarball_path}"
             f" && cd {work_dir}"
             f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
             f" && {entrypoint}"
