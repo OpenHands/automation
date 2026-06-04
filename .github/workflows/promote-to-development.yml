@@ -67,6 +67,10 @@ jobs:
                   GH_TOKEN: ${{ steps.app-token.outputs.token }}
                   SLUG: ${{ steps.app-token.outputs.app-slug }}
               run: |
+                  if ! gh api "/users/${SLUG}[bot]" --silent; then
+                    echo "::error title=App not installed::GitHub App must be installed on OpenHands/saas-deploy"
+                    exit 1
+                  fi
                   id=$(gh api "/users/${SLUG}[bot]" --jq .id)
                   echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
                   echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
