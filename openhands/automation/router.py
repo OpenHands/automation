@@ -455,7 +455,10 @@ async def cancel_run(
     if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            detail=f"Run is {run.status.value}, only PENDING or RUNNING runs can be cancelled",
+            detail=(
+                f"Run is {run.status.value}, only PENDING or"
+                " RUNNING runs can be cancelled"
+            ),
         )
 
     now = utcnow()

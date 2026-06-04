@@ -40,7 +40,6 @@ async def _create_automation_with_run(
     return automation, run
 
 
-
 async def test_cancel_pending_run(async_client, async_session):
     """Cancelling a PENDING run should succeed."""
     _, run = await _create_automation_with_run(
@@ -55,7 +54,6 @@ async def test_cancel_pending_run(async_client, async_session):
     assert data["completed_at"] is not None
 
 
-
 async def test_cancel_running_run(async_client, async_session):
     """Cancelling a RUNNING run should succeed."""
     _, run = await _create_automation_with_run(
@@ -66,7 +64,6 @@ async def test_cancel_running_run(async_client, async_session):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "CANCELLED"
-
 
 
 async def test_cancel_completed_run_returns_409(async_client, async_session):
@@ -80,7 +77,6 @@ async def test_cancel_completed_run_returns_409(async_client, async_session):
     assert "COMPLETED" in resp.json()["detail"]
 
 
-
 async def test_cancel_failed_run_returns_409(async_client, async_session):
     """Cancelling a FAILED run should return 409."""
     _, run = await _create_automation_with_run(
@@ -90,7 +86,6 @@ async def test_cancel_failed_run_returns_409(async_client, async_session):
     resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
     assert resp.status_code == 409
     assert "FAILED" in resp.json()["detail"]
-
 
 
 async def test_cancel_already_cancelled_run_returns_409(async_client, async_session):
@@ -104,13 +99,11 @@ async def test_cancel_already_cancelled_run_returns_409(async_client, async_sess
     assert "CANCELLED" in resp.json()["detail"]
 
 
-
 async def test_cancel_nonexistent_run_returns_404(async_client, async_session):
     """Cancelling a non-existent run should return 404."""
     fake_id = uuid.uuid4()
     resp = await async_client.post(f"/api/automation/v1/runs/{fake_id}/cancel")
     assert resp.status_code == 404
-
 
 
 async def test_cancel_other_users_run_returns_403(async_client, async_session):
