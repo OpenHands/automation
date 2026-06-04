@@ -38,7 +38,9 @@ jobs:
         steps:
             - name: Compute image tag
               id: tag
-              # Matches docker/metadata-action type=sha (7-char short SHA) in ghcr-build.yml.
+              # When manually dispatched, accepts the full sha-<short> tag from the Docker
+              # workflow (e.g. "sha-c58faa1"). Defaults to "sha-<first-7-characters-of-SHA>"
+              # which matches docker/metadata-action's type=sha in ghcr-build.yml.
               env:
                   DISPATCH_IMAGE_TAG: ${{ github.event.inputs['image-tag'] }}
                   SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
