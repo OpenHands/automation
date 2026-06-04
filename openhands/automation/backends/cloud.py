@@ -52,6 +52,19 @@ def _is_auth_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_transient_auth_error(exc: BaseException) -> bool:
+    """Check if exception is a transient auth error that may succeed on retry.
+
+    401 errors from the sandbox API could be caused by:
+    - Race conditions during key rotation
+    - Clock skew between services
+    - Temporary token validation issues
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 401
+    return False
+
+
 class CloudSandboxBackend(ExecutionBackend):
     """Execution backend that creates Cloud sandboxes per run.
 
@@ -79,9 +92,12 @@ class CloudSandboxBackend(ExecutionBackend):
         self._ready_timeout = sandbox_config.sandbox_ready_timeout
         self._poll_interval = sandbox_config.sandbox_poll_interval
 
-        # Configure retry decorator for rate limiting
+        # Configure retry decorator for rate limiting and transient auth errors
+        # 401 errors can occur due to race conditions during key rotation
         self._retry = retry(
-            retry=retry_if_exception(_is_rate_limit_error),
+            retry=retry_if_exception(
+                lambda e: _is_rate_limit_error(e) or _is_transient_auth_error(e)
+            ),
             stop=stop_after_attempt(sandbox_config.rate_limit_max_retries),
             wait=wait_exponential(
                 min=sandbox_config.rate_limit_min_wait,
@@ -130,7 +146,13 @@ class CloudSandboxBackend(ExecutionBackend):
             return await operation()
         except Exception as e:
             if _is_auth_error(e):
+                logger.warning(
+                    "Auth error encountered, refreshing API key: %s (status=%s)",
+                    str(e),
+                    getattr(e, "response", None) and getattr(e.response, "status_code", None),
+                )
                 await self._refresh_api_key()
+                logger.info("API key refreshed, retrying operation")
                 return await operation()
             raise
 
