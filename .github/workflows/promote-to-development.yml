@@ -51,6 +51,15 @@ jobs:
                     echo "tag=sha-${SHA::7}" >> "$GITHUB_OUTPUT"
                   fi
 
+            - name: Validate image tag format
+              env:
+                  IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+              run: |
+                  if [[ ! "$IMAGE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                    echo "::error title=Invalid image tag::Image tag must contain only alphanumeric characters, dots, underscores, or hyphens"
+                    exit 1
+                  fi
+
             - name: Mint saas-deploy token
               id: app-token
               uses: actions/create-github-app-token@7bd03711494f032dfa3be3558f7dc8787b0be333  # v3.1.0
