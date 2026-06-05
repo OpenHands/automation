@@ -145,7 +145,11 @@ async def mark_run_status(
         values["timeout_at"] = now + max_duration
         run.started_at = now
         run.timeout_at = now + max_duration
-    elif status in (AutomationRunStatus.COMPLETED, AutomationRunStatus.FAILED):
+    elif status in (
+        AutomationRunStatus.COMPLETED,
+        AutomationRunStatus.FAILED,
+        AutomationRunStatus.CANCELLED,
+    ):
         values["completed_at"] = now
         run.completed_at = now
 
