@@ -241,6 +241,79 @@ class TestSqliteMigrations:
             if os.path.exists(db_path):
                 os.unlink(db_path)
 
+    def test_head_repairs_missing_automation_indexes(self):
+        """Head migration recreates automation indexes missing from prior deploys."""
+        import subprocess
+
+        from sqlalchemy import create_engine, inspect, text
+
+        expected_indexes = {
+            "automations": {
+                "ix_automations_user_id",
+                "ix_automations_org_id",
+                "ix_automations_enabled",
+                "ix_automations_deleted_at",
+                "ix_automations_last_polled_at",
+            },
+            "automation_runs": {
+                "ix_automation_runs_automation_id",
+                "ix_automation_runs_status",
+                "ix_automation_runs_pending",
+                "ix_automation_runs_timeout_at",
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            db_url = f"sqlite:///{db_path}"
+            env = os.environ.copy()
+            env["AUTOMATION_DB_URL"] = db_url
+
+            result = subprocess.run(
+                ["uv", "run", "alembic", "upgrade", "006"],
+                env=env,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+            )
+            assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
+
+            engine = create_engine(db_url)
+            with engine.begin() as connection:
+                for index_names in expected_indexes.values():
+                    for index_name in index_names:
+                        connection.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+
+            inspector = inspect(engine)
+            for table_name, index_names in expected_indexes.items():
+                existing_names = {
+                    index["name"] for index in inspector.get_indexes(table_name)
+                }
+                assert existing_names.isdisjoint(index_names)
+
+            result = subprocess.run(
+                ["uv", "run", "alembic", "upgrade", "head"],
+                env=env,
+                capture_output=True,
+                text=True,
+                cwd=str(PROJECT_ROOT),
+            )
+            assert result.returncode == 0, f"Alembic upgrade failed: {result.stderr}"
+
+            inspector = inspect(engine)
+            for table_name, index_names in expected_indexes.items():
+                existing_names = {
+                    index["name"] for index in inspector.get_indexes(table_name)
+                }
+                assert index_names <= existing_names
+
+            engine.dispose()
+        finally:
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
     def test_auto_migration_error_handling(self):
         """Migration failure returns non-zero exit code.
 
