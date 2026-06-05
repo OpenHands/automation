@@ -187,6 +187,12 @@ class TestSqliteMigrations:
             assert "custom_webhooks" in tables
             assert "alembic_version" in tables
 
+            run_indexes = {
+                index["name"] for index in inspector.get_indexes("automation_runs")
+            }
+            assert "ix_automation_runs_status_created_at" in run_indexes
+            assert "ix_automation_runs_status_timeout_at" in run_indexes
+
             engine.dispose()
         finally:
             # Clean up

@@ -191,6 +191,8 @@ class AutomationRun(Base):
             postgresql_where=(status == AutomationRunStatus.PENDING),
         ),
         Index("ix_automation_runs_status", "status"),
+        Index("ix_automation_runs_status_created_at", "status", "created_at"),
+        Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
     )
 
 
