@@ -210,6 +210,7 @@ class RunStatus(StrEnum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 def _validate_command_string(

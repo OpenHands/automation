@@ -423,6 +423,100 @@ async def complete_run(
     return AutomationRunResponse.model_validate(run)
 
 
+# --- Run cancellation ---
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(
+    run_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Cancel a pending or running automation run.
+
+    For PENDING runs, prevents future dispatch.
+    For RUNNING runs, marks as cancelled and cleans up the sandbox.
+    Returns 409 if the run is already in a terminal state.
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    # Only PENDING and RUNNING runs can be cancelled
+    if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run is {run.status.value}, only PENDING or"
+                " RUNNING runs can be cancelled"
+            ),
+        )
+
+    now = utcnow()
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+            ),
+        )
+        .values(
+            status=AutomationRunStatus.CANCELLED,
+            completed_at=now,
+            error_detail="Cancelled by user",
+        )
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+
+    if db_result.rowcount == 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Run state changed concurrently, cancellation failed",
+        )
+
+    await session.refresh(run)
+    logger.info("Run %s cancelled by user", run_id)
+
+    # Clean up sandbox for runs that were RUNNING
+    if run.sandbox_id:
+        from openhands.automation.config import get_settings
+
+        settings = get_settings()
+        api_key = user.api_key
+        if api_key is None:
+            try:
+                api_key = await get_api_key_for_automation_run(run)
+            except (APIKeyError, ValueError):
+                logger.warning(
+                    "Could not mint API key for sandbox cleanup (run %s), "
+                    "skipping cleanup",
+                    run_id,
+                )
+                api_key = None
+
+        if api_key is not None:
+            asyncio.create_task(
+                cleanup_sandbox(
+                    api_url=settings.openhands_api_base_url,
+                    api_key=api_key,
+                    sandbox_id=run.sandbox_id,
+                    run_id=str(run_id),
+                )
+            )
+
+    return AutomationRunResponse.model_validate(run)
+
+
 # --- Helpers ---
 
 
