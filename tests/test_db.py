@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from openhands.automation.db import (
+    _build_asyncpg_connect_args,
+    _build_pg8000_connect_args,
     _create_sqlite_engine,
     is_sqlite_url,
     normalize_sqlite_url_for_alembic,
@@ -109,6 +111,28 @@ class TestEngineResult:
         """Dispose works when connector is None."""
         result = _create_sqlite_engine("sqlite+aiosqlite:///:memory:")
         await result.dispose()  # Should not raise
+
+
+class TestPostgresSslMode:
+    """Tests for PostgreSQL SSL mode mapping."""
+
+    def test_build_asyncpg_connect_args_for_ssl_modes(self):
+        assert _build_asyncpg_connect_args(None) == {}
+        assert _build_asyncpg_connect_args("") == {}
+        assert _build_asyncpg_connect_args("prefer") == {}
+        assert _build_asyncpg_connect_args("require") == {"ssl": "require"}
+        assert _build_asyncpg_connect_args("disable") == {"ssl": "disable"}
+
+    def test_build_pg8000_connect_args_for_ssl_modes(self):
+        assert _build_pg8000_connect_args(None) == {}
+        assert _build_pg8000_connect_args("") == {}
+        assert _build_pg8000_connect_args("prefer") == {}
+        assert _build_pg8000_connect_args("require") == {"ssl_context": True}
+        assert _build_pg8000_connect_args("disable") == {"ssl_context": False}
+
+    def test_build_connect_args_rejects_unsupported_ssl_mode(self):
+        with pytest.raises(ValueError, match="Unsupported AUTOMATION_DB_SSL_MODE"):
+            _build_asyncpg_connect_args("verify-full")
 
 
 class TestNormalizeSqliteUrlForAlembic:

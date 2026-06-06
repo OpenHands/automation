@@ -237,6 +237,8 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_NAME: Database name (default: automations)
         AUTOMATION_DB_USER: Database user (default: postgres)
         AUTOMATION_DB_PASS: Database password (default: postgres)
+        AUTOMATION_DB_SSL_MODE: PostgreSQL SSL mode: prefer, require, or disable
+            (default: empty, use driver default)
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
@@ -291,6 +293,7 @@ class ServiceSettings(BaseSettings):
     db_name: str = "automations"
     db_user: str = "postgres"
     db_pass: str = "postgres"
+    db_ssl_mode: str = ""
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes

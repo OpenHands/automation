@@ -294,6 +294,11 @@ class TestLocalModeSettings:
         settings = Settings()
         assert settings.db_url == ""
 
+    def test_db_ssl_mode_default(self):
+        """db_ssl_mode defaults to empty string."""
+        settings = Settings()
+        assert settings.db_ssl_mode == ""
+
     def test_local_mode_full_configuration(self):
         """All local mode settings can be configured together."""
         settings = Settings(
@@ -314,6 +319,7 @@ class TestLocalModeSettings:
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "env-key")
         monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", "/env/workspace")
         monkeypatch.setenv("AUTOMATION_DB_URL", "sqlite+aiosqlite:////data/test.db")
+        monkeypatch.setenv("AUTOMATION_DB_SSL_MODE", "require")
         clear_config_cache()
 
         settings = Settings()
@@ -322,6 +328,7 @@ class TestLocalModeSettings:
         assert settings.agent_server_api_key == "env-key"
         assert settings.workspace_base == "/env/workspace"
         assert settings.db_url == "sqlite+aiosqlite:////data/test.db"
+        assert settings.db_ssl_mode == "require"
 
 
 class TestDeprecatedFunctionWarnings:

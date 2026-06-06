@@ -23,6 +23,7 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, text
 
+from openhands.automation.db import _build_pg8000_connect_args
 from openhands.automation.models import Base
 
 
@@ -41,6 +42,9 @@ DB_PASS = os.getenv("AUTOMATION_DB_PASS", os.getenv("DB_PASS", "postgres"))
 DB_HOST = os.getenv("AUTOMATION_DB_HOST", os.getenv("DB_HOST", "localhost"))
 DB_PORT = os.getenv("AUTOMATION_DB_PORT", os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("AUTOMATION_DB_NAME", os.getenv("DB_NAME", "automations"))
+DB_SSL_MODE = os.getenv(
+    "AUTOMATION_DB_SSL_MODE", os.getenv("DB_SSL_MODE", os.getenv("PGSSLMODE", ""))
+)
 
 GCP_DB_INSTANCE = os.getenv("AUTOMATION_GCP_DB_INSTANCE", os.getenv("GCP_DB_INSTANCE"))
 GCP_PROJECT = os.getenv("AUTOMATION_GCP_PROJECT", os.getenv("GCP_PROJECT"))
@@ -91,7 +95,11 @@ def get_engine(database_name=DB_NAME):
 
     # Direct PostgreSQL
     url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{database_name}"
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url,
+        connect_args=_build_pg8000_connect_args(DB_SSL_MODE),
+        pool_pre_ping=True,
+    )
 
 
 def run_migrations_offline():
