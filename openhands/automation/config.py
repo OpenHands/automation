@@ -41,6 +41,7 @@ where repeated config lookups would add overhead. If you need to test with
 different values, use monkeypatching or reload the affected modules.
 """
 
+import os
 import warnings
 from functools import cached_property, lru_cache
 from typing import Literal
@@ -379,6 +380,13 @@ class ServiceSettings(BaseSettings):
     webhook_secret: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @model_validator(mode="after")
+    def apply_db_ssl_mode_env_fallback(self) -> "ServiceSettings":
+        """Match migration env fallback for standard Postgres SSL variables."""
+        if "db_ssl_mode" not in self.model_fields_set:
+            self.db_ssl_mode = os.getenv("DB_SSL_MODE", os.getenv("PGSSLMODE", ""))
+        return self
 
     @property
     def is_local_mode(self) -> bool:

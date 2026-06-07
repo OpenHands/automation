@@ -299,6 +299,41 @@ class TestLocalModeSettings:
         settings = Settings()
         assert settings.db_ssl_mode == ""
 
+    def test_db_ssl_mode_falls_back_to_db_ssl_mode(self, monkeypatch):
+        """db_ssl_mode falls back to standard DB_SSL_MODE."""
+        monkeypatch.setenv("DB_SSL_MODE", "require")
+
+        settings = Settings()
+
+        assert settings.db_ssl_mode == "require"
+
+    def test_db_ssl_mode_falls_back_to_pgsslmode(self, monkeypatch):
+        """db_ssl_mode falls back to standard PGSSLMODE."""
+        monkeypatch.setenv("PGSSLMODE", "disable")
+
+        settings = Settings()
+
+        assert settings.db_ssl_mode == "disable"
+
+    def test_automation_db_ssl_mode_takes_precedence(self, monkeypatch):
+        """AUTOMATION_DB_SSL_MODE takes precedence over standard fallbacks."""
+        monkeypatch.setenv("AUTOMATION_DB_SSL_MODE", "require")
+        monkeypatch.setenv("DB_SSL_MODE", "disable")
+        monkeypatch.setenv("PGSSLMODE", "prefer")
+
+        settings = Settings()
+
+        assert settings.db_ssl_mode == "require"
+
+    def test_db_ssl_mode_takes_precedence_over_pgsslmode(self, monkeypatch):
+        """DB_SSL_MODE takes precedence over PGSSLMODE."""
+        monkeypatch.setenv("DB_SSL_MODE", "require")
+        monkeypatch.setenv("PGSSLMODE", "disable")
+
+        settings = Settings()
+
+        assert settings.db_ssl_mode == "require"
+
     def test_local_mode_full_configuration(self):
         """All local mode settings can be configured together."""
         settings = Settings(
