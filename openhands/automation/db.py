@@ -27,6 +27,38 @@ from openhands.automation.config import ServiceSettings, get_config
 
 
 logger = logging.getLogger("automation.db")
+SUPPORTED_DB_SSL_MODES = {"prefer", "require", "disable"}
+
+
+def _normalize_db_ssl_mode(db_ssl_mode: str | None) -> str | None:
+    if db_ssl_mode is None:
+        return None
+
+    mode = db_ssl_mode.strip().lower()
+    if not mode or mode == "prefer":
+        return None
+    if mode not in SUPPORTED_DB_SSL_MODES:
+        raise ValueError(
+            f'Unsupported AUTOMATION_DB_SSL_MODE "{db_ssl_mode}". '
+            f"Supported values are: {', '.join(sorted(SUPPORTED_DB_SSL_MODES))}."
+        )
+    return mode
+
+
+def _build_asyncpg_connect_args(db_ssl_mode: str | None) -> dict:
+    mode = _normalize_db_ssl_mode(db_ssl_mode)
+    if mode:
+        return {"ssl": mode}
+    return {}
+
+
+def _build_pg8000_connect_args(db_ssl_mode: str | None) -> dict:
+    mode = _normalize_db_ssl_mode(db_ssl_mode)
+    if mode == "require":
+        return {"ssl_context": True}
+    if mode == "disable":
+        return {"ssl_context": False}
+    return {}
 
 
 def is_sqlite_url(url: str) -> bool:
@@ -103,6 +135,7 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     )
     engine = create_async_engine(
         url,
+        connect_args=_build_asyncpg_connect_args(settings.db_ssl_mode),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_recycle=settings.db_pool_recycle,
