@@ -214,47 +214,66 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 ## Release Procedure
 
-Releases publish `openhands-automation` to PyPI and retag the Docker image on GHCR. There are two paths:
+Releases are driven by [release-please](https://github.com/googleapis/release-please)
+via the centralized reusable workflows in
+[`OpenHands/release-actions`](https://github.com/OpenHands/release-actions). You do
+**not** bump versions or push tags by hand — release-please does both from the
+Conventional Commit history. (The old manual `Prepare Release` workflow has been
+removed.)
 
-### Automated (preferred) — Prepare Release workflow
+### Day-to-day flow
 
-1. Go to **Actions → Prepare Release** on GitHub and trigger it with the desired version (e.g. `1.0.0a3`).
-2. The workflow opens a PR that bumps `pyproject.toml` and regenerates `uv.lock`.
-3. Review and merge the PR.
-4. After merging, pull `main` and push a tag to trigger publishing:
+1. Open a PR against `main` with a [Conventional Commit](https://www.conventionalcommits.org)
+   title (`feat: …`, `fix: …`, `docs: …`, …). The `pr` workflow lints the title and
+   applies a `type: <type>` label.
+2. Squash-merge it. The **PR title becomes the commit message** release-please reads,
+   so the repo is configured to squash-merge with `PR_TITLE` as the commit title.
+3. On merge, release-please opens/updates a `chore(main): release X.Y.Z` PR that:
+   - bumps the version everywhere it is embedded (see table below), derived from the
+     merged commit types — `fix` → patch, `feat` → minor, breaking → major;
+   - aggregates the GitHub release notes (grouped by `type:` label via
+     `.github/release.yml`).
+4. **Merging that release PR publishes the release**: it tags the commit (e.g. `1.1.0`,
+   no `v` prefix) and publishes the GitHub release. The tag then triggers the publish
+   workflows below, and shipped PRs are back-labeled `released: X.Y.Z`.
 
-```bash
-git checkout main && git pull origin main
-git tag <version>          # e.g. git tag 1.0.0a3
-git push origin <version>
-```
+### Versions release-please keeps in sync
 
-### Manual
+A single repo version is applied to every embedded location (configured in
+`release-please-config.json`):
 
-1. Edit `pyproject.toml` — set `version = "<new-version>"`.
-2. Regenerate the lock file: `uv lock`.
-3. Commit both files: `git commit -am "chore: bump version to <new-version>"`.
-4. Merge (or push directly to main if you have access).
-5. Tag and push (the tag can point to any commit, including a PR branch head):
+| File | How it is updated |
+|------|-------------------|
+| `pyproject.toml` (`[project].version`) | native `python` release-type |
+| `uv.lock` (root package) | `toml` updater (`$.package[?(@.name.value=='openhands-automation')].version`) |
+| `frontend/package.json` | `json` updater (`$.version`) |
+| `frontend/package-lock.json` | `json` updater (`$.version` and `$.packages[''].version`) |
+| `openhands/automation/__init__.py` (`__version__`) | `generic` updater (`# x-release-please-version`) |
+| `openhands/automation/app.py` (FastAPI `version=`) | `generic` updater (`# x-release-please-version`) |
 
-```bash
-git tag <version>          # e.g. git tag 1.0.0a3
-git push origin <version>
-```
+The lock files are bumped so the release PR's own CI (`uv sync --frozen`, `npm ci`)
+stays green. Keep the `# x-release-please-version` annotations on the `__init__.py`
+and `app.py` version lines.
 
-### What the tag triggers
+### What the release tag triggers
 
 | Workflow | File | Action |
 |----------|------|--------|
 | Publish PyPI Package | `pypi-release.yml` | Builds and publishes `openhands-automation` to PyPI via OIDC trusted publishing |
-| Tag Docker images | `tag-image.yml` | Aliases the existing `sha-<commit>` GHCR image to the new tag (requires the Docker build for that commit to have run first) |
+| Tag Docker images | `tag-image.yml` | Aliases the existing `sha-<commit>` GHCR image to the release tag plus `X.Y` / `X` / `latest` (the `ghcr-build.yml` build for that commit must have run first) |
+
+> Prerequisites (one-time, org/repo settings — not in this repo): the org secrets
+> `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` (the GitHub App release-please uses —
+> required so the release tag triggers the publish workflows above), and squash-merge
+> configured with `PR_TITLE` as the commit title.
 
 ### SDK dependency bumps
 
 When bumping `openhands-sdk` / `openhands-workspace` pins:
 1. Update both versions in `pyproject.toml` dependencies.
 2. Run `uv lock` to regenerate `uv.lock`.
-3. Bump the package version and follow the release procedure above.
-4. After publishing, update `AUTOMATION_SHA` in the deploy repo:
+3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
+   release-please handles the version bump and release.
+4. After the release publishes, update `AUTOMATION_SHA` in the deploy repo:
    - `.github/workflows/deploy.yaml`
    - `.github/workflows/deploy-automation.yaml`
