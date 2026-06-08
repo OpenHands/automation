@@ -38,11 +38,17 @@ function formatRunTimestamp(
 }
 
 function getConversationUrl(conversationId: string): string {
-  const { hostname } = window.location;
-  const baseHost = hostname.includes("staging.all-hands.dev")
-    ? "staging.all-hands.dev"
-    : "app.all-hands.dev";
-  return `https://${baseHost}/conversations/${conversationId}`;
+  const { hostname, origin, pathname } = window.location;
+  const isLocalHost = hostname === "localhost" || hostname === "127.0.0.1";
+
+  if (isLocalHost) {
+    return `https://app.all-hands.dev/conversations/${conversationId}`;
+  }
+
+  const automationsPathIndex = pathname.indexOf("/automations");
+  const prefix =
+    automationsPathIndex >= 0 ? pathname.slice(0, automationsPathIndex) : "";
+  return `${origin}${prefix}/conversations/${conversationId}`;
 }
 
 export function ActivityLogItem({ run, timeZone }: ActivityLogItemProps) {

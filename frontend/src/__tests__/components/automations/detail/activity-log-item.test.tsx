@@ -7,7 +7,11 @@ import { ActivityLogItem } from "#/components/automations/detail/activity-log-it
 describe("ActivityLogItem", () => {
   beforeEach(() => {
     Object.defineProperty(window, "location", {
-      value: { hostname: "app.all-hands.dev" },
+      value: {
+        hostname: "app.all-hands.dev",
+        origin: "https://app.all-hands.dev",
+        pathname: "/automations/1",
+      },
       writable: true,
     });
   });
@@ -107,7 +111,11 @@ describe("ActivityLogItem", () => {
 
   it("uses staging host when on staging domain", () => {
     Object.defineProperty(window, "location", {
-      value: { hostname: "staging.all-hands.dev" },
+      value: {
+        hostname: "staging.all-hands.dev",
+        origin: "https://staging.all-hands.dev",
+        pathname: "/automations/1",
+      },
       writable: true,
     });
 
@@ -121,9 +129,74 @@ describe("ActivityLogItem", () => {
     );
   });
 
+  it("uses the current host on replicated deployments", () => {
+    Object.defineProperty(window, "location", {
+      value: {
+        hostname: "app.replicated-02.aws.alona.platform-team.all-hands.dev",
+        origin:
+          "https://app.replicated-02.aws.alona.platform-team.all-hands.dev",
+        pathname: "/automations/1",
+      },
+      writable: true,
+    });
+
+    const run = createRun({ conversation_id: "conv-abc123" });
+    render(<ActivityLogItem run={run} />);
+
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute(
+      "href",
+      "https://app.replicated-02.aws.alona.platform-team.all-hands.dev/conversations/conv-abc123",
+    );
+  });
+
+  it("preserves path prefixes before the automations route", () => {
+    Object.defineProperty(window, "location", {
+      value: {
+        hostname: "example.com",
+        origin: "https://example.com",
+        pathname: "/acmecorp/automations/1",
+      },
+      writable: true,
+    });
+
+    const run = createRun({ conversation_id: "conv-abc123" });
+    render(<ActivityLogItem run={run} />);
+
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute(
+      "href",
+      "https://example.com/acmecorp/conversations/conv-abc123",
+    );
+  });
+
+  it("falls back to root when the current path is not an automations route", () => {
+    Object.defineProperty(window, "location", {
+      value: {
+        hostname: "example.com",
+        origin: "https://example.com",
+        pathname: "/settings",
+      },
+      writable: true,
+    });
+
+    const run = createRun({ conversation_id: "conv-abc123" });
+    render(<ActivityLogItem run={run} />);
+
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute(
+      "href",
+      "https://example.com/conversations/conv-abc123",
+    );
+  });
+
   it("uses app.all-hands.dev for localhost", () => {
     Object.defineProperty(window, "location", {
-      value: { hostname: "localhost" },
+      value: {
+        hostname: "localhost",
+        origin: "http://localhost:3002",
+        pathname: "/automations/1",
+      },
       writable: true,
     });
 
