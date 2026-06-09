@@ -27,3 +27,14 @@ class TarballNotFoundError(PermanentDispatchError):
     """
 
     pass
+
+
+class ConcurrencyLimitReachedError(Exception):
+    """The organization/workspace has reached its concurrent-sandbox limit.
+
+    Unlike PermanentDispatchError this is a *transient*, org-level condition: a
+    later run may succeed once a concurrent slot frees up. The run is marked
+    SKIPPED (not FAILED) and the automation is left enabled.
+    """
+
+    pass

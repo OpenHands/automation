@@ -25,4 +25,11 @@ describe("RunStatusBadge", () => {
     render(<RunStatusBadge status={AutomationRunStatus.RUNNING} />);
     expect(screen.getByText("AUTOMATIONS$DETAIL$RUNNING")).toBeInTheDocument();
   });
+
+  it("renders skipped/limit-reached label for skipped status", () => {
+    render(<RunStatusBadge status={AutomationRunStatus.SKIPPED} />);
+    expect(
+      screen.getByText("AUTOMATIONS$DETAIL$SKIPPED_LIMIT_REACHED"),
+    ).toBeInTheDocument();
+  });
 });

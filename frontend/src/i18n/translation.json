@@ -696,6 +696,23 @@
     "tr": "Zamanlama",
     "uk": "Розклад"
   },
+  "AUTOMATIONS$DETAIL$SKIPPED_LIMIT_REACHED": {
+    "en": "Skipped – Limit Reached",
+    "ja": "スキップ – 上限に到達",
+    "zh-CN": "已跳过 – 已达上限",
+    "zh-TW": "已略過 – 已達上限",
+    "ko-KR": "건너뜀 – 한도 도달",
+    "no": "Hoppet over – grense nådd",
+    "ar": "تم التخطّي – تم بلوغ الحد",
+    "de": "Übersprungen – Limit erreicht",
+    "fr": "Ignoré – limite atteinte",
+    "it": "Saltato – limite raggiunto",
+    "pt": "Ignorado – limite atingido",
+    "es": "Omitido – límite alcanzado",
+    "ca": "Omès – límit assolit",
+    "tr": "Atlandı – sınıra ulaşıldı",
+    "uk": "Пропущено – ліміт досягнуто"
+  },
   "AUTOMATIONS$DETAIL$SUCCESSFUL": {
     "en": "Successful",
     "ja": "成功",

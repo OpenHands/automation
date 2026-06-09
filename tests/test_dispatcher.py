@@ -11,12 +11,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from openhands.automation.dispatcher import (
     _build_event_payload,
+    _execute_run,
     dispatch_pending_runs,
     dispatcher_loop,
 )
+from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import mark_run_status
@@ -689,3 +692,110 @@ class TestBuildEventPayload:
 
         assert payload["trigger"] == "unknown"
         assert payload["trigger_payload"] == {}
+
+
+class TestExecuteRunConcurrencyLimit:
+    """When the org/workspace is at its concurrent-sandbox limit, the run is
+    marked SKIPPED (not FAILED) and the automation is left enabled."""
+
+    async def _make_running_run(self, async_session_factory):
+        """Create an automation + a RUNNING run (as the dispatcher leaves it
+        right before calling get_execution_context), with the automation
+        relationship eagerly loaded for _execute_run."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+            automation_id = automation.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalars().first()
+        return run, run_id, automation_id
+
+    async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A ConcurrencyLimitReachedError from get_execution_context marks the
+        run SKIPPED (with completed_at, no error_detail) and does NOT disable
+        the automation."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(
+            side_effect=ConcurrencyLimitReachedError(
+                "You have reached your limit of 3 concurrent conversations."
+            )
+        )
+        backend.release_context = AsyncMock()
+
+        with patch(
+            "openhands.automation.dispatcher.get_backend", return_value=backend
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                await session.execute(
+                    select(AutomationRun).where(AutomationRun.id == run_id)
+                )
+            ).scalars().first()
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.completed_at is not None
+            assert updated.error_detail is None  # SKIPPED is not a failure
+
+            auto = (
+                await session.execute(
+                    select(Automation).where(Automation.id == automation_id)
+                )
+            ).scalars().first()
+            assert auto.enabled is True  # transient org-level condition: not disabled
+
+        # No execution context was acquired, so there is nothing to release.
+        backend.release_context.assert_not_called()
+
+    async def test_generic_context_failure_still_marks_failed(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """Regression: a non-concurrency failure in get_execution_context still
+        marks the run FAILED — the new SKIPPED branch must not swallow it."""
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
+        backend.release_context = AsyncMock()
+
+        with patch(
+            "openhands.automation.dispatcher.get_backend", return_value=backend
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                await session.execute(
+                    select(AutomationRun).where(AutomationRun.id == run_id)
+                )
+            ).scalars().first()
+            assert updated.status == AutomationRunStatus.FAILED
