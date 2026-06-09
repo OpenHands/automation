@@ -49,6 +49,7 @@ PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
+
 def _get_preset_entrypoint() -> str:
     """Return the preset entrypoint for the current host platform.
 
@@ -56,9 +57,7 @@ def _get_preset_entrypoint() -> str:
     directory. Cloud sandboxes use the POSIX layout (``.venv/bin/python``),
     while native Windows uses ``.venv/Scripts/python.exe``.
     """
-    python_path = (
-        ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
-    )
+    python_path = ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
     return f"{python_path} main.py"
 
 
