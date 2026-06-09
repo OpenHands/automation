@@ -14,6 +14,7 @@ from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
+    _get_preset_entrypoint,
     _replace_prompt_in_tarball,
 )
 from openhands.sdk.plugin import PluginSource
@@ -110,6 +111,30 @@ class TestPresetFileSyntax:
             "setup.sh must call ${AUTOMATION_API_URL}/sdk-version "
             "— do not hardcode the version"
         )
+
+
+class TestPresetEntrypoint:
+    def test_get_preset_entrypoint_posix(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
+        assert _get_preset_entrypoint() == ".venv/bin/python main.py"
+
+    def test_get_preset_entrypoint_windows(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
+        assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
+
+    def test_prompt_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
+
+    def test_plugin_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
 
 
 class TestGenerateTarball:
@@ -427,7 +452,7 @@ class TestCreateAutomationFromPrompt:
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -554,7 +579,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -1283,7 +1308,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -1399,7 +1424,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
