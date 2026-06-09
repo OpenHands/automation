@@ -100,16 +100,3 @@ jobs:
                   push: false
                   tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEVANT_SHA }}
                   platforms: linux/amd64
-
-    trigger-deploy-preview:
-        name: Trigger Deploy Preview
-        needs: ghcr_build
-        # Only trigger for PRs from non-fork repos (fork check mirrors the push condition in ghcr_build)
-        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
-        uses: ./.github/workflows/trigger-deploy-preview.yml
-        with:
-            pr_number: ${{ github.event.pull_request.number }}
-            head_sha: ${{ github.event.pull_request.head.sha }}
-            pr_title: ${{ github.event.pull_request.title }}
-        secrets:
-            ALLHANDS_BOT_GITHUB_PAT: ${{ secrets.ALLHANDS_BOT_GITHUB_PAT }}
