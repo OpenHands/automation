@@ -764,6 +764,23 @@
     "tr": "Aktif ve aktif olmayan otomasyonları görüntüleyin, meta verilere göre arayın ve salt okunur ayrıntıları inceleyin.",
     "uk": "Переглядайте активні та неактивні автоматизації, шукайте за метаданими та переглядайте деталі лише для читання."
   },
+  "AUTOMATIONS$ARCHITECTURE": {
+    "en": "Architecture",
+    "ja": "アーキテクチャ",
+    "zh-CN": "架构",
+    "zh-TW": "架構",
+    "ko-KR": "아키텍처",
+    "no": "Arkitektur",
+    "ar": "البنية",
+    "de": "Architektur",
+    "fr": "Architecture",
+    "it": "Architettura",
+    "pt": "Arquitetura",
+    "es": "Arquitectura",
+    "ca": "Arquitectura",
+    "tr": "Mimari",
+    "uk": "Архітектура"
+  },
   "AUTOMATIONS$SEARCH_PLACEHOLDER": {
     "en": "Search automations...",
     "ja": "オートメーションを検索...",

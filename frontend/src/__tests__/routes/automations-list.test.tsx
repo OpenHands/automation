@@ -118,6 +118,19 @@ describe("AutomationsList", () => {
     expect(screen.getByText("Release Readiness Review")).toBeInTheDocument();
   });
 
+  it("links to the architecture page", async () => {
+    getAutomationsSpy.mockResolvedValue(mockAutomations);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("PR Triage Digest")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole("link", { name: "AUTOMATIONS$ARCHITECTURE" }),
+    ).toHaveAttribute("href", "/arch");
+  });
+
   it("filters automations by search query", async () => {
     const user = userEvent.setup();
     getAutomationsSpy.mockResolvedValue(mockAutomations);

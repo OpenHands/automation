@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import {
@@ -71,12 +72,22 @@ export default function AutomationsList() {
   return (
     <div>
       {/* Header */}
-      <h1 className="text-xl font-semibold text-content">
-        {t(I18nKey.AUTOMATIONS$TITLE)}
-      </h1>
-      <p className="mt-1 text-sm text-content-muted">
-        {t(I18nKey.AUTOMATIONS$SUBTITLE)}
-      </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-content">
+            {t(I18nKey.AUTOMATIONS$TITLE)}
+          </h1>
+          <p className="mt-1 text-sm text-content-muted">
+            {t(I18nKey.AUTOMATIONS$SUBTITLE)}
+          </p>
+        </div>
+        <Link
+          to="/arch"
+          className="inline-flex items-center justify-center rounded-lg border border-border px-3 py-2 text-sm text-content-muted transition hover:border-border-hover hover:text-content"
+        >
+          {t(I18nKey.AUTOMATIONS$ARCHITECTURE)}
+        </Link>
+      </div>
 
       {/* Search */}
       <div className="mt-6">
