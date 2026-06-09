@@ -41,6 +41,7 @@ class AutomationRunStatus(enum.Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    SKIPPED = "SKIPPED"
 
 
 class Automation(Base):

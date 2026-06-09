@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from openhands.automation.backends import (
@@ -10,6 +11,8 @@ from openhands.automation.backends import (
     LocalAgentServerBackend,
     get_backend,
 )
+from openhands.automation.backends.cloud import _concurrency_limit_detail
+from openhands.automation.exceptions import ConcurrencyLimitReachedError
 
 
 class TestExecutionContext:
@@ -469,3 +472,101 @@ class TestGetBackend:
         backend = get_backend(mock_run)
         assert isinstance(backend, CloudSandboxBackend)
         assert backend.api_url == "https://app.all-hands.dev"
+
+
+class TestConcurrencyLimitDetection:
+    """Tests for `_concurrency_limit_detail`, the discriminator that tells an
+    organization concurrency-limit 429 (→ mark run SKIPPED) apart from a
+    transient rate-limit 429 (→ retry as before)."""
+
+    @staticmethod
+    def _resp(status: int, *, json=None, raw: bytes | None = None) -> httpx.Response:
+        req = httpx.Request("POST", "https://app.all-hands.dev/api/v1/sandboxes")
+        if raw is not None:
+            return httpx.Response(status, request=req, content=raw)
+        return httpx.Response(status, request=req, json=json)
+
+    def test_detects_nested_fastapi_detail(self):
+        """The real shape: FastAPI nests the HTTPException detail under "detail"."""
+        resp = self._resp(
+            429,
+            json={
+                "detail": {
+                    "error": "CONCURRENCY_LIMIT_REACHED",
+                    "message": "You have reached your limit of 3 ...",
+                    "limit": 3,
+                    "current": 3,
+                }
+            },
+        )
+        detail = _concurrency_limit_detail(resp)
+        assert detail is not None
+        assert detail["limit"] == 3
+
+    def test_detects_flat_detail(self):
+        """A non-nested {"error": ...} body is also tolerated."""
+        resp = self._resp(429, json={"error": "CONCURRENCY_LIMIT_REACHED"})
+        assert _concurrency_limit_detail(resp) is not None
+
+    def test_ignores_transient_rate_limit_429(self):
+        """A generic 429 with a string detail is a transient rate limit."""
+        resp = self._resp(429, json={"detail": "Rate limited, slow down"})
+        assert _concurrency_limit_detail(resp) is None
+
+    def test_ignores_429_without_marker(self):
+        """A 429 whose detail lacks the marker is not a concurrency limit."""
+        resp = self._resp(429, json={"detail": {"error": "SOMETHING_ELSE"}})
+        assert _concurrency_limit_detail(resp) is None
+
+    def test_ignores_non_json_429(self):
+        """A non-JSON 429 body never matches (and does not raise)."""
+        resp = self._resp(429, raw=b"<html>too many requests</html>")
+        assert _concurrency_limit_detail(resp) is None
+
+    def test_ignores_non_429(self):
+        """Only 429 responses can be a concurrency limit."""
+        resp = self._resp(200, json={"id": "sandbox-abc"})
+        assert _concurrency_limit_detail(resp) is None
+
+
+class TestCloudSandboxConcurrencyLimit:
+    """Tests that `_create_sandbox` surfaces the org concurrency limit as
+    `ConcurrencyLimitReachedError` without retrying it."""
+
+    @pytest.fixture
+    def mock_run(self):
+        run = MagicMock()
+        run.sandbox_id = None
+        run.keep_alive = False
+        run.bash_command_id = None
+        return run
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_raises_and_does_not_retry(self, mock_run):
+        """A concurrency-limit 429 raises ConcurrencyLimitReachedError on the
+        first attempt — retrying cannot free a slot, so it must not be retried."""
+        backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
+
+        req = httpx.Request("POST", "https://app.all-hands.dev/api/v1/sandboxes")
+        resp = httpx.Response(
+            429,
+            request=req,
+            json={
+                "detail": {
+                    "error": "CONCURRENCY_LIMIT_REACHED",
+                    "message": "Reached limit of 3 concurrent conversations.",
+                    "limit": 3,
+                    "current": 3,
+                }
+            },
+        )
+        client = MagicMock()
+        client.post = AsyncMock(return_value=resp)
+
+        with pytest.raises(
+            ConcurrencyLimitReachedError, match="concurrent conversations"
+        ):
+            await backend._create_sandbox(client, {"Authorization": "Bearer x"})
+
+        # No retry: the sandbox API was hit exactly once.
+        assert client.post.await_count == 1

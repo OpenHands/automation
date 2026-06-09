@@ -21,6 +21,7 @@ from tenacity import (
 
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
 from openhands.automation.config import get_config
+from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.api_key import get_api_key_for_automation_run
 from openhands.automation.utils.sandbox import (
@@ -50,6 +51,27 @@ def _is_auth_error(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (401, 403)
     return False
+
+
+def _concurrency_limit_detail(resp: httpx.Response) -> dict | None:
+    """Return the CONCURRENCY_LIMIT_REACHED detail dict if the response is the
+    organization concurrent-sandbox limit 429, else None.
+
+    The OpenHands API raises this as a FastAPI HTTPException, so the body is
+    ``{"detail": {"error": "CONCURRENCY_LIMIT_REACHED", ...}}``; we also tolerate
+    a flat ``{"error": ...}`` shape. This is distinct from a transient
+    rate-limit 429, which should still be retried (see ``_is_rate_limit_error``).
+    """
+    if resp.status_code != 429:
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    detail = body.get("detail", body) if isinstance(body, dict) else None
+    if isinstance(detail, dict) and detail.get("error") == "CONCURRENCY_LIMIT_REACHED":
+        return detail
+    return None
 
 
 class CloudSandboxBackend(ExecutionBackend):
@@ -269,6 +291,14 @@ class CloudSandboxBackend(ExecutionBackend):
             resp = await client.post(
                 f"{self.api_url}/api/v1/sandboxes", headers=headers
             )
+            # A concurrency-limit 429 is not transient: retrying won't free a
+            # slot. Raise a non-HTTPStatusError so the retry predicate skips it
+            # and the dispatcher can mark the run SKIPPED instead of FAILED.
+            detail = _concurrency_limit_detail(resp)
+            if detail is not None:
+                raise ConcurrencyLimitReachedError(
+                    detail.get("message") or "Concurrency limit reached"
+                )
             resp.raise_for_status()
             return resp.json()["id"]
 

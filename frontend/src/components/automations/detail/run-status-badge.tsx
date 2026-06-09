@@ -30,6 +30,10 @@ const statusConfig: Record<
     label: I18nKey.AUTOMATIONS$DETAIL$RUNNING,
     style: "border-border bg-surface-elevated text-content-muted",
   },
+  [AutomationRunStatus.SKIPPED]: {
+    label: I18nKey.AUTOMATIONS$DETAIL$SKIPPED_LIMIT_REACHED,
+    style: "border-border bg-surface-elevated text-content-muted",
+  },
 };
 
 function StatusIcon({ status }: { status: AutomationRunStatus }) {

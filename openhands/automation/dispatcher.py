@@ -29,7 +29,11 @@ from sqlalchemy.orm import selectinload
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
 from openhands.automation.db import using_sqlite
-from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    PermanentDispatchError,
+    TarballNotFoundError,
+)
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import (
     Automation,
@@ -196,6 +200,14 @@ async def _execute_run(
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
         ctx = await backend.get_execution_context(client)
+    except ConcurrencyLimitReachedError as exc:
+        logger.warning(
+            "Run skipped — organization concurrency limit reached: %s",
+            exc,
+            extra=_log_ctx(),
+        )
+        await mark_run_terminal(session_factory, run, AutomationRunStatus.SKIPPED)
+        return
     except Exception:
         logger.exception("Failed to get execution context", extra=_log_ctx())
         await _fail("Failed to get execution context")
