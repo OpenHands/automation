@@ -29,6 +29,7 @@ dependencies = [
   "python-json-logger>=3",
   "sqlalchemy[asyncio]>=2",
   "tenacity>=9.1.4",
+  "tzdata>=2024.1",
   "uvicorn[standard]>=0.30",
 ]
 
