@@ -12,6 +12,7 @@ Currently supported presets:
 import io
 import json
 import logging
+import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -48,11 +49,17 @@ PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
-# Venv Python entrypoint (Unix path format)
-# - Cloud mode: Always Linux sandboxes, so Unix paths work
-# - Local mode: Requires Unix-like environment (Linux, macOS, WSL)
-# - Native Windows is not currently supported for local mode
-VENV_ENTRYPOINT = ".venv/bin/python main.py"
+
+def _get_preset_entrypoint() -> str:
+    """Return the preset entrypoint for the current host platform.
+
+    Preset automations create their virtual environment inside the run working
+    directory. Cloud sandboxes use the POSIX layout (``.venv/bin/python``),
+    while native Windows uses ``.venv/Scripts/python.exe``.
+    """
+    python_path = ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
+    return f"{python_path} main.py"
+
 
 # Preset file caches to avoid I/O on every request
 _PROMPT_PRESET_CACHE: dict[str, str] | None = None
@@ -434,7 +441,7 @@ async def create_automation_from_prompt(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint=VENV_ENTRYPOINT,
+            entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
         )
         session.add(automation)
@@ -751,7 +758,7 @@ async def create_automation_from_plugin(
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
-            entrypoint=VENV_ENTRYPOINT,
+            entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
         )
         session.add(automation)
