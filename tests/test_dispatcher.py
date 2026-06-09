@@ -727,12 +727,16 @@ class TestExecuteRunConcurrencyLimit:
 
         async with async_session_factory() as session:
             run = (
-                await session.execute(
-                    select(AutomationRun)
-                    .options(selectinload(AutomationRun.automation))
-                    .where(AutomationRun.id == run_id)
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
         return run, run_id, automation_id
 
     async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
@@ -751,26 +755,32 @@ class TestExecuteRunConcurrencyLimit:
         )
         backend.release_context = AsyncMock()
 
-        with patch(
-            "openhands.automation.dispatcher.get_backend", return_value=backend
-        ):
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         async with async_session_factory() as session:
             updated = (
-                await session.execute(
-                    select(AutomationRun).where(AutomationRun.id == run_id)
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert updated.status == AutomationRunStatus.SKIPPED
             assert updated.completed_at is not None
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
-                await session.execute(
-                    select(Automation).where(Automation.id == automation_id)
+                (
+                    await session.execute(
+                        select(Automation).where(Automation.id == automation_id)
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert auto.enabled is True  # transient org-level condition: not disabled
 
         # No execution context was acquired, so there is nothing to release.
@@ -787,15 +797,17 @@ class TestExecuteRunConcurrencyLimit:
         backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
         backend.release_context = AsyncMock()
 
-        with patch(
-            "openhands.automation.dispatcher.get_backend", return_value=backend
-        ):
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         async with async_session_factory() as session:
             updated = (
-                await session.execute(
-                    select(AutomationRun).where(AutomationRun.id == run_id)
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert updated.status == AutomationRunStatus.FAILED
