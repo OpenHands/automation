@@ -237,8 +237,8 @@ def _build_python_runner_command(
     ).strip()
     encoded_payload = base64.b64encode(payload.encode("utf-8")).decode("ascii")
     return (
-        f'{_get_python_launcher()} -c '
-        f'"import base64; exec(base64.b64decode(\'{encoded_payload}\').decode())"'
+        f"{_get_python_launcher()} -c "
+        f"\"import base64; exec(base64.b64decode('{encoded_payload}').decode())\""
     )
 
 
@@ -255,21 +255,19 @@ def _build_shell_runner_command(
         parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
         exports = " && ".join(parts) + " && "
 
-    setup_step = ""
-    if setup_script_path:
-        quoted_setup_path = _shell_quote(setup_script_path)
-        setup_step = f" && ([ ! -f {quoted_setup_path} ] || bash {quoted_setup_path})"
+    base_command = (
+        f"mkdir -p {work_dir}"
+        f" && tar xzf {tarball_path} -C {work_dir}"
+        f" && rm -f {tarball_path}"
+        f" && cd {work_dir}"
+    )
 
+    if not setup_script_path:
+        return f"{base_command} && {exports}{entrypoint}"
+
+    quoted_setup_path = _shell_quote(setup_script_path)
     return (
-        f"mkdir -p {work_dir}"
-        f" && tar xzf {tarball_path} -C {work_dir}"
-        f" && rm -f {tarball_path}"
-        f" && cd {work_dir}"
-        f" && {exports}{entrypoint}" if not setup_step else
-        f"mkdir -p {work_dir}"
-        f" && tar xzf {tarball_path} -C {work_dir}"
-        f" && rm -f {tarball_path}"
-        f" && cd {work_dir}"
+        f"{base_command}"
         f" && {exports}([ ! -f {quoted_setup_path} ] || bash {quoted_setup_path})"
         f" && {entrypoint}"
     )

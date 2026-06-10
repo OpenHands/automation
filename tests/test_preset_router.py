@@ -130,14 +130,14 @@ class TestPresetEntrypoint:
         content = bootstrap_path.read_text()
         assert 'VENV_DIR / "Scripts" / "python.exe"' in content
         assert 'VENV_DIR / "bin" / "python"' in content
-        assert 'AUTOMATION_API_URL' in content
+        assert "AUTOMATION_API_URL" in content
 
     def test_plugin_bootstrap_contains_cross_platform_venv_paths(self):
         bootstrap_path = PRESETS_DIR / "plugin" / "bootstrap.py"
         content = bootstrap_path.read_text()
         assert 'VENV_DIR / "Scripts" / "python.exe"' in content
         assert 'VENV_DIR / "bin" / "python"' in content
-        assert 'AUTOMATION_API_URL' in content
+        assert "AUTOMATION_API_URL" in content
 
 
 class TestGenerateTarball:

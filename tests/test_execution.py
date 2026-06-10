@@ -189,6 +189,7 @@ class TestUploadUsesQueryParams:
         )
         # Verify the path is properly encoded in query string
         from urllib.parse import quote
+
         encoded = quote(dest, safe="")
         assert f"path={encoded}" in url or f"path={dest}" in url
 
@@ -344,7 +345,6 @@ class TestExecuteInContextErrors:
         assert "AUTOMATION_API_URL" in payload
 
 
-
 class TestPerRunTarballPath:
     """Tests that execute_in_context uses an isolated per-run tarball path.
 
@@ -378,9 +378,7 @@ class TestPerRunTarballPath:
         )
 
         uploaded_dest = mock_upload.call_args.args[4]  # (client, url, key, data, dest)
-        expected = os.path.join(
-            tempfile.gettempdir(), f"automation-{run_id}.tar.gz"
-        )
+        expected = os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
         assert uploaded_dest == expected
         assert uploaded_dest != TARBALL_PATH
 
@@ -406,9 +404,7 @@ class TestPerRunTarballPath:
         )
 
         download_dest = mock_download_in_sandbox.call_args.args[4]
-        expected = os.path.join(
-            tempfile.gettempdir(), f"automation-{run_id}.tar.gz"
-        )
+        expected = os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
         assert download_dest == expected
         assert download_dest != TARBALL_PATH
 
