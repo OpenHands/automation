@@ -2,7 +2,7 @@
 # Install the OpenHands SDK from PyPI into an isolated virtual environment.
 set -e
 
-SDK_VERSION="1.22.0"
+SDK_VERSION="1.27.0"
 
 echo "[setup] Creating isolated virtual environment"
 uv venv .venv --quiet
