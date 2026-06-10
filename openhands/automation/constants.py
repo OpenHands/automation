@@ -13,6 +13,9 @@ WARNING: Changing any value here requires careful analysis of:
 - Sandbox conventions (if expected by SDK/runtime)
 """
 
+import os
+import tempfile
+
 # ---------------------------------------------------------------------------
 # Sandbox protocol conventions
 # ---------------------------------------------------------------------------
@@ -24,11 +27,10 @@ WARNING: Changing any value here requires careful analysis of:
 # DO NOT CHANGE: Would break all existing automations and SDK integration.
 WORK_DIR = "/workspace/project"
 
-# Path where tarballs are extracted inside the sandbox. This is:
-# - Written by the sandbox initialization script
-# - Read by the automation entrypoint
-# DO NOT CHANGE: Would break tarball extraction in running sandboxes.
-TARBALL_PATH = "/tmp/automation.tar.gz"
+# Path where tarballs are stored before extraction. Uses the platform temp
+# directory so the agent-server accepts the path on every OS (Windows
+# requires a drive-letter prefix for os.path.isabs() to return True).
+TARBALL_PATH = os.path.join(tempfile.gettempdir(), "automation.tar.gz")
 
 # model profile names mirror the agent-server profile-store constraints.
 MODEL_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
