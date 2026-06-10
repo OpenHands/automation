@@ -4,7 +4,9 @@ Only tests pure logic that can run without a network.  The e2e flow
 (run_automation against a real sandbox) lives in scripts/test_automation.py.
 """
 
+import base64
 import io
+import re
 import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -299,6 +301,44 @@ class TestExecuteInContextErrors:
         assert isinstance(result, DispatchResult)
         assert result.success is True
         assert result.sandbox_id == "test-sandbox-id"
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_setup_script_none_uses_python_runner(
+        self, mock_start_bash, mock_upload
+    ):
+        """setup_script_path=None should bypass POSIX setup.sh handling."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-bootstrap"
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        expected_path = f"/tmp/automation-{run_id}.tar.gz"
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python bootstrap.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            env_vars={"AUTOMATION_API_URL": "https://automation.example.com"},
+            run_id=run_id,
+            setup_script_path=None,
+        )
+
+        bash_cmd = mock_start_bash.call_args.args[3]
+        assert "base64.b64decode" in bash_cmd
+        assert "export " not in bash_cmd
+        assert "setup.sh" not in bash_cmd
+
+        match = re.search(r"base64\.b64decode\('([^']+)'\)", bash_cmd)
+        assert match is not None
+        payload = base64.b64decode(match.group(1)).decode("utf-8")
+        assert expected_path in payload
+        assert DEFAULT_WORK_DIR in payload
+        assert "python bootstrap.py" in payload
+        assert "AUTOMATION_API_URL" in payload
+
 
 
 class TestPerRunTarballPath:

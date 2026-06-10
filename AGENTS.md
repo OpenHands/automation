@@ -102,7 +102,8 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
 6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
-   - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
+   - Shell path: extracts tarball, runs `setup.sh` (if present), exports env vars, runs entrypoint
+   - Cross-platform preset path: when `setup_script_path is null`, execution uses an inline Python runner to extract the tarball, inject env vars, and launch the entrypoint without POSIX shell features
 7. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
@@ -184,16 +185,17 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 2. Service generates SDK boilerplate code with the user's prompt
 3. Creates a tarball containing:
    - `main.py` - SDK boilerplate that loads and executes the prompt
+   - `bootstrap.py` - stdlib-only cross-platform bootstrap that creates `.venv`, installs the matching OpenHands SDK packages, and re-execs `main.py`
    - `prompt.txt` - The user's prompt text
-   - `setup.sh` - SDK installation script
 4. Uploads the tarball to storage (creates `TarballUpload` record)
-5. Creates the `Automation` record referencing the internal upload
+5. Creates the `Automation` record referencing the internal upload with `setup_script_path=None` and a bootstrap entrypoint (`python bootstrap.py` on POSIX, `py -3 bootstrap.py` on Windows)
 
 #### Files
 
 - `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
 - `openhands/automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
-- `openhands/automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
+- `openhands/automation/presets/prompt/bootstrap.py` - stdlib-only cross-platform preset bootstrap
+- `openhands/automation/presets/prompt/setup.sh` - legacy shell bootstrap retained for reference/tests but no longer used by generated presets
 
 #### Request Schema
 
@@ -209,7 +211,7 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 ### Notes
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
-- The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
+- Generated presets now launch `bootstrap.py` (`python bootstrap.py` on POSIX, `py -3 bootstrap.py` on Windows) and set `setup_script_path=None`
 - Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
 
 ## Release Procedure
