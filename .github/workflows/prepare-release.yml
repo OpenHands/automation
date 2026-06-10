@@ -33,7 +33,7 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v4
               with:
-                  token: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}
+                  token: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PUBLIC }}
                   fetch-depth: 0
 
             - name: Install uv
@@ -99,7 +99,7 @@ jobs:
 
             - name: Create Pull Request
               env:
-                  GH_TOKEN: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PRIVATE }}
+                  GH_TOKEN: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PUBLIC }}
               run: |
                   VERSION="${{ inputs.version }}"
                   CURRENT="${{ steps.current.outputs.version }}"
