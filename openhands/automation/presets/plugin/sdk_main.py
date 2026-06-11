@@ -372,6 +372,10 @@ This automation was triggered by a webhook event:
         tags=experiment_tags or None,
     )
     assert isinstance(conversation, RemoteConversation)
+
+    # Register conversation ID with workspace for completion callback
+    workspace.register_conversation(str(conversation.id))
+
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
     if experiment_tags:
