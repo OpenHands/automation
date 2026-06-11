@@ -67,6 +67,28 @@ Three repos work together:
 
 After pushing to the automation repo, update both files in the deploy repo.
 
+## Configuration
+
+Configuration is centralized in `config.py` using a composed `AppConfig` with typed sections:
+
+```python
+from automation.config import get_config
+
+config = get_config()
+config.service.db_host          # ServiceSettings (AUTOMATION_ prefix)
+config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
+config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
+config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
+config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
+config.log.log_level            # LogSettings (no prefix)
+```
+
+**Key principles:**
+- Use `get_config().<section>` instead of deprecated `get_settings()`
+- All environment variables documented in config class docstrings
+- Protocol constants (WORK_DIR, TARBALL_PATH) in `constants.py` - these cannot be changed without breaking compatibility
+- Shared logging context via `log_extra()` from `automation.utils`
+
 ## Build & Test Commands
 
 ```bash

@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
-from openhands.automation.config import get_settings
+from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
     create_session_factory,
@@ -22,6 +22,7 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
+from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
@@ -52,7 +53,10 @@ async def lifespan(app: FastAPI):
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-    logger.info("Starting OpenHands Automations Service")
+    logger.info(
+        "Starting OpenHands Automations Service",
+        extra={"kv_store_configured": get_config().kv.enabled},
+    )
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()
@@ -224,6 +228,7 @@ app.include_router(uploads_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
+app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 

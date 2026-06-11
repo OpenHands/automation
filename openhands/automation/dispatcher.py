@@ -43,6 +43,7 @@ from openhands.automation.models import (
 )
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
@@ -233,6 +234,18 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+
+    # Inject a KV token whenever the service has a KV secret configured.
+    # The KV store is always available to automations — there is no per-
+    # automation toggle. If no secret is configured the feature is simply
+    # disabled service-wide.
+    kv_config = get_config().kv
+    if kv_config.kv_secret:
+        env_vars["AUTOMATION_KV_TOKEN"] = create_kv_token(
+            secret=kv_config.kv_secret,
+            automation_id=automation.id,
+            run_id=run.id,
+        )
 
     # 4. Prepare tarball source
     try:

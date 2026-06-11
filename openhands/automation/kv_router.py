@@ -1,0 +1,1135 @@
+"""FastAPI router for the automation KV store API.
+
+Provides a Redis-like key-value store scoped per-automation for state persistence.
+Values are encrypted at the application level via the SDK's :class:`Cipher`
+helper (Fernet: AES-128-CBC + HMAC-SHA256) before storage. Authentication is
+via per-run JWT tokens (AUTOMATION_KV_TOKEN).
+
+Single-Document Backend Design
+==============================
+
+While the API presents a multi-key interface (GET /kv/{key}, PUT /kv/{key}, etc.),
+the backend stores all state in a SINGLE encrypted JSON document per automation.
+
+    API "keys" → top-level fields in the state document
+
+Example:
+    PUT /kv/config   → state["config"] = value
+    PUT /kv/counter  → state["counter"] = value
+    GET /kv/config   → return state["config"]
+
+This design eliminates deadlock risk:
+- Only ONE row per automation to lock
+- All operations serialize through that single lock
+- No multi-key ordering issues possible
+
+Trade-off: Every operation reads/writes the entire state blob. This is acceptable
+because automation state is intended to be small and access is infrequent.
+"""
+
+import logging
+import uuid
+from typing import Annotated, Any
+
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from openhands.automation.config import KVSettings, get_config
+from openhands.automation.db import get_session
+from openhands.automation.kv_helpers import (
+    get_nested_value,
+    require_dict,
+    require_int,
+    require_list,
+    safe_decrypt,
+    safe_encrypt,
+    set_nested_value,
+    validate_key,
+)
+from openhands.automation.kv_metrics import (
+    record_conflict,
+    record_lock_wait,
+    record_state_size,
+)
+from openhands.automation.kv_schemas import (
+    KVBatchOperation,
+    KVBatchRequest,
+    KVBatchResponse,
+    KVConflictResponse,
+    KVDeleteResponse,
+    KVIncrRequest,
+    KVIncrResponse,
+    KVKeyMetaResponse,
+    KVKeyPathResponse,
+    KVKeyResponse,
+    KVListKeysResponse,
+    KVListLengthResponse,
+    KVListPushRequest,
+    KVPatchRequest,
+    KVSetResponse,
+)
+from openhands.automation.models import AutomationKV
+from openhands.automation.utils.kv import KVTokenClaims, KVTokenError, verify_kv_token
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/kv", tags=["KV Store"])
+
+
+# --- Authentication ---
+
+
+async def get_token_claims(
+    authorization: Annotated[str, Header()],
+) -> KVTokenClaims:
+    """Extract and verify claims from the KV token.
+
+    The token is passed via Authorization: Bearer <token> header.
+    It contains the automation_id as a trusted claim.
+    """
+    kv_config = get_config().kv
+
+    if not kv_config.kv_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="KV store not configured (missing AUTOMATION_KV_SECRET)",
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format",
+        )
+
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing token",
+        )
+
+    try:
+        return verify_kv_token(kv_config.kv_secret, token)
+    except KVTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+        )
+
+
+# Backward-compatible alias for tests
+async def get_automation_id_from_token(
+    authorization: Annotated[str, Header()],
+) -> uuid.UUID:
+    """Extract automation_id from KV token (deprecated, use get_token_claims)."""
+    claims = await get_token_claims(authorization)
+    return claims.automation_id
+
+
+# --- Validation Helpers ---
+
+
+# Type alias for validated KV keys - ensures key validation is applied
+# Use this as a FastAPI path parameter annotation: key: ValidatedKey
+ValidatedKey = Annotated[str, Depends(lambda key: validate_key(key))]
+
+
+def _check_state_size(
+    state: dict[str, Any], kv_config: KVSettings | None = None
+) -> None:
+    """Validate that the entire state document doesn't exceed the configured size limit.
+
+    Args:
+        state: The state dict to check (will be JSON-serialized to measure size)
+        kv_config: Optional KVSettings object (fetched if not provided)
+
+    Raises:
+        HTTPException: 413 Payload Too Large if state exceeds limit
+    """
+    import json
+
+    if kv_config is None:
+        kv_config = get_config().kv
+
+    max_size = kv_config.kv_max_value_size
+    if max_size <= 0:
+        return  # Size limit disabled
+
+    # Measure the JSON-serialized size (this is what gets encrypted/stored)
+    try:
+        serialized = json.dumps(state)
+    except (TypeError, ValueError):
+        # If we can't serialize it, the encrypt step will fail anyway
+        return
+
+    actual_size = len(serialized.encode("utf-8"))
+    if actual_size > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"State size ({actual_size} bytes) exceeds limit ({max_size} bytes)",
+        )
+
+
+# --- Database Helpers ---
+
+
+async def _get_state_row(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+) -> AutomationKV | None:
+    """Get the state row for an automation (no lock)."""
+    result = await session.execute(
+        select(AutomationKV).where(AutomationKV.automation_id == automation_id)
+    )
+    return result.scalars().first()
+
+
+async def _get_state_row_for_update(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    lock_timeout_ms: int = 5000,
+) -> AutomationKV | None:
+    """Get the state row with FOR UPDATE lock and bounded wait time.
+
+    Since there's only ONE row per automation, this is the single lock point.
+    All concurrent operations on this automation's state will serialize here.
+
+    Timeout Strategy (Defense in Depth):
+
+    1. Statement Timeout (2x lock timeout): Safety net that kills any runaway
+       query, including slow encryption, network issues, or unexpected operations.
+       This catches problems AFTER the lock is acquired.
+
+    2. Lock Timeout (service-wide default): Fail fast if waiting too long for
+       another transaction to release the row lock. This catches contention
+       BEFORE the lock is acquired. Configured via AUTOMATION_KV_LOCK_TIMEOUT_MS
+       on the service (single global value — no per-automation knob).
+
+    Statement timeout > lock timeout because:
+    - If we're waiting for a lock, lock_timeout triggers first
+    - If we have the lock but operation is slow, statement_timeout triggers
+    - The 2x ratio gives legitimate operations enough headroom
+
+    SET LOCAL scopes both timeouts to this transaction only, so they don't
+    affect other queries in this session or pollute the connection pool.
+
+    If either timeout fires, PostgreSQL raises an error which we catch and
+    convert to HTTP 409 Conflict, allowing clients to retry with backoff.
+
+    Args:
+        session: Database session
+        automation_id: UUID of the automation
+        lock_timeout_ms: Lock timeout in milliseconds (from KVSettings)
+    """
+    # Statement timeout: 2x lock timeout as safety net for runaway operations
+    statement_timeout_ms = lock_timeout_ms * 2
+    stmt_sql = f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'"
+    await session.execute(text(stmt_sql))
+    # Lock timeout: fail fast when waiting for lock (configurable per-automation)
+    lock_sql = f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"
+    await session.execute(text(lock_sql))
+
+    # Record lock wait time
+    with record_lock_wait():
+        result = await session.execute(
+            select(AutomationKV)
+            .where(AutomationKV.automation_id == automation_id)
+            .with_for_update()
+        )
+    return result.scalars().first()
+
+
+def _is_lock_timeout_error(exc: Exception) -> bool:
+    """Check if an exception is a PostgreSQL lock or statement timeout error.
+
+    PostgreSQL error codes:
+    - 55P03 (lock_not_available): lock_timeout exceeded while waiting for lock
+    - 57014 (query_canceled): statement_timeout exceeded during query execution
+
+    Both indicate the operation took too long and should be retried.
+    """
+    error_str = str(exc).lower()
+    return (
+        # Lock timeout errors (55P03)
+        "lock_not_available" in error_str
+        or "55p03" in error_str
+        or "could not obtain lock" in error_str
+        or "canceling statement due to lock timeout" in error_str
+        # Statement timeout errors (57014)
+        or "query_canceled" in error_str
+        or "57014" in error_str
+        or "canceling statement due to statement timeout" in error_str
+    )
+
+
+# Default retry delay in seconds for 409 responses
+_RETRY_AFTER_SECONDS = "1"
+
+
+def _raise_lock_conflict() -> None:
+    """Raise HTTP 409 for lock/statement timeout - signals client should retry.
+
+    Includes Retry-After header suggesting initial backoff delay.
+    Clients should use exponential backoff with jitter on subsequent retries.
+    """
+    record_conflict("lock_timeout")
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="kv_store_busy: another operation is in progress, please retry",
+        headers={"Retry-After": _RETRY_AFTER_SECONDS},
+    )
+
+
+def _raise_version_conflict(expected: int, actual: int) -> None:
+    """Raise HTTP 409 for version mismatch - signals optimistic concurrency failure."""
+    record_conflict("version_mismatch")
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "version_mismatch",
+            "message": "State was modified by another process",
+            "expected_version": expected,
+            "actual_version": actual,
+        },
+        headers={"Retry-After": _RETRY_AFTER_SECONDS},
+    )
+
+
+def _decrypt_state(secret: str, row: AutomationKV | None) -> dict[str, Any]:
+    """Decrypt the state document from a row, returning empty dict if no row."""
+    if row is None:
+        return {}
+    return safe_decrypt(secret, row.state_encrypted)
+
+
+async def _save_state(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    state: dict[str, Any],
+    secret: str,
+    existing_row: AutomationKV | None,
+    *,
+    bump_version: bool = True,
+) -> AutomationKV:
+    """Save the state document, creating or updating the row as needed.
+
+    Args:
+        session: Database session
+        automation_id: The automation's UUID
+        state: The state dict to save (will be encrypted)
+        secret: Encryption secret
+        existing_row: Existing row to update, or None to create new
+        bump_version: If True (default), auto-increment $version
+
+    Returns:
+        The saved/updated AutomationKV row
+    """
+    # Auto-increment $version on every write (unless explicitly disabled)
+    if bump_version:
+        state["$version"] = state.get("$version", 0) + 1
+
+    encrypted = safe_encrypt(secret, state)
+
+    # Record state size metric (encrypted size includes crypto overhead)
+    record_state_size(len(encrypted))
+
+    if existing_row is None:
+        # Create new row
+        row = AutomationKV(
+            automation_id=automation_id,
+            state_encrypted=encrypted,
+        )
+        session.add(row)
+    else:
+        # Update existing row
+        existing_row.state_encrypted = encrypted
+        row = existing_row
+
+    await session.flush()
+    await session.refresh(row)
+    return row
+
+
+def _get_version(state: dict[str, Any]) -> int:
+    """Get the current $version from state, defaulting to 0."""
+    return state.get("$version", 0)
+
+
+# --- Endpoints ---
+
+
+@router.get("")
+async def list_keys(
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVListKeysResponse:
+    """List all keys for this automation.
+
+    Note: System keys (starting with $) are filtered from the response.
+    """
+    kv_config = get_config().kv
+
+    row = await _get_state_row(session, claims.automation_id)
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    # Filter out system keys (e.g., $version)
+    keys = [k for k in state.keys() if not k.startswith("$")]
+    return KVListKeysResponse(keys=keys, count=len(keys))
+
+
+@router.get("/{key}")
+async def get_value(
+    key: ValidatedKey,
+    path: str | None = Query(default=None, description="Nested path (dot notation)"),
+    meta: bool = Query(default=False, description="Include metadata and version"),
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVKeyResponse | KVKeyPathResponse | KVKeyMetaResponse:
+    """Get a value by key, optionally at a nested path.
+
+    With meta=true, includes version for optimistic concurrency control.
+    """
+    kv_config = get_config().kv
+
+    row = await _get_state_row(session, claims.automation_id)
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="key_not_found",
+        )
+
+    value = state[key]
+
+    if path:
+        try:
+            value = get_nested_value(value, path)
+        except KeyError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="invalid_path",
+            )
+        return KVKeyPathResponse(key=key, path=path, value=value)
+
+    if meta:
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="key_not_found",
+            )
+        return KVKeyMetaResponse(
+            key=key,
+            value=value,
+            version=_get_version(state),
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
+        )
+
+    return KVKeyResponse(key=key, value=value)
+
+
+@router.put("/{key}")
+async def set_value(
+    key: ValidatedKey,
+    body: Annotated[Any, Body()],  # Accept any JSON body directly as the value
+    response: Response,
+    nx: bool = Query(default=False, description="Only set if key does not exist"),
+    xx: bool = Query(default=False, description="Only set if key exists"),
+    if_version: int | None = Query(
+        default=None,
+        description="Only set if current state version matches (optimistic lock)",
+    ),
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVSetResponse | KVConflictResponse:
+    """Set a value for a key.
+
+    The entire request body is stored as the value.
+
+    Query params:
+    - nx=true: Only set if key does NOT exist (like Redis SETNX)
+    - xx=true: Only set if key DOES exist
+    - if_version=N: Only set if current $version equals N (optimistic concurrency)
+
+    Returns:
+    - 200: Key updated (existing key)
+    - 201: Key created (new key, or nx=true success)
+    - 409: Conflict (nx/xx/if_version check failed)
+    - 413: Payload too large (state exceeds size limit)
+    """
+    kv_config = get_config().kv
+
+    if nx and xx:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot use both nx and xx",
+        )
+
+    # Lock the state row for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            _raise_version_conflict(if_version, current_version)
+
+    key_exists = key in state
+
+    if nx and key_exists:
+        response.status_code = status.HTTP_409_CONFLICT
+        return KVConflictResponse(key=key, created=False, error="key_exists")
+
+    if xx and not key_exists:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="key_not_exists",
+        )
+
+    # Update state
+    state[key] = body
+    _check_state_size(state, kv_config)
+
+    # Save
+    saved_row = await _save_state(
+        session, claims.automation_id, state, kv_config.kv_secret, row
+    )
+
+    created = not key_exists
+    if created:
+        response.status_code = status.HTTP_201_CREATED
+
+    return KVSetResponse(
+        key=key,
+        value=body,
+        created=created,
+        updated_at=saved_row.updated_at.isoformat(),
+    )
+
+
+@router.patch("/{key}")
+async def patch_value(
+    key: ValidatedKey,
+    body: KVPatchRequest,
+    if_version: int | None = Query(
+        default=None,
+        description="Only patch if current state version matches (optimistic lock)",
+    ),
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVKeyPathResponse:
+    """Update a nested path within an existing value.
+
+    Query params:
+    - if_version=N: Only patch if current $version equals N (optimistic concurrency)
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            _raise_version_conflict(if_version, current_version)
+
+    if key not in state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="key_not_found",
+        )
+
+    value = state[key]
+    require_dict(value)
+
+    try:
+        set_nested_value(value, body.path, body.value)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid_path: {e}",
+        )
+
+    state[key] = value
+    _check_state_size(state, kv_config)
+
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVKeyPathResponse(
+        key=key,
+        path=body.path,
+        value=body.value,
+    )
+
+
+def _has_user_keys(state: dict[str, Any]) -> bool:
+    """Check if state has any user keys (excluding system keys like $version)."""
+    return any(not k.startswith("$") for k in state.keys())
+
+
+@router.delete("/{key}")
+async def delete_key(
+    key: ValidatedKey,
+    if_version: int | None = Query(
+        default=None,
+        description="Only delete if current state version matches (optimistic lock)",
+    ),
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVDeleteResponse:
+    """Delete a key.
+
+    Query params:
+    - if_version=N: Only delete if current $version equals N (optimistic concurrency)
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    # Check version if specified (optimistic concurrency)
+    if if_version is not None:
+        current_version = _get_version(state)
+        if current_version != if_version:
+            _raise_version_conflict(if_version, current_version)
+
+    if key not in state:
+        return KVDeleteResponse(key=key, deleted=False)
+
+    del state[key]
+
+    if row is not None:
+        if _has_user_keys(state):
+            # Still have user keys, update the row
+            await _save_state(
+                session, claims.automation_id, state, kv_config.kv_secret, row
+            )
+        else:
+            # No user keys left, delete the row entirely
+            await session.delete(row)
+            await session.flush()
+
+    return KVDeleteResponse(key=key, deleted=True)
+
+
+@router.post("/{key}/incr")
+async def increment(
+    key: ValidatedKey,
+    body: KVIncrRequest | None = None,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVIncrResponse:
+    """Atomically increment an integer value.
+
+    If the key doesn't exist, initializes it to `by` (default 1).
+
+    Note: The stored value must be an integer. Float values are rejected
+    because integer arithmetic on floats can cause precision loss.
+    """
+    kv_config = get_config().kv
+    by = body.by if body else 1
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        # Initialize with `by`
+        state[key] = by
+        new_value = by
+    else:
+        value = state[key]
+        require_int(value)
+        new_value = value + by
+        state[key] = new_value
+
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVIncrResponse(key=key, value=new_value)
+
+
+@router.post("/{key}/decr")
+async def decrement(
+    key: ValidatedKey,
+    body: KVIncrRequest | None = None,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVIncrResponse:
+    """Atomically decrement an integer value.
+
+    If the key doesn't exist, initializes it to `-by` (default -1).
+
+    Note: The stored value must be an integer. Float values are rejected
+    because integer arithmetic on floats can cause precision loss.
+    """
+    kv_config = get_config().kv
+    by = body.by if body else 1
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        # Initialize with `-by`
+        state[key] = -by
+        new_value = -by
+    else:
+        value = state[key]
+        require_int(value)
+        new_value = value - by
+        state[key] = new_value
+
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVIncrResponse(key=key, value=new_value)
+
+
+@router.post("/{key}/lpush")
+async def lpush(
+    key: ValidatedKey,
+    body: KVListPushRequest,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVListLengthResponse:
+    """Push a value to the left (front) of a list.
+
+    Creates the list if it doesn't exist.
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        # Initialize with single-element list
+        state[key] = [body.value]
+    else:
+        value = state[key]
+        require_list(value)
+        value.insert(0, body.value)
+        state[key] = value
+
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVListLengthResponse(key=key, length=len(state[key]))
+
+
+@router.post("/{key}/rpush")
+async def rpush(
+    key: ValidatedKey,
+    body: KVListPushRequest,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVListLengthResponse:
+    """Push a value to the right (back) of a list.
+
+    Creates the list if it doesn't exist.
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        # Initialize with single-element list
+        state[key] = [body.value]
+    else:
+        value = state[key]
+        require_list(value)
+        value.append(body.value)
+        state[key] = value
+
+    _check_state_size(state, kv_config)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVListLengthResponse(key=key, length=len(state[key]))
+
+
+@router.post("/{key}/lpop")
+async def lpop(
+    key: ValidatedKey,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVKeyResponse:
+    """Pop a value from the left (front) of a list.
+
+    Returns null if key doesn't exist or list is empty.
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        return KVKeyResponse(key=key, value=None)
+
+    value = state[key]
+    require_list(value)
+
+    if len(value) == 0:
+        return KVKeyResponse(key=key, value=None)
+
+    popped = value.pop(0)
+    state[key] = value
+
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVKeyResponse(key=key, value=popped)
+
+
+@router.post("/{key}/rpop")
+async def rpop(
+    key: ValidatedKey,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVKeyResponse:
+    """Pop a value from the right (back) of a list.
+
+    Returns null if key doesn't exist or list is empty.
+    """
+    kv_config = get_config().kv
+
+    # Lock for atomic read-modify-write
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        return KVKeyResponse(key=key, value=None)
+
+    value = state[key]
+    require_list(value)
+
+    if len(value) == 0:
+        return KVKeyResponse(key=key, value=None)
+
+    popped = value.pop()
+    state[key] = value
+
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVKeyResponse(key=key, value=popped)
+
+
+@router.get("/{key}/len")
+async def list_length(
+    key: ValidatedKey,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVListLengthResponse:
+    """Get the length of a list."""
+    kv_config = get_config().kv
+
+    row = await _get_state_row(session, claims.automation_id)
+    state = _decrypt_state(kv_config.kv_secret, row)
+
+    if key not in state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="key_not_found",
+        )
+
+    value = state[key]
+    require_list(value)
+
+    return KVListLengthResponse(key=key, length=len(value))
+
+
+# --- Batch Operations ---
+
+
+class KVOperationError(Exception):
+    """Raised when a batch operation fails validation."""
+
+    pass
+
+
+def _validate_batch_key(key: str) -> None:
+    """Validate a key for batch operations (same rules as validate_key).
+
+    Raises:
+        KVOperationError: If key is invalid
+    """
+    if not key:
+        raise KVOperationError("key cannot be empty")
+    if not key.strip():
+        raise KVOperationError("key cannot be whitespace-only")
+    if key.startswith("$"):
+        raise KVOperationError("keys starting with '$' are reserved for system use")
+    if len(key) > 255:
+        raise KVOperationError(f"key exceeds 255 chars ({len(key)} given)")
+
+
+def _execute_batch_operation(
+    state: dict[str, Any],
+    op: KVBatchOperation,
+) -> dict[str, Any]:
+    """Execute a single operation within a batch.
+
+    Args:
+        state: The current state dict (modified in place)
+        op: The operation to execute
+
+    Returns:
+        Result dict for this operation
+
+    Raises:
+        KVOperationError: If operation fails validation
+    """
+    _validate_batch_key(op.key)
+    key = op.key
+
+    if op.op == "set":
+        key_existed = key in state
+        # Handle nx (set if not exists)
+        if op.nx and key_existed:
+            raise KVOperationError(f"key '{key}' already exists (nx=true)")
+        # Handle xx (set if exists)
+        if op.xx and not key_existed:
+            raise KVOperationError(f"key '{key}' does not exist (xx=true)")
+        state[key] = op.value
+        return {"op": "set", "key": key, "success": True, "created": not key_existed}
+
+    elif op.op == "delete":
+        deleted = key in state
+        if deleted:
+            del state[key]
+        return {"op": "delete", "key": key, "success": True, "deleted": deleted}
+
+    elif op.op == "incr":
+        by = op.by
+        if key not in state:
+            state[key] = by
+            new_value = by
+        else:
+            value = state[key]
+            if isinstance(value, bool):
+                raise KVOperationError(f"key '{key}' is boolean, not integer")
+            if not isinstance(value, int):
+                raise KVOperationError(f"key '{key}' is not an integer")
+            new_value = value + by
+            state[key] = new_value
+        return {"op": "incr", "key": key, "success": True, "value": new_value}
+
+    elif op.op == "decr":
+        by = op.by
+        if key not in state:
+            state[key] = -by
+            new_value = -by
+        else:
+            value = state[key]
+            if isinstance(value, bool):
+                raise KVOperationError(f"key '{key}' is boolean, not integer")
+            if not isinstance(value, int):
+                raise KVOperationError(f"key '{key}' is not an integer")
+            new_value = value - by
+            state[key] = new_value
+        return {"op": "decr", "key": key, "success": True, "value": new_value}
+
+    elif op.op == "lpush":
+        if key not in state:
+            state[key] = [op.value]
+        else:
+            value = state[key]
+            if not isinstance(value, list):
+                raise KVOperationError(f"key '{key}' is not a list")
+            value.insert(0, op.value)
+        return {"op": "lpush", "key": key, "success": True, "length": len(state[key])}
+
+    elif op.op == "rpush":
+        if key not in state:
+            state[key] = [op.value]
+        else:
+            value = state[key]
+            if not isinstance(value, list):
+                raise KVOperationError(f"key '{key}' is not a list")
+            value.append(op.value)
+        return {"op": "rpush", "key": key, "success": True, "length": len(state[key])}
+
+    elif op.op == "lpop":
+        if key not in state:
+            return {"op": "lpop", "key": key, "success": True, "value": None}
+        value = state[key]
+        if not isinstance(value, list):
+            raise KVOperationError(f"key '{key}' is not a list")
+        if len(value) == 0:
+            return {"op": "lpop", "key": key, "success": True, "value": None}
+        popped = value.pop(0)
+        return {"op": "lpop", "key": key, "success": True, "value": popped}
+
+    elif op.op == "rpop":
+        if key not in state:
+            return {"op": "rpop", "key": key, "success": True, "value": None}
+        value = state[key]
+        if not isinstance(value, list):
+            raise KVOperationError(f"key '{key}' is not a list")
+        if len(value) == 0:
+            return {"op": "rpop", "key": key, "success": True, "value": None}
+        popped = value.pop()
+        return {"op": "rpop", "key": key, "success": True, "value": popped}
+
+    elif op.op == "patch":
+        if key not in state:
+            state[key] = {}
+        value = state[key]
+        if not isinstance(value, dict):
+            raise KVOperationError(f"key '{key}' is not an object")
+        try:
+            set_nested_value(value, op.path, op.value)
+        except ValueError as e:
+            raise KVOperationError(str(e))
+        return {"op": "patch", "key": key, "success": True}
+
+    else:
+        raise KVOperationError(f"unknown operation: {op.op}")
+
+
+@router.post("/batch")
+async def batch(
+    body: KVBatchRequest,
+    claims: KVTokenClaims = Depends(get_token_claims),
+    session: AsyncSession = Depends(get_session),
+) -> KVBatchResponse:
+    """Execute multiple KV operations atomically in a single transaction.
+
+    All operations succeed or none do. Use `if_version` for optimistic
+    concurrency control - the batch will be rejected if the current state
+    version doesn't match.
+
+    Operations are executed in order. The $version is incremented once
+    for the entire batch, not per operation.
+
+    Returns:
+    - 200: All operations succeeded
+    - 400: An operation failed validation (e.g., incr on a list)
+    - 409: Version mismatch (if_version specified but doesn't match)
+    - 409: Lock timeout (another operation in progress)
+    - 413: Payload too large (state exceeds size limit)
+    """
+    kv_config = get_config().kv
+
+    # Acquire lock for atomic batch execution
+    try:
+        row = await _get_state_row_for_update(
+            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+        )
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+
+    state = _decrypt_state(kv_config.kv_secret, row)
+    current_version = _get_version(state)
+
+    # Check version if specified
+    if body.if_version is not None and current_version != body.if_version:
+        _raise_version_conflict(body.if_version, current_version)
+
+    # Execute all operations
+    results = []
+    for i, op in enumerate(body.operations):
+        try:
+            result = _execute_batch_operation(state, op)
+            results.append(result)
+        except KVOperationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "operation_failed",
+                    "message": str(e),
+                    "operation_index": i,
+                    "operation": {"op": op.op, "key": op.key},
+                },
+            )
+
+    # Validate state size before saving
+    _check_state_size(state, kv_config)
+
+    # Save state (auto-increments $version)
+    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+
+    return KVBatchResponse(version=_get_version(state), results=results)
