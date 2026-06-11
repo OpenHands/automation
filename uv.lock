@@ -2158,7 +2158,7 @@ wheels = [
 
 [[package]]
 name = "openhands-automation"
-version = "1.0.0a5"
+version = "1.0.0a8"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
