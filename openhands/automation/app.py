@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -23,6 +22,7 @@ from openhands.automation.db import (
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
 from openhands.automation.logger import setup_all_loggers
+from openhands.automation.middleware import ApiKeyAwareCORSMiddleware
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
@@ -207,12 +207,12 @@ def _create_app() -> FastAPI:
 
 app = _create_app()
 
+# API-key requests (e.g. the local agent-server GUI calling directly from the
+# browser) get permissive CORS; cookie/session requests keep the strict
+# allowlist below. Mirrors the main cloud API's ApiKeyAwareCORSMiddleware.
 app.add_middleware(
-    CORSMiddleware,
+    ApiKeyAwareCORSMiddleware,
     allow_origins=_build_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 _base_path = get_settings().base_path
