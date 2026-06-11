@@ -5,10 +5,14 @@ extract it, run setup, run the entrypoint, tear down.
 """
 
 import asyncio
+import base64
 import io
 import logging
+import os
 import re
 import tarfile
+import tempfile
+import textwrap
 from typing import Any
 
 import httpx
@@ -188,6 +192,87 @@ async def _upload(
     resp.raise_for_status()
 
 
+def _get_python_launcher() -> str:
+    """Return a cross-platform Python launcher for inline runner commands."""
+    return "py -3" if os.name == "nt" else "python"
+
+
+def _build_python_runner_command(
+    entrypoint: str,
+    tarball_path: str,
+    work_dir: str,
+    env_vars: dict[str, str],
+) -> str:
+    """Build a cross-platform Python runner command.
+
+    This path avoids POSIX shell features entirely. The inline Python snippet
+    creates the working directory, extracts the tarball, injects environment
+    variables, and then launches the requested entrypoint from inside the
+    extracted automation directory.
+    """
+    payload = textwrap.dedent(
+        f"""
+        import os
+        import pathlib
+        import subprocess
+        import tarfile
+
+        tarball_path = {tarball_path!r}
+        work_dir = {work_dir!r}
+        entrypoint = {entrypoint!r}
+        env_updates = {env_vars!r}
+
+        pathlib.Path(work_dir).mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tarball_path, 'r:gz') as tar:
+            tar.extractall(work_dir)
+        try:
+            os.remove(tarball_path)
+        except FileNotFoundError:
+            pass
+        env = os.environ.copy()
+        env.update(env_updates)
+        result = subprocess.run(entrypoint, shell=True, cwd=work_dir, env=env)
+        raise SystemExit(result.returncode)
+        """
+    ).strip()
+    encoded_payload = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return (
+        f"{_get_python_launcher()} -c "
+        f"\"import base64; exec(base64.b64decode('{encoded_payload}').decode())\""
+    )
+
+
+def _build_shell_runner_command(
+    entrypoint: str,
+    tarball_path: str,
+    work_dir: str,
+    env_vars: dict[str, str],
+    setup_script_path: str | None,
+) -> str:
+    """Build the legacy POSIX shell runner command."""
+    exports = ""
+    if env_vars:
+        parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
+        exports = " && ".join(parts) + " && "
+
+    base_command = (
+        f"mkdir -p {work_dir}"
+        f" && tar xzf {tarball_path} -C {work_dir}"
+        f" && rm -f {tarball_path}"
+        f" && cd {work_dir}"
+    )
+
+    if not setup_script_path:
+        return f"{base_command} && {exports}{entrypoint}"
+
+    quoted_setup_path = _shell_quote(setup_script_path)
+    return (
+        f"{base_command}"
+        f" && {exports}([ ! -f {quoted_setup_path} ] || bash {quoted_setup_path})"
+        f" && {entrypoint}"
+    )
+
+
 async def _bash(
     client: httpx.AsyncClient,
     agent_url: str,
@@ -339,6 +424,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    setup_script_path: str | None = "setup.sh",
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -359,7 +445,7 @@ async def execute_in_context(
         env_vars: Environment variables to export
         timeout: Max execution time
         run_id: Run ID — used for logging and to derive an isolated tarball
-            path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
+            path (<tempdir>/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
 
@@ -377,8 +463,10 @@ async def execute_in_context(
     # Use a per-run tarball path to avoid collisions when multiple automations
     # run concurrently on a shared filesystem (sandboxless/local mode).
     # Guard against path separators in run_id before embedding it in a shell command.
+    # Use tempfile.gettempdir() so the path is valid on every platform (Windows
+    # agent-servers reject POSIX /tmp/ because it lacks a drive-letter prefix).
     tarball_path = (
-        f"/tmp/automation-{run_id}.tar.gz"
+        os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
         if run_id and "/" not in run_id
         else TARBALL_PATH
     )
@@ -394,19 +482,21 @@ async def execute_in_context(
                 client, agent_url, session_key, tarball_source, tarball_path
             )
 
-        exports = ""
-        if env_vars:
-            parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
-            exports = " && ".join(parts) + " && "
-
-        cmd = (
-            f"mkdir -p {work_dir}"
-            f" && tar xzf {tarball_path} -C {work_dir}"
-            f" && rm -f {tarball_path}"
-            f" && cd {work_dir}"
-            f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
-            f" && {entrypoint}"
-        )
+        if setup_script_path is None:
+            cmd = _build_python_runner_command(
+                entrypoint=entrypoint,
+                tarball_path=tarball_path,
+                work_dir=work_dir,
+                env_vars=env_vars,
+            )
+        else:
+            cmd = _build_shell_runner_command(
+                entrypoint=entrypoint,
+                tarball_path=tarball_path,
+                work_dir=work_dir,
+                env_vars=env_vars,
+                setup_script_path=setup_script_path,
+            )
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(
@@ -455,6 +545,7 @@ async def run_automation(
     run_id: str | None = None,
     keep_sandbox: bool = False,
     work_dir: str = DEFAULT_WORK_DIR,
+    setup_script_path: str | None = "setup.sh",
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox (blocking).
 
@@ -534,18 +625,21 @@ async def run_automation(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
 
-            exports = ""
-            if env_vars:
-                parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
-                exports = " && ".join(parts) + " && "
-
-            cmd = (
-                f"mkdir -p {work_dir}"
-                f" && tar xzf {TARBALL_PATH} -C {work_dir}"
-                f" && cd {work_dir}"
-                f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
-                f" && {entrypoint}"
-            )
+            if setup_script_path is None:
+                cmd = _build_python_runner_command(
+                    entrypoint=entrypoint,
+                    tarball_path=TARBALL_PATH,
+                    work_dir=work_dir,
+                    env_vars=env_vars,
+                )
+            else:
+                cmd = _build_shell_runner_command(
+                    entrypoint=entrypoint,
+                    tarball_path=TARBALL_PATH,
+                    work_dir=work_dir,
+                    env_vars=env_vars,
+                    setup_script_path=setup_script_path,
+                )
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
             exit_code, stdout, stderr = await _bash(

@@ -31,12 +31,15 @@ PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "prese
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
         sock.close()
         return True
-    except (FileNotFoundError, ConnectionRefusedError):
+    except (AttributeError, FileNotFoundError, ConnectionRefusedError):
         return False
 
 
@@ -116,25 +119,25 @@ class TestPresetFileSyntax:
 class TestPresetEntrypoint:
     def test_get_preset_entrypoint_posix(self, monkeypatch):
         monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
-        assert _get_preset_entrypoint() == ".venv/bin/python main.py"
+        assert _get_preset_entrypoint() == "python bootstrap.py"
 
     def test_get_preset_entrypoint_windows(self, monkeypatch):
         monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
-        assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
+        assert _get_preset_entrypoint() == "py -3 bootstrap.py"
 
-    def test_prompt_setup_sh_falls_back_when_python3_missing(self):
-        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
-        content = setup_sh_path.read_text()
-        assert "command -v python3" in content
-        assert "command -v python" in content
-        assert "command -v py" in content
+    def test_prompt_bootstrap_contains_cross_platform_venv_paths(self):
+        bootstrap_path = PRESETS_DIR / "prompt" / "bootstrap.py"
+        content = bootstrap_path.read_text()
+        assert 'VENV_DIR / "Scripts" / "python.exe"' in content
+        assert 'VENV_DIR / "bin" / "python"' in content
+        assert "AUTOMATION_API_URL" in content
 
-    def test_plugin_setup_sh_falls_back_when_python3_missing(self):
-        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
-        content = setup_sh_path.read_text()
-        assert "command -v python3" in content
-        assert "command -v python" in content
-        assert "command -v py" in content
+    def test_plugin_bootstrap_contains_cross_platform_venv_paths(self):
+        bootstrap_path = PRESETS_DIR / "plugin" / "bootstrap.py"
+        content = bootstrap_path.read_text()
+        assert 'VENV_DIR / "Scripts" / "python.exe"' in content
+        assert 'VENV_DIR / "bin" / "python"' in content
+        assert "AUTOMATION_API_URL" in content
 
 
 class TestGenerateTarball:
@@ -149,8 +152,8 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "bootstrap.py" in names
             assert "prompt.txt" in names
-            assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
             # as the SDK workspace now provides these methods directly
 
@@ -190,15 +193,18 @@ class TestGenerateTarball:
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
 
-    def test_generate_tarball_setup_sh_executable(self):
-        """setup.sh in tarball has executable permissions."""
+    def test_generate_tarball_bootstrap_content(self):
+        """bootstrap.py in tarball contains the cross-platform SDK bootstrap."""
         prompt = "Test prompt"
         tarball_bytes = _generate_tarball(prompt)
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
-            setup_info = tar.getmember("setup.sh")
-            # Check executable bit is set (0o755 includes 0o100 for owner execute)
-            assert setup_info.mode & 0o100
+            bootstrap_file = tar.extractfile("bootstrap.py")
+            assert bootstrap_file is not None
+            bootstrap_content = bootstrap_file.read().decode("utf-8")
+            assert "OPENHANDS_SDK_VERSION" in bootstrap_content
+            assert "uv" in bootstrap_content
+            assert "os.execv" in bootstrap_content
 
     def test_generate_tarball_without_repos(self):
         """Generated tarball without repos does not include repos_config.json."""
@@ -241,8 +247,8 @@ class TestReplacePromptInTarball:
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
-        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
-        # plugins_config.json and repos_config.json; all but the prompt must survive.
+        # Arrange — a plugin preset tarball carries main.py, bootstrap.py,
+        # prompt.txt, plugins_config.json and repos_config.json.
         original = _generate_plugin_tarball(
             [PluginSource(source="github:owner/repo")],
             "Original prompt",
@@ -264,15 +270,19 @@ class TestReplacePromptInTarball:
                     extracted = tar.extractfile(member)
                     assert extracted is not None
                     files[member.name] = extracted.read()
-                return files, tar.getmember("setup.sh").mode
+                return files
 
-        old_files, _ = _read(original)
-        new_files, new_setup_mode = _read(updated)
+        old_files = _read(original)
+        new_files = _read(updated)
 
         assert new_files["prompt.txt"].decode() == "New prompt"
-        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+        for name in (
+            "main.py",
+            "bootstrap.py",
+            "plugins_config.json",
+            "repos_config.json",
+        ):
             assert new_files[name] == old_files[name]
-        assert new_setup_mode & 0o100  # setup.sh stays executable
 
     def test_returns_none_when_tarball_has_no_prompt(self):
         """A tarball without prompt.txt is not regenerable, so None is returned."""
@@ -453,7 +463,7 @@ class TestCreateAutomationFromPrompt:
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
         assert data["entrypoint"] == _get_preset_entrypoint()
-        assert data["setup_script_path"] == "setup.sh"
+        assert data["setup_script_path"] is None
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
         assert "id" in data
@@ -469,8 +479,8 @@ class TestCreateAutomationFromPrompt:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "bootstrap.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
-            assert "setup.sh" in tar.getnames()
             assert "automation_model.py" not in tar.getnames()
 
             # Verify prompt content matches what was sent
@@ -580,7 +590,7 @@ class TestCreateAutomationFromPrompt:
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
         assert automation.entrypoint == _get_preset_entrypoint()
-        assert automation.setup_script_path == "setup.sh"
+        assert automation.setup_script_path is None
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
         assert automation.org_id == TEST_ORG_ID
@@ -802,9 +812,9 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "bootstrap.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
-            assert "setup.sh" in names
 
     def test_generate_plugin_tarball_plugins_config(self):
         """Generated tarball contains correct plugins_config.json."""
@@ -864,16 +874,19 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert "plugins=plugin_sources" in main_content
 
-    def test_generate_plugin_tarball_setup_sh_executable(self):
-        """setup.sh in plugin tarball has executable permissions."""
+    def test_generate_plugin_tarball_bootstrap_content(self):
+        """bootstrap.py in plugin tarball contains the cross-platform bootstrap."""
         plugins = [PluginSource(source="github:owner/repo")]
         prompt = "Test prompt"
         tarball_bytes = _generate_plugin_tarball(plugins, prompt)
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
-            setup_info = tar.getmember("setup.sh")
-            # Check executable bit is set (0o755 includes 0o100 for owner execute)
-            assert setup_info.mode & 0o100
+            bootstrap_file = tar.extractfile("bootstrap.py")
+            assert bootstrap_file is not None
+            bootstrap_content = bootstrap_file.read().decode("utf-8")
+            assert "OPENHANDS_SDK_VERSION" in bootstrap_content
+            assert "uv" in bootstrap_content
+            assert "os.execv" in bootstrap_content
 
     def test_generate_plugin_tarball_excludes_none_values(self):
         """Generated plugins_config.json excludes None values."""
@@ -1192,8 +1205,8 @@ class TestExperimentTarball:
             assert "experiment_config.json" in names
             assert "plugins_config.json" not in names
             assert "main.py" in names
+            assert "bootstrap.py" in names
             assert "prompt.txt" in names
-            assert "setup.sh" in names
 
     def test_experiment_config_content(self):
         """experiment_config.json has correct structure."""
@@ -1309,7 +1322,7 @@ class TestCreateAutomationFromPlugin:
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
         assert data["entrypoint"] == _get_preset_entrypoint()
-        assert data["setup_script_path"] == "setup.sh"
+        assert data["setup_script_path"] is None
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
         assert "id" in data
@@ -1325,9 +1338,9 @@ class TestCreateAutomationFromPlugin:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "bootstrap.py" in tar.getnames()
             assert "plugins_config.json" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
-            assert "setup.sh" in tar.getnames()
 
             # Verify plugins config
             config_file = tar.extractfile("plugins_config.json")
@@ -1425,7 +1438,7 @@ class TestCreateAutomationFromPlugin:
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
         assert automation.entrypoint == _get_preset_entrypoint()
-        assert automation.setup_script_path == "setup.sh"
+        assert automation.setup_script_path is None
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
         assert automation.org_id == TEST_ORG_ID

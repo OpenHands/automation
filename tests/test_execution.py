@@ -4,8 +4,12 @@ Only tests pure logic that can run without a network.  The e2e flow
 (run_automation against a real sandbox) lives in scripts/test_automation.py.
 """
 
+import base64
 import io
+import os
+import re
 import tarfile
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -164,12 +168,13 @@ class TestUploadUsesQueryParams:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
 
+        dest = os.path.join(tempfile.gettempdir(), "automation.tar.gz")
         await _upload(
             client=mock_client,
             agent_url="https://agent.example.com",
             session_key="test-session-key",
             data=b"test data",
-            dest="/tmp/automation.tar.gz",
+            dest=dest,
         )
 
         # Verify post was called with query param, not path param
@@ -179,14 +184,14 @@ class TestUploadUsesQueryParams:
         url = call_args[0][0]
         # URL should use query param format
         assert "?path=" in url, f"Expected query param in URL, got: {url}"
-        assert "/tmp/automation.tar.gz" not in url.split("?")[0], (
+        assert dest not in url.split("?")[0], (
             f"Path should not be in URL path segment: {url}"
         )
         # Verify the path is properly encoded in query string
-        assert (
-            "path=%2Ftmp%2Fautomation.tar.gz" in url
-            or "path=/tmp/automation.tar.gz" in url
-        )
+        from urllib.parse import quote
+
+        encoded = quote(dest, safe="")
+        assert f"path={encoded}" in url or f"path={dest}" in url
 
     @pytest.mark.asyncio
     async def test_upload_preserves_absolute_path(self):
@@ -300,6 +305,45 @@ class TestExecuteInContextErrors:
         assert result.success is True
         assert result.sandbox_id == "test-sandbox-id"
 
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._upload")
+    @patch("openhands.automation.execution._start_bash")
+    async def test_setup_script_none_uses_python_runner(
+        self, mock_start_bash, mock_upload
+    ):
+        """setup_script_path=None should bypass POSIX setup.sh handling."""
+        mock_upload.return_value = None
+        mock_start_bash.return_value = "cmd-bootstrap"
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        expected_path = os.path.join(
+            tempfile.gettempdir(), f"automation-{run_id}.tar.gz"
+        )
+
+        await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="key",
+            entrypoint="python bootstrap.py",
+            tarball_source=b"fake bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            env_vars={"AUTOMATION_API_URL": "https://automation.example.com"},
+            run_id=run_id,
+            setup_script_path=None,
+        )
+
+        bash_cmd = mock_start_bash.call_args.args[3]
+        assert "base64.b64decode" in bash_cmd
+        assert "export " not in bash_cmd
+        assert "setup.sh" not in bash_cmd
+
+        match = re.search(r"base64\.b64decode\('([^']+)'\)", bash_cmd)
+        assert match is not None
+        payload = base64.b64decode(match.group(1)).decode("utf-8")
+        assert expected_path in payload
+        assert DEFAULT_WORK_DIR in payload
+        assert "python bootstrap.py" in payload
+        assert "AUTOMATION_API_URL" in payload
+
 
 class TestPerRunTarballPath:
     """Tests that execute_in_context uses an isolated per-run tarball path.
@@ -334,7 +378,8 @@ class TestPerRunTarballPath:
         )
 
         uploaded_dest = mock_upload.call_args.args[4]  # (client, url, key, data, dest)
-        assert uploaded_dest == f"/tmp/automation-{run_id}.tar.gz"
+        expected = os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
+        assert uploaded_dest == expected
         assert uploaded_dest != TARBALL_PATH
 
     @pytest.mark.asyncio
@@ -359,7 +404,8 @@ class TestPerRunTarballPath:
         )
 
         download_dest = mock_download_in_sandbox.call_args.args[4]
-        assert download_dest == f"/tmp/automation-{run_id}.tar.gz"
+        expected = os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
+        assert download_dest == expected
         assert download_dest != TARBALL_PATH
 
     @pytest.mark.asyncio
@@ -372,7 +418,9 @@ class TestPerRunTarballPath:
         mock_upload.return_value = None
         mock_start_bash.return_value = "cmd-abc"
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        expected_path = f"/tmp/automation-{run_id}.tar.gz"
+        expected_path = os.path.join(
+            tempfile.gettempdir(), f"automation-{run_id}.tar.gz"
+        )
 
         await execute_in_context(
             client=AsyncMock(),
@@ -456,8 +504,14 @@ class TestPerRunTarballPath:
         )
 
         upload_dests = {c.args[4] for c in mock_upload.call_args_list}
-        assert f"/tmp/automation-{run_id_a}.tar.gz" in upload_dests
-        assert f"/tmp/automation-{run_id_b}.tar.gz" in upload_dests
+        expected_a = os.path.join(
+            tempfile.gettempdir(), f"automation-{run_id_a}.tar.gz"
+        )
+        expected_b = os.path.join(
+            tempfile.gettempdir(), f"automation-{run_id_b}.tar.gz"
+        )
+        assert expected_a in upload_dests
+        assert expected_b in upload_dests
         assert len(upload_dests) == 2, "Each run must upload to its own unique path"
 
     @pytest.mark.asyncio

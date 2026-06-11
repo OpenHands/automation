@@ -238,8 +238,8 @@ class TestABTestAutomationCreation:
         assert "experiment_config.json" in files
         assert "plugins_config.json" not in files
         assert "main.py" in files
+        assert "bootstrap.py" in files
         assert "prompt.txt" in files
-        assert "setup.sh" in files
 
     async def test_experiment_config_matches_request(self, client, mock_file_store):
         """experiment_config.json faithfully represents the request."""
