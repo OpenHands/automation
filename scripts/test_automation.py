@@ -11,6 +11,7 @@ Usage
     export OPENHANDS_API_KEY="sk-oh-..."
     python scripts/test_automation.py
     python scripts/test_automation.py --api-url https://staging.all-hands.dev
+    python scripts/test_automation.py --automation-api-url http://localhost:8000/api/automation
     python scripts/test_automation.py --tarball-dir ./my_custom_tarball
 """
 
@@ -33,6 +34,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(message)s",
 )
+DEFAULT_AUTOMATION_API_PATH = "/api/automation"
+
+
+def default_automation_api_url(api_url: str) -> str:
+    """Infer the routed automation API URL from the Cloud/API host."""
+    return f"{api_url.rstrip('/')}{DEFAULT_AUTOMATION_API_PATH}"
+
+
 log = logging.getLogger("test_automation")
 
 DEFAULT_API_URL = "https://staging.all-hands.dev"
@@ -87,6 +96,7 @@ async def run_test(
     api_url: str,
     api_key: str,
     tarball_dir: Path,
+    automation_api_url: str,
     entrypoint: str = "python main.py",
 ) -> bool:
     """Build a tarball and run it through ``run_automation()``."""
@@ -95,6 +105,7 @@ async def run_test(
     env_vars = {
         "OPENHANDS_API_KEY": api_key,
         "OPENHANDS_CLOUD_API_URL": api_url,
+        "AUTOMATION_API_URL": automation_api_url,
     }
 
     result = await run_automation(
@@ -123,6 +134,14 @@ def main() -> None:
         default=os.environ.get("OPENHANDS_API_KEY", ""),
     )
     parser.add_argument(
+        "--automation-api-url",
+        default=os.environ.get("AUTOMATION_API_URL"),
+        help=(
+            "Automation service API URL used by setup.sh to fetch /sdk-version "
+            "(default: <api-url>/api/automation)"
+        ),
+    )
+    parser.add_argument(
         "--tarball-dir",
         type=Path,
         default=DEFAULT_TARBALL_DIR,
@@ -143,13 +162,24 @@ def main() -> None:
         print(f"Tarball dir not found: {args.tarball_dir}", file=sys.stderr)
         sys.exit(1)
 
-    log.info("API URL:      %s", args.api_url)
-    log.info("Tarball dir:  %s", args.tarball_dir)
-    log.info("Entrypoint:   %s", args.entrypoint)
+    automation_api_url = args.automation_api_url or default_automation_api_url(
+        args.api_url
+    )
+
+    log.info("API URL:            %s", args.api_url)
+    log.info("Automation API URL: %s", automation_api_url)
+    log.info("Tarball dir:        %s", args.tarball_dir)
+    log.info("Entrypoint:         %s", args.entrypoint)
 
     start = time.monotonic()
     ok = asyncio.run(
-        run_test(args.api_url, args.api_key, args.tarball_dir, args.entrypoint)
+        run_test(
+            args.api_url,
+            args.api_key,
+            args.tarball_dir,
+            automation_api_url,
+            args.entrypoint,
+        )
     )
     elapsed = time.monotonic() - start
     log.info("Total time: %.1fs", elapsed)
