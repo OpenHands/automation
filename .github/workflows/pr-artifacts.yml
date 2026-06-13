@@ -106,7 +106,7 @@ jobs:
               run: |
                   if [ -d ".pr" ]; then
                     echo "exists=true" >> $GITHUB_OUTPUT
-                    echo "::warning::.pr/ directory exists and will be automatically removed when the PR is approved. For fork PRs, manual removal is required before merging."
+                    echo "::warning::the .pr/ directory is a temporary directory, intended by this repository policy to be used to show live tests artifacts for review. It will be automatically removed when the PR is approved. For fork PRs, manual removal is required before merging."
                   else
                     echo "exists=false" >> $GITHUB_OUTPUT
                   fi
