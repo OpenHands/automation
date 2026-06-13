@@ -203,3 +203,111 @@ def mock_settings():
         service_key="test-service-key",
         base_url="http://localhost:8000",
     )
+
+
+# ---------------------------------------------------------------------------
+# Lightweight SQLite fixtures for trigger / scheduler-helper unit tests
+# ---------------------------------------------------------------------------
+# These bypass testcontainers/Docker for tests that only need a real session
+# to write/read AutomationRun rows. The scheduler code uses ``using_sqlite()``
+# to gate Postgres-only features (``FOR UPDATE SKIP LOCKED``), so SQLite is a
+# valid backend here.
+
+
+@pytest.fixture
+async def sqlite_engine():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture
+async def sqlite_session_factory(sqlite_engine):
+    return async_sessionmaker(
+        sqlite_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+
+@pytest.fixture
+async def sqlite_session(sqlite_session_factory):
+    async with sqlite_session_factory() as session:
+        yield session
+
+
+@pytest.fixture
+def patch_github_transport(monkeypatch):
+    """Inject an ``httpx.MockTransport`` into ``GithubTrigger._build_client``.
+
+    Returns a callable: given a responder ``(httpx.Request) -> httpx.Response``,
+    installs it and returns the list of requests the trigger ends up issuing.
+    """
+    import httpx
+
+    from openhands.automation.schemas import GithubTrigger
+
+    def install(responder):
+        seen: list[httpx.Request] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return responder(request)
+
+        transport = httpx.MockTransport(capture)
+
+        def _patched(self: GithubTrigger) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                base_url="https://api.github.com",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": "openhands-automation",
+                    "Authorization": (
+                        f"Bearer {self.github_access_token.get_secret_value()}"
+                    ),
+                },
+                transport=transport,
+            )
+
+        monkeypatch.setattr(GithubTrigger, "_build_client", _patched)
+        return seen
+
+    return install
+
+
+@pytest.fixture
+def patch_slack_transport(monkeypatch):
+    """Inject an ``httpx.MockTransport`` into ``SlackTrigger._build_client``.
+
+    Returns a callable: given a responder ``(httpx.Request) -> httpx.Response``,
+    installs it and returns the list of requests the trigger ends up issuing.
+    """
+    import httpx
+
+    from openhands.automation.schemas import SlackTrigger
+
+    def install(responder):
+        seen: list[httpx.Request] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return responder(request)
+
+        transport = httpx.MockTransport(capture)
+
+        def _patched(self: SlackTrigger) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                base_url="https://slack.com/api",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "openhands-automation",
+                    "Authorization": f"Bearer {self.slack_token.get_secret_value()}",
+                },
+                transport=transport,
+            )
+
+        monkeypatch.setattr(SlackTrigger, "_build_client", _patched)
+        return seen
+
+    return install
