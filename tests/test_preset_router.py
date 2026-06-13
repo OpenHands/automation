@@ -862,7 +862,8 @@ class TestGeneratePluginTarball:
             assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
             assert "PluginSource.model_validate" in main_content
-            assert "plugins=plugin_sources" in main_content
+            assert '"plugins": plugin_sources' in main_content
+            assert "Conversation(**conversation_kwargs)" in main_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""
