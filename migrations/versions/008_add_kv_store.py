@@ -24,8 +24,8 @@ type. The ~33% base64 overhead is acceptable for the small JSON documents
 typical of automation state (counters, cursors, configs) and keeps the
 schema simple.
 
-Revision ID: 006
-Revises: 005
+Revision ID: 008
+Revises: 007
 Create Date: 2026-04-24
 """
 
@@ -35,8 +35,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "006"
-down_revision: str = "005"
+revision: str = "008"
+down_revision: str = "007"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
