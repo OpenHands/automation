@@ -42,6 +42,7 @@ where repeated config lookups would add overhead. If you need to test with
 different values, use monkeypatching or reload the affected modules.
 """
 
+import os
 import warnings
 from functools import cached_property, lru_cache
 from typing import Literal
@@ -296,6 +297,8 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_NAME: Database name (default: automations)
         AUTOMATION_DB_USER: Database user (default: postgres)
         AUTOMATION_DB_PASS: Database password (default: postgres)
+        AUTOMATION_DB_SSL_MODE: PostgreSQL SSL mode: prefer, require, or disable
+            (default: empty, use driver default)
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
@@ -350,6 +353,7 @@ class ServiceSettings(BaseSettings):
     db_name: str = "automations"
     db_user: str = "postgres"
     db_pass: str = "postgres"
+    db_ssl_mode: str = ""
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
@@ -440,6 +444,13 @@ class ServiceSettings(BaseSettings):
     webhook_secret: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
+
+    @model_validator(mode="after")
+    def apply_db_ssl_mode_env_fallback(self) -> "ServiceSettings":
+        """Match migration env fallback for standard Postgres SSL variables."""
+        if "db_ssl_mode" not in self.model_fields_set:
+            self.db_ssl_mode = os.getenv("DB_SSL_MODE", os.getenv("PGSSLMODE", ""))
+        return self
 
     @property
     def is_local_mode(self) -> bool:

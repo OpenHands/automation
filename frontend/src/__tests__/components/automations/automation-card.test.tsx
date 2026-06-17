@@ -29,7 +29,7 @@ const mockAutomation: Automation = {
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",
-  model: "Claude Opus",
+  model: "claude-opus",
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-03-01T00:00:00Z",
 };
@@ -67,7 +67,7 @@ describe("AutomationCard", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("acme/frontend-app")).toBeInTheDocument();
     expect(screen.getByText("Weekdays at 09:00")).toBeInTheDocument();
-    expect(screen.getByText("Claude Opus")).toBeInTheDocument();
+    expect(screen.getByText("claude-opus")).toBeInTheDocument();
   });
 
   it("navigates to detail page when card is clicked", async () => {
@@ -113,7 +113,7 @@ describe("AutomationCard", () => {
     renderCard(automation);
 
     expect(screen.queryByText("acme/frontend-app")).not.toBeInTheDocument();
-    expect(screen.queryByText("Claude Opus")).not.toBeInTheDocument();
+    expect(screen.queryByText("claude-opus")).not.toBeInTheDocument();
     expect(screen.getByText("Weekdays at 09:00")).toBeInTheDocument();
   });
 

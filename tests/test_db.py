@@ -3,10 +3,15 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from openhands.automation import db as db_module
+from openhands.automation.config import ServiceSettings
 from openhands.automation.db import (
+    _build_asyncpg_connect_args,
+    _build_pg8000_connect_args,
     _create_sqlite_engine,
     is_sqlite_url,
     normalize_sqlite_url_for_alembic,
@@ -111,6 +116,63 @@ class TestEngineResult:
         await result.dispose()  # Should not raise
 
 
+class TestPostgresSslMode:
+    """Tests for PostgreSQL SSL mode mapping."""
+
+    def test_build_asyncpg_connect_args_for_ssl_modes(self):
+        assert _build_asyncpg_connect_args(None) == {}
+        assert _build_asyncpg_connect_args("") == {}
+        assert _build_asyncpg_connect_args("prefer") == {}
+        assert _build_asyncpg_connect_args("require") == {"ssl": "require"}
+        assert _build_asyncpg_connect_args("disable") == {"ssl": "disable"}
+
+    def test_build_pg8000_connect_args_for_ssl_modes(self):
+        assert _build_pg8000_connect_args(None) == {}
+        assert _build_pg8000_connect_args("") == {}
+        assert _build_pg8000_connect_args("prefer") == {}
+        assert _build_pg8000_connect_args("require") == {"ssl_context": True}
+        assert _build_pg8000_connect_args("disable") == {"ssl_context": False}
+
+    def test_build_connect_args_rejects_unsupported_ssl_mode(self):
+        with pytest.raises(ValueError, match="Unsupported AUTOMATION_DB_SSL_MODE"):
+            _build_asyncpg_connect_args("verify-full")
+
+    @pytest.mark.asyncio
+    async def test_create_engine_passes_asyncpg_ssl_connect_args(self, monkeypatch):
+        captured: dict[str, Any] = {}
+        fake_engine: Any = object()
+
+        def fake_create_async_engine(*args: Any, **kwargs: Any) -> Any:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return fake_engine
+
+        monkeypatch.setattr(db_module, "create_async_engine", fake_create_async_engine)
+        settings = ServiceSettings(
+            db_host="db.example.com",
+            db_port=5433,
+            db_name="automations",
+            db_user="openhands",
+            db_pass="secret",
+            db_ssl_mode="require",
+            db_url="",
+            gcp_db_instance=None,
+        )
+
+        result = await db_module.create_engine(settings)
+
+        assert result.engine is fake_engine
+        url = captured["args"][0]
+        assert url.drivername == "postgresql+asyncpg"
+        assert url.host == "db.example.com"
+        assert url.port == 5433
+        assert captured["kwargs"]["connect_args"] == {"ssl": "require"}
+        assert captured["kwargs"]["pool_size"] == settings.db_pool_size
+        assert captured["kwargs"]["max_overflow"] == settings.db_max_overflow
+        assert captured["kwargs"]["pool_recycle"] == settings.db_pool_recycle
+        assert captured["kwargs"]["pool_pre_ping"] is True
+
+
 class TestNormalizeSqliteUrlForAlembic:
     """Tests for normalize_sqlite_url_for_alembic helper function."""
 
@@ -186,6 +248,12 @@ class TestSqliteMigrations:
             assert "tarball_uploads" in tables
             assert "custom_webhooks" in tables
             assert "alembic_version" in tables
+
+            run_indexes = {
+                index["name"] for index in inspector.get_indexes("automation_runs")
+            }
+            assert "ix_automation_runs_status_created_at" in run_indexes
+            assert "ix_automation_runs_status_timeout_at" in run_indexes
 
             engine.dispose()
         finally:

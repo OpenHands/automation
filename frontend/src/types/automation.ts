@@ -2,6 +2,7 @@ export interface AutomationTrigger {
   type: string;
   schedule?: string;
   schedule_human?: string;
+  timezone?: string;
 }
 
 export interface Automation {
@@ -10,7 +11,9 @@ export interface Automation {
   trigger: AutomationTrigger;
   enabled: boolean;
   repository?: string;
-  model?: string;
+  /** Model profile name used for automation runs. */
+  model?: string | null;
+
   created_at: string;
   updated_at: string;
   prompt: string | null;
@@ -31,6 +34,7 @@ export enum AutomationRunStatus {
   RUNNING = "RUNNING",
   COMPLETED = "COMPLETED",
   FAILED = "FAILED",
+  SKIPPED = "SKIPPED",
 }
 
 export interface AutomationRun {

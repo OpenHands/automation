@@ -5,6 +5,9 @@ import pytest
 from openhands.automation.event_schemas import (
     parse_event,
 )
+from openhands.automation.event_schemas.bitbucket_data_center import (
+    BitbucketDataCenterEvent,
+)
 from openhands.automation.event_schemas.detection import EventTypeDetector
 from openhands.automation.event_schemas.github import (
     GITHUB_DETECTION_RULES,
@@ -17,6 +20,7 @@ from openhands.automation.event_schemas.github import (
     detect_github_event_type,
     parse_github_event_auto,
 )
+from openhands.automation.event_schemas.jira_dc import JiraDcEvent
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.trigger_matcher import matches_trigger
 
@@ -603,6 +607,112 @@ class TestCustomWebhookEvent:
         )
         result = matches_trigger(trigger, "stripe", "payment.completed", payload)
         assert result is False
+
+
+class TestJiraDcEvent:
+    """Tests for Jira Data Center webhook events."""
+
+    def test_parse_jira_dc_comment_created(self):
+        """Jira DC event keys come from webhookEvent."""
+        payload = {
+            "webhookEvent": "comment_created",
+            "comment": {"body": "hello"},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        event = parse_event("jira_dc", payload)
+
+        assert isinstance(event, JiraDcEvent)
+        assert event.source == "jira_dc"
+        assert event.event_key == "comment_created"
+        assert event.payload == payload
+
+    def test_parse_jira_dc_issue_updated(self):
+        """Jira DC issue update events are exposed as their webhookEvent."""
+        payload = {
+            "webhookEvent": "jira:issue_updated",
+            "changelog": {"items": []},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        event = parse_event("jira_dc", payload)
+
+        assert event.source == "jira_dc"
+        assert event.event_key == "jira:issue_updated"
+
+    def test_jira_dc_trigger_matching_with_filter(self):
+        """Jira DC events support normal trigger filters."""
+        payload = {
+            "webhookEvent": "comment_created",
+            "comment": {"body": "please review @openhands"},
+            "issue": {"key": "PROJ-123"},
+        }
+
+        trigger = EventTrigger(
+            source="jira_dc",
+            on="comment_created",
+            filter="icontains(comment.body, '@openhands')",
+        )
+
+        assert matches_trigger(trigger, "jira_dc", "comment_created", payload) is True
+
+    def test_jira_dc_missing_webhook_event(self):
+        """Jira DC events require webhookEvent."""
+        with pytest.raises(ValueError, match="Cannot detect jira_dc event type"):
+            parse_event("jira_dc", {"issue": {"key": "PROJ-123"}})
+
+
+class TestBitbucketDataCenterEvent:
+    """Tests for Bitbucket Data Center webhook events."""
+
+    def test_parse_bitbucket_data_center_pr_opened(self):
+        """Bitbucket Data Center event keys come from eventKey."""
+        payload = {
+            "eventKey": "pr:opened",
+            "pullRequest": {"id": 1, "title": "Test PR"},
+            "actor": {"name": "alona"},
+        }
+
+        event = parse_event("bitbucket_data_center", payload)
+
+        assert isinstance(event, BitbucketDataCenterEvent)
+        assert event.source == "bitbucket_data_center"
+        assert event.event_key == "pr:opened"
+        assert event.payload == payload
+
+    def test_bitbucket_data_center_trigger_matching_with_filter(self):
+        """Bitbucket Data Center events support normal trigger filters."""
+        payload = {
+            "eventKey": "repo:refs_changed",
+            "repository": {
+                "slug": "myrepo",
+                "project": {"key": "PROJ"},
+            },
+            "changes": [{"refId": "refs/heads/main"}],
+        }
+
+        trigger = EventTrigger(
+            source="bitbucket_data_center",
+            on="repo:refs_changed",
+            filter="repository.project.key == 'PROJ'",
+        )
+
+        assert (
+            matches_trigger(
+                trigger,
+                "bitbucket_data_center",
+                "repo:refs_changed",
+                payload,
+            )
+            is True
+        )
+
+    def test_bitbucket_data_center_missing_event_key(self):
+        """Bitbucket Data Center events require eventKey."""
+        with pytest.raises(
+            ValueError, match="Cannot detect bitbucket_data_center event type"
+        ):
+            parse_event("bitbucket_data_center", {"repository": {"slug": "repo"}})
 
 
 class TestMalformedPayloads:

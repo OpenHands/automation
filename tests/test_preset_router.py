@@ -14,6 +14,8 @@ from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
+    _get_preset_entrypoint,
+    _replace_prompt_in_tarball,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -111,6 +113,30 @@ class TestPresetFileSyntax:
         )
 
 
+class TestPresetEntrypoint:
+    def test_get_preset_entrypoint_posix(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
+        assert _get_preset_entrypoint() == ".venv/bin/python main.py"
+
+    def test_get_preset_entrypoint_windows(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
+        assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
+
+    def test_prompt_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
+
+    def test_plugin_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
+
+
 class TestGenerateTarball:
     """Tests for the tarball generation function."""
 
@@ -154,7 +180,8 @@ class TestGenerateTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -207,6 +234,58 @@ class TestGenerateTarball:
             assert "ref" not in repos_config[0]  # None excluded
             assert repos_config[1]["url"] == "owner/repo2"
             assert repos_config[1]["ref"] == "main"
+
+
+class TestReplacePromptInTarball:
+    """Tests for swapping prompt.txt inside an existing preset tarball."""
+
+    def test_replaces_prompt_and_preserves_sibling_files(self):
+        """The prompt is swapped while every other file is left byte-for-byte intact."""
+        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
+        # plugins_config.json and repos_config.json; all but the prompt must survive.
+        original = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/repo")],
+            "Original prompt",
+            repos=[RepoSource(url="owner/repo", provider="github")],
+        )
+
+        # Act
+        updated = _replace_prompt_in_tarball(original, "New prompt")
+
+        # Assert
+        assert updated is not None
+
+        def _read(tarball_bytes):
+            files = {}
+            with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    extracted = tar.extractfile(member)
+                    assert extracted is not None
+                    files[member.name] = extracted.read()
+                return files, tar.getmember("setup.sh").mode
+
+        old_files, _ = _read(original)
+        new_files, new_setup_mode = _read(updated)
+
+        assert new_files["prompt.txt"].decode() == "New prompt"
+        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+            assert new_files[name] == old_files[name]
+        assert new_setup_mode & 0o100  # setup.sh stays executable
+
+    def test_returns_none_when_tarball_has_no_prompt(self):
+        """A tarball without prompt.txt is not regenerable, so None is returned."""
+        # Arrange — an archive that has no prompt.txt member.
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            data = b"print('hi')"
+            info = tarfile.TarInfo(name="main.py")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        # Act / Assert
+        assert _replace_prompt_in_tarball(buffer.getvalue(), "New prompt") is None
 
 
 class TestRepoSource:
@@ -357,6 +436,7 @@ class TestCreateAutomationFromPrompt:
         payload = {
             "name": "My Prompt Automation",
             "prompt": test_prompt,
+            "model": "fast-profile",
             "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
         }
 
@@ -367,10 +447,12 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "My Prompt Automation"
+        assert data["model"] == "fast-profile"
+
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -389,11 +471,50 @@ class TestCreateAutomationFromPrompt:
             assert "main.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
+            assert "automation_model.py" not in tar.getnames()
 
             # Verify prompt content matches what was sent
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_defaults_to_active_model_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Prompt preset stores the active profile name when none is requested."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["model"] == "active-profile"
+
+    async def test_create_from_prompt_unknown_model_profile_rejected(
+        self, async_client, mock_file_store, mock_authenticated_user
+    ):
+        """Prompt preset rejects unknown profiles when auth metadata includes names."""
+        mock_authenticated_user.model_profile_names = frozenset({"allowed-profile"})
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "My Prompt Automation",
+                "prompt": "Do something",
+                "model": "missing-profile",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Model profile `missing-profile` not found"
+        mock_file_store.write_stream.assert_not_called()
 
     async def test_create_from_prompt_creates_upload_record(
         self, async_client, async_session, mock_file_store
@@ -458,7 +579,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -734,7 +855,8 @@ class TestGeneratePluginTarball:
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm()" in main_content
+            assert "workspace.get_llm(profile_name=model_profile)" in main_content
+            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -797,6 +919,7 @@ class TestGeneratePluginTarball:
             # Note: clone_repos.py is no longer included - SDK handles cloning
             assert "clone_repos.py" not in names
             assert "plugins_config.json" in names  # All should be present
+            assert "automation_model.py" not in names
 
             # Verify repos config content
             repos_file = tar.extractfile("repos_config.json")
@@ -807,6 +930,317 @@ class TestGeneratePluginTarball:
             assert repos_config[0]["provider"] == "github"
             assert repos_config[1]["url"] == "https://gitlab.com/owner/repo2"
             assert repos_config[1]["ref"] == "develop"
+
+
+class TestExperimentVariantValidation:
+    """Tests for A/B test variant validation on CreatePluginAutomationRequest."""
+
+    def test_variants_accepted(self):
+        """Valid variants request is accepted."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        request = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "AB Test",
+                "experiment_id": "my-experiment",
+                "variants": [
+                    {
+                        "name": "control",
+                        "weight": 50,
+                        "plugins": [{"source": "github:owner/repo", "ref": "v1"}],
+                    },
+                    {
+                        "name": "treatment",
+                        "weight": 50,
+                        "plugins": [{"source": "github:owner/repo", "ref": "v2"}],
+                    },
+                ],
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
+        )
+        assert request.variants is not None
+        assert len(request.variants) == 2
+        assert request.plugins is None
+        assert request.experiment_id == "my-experiment"
+
+    def test_plugins_and_variants_mutually_exclusive(self):
+        """Providing both plugins and variants raises error."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Bad",
+                    "plugins": [{"source": "github:owner/repo"}],
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_neither_plugins_nor_variants_rejected(self):
+        """Providing neither plugins nor variants raises error."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Bad",
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_experiment_id_required_with_variants(self):
+        """experiment_id is required when variants is used."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="experiment_id.*required"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_experiment_id_rejected_with_plugins(self):
+        """experiment_id cannot be used with plugins (only variants)."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="experiment_id.*can only be used with"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "plugins": [{"source": "github:owner/repo"}],
+                    "experiment_id": "oops",
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_single_variant_rejected(self):
+        """At least two variants are required."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="At least two variants"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {
+                            "name": "only",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_duplicate_variant_names_rejected(self):
+        """Variant names must be unique."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError, match="unique"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {
+                            "name": "same",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "same",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_zero_weight_rejected(self):
+        """Variant weight must be positive."""
+        from openhands.automation.preset_router import CreatePluginAutomationRequest
+
+        with pytest.raises(ValueError):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 0,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/repo"}],
+                        },
+                    ],
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+    def test_max_variants_accepted(self):
+        """Exactly MAX_VARIANTS variants is accepted."""
+        from openhands.automation.preset_router import (
+            MAX_VARIANTS,
+            CreatePluginAutomationRequest,
+        )
+
+        variants = [
+            {"name": f"v{i}", "weight": 1, "plugins": [{"source": "github:owner/repo"}]}
+            for i in range(MAX_VARIANTS)
+        ]
+        req = CreatePluginAutomationRequest.model_validate(
+            {
+                "name": "Test",
+                "experiment_id": "boundary-test",
+                "variants": variants,
+                "prompt": "Test",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            }
+        )
+        assert req.variants is not None and len(req.variants) == MAX_VARIANTS
+
+    def test_too_many_variants_rejected(self):
+        """More than MAX_VARIANTS is rejected."""
+        from openhands.automation.preset_router import (
+            MAX_VARIANTS,
+            CreatePluginAutomationRequest,
+        )
+
+        variants = [
+            {"name": f"v{i}", "weight": 1, "plugins": [{"source": "github:owner/repo"}]}
+            for i in range(MAX_VARIANTS + 1)
+        ]
+        with pytest.raises(ValueError, match="At most"):
+            CreatePluginAutomationRequest.model_validate(
+                {
+                    "name": "Test",
+                    "experiment_id": "test",
+                    "variants": variants,
+                    "prompt": "Test",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                }
+            )
+
+
+class TestExperimentTarball:
+    """Tests for experiment (A/B) tarball generation."""
+
+    def test_experiment_tarball_contains_experiment_config(self):
+        """Experiment tarball has experiment_config.json, not plugins_config.json."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+        tarball_bytes = _generate_plugin_tarball(
+            None,
+            "Test prompt",
+            experiment_id="test-exp",
+            variants=variants,
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "experiment_config.json" in names
+            assert "plugins_config.json" not in names
+            assert "main.py" in names
+            assert "prompt.txt" in names
+            assert "setup.sh" in names
+
+    def test_experiment_config_content(self):
+        """experiment_config.json has correct structure."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=70,
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=30,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+        tarball_bytes = _generate_plugin_tarball(
+            None,
+            "Test prompt",
+            experiment_id="my-exp",
+            variants=variants,
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            config_file = tar.extractfile("experiment_config.json")
+            assert config_file is not None
+            config = json.loads(config_file.read().decode("utf-8"))
+
+            assert config["experiment_id"] == "my-exp"
+            assert len(config["variants"]) == 2
+            assert config["variants"][0]["name"] == "control"
+            assert config["variants"][0]["weight"] == 70
+            assert config["variants"][0]["plugins"][0]["source"] == "github:owner/repo"
+            assert config["variants"][0]["plugins"][0]["ref"] == "v1"
+            assert config["variants"][1]["name"] == "treatment"
+            assert config["variants"][1]["weight"] == 30
+
+    def test_standard_tarball_unchanged(self):
+        """Non-experiment tarball still produces plugins_config.json."""
+        plugins = [PluginSource(source="github:owner/repo", ref="main")]
+        tarball_bytes = _generate_plugin_tarball(plugins, "Test prompt")
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "plugins_config.json" in names
+            assert "experiment_config.json" not in names
 
 
 @requires_docker
@@ -874,7 +1308,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -903,6 +1337,26 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_defaults_to_active_model_profile(
+        self, async_client, mock_authenticated_user
+    ):
+        """Plugin preset stores the active profile name when none is requested."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "My Plugin Automation",
+                "plugins": [{"source": "github:owner/plugin"}],
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["model"] == "active-profile"
 
     async def test_create_from_plugin_creates_upload_record(
         self, async_client, async_session, mock_file_store
@@ -970,7 +1424,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID

@@ -2,6 +2,8 @@ import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import type { Automation } from "#/types/automation";
+import AutomationService from "#/api/automation-service";
+import { displayErrorToast } from "#/utils/custom-toast-handlers";
 import { ToggleSwitch } from "./toggle-switch";
 import { MetadataChip } from "./metadata-chip";
 import { KebabMenu } from "./kebab-menu";
@@ -11,6 +13,7 @@ import FolderIcon from "#/icons/folder.svg?react";
 import ClockIcon from "#/icons/clock.svg?react";
 import SparkleIcon from "#/icons/sparkle.svg?react";
 import PowerIcon from "#/icons/power.svg?react";
+import DownloadIcon from "#/icons/download.svg?react";
 import TrashIcon from "#/icons/trash.svg?react";
 
 interface AutomationCardProps {
@@ -38,6 +41,20 @@ export function AutomationCard({
         : t(I18nKey.AUTOMATIONS$TURN_ON),
       icon: <PowerIcon className="size-4" />,
       onClick: () => onToggle(automation.id, automation.enabled),
+    },
+    {
+      label: t(I18nKey.AUTOMATIONS$DOWNLOAD_TARBALL),
+      icon: <DownloadIcon className="size-4" />,
+      onClick: async () => {
+        try {
+          await AutomationService.downloadTarball(
+            automation.id,
+            automation.name,
+          );
+        } catch {
+          displayErrorToast(t(I18nKey.ERROR$GENERIC));
+        }
+      },
     },
     {
       label: t(I18nKey.AUTOMATIONS$DELETE),

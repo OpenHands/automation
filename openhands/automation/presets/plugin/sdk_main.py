@@ -54,13 +54,19 @@ Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
+  AUTOMATION_MODEL           - model profile name to load instead of default (optional)
+
+Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
+  AUTOMATION_SESSION_URL     - direct URL to this conversation in the OpenHands UI
+                               (Cloud mode only; built from conversation.id)
+
 """
 
 import json
 import os
+import random
 import sys
 import time
-
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -80,6 +86,7 @@ session_key = (
     os.environ.get("OH_SESSION_API_KEYS_0")
     or os.environ.get("SESSION_API_KEY", "")
 )
+model_profile = os.environ.get("AUTOMATION_MODEL") or None
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -111,6 +118,7 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
+print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
@@ -120,16 +128,24 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+
+
 # Workspace base directory (for RemoteWorkspace working_dir)
 # Expand ~ to home directory before validation
 workspace_base = os.path.expanduser(os.environ.get("WORKSPACE_BASE", "/workspace"))
 
 # Validate workspace_base path (after expansion) - fail fast with clear errors
 if not os.path.isabs(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE must be absolute path, got: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 if IS_LOCAL_MODE and not os.path.isdir(workspace_base):
-    print(f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}", file=sys.stderr)
+    print(
+        f"ERROR: WORKSPACE_BASE directory does not exist: {workspace_base}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 # Create workspace based on mode
@@ -200,11 +216,32 @@ with workspace_ctx as workspace:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
+    EXPERIMENT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "experiment_config.json")
     PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
     PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 
-    with open(PLUGINS_CONFIG_FILE) as f:
-        plugins_config = json.load(f)
+    # Experiment-aware variant selection
+    experiment_id: str | None = None
+    selected_variant: str | None = None
+
+    if os.path.exists(EXPERIMENT_CONFIG_FILE):
+        with open(EXPERIMENT_CONFIG_FILE) as f:
+            experiment_config = json.load(f)
+
+        experiment_id = experiment_config["experiment_id"]
+        variants = experiment_config["variants"]
+        weights = [v["weight"] for v in variants]
+        selected = random.choices(variants, weights=weights, k=1)[0]
+
+        selected_variant = selected["name"]
+        plugins_config = selected["plugins"]
+        print("\n=== EXPERIMENT ===")
+        print(f"  id: {experiment_id}")
+        print(f"  variant: {selected_variant}")
+        print(f"  weights: {dict(zip([v['name'] for v in variants], weights))}")
+    else:
+        with open(PLUGINS_CONFIG_FILE) as f:
+            plugins_config = json.load(f)
 
     with open(PROMPT_FILE) as f:
         USER_PROMPT = f.read()
@@ -246,9 +283,19 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace
+    # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
-    llm = workspace.get_llm()
+    try:
+        llm = workspace.get_llm(profile_name=model_profile)
+    except FileNotFoundError:
+        if not model_profile:
+            raise
+        print(
+            f"  profile {model_profile!r} not found; "
+            "falling back to active/default profile"
+        )
+        llm = workspace.get_llm()
+    print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
 
@@ -305,21 +352,42 @@ This automation was triggered by a webhook event:
         received_events.append(event)
         last_event_time["ts"] = time.time()
 
+    # Build experiment tags (if running an A/B test)
+    experiment_tags: dict[str, str] = {}
+    if experiment_id:
+        experiment_tags["experiment_id"] = experiment_id
+        if selected_variant is None:
+            raise RuntimeError(
+                "BUG: experiment_id is set but selected_variant is None — "
+                "experiment config may be malformed."
+            )
+        experiment_tags["variant"] = selected_variant
+
     conversation = Conversation(
         agent=agent,
         workspace=workspace,
         plugins=plugin_sources,  # All plugins loaded here
         callbacks=[event_callback],
         delete_on_close=False,  # Keep conversation history after completion
+        tags=experiment_tags or None,
     )
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
+    if experiment_tags:
+        print(f"  experiment tags: {experiment_tags}")
 
-    # Inject secrets into the conversation (as LookupSecret references)
+    # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
         conversation.update_secrets(secrets)
         print(f"  injected {len(secrets)} secrets into conversation")
+
+    # Build session URL from conversation ID and inject as a secret so
+    # the agent can use $AUTOMATION_SESSION_URL in bash commands.
+    if not IS_LOCAL_MODE and api_url:
+        session_url = f"{api_url}/conversations/{conversation.id}"
+        conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
+        print(f"  session URL: {session_url}")
 
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")

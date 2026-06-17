@@ -20,10 +20,11 @@ export function ConfigurationSection({
 }: ConfigurationSectionProps) {
   const { t } = useTranslation();
 
+  const automationTimeZone = automation.trigger.timezone ?? automation.timezone;
   let scheduleDisplay = automation.trigger.schedule ?? "";
   if (automation.trigger.schedule_human) {
-    scheduleDisplay = automation.timezone
-      ? `${automation.trigger.schedule_human} (${automation.timezone})`
+    scheduleDisplay = automationTimeZone
+      ? `${automation.trigger.schedule_human} (${automationTimeZone})`
       : automation.trigger.schedule_human;
   }
 
@@ -62,14 +63,12 @@ export function ConfigurationSection({
           {scheduleDisplay}
         </ConfigField>
 
-        {automation.model && (
-          <ConfigField
-            icon={<SparkleIcon className="size-3.5" />}
-            label={t(I18nKey.AUTOMATIONS$DETAIL$MODEL)}
-          >
-            {automation.model}
-          </ConfigField>
-        )}
+        <ConfigField
+          icon={<SparkleIcon className="size-3.5" />}
+          label={t(I18nKey.AUTOMATIONS$DETAIL$MODEL)}
+        >
+          {automation.model ?? "Active profile"}
+        </ConfigField>
 
         {automation.notification && (
           <ConfigField

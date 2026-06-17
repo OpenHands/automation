@@ -60,6 +60,20 @@ def mock_http_client():
     return client
 
 
+def _make_header_getter(headers_dict: dict[str, str]):
+    """Return a side_effect callable for mock_request.headers.get.
+
+    Allows tests to return different values for different header names,
+    which is needed when the code checks multiple headers (Authorization,
+    X-Session-API-Key).
+    """
+
+    def _get(name: str, default: str = "") -> str:
+        return headers_dict.get(name, default)
+
+    return _get
+
+
 class TestAuthentication:
     """Tests for authenticate_request function with API key auth.
 
@@ -91,6 +105,33 @@ class TestAuthentication:
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "valid-api-key"
 
+    async def test_authenticate_extracts_model_profile_metadata(
+        self, mock_request, mock_http_client
+    ):
+        """Auth stores available and active model profile names when present."""
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {
+            **MOCK_USERS_ME_RESPONSE,
+            "llm_profiles": {
+                "active_profile": "fast-profile",
+                "profiles": [
+                    {"name": "fast-profile"},
+                    {"name": "careful-profile"},
+                ],
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.model_profile_names == frozenset(
+            {"fast-profile", "careful-profile"}
+        )
+        assert result.active_model_profile_name == "fast-profile"
+
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header and no cookie raises 401."""
         mock_request.headers.get.return_value = ""
@@ -104,8 +145,10 @@ class TestAuthentication:
     async def test_authenticate_invalid_bearer_format(
         self, mock_request, mock_http_client
     ):
-        """Invalid Bearer format with no cookie raises 401."""
-        mock_request.headers.get.return_value = "InvalidFormat token"
+        """Invalid Bearer format with no cookie or X-Session-API-Key raises 401."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"Authorization": "InvalidFormat token"}
+        )
 
         with pytest.raises(HTTPException) as exc_info:
             await authenticate_request(mock_request, client=mock_http_client)
@@ -196,6 +239,28 @@ class TestCookieAuthentication:
         assert headers["Cookie"] == "keycloak_auth=valid-cookie-value"
         assert "Authorization" not in headers
 
+    async def test_authenticate_chunked_cookie(self, mock_request, mock_http_client):
+        """Chunked keycloak_auth cookies are reassembled before validation."""
+        mock_request.headers.get.return_value = ""
+        mock_request.cookies = {
+            "keycloak_auth": "chunk-0.",
+            "keycloak_auth_1": "chunk-1.",
+            "keycloak_auth_2": "chunk-2",
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.COOKIE
+        call_args = mock_http_client.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers["Cookie"] == "keycloak_auth=chunk-0.chunk-1.chunk-2"
+        assert "Authorization" not in headers
+
     async def test_cookie_invalid_raises_401(self, mock_request, mock_http_client):
         """Invalid cookie (401 from OpenHands) raises 401."""
         mock_request.headers.get.return_value = ""
@@ -257,6 +322,144 @@ class TestCookieAuthentication:
             await authenticate_request(mock_request, client=mock_http_client)
 
         assert exc_info.value.status_code == 502
+
+
+class TestXSessionAPIKeyAuthentication:
+    """Tests for X-Session-API-Key header authentication."""
+
+    async def test_x_session_api_key_authenticates(
+        self, mock_request, mock_http_client
+    ):
+        """X-Session-API-Key header is accepted when no Authorization header."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"X-Session-API-Key": "session-key-value"}
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert isinstance(result, AuthenticatedUser)
+        assert result.user_id == TEST_USER_ID
+        assert result.auth_method == AuthMethod.API_KEY
+        assert result.api_key == "session-key-value"
+
+        # Verify outbound request used Authorization: Bearer
+        call_args = mock_http_client.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer session-key-value"
+
+    async def test_bearer_takes_priority_over_x_session_api_key(
+        self, mock_request, mock_http_client
+    ):
+        """Authorization: Bearer wins when both headers are present."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {
+                "Authorization": "Bearer bearer-key",
+                "X-Session-API-Key": "session-key",
+            }
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.api_key == "bearer-key"
+
+    async def test_x_session_api_key_takes_priority_over_cookie(
+        self, mock_request, mock_http_client
+    ):
+        """X-Session-API-Key wins over keycloak_auth cookie."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"X-Session-API-Key": "session-key"}
+        )
+        mock_request.cookies = {"keycloak_auth": "cookie-value"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.API_KEY
+        assert result.api_key == "session-key"
+
+    async def test_x_session_api_key_empty_falls_through_to_cookie(
+        self, mock_request, mock_http_client
+    ):
+        """Empty X-Session-API-Key falls through to cookie auth."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"X-Session-API-Key": "  "}
+        )
+        mock_request.cookies = {"keycloak_auth": "cookie-value"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.COOKIE
+
+    async def test_x_session_api_key_invalid_raises_401(
+        self, mock_request, mock_http_client
+    ):
+        """Invalid X-Session-API-Key returns 401 from upstream."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"X-Session-API-Key": "bad-key"}
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert exc_info.value.status_code == 401
+        assert "Invalid or expired API key" in exc_info.value.detail
+
+    async def test_x_session_api_key_works_with_local_mode(
+        self, mock_request, mock_http_client
+    ):
+        """X-Session-API-Key works with local_api_key authentication."""
+        mock_request.headers.get.side_effect = _make_header_getter(
+            {"X-Session-API-Key": "test-local-api-key"}
+        )
+
+        with patch("openhands.automation.auth.get_config") as mock_get_config:
+            mock_settings = MagicMock()
+            mock_settings.is_local_mode = True
+            mock_settings.local_api_key = "test-local-api-key"
+            mock_config = MagicMock()
+            mock_config.service = mock_settings
+            mock_get_config.return_value = mock_config
+
+            user = await authenticate_request(mock_request, client=mock_http_client)
+
+            mock_http_client.get.assert_not_called()
+            assert user.auth_method == AuthMethod.LOCAL_API_KEY
+
+    async def test_no_headers_no_cookie_raises_401(
+        self, mock_request, mock_http_client
+    ):
+        """No Authorization, no X-Session-API-Key, no cookie → 401."""
+        mock_request.headers.get.side_effect = _make_header_getter({})
+        mock_request.cookies = {}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert exc_info.value.status_code == 401
+        assert "X-Session-API-Key" in exc_info.value.detail
 
 
 class TestAuthIntegration:

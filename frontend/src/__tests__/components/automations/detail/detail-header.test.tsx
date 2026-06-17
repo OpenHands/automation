@@ -14,7 +14,7 @@ const mockAutomation: Automation = {
   trigger: { type: "cron", schedule_human: "Weekdays at 09:00" },
   enabled: true,
   repository: "acme/frontend-app",
-  model: "Claude Opus",
+  model: "claude-opus",
   created_at: "2026-01-10T00:00:00Z",
   updated_at: "2026-03-23T09:00:00Z",
 };

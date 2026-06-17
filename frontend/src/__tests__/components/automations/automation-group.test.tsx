@@ -11,7 +11,7 @@ const mockAutomation: Automation = {
   trigger: { type: "cron", schedule_human: "Daily" },
   enabled: true,
   repository: "acme/test",
-  model: "Claude",
+  model: "claude",
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
 };

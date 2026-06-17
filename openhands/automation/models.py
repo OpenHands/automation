@@ -40,6 +40,8 @@ class AutomationRunStatus(enum.Enum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    SKIPPED = "SKIPPED"
 
 
 class Automation(Base):
@@ -54,6 +56,10 @@ class Automation(Base):
 
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Model profile name to use for automation runs.
+    # None is only used for legacy/local fallback.
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
@@ -187,6 +193,8 @@ class AutomationRun(Base):
             postgresql_where=(status == AutomationRunStatus.PENDING),
         ),
         Index("ix_automation_runs_status", "status"),
+        Index("ix_automation_runs_status_created_at", "status", "created_at"),
+        Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
     )
 
 
