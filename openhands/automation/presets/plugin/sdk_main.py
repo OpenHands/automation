@@ -234,10 +234,12 @@ with workspace_ctx as workspace:
         selected = random.choices(variants, weights=weights, k=1)[0]
 
         selected_variant = selected["name"]
+        model_profile = selected.get("model") or model_profile
         plugins_config = selected["plugins"]
         print("\n=== EXPERIMENT ===")
         print(f"  id: {experiment_id}")
         print(f"  variant: {selected_variant}")
+        print(f"  model_profile: {model_profile or 'DEFAULT'}")
         print(f"  weights: {dict(zip([v['name'] for v in variants], weights))}")
     else:
         with open(PLUGINS_CONFIG_FILE) as f:
@@ -362,6 +364,8 @@ This automation was triggered by a webhook event:
                 "experiment config may be malformed."
             )
         experiment_tags["variant"] = selected_variant
+        if model_profile:
+            experiment_tags["model_profile"] = model_profile
 
     conversation = Conversation(
         agent=agent,
