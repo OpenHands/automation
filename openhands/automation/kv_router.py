@@ -45,7 +45,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.config import KVSettings, get_config
-from openhands.automation.db import get_session
+from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.kv_helpers import (
     get_nested_value,
     require_dict,
@@ -227,26 +227,32 @@ async def _get_state_row_for_update(
     If either timeout fires, PostgreSQL raises an error which we catch and
     convert to HTTP 409 Conflict, allowing clients to retry with backoff.
 
+    SQLite: SET LOCAL and FOR UPDATE are PostgreSQL-specific and are skipped
+    when running against SQLite (local/dev). SQLite serializes writers at the
+    database level, so no explicit row lock is needed.
+
     Args:
         session: Database session
         automation_id: UUID of the automation
         lock_timeout_ms: Lock timeout in milliseconds (from KVSettings)
     """
-    # Statement timeout: 2x lock timeout as safety net for runaway operations
-    statement_timeout_ms = lock_timeout_ms * 2
-    stmt_sql = f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'"
-    await session.execute(text(stmt_sql))
-    # Lock timeout: fail fast when waiting for lock (configurable per-automation)
-    lock_sql = f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"
-    await session.execute(text(lock_sql))
+    query = select(AutomationKV).where(AutomationKV.automation_id == automation_id)
+
+    if not using_sqlite():
+        # Statement timeout: 2x lock timeout as safety net for runaway operations
+        statement_timeout_ms = lock_timeout_ms * 2
+        await session.execute(
+            text(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'")
+        )
+        # Lock timeout: fail fast when waiting for lock
+        await session.execute(
+            text(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")
+        )
+        query = query.with_for_update()
 
     # Record lock wait time
     with record_lock_wait():
-        result = await session.execute(
-            select(AutomationKV)
-            .where(AutomationKV.automation_id == automation_id)
-            .with_for_update()
-        )
+        result = await session.execute(query)
     return result.scalars().first()
 
 
