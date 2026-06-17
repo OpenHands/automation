@@ -282,7 +282,7 @@ class TestABTestAutomationCreation:
         assert "random.choices" in main_py
         assert "experiment_tags" in main_py
         assert 'selected.get("model")' in main_py
-        assert 'experiment_tags["model_profile"]' in main_py
+        assert 'experiment_tags["modelprofile"]' in main_py
 
     async def test_variant_models_are_written_to_experiment_config(
         self, client, mock_file_store, mock_authenticated_user
