@@ -245,9 +245,7 @@ async def _get_state_row_for_update(
             text(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'")
         )
         # Lock timeout: fail fast when waiting for lock
-        await session.execute(
-            text(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")
-        )
+        await session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'"))
         query = query.with_for_update()
 
     # Record lock wait time
