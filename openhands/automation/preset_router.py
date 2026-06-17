@@ -661,7 +661,7 @@ def _generate_plugin_tarball(
                 "experiment_id": experiment_id,
                 "variants": [
                     {
-                        **({"model": v.model} if v.model is not None else {}),
+                        "model": v.model,
                         "name": v.name,
                         "weight": v.weight,
                         "plugins": [p.model_dump(exclude_none=True) for p in v.plugins],
