@@ -212,8 +212,7 @@ async def mark_stale_runs(
         # Fetch stale run IDs only — close this session before doing any
         # per-run work so we don't hold locks across slow verify calls.
         result = await session.execute(
-            select(AutomationRun.id)
-            .where(
+            select(AutomationRun.id).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
                 AutomationRun.timeout_at.isnot(None),
                 AutomationRun.timeout_at < now,
