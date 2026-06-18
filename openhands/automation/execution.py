@@ -630,14 +630,20 @@ async def run_automation(
             if isinstance(tarball_source, bytes):
                 logger.info("Uploading tarball to sandbox", extra=_log_ctx())
                 await _upload(
-                    client, agent_url, session_key,
-                    tarball_source, _FALLBACK_TARBALL_PATH,
+                    client,
+                    agent_url,
+                    session_key,
+                    tarball_source,
+                    _FALLBACK_TARBALL_PATH,
                 )
             else:
                 logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
-                    client, agent_url, session_key,
-                    tarball_source, _FALLBACK_TARBALL_PATH,
+                    client,
+                    agent_url,
+                    session_key,
+                    tarball_source,
+                    _FALLBACK_TARBALL_PATH,
                 )
 
             if setup_script_path is None:

@@ -49,7 +49,11 @@ def _docker_available() -> bool:
     try:
         import socket
 
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        af_unix = getattr(socket, "AF_UNIX", None)
+        if af_unix is None:
+            return False
+
+        sock = socket.socket(af_unix, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
         sock.close()
         return True

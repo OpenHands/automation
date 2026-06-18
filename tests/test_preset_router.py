@@ -32,15 +32,16 @@ PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "prese
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
-    if not hasattr(socket, "AF_UNIX"):
+    af_unix = getattr(socket, "AF_UNIX", None)
+    if af_unix is None:
         return False
 
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock = socket.socket(af_unix, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")
         sock.close()
         return True
-    except (AttributeError, FileNotFoundError, ConnectionRefusedError):
+    except (FileNotFoundError, ConnectionRefusedError):
         return False
 
 
