@@ -339,7 +339,7 @@ class TestExecuteInContextErrors:
         match = re.search(r"base64\.b64decode\('([^']+)'\)", bash_cmd)
         assert match is not None
         payload = base64.b64decode(match.group(1)).decode("utf-8")
-        assert expected_path in payload
+        assert repr(expected_path) in payload
         assert DEFAULT_WORK_DIR in payload
         assert "python bootstrap.py" in payload
         assert "AUTOMATION_API_URL" in payload
