@@ -16,6 +16,7 @@ from openhands.automation.preset_router import (
     _generate_tarball,
     _get_preset_entrypoint,
     _replace_prompt_in_tarball,
+    _resolve_experiment_variant_models,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -960,6 +961,7 @@ class TestExperimentVariantValidation:
                     {
                         "name": "control",
                         "weight": 50,
+                        "model": "fast-profile",
                         "plugins": [{"source": "github:owner/repo", "ref": "v1"}],
                     },
                     {
@@ -974,8 +976,65 @@ class TestExperimentVariantValidation:
         )
         assert request.variants is not None
         assert len(request.variants) == 2
+        assert request.variants[0].model == "fast-profile"
+        assert request.variants[1].model is None
+
         assert request.plugins is None
         assert request.experiment_id == "my-experiment"
+
+    def test_variant_models_default_to_active_profile(self, mock_authenticated_user):
+        """Missing variant model profiles resolve to the active profile."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        mock_authenticated_user.model_profile_names = frozenset(
+            {"active-profile", "fast-profile"}
+        )
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                model="fast-profile",
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+
+        resolved = _resolve_experiment_variant_models(variants, mock_authenticated_user)
+
+        assert resolved is not None
+        assert resolved[0].model == "fast-profile"
+        assert resolved[1].model == "active-profile"
+
+    def test_unknown_variant_model_profile_rejected(self, mock_authenticated_user):
+        """Variant model profile names are validated when metadata is available."""
+        from fastapi import HTTPException
+
+        from openhands.automation.preset_router import ExperimentVariant
+
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                model="missing-profile",
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+
+        with pytest.raises(HTTPException) as exc_info:
+            _resolve_experiment_variant_models(variants, mock_authenticated_user)
+        assert exc_info.value.detail == "Model profile `missing-profile` not found"
 
     def test_plugins_and_variants_mutually_exclusive(self):
         """Providing both plugins and variants raises error."""
@@ -1216,11 +1275,13 @@ class TestExperimentTarball:
             ExperimentVariant(
                 name="control",
                 weight=70,
+                model="fast-profile",
                 plugins=[PluginSource(source="github:owner/repo", ref="v1")],
             ),
             ExperimentVariant(
                 name="treatment",
                 weight=30,
+                model="reasoning-profile",
                 plugins=[PluginSource(source="github:owner/repo", ref="v2")],
             ),
         ]
@@ -1242,8 +1303,11 @@ class TestExperimentTarball:
             assert config["variants"][0]["weight"] == 70
             assert config["variants"][0]["plugins"][0]["source"] == "github:owner/repo"
             assert config["variants"][0]["plugins"][0]["ref"] == "v1"
+            assert config["variants"][0]["model"] == "fast-profile"
+
             assert config["variants"][1]["name"] == "treatment"
             assert config["variants"][1]["weight"] == 30
+            assert config["variants"][1]["model"] == "reasoning-profile"
 
     def test_standard_tarball_unchanged(self):
         """Non-experiment tarball still produces plugins_config.json."""

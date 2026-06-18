@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.0.0a9"
+version = "1.0.0a10"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -24,8 +24,10 @@ dependencies = [
   "openhands-sdk==1.28.1",
   "openhands-workspace==1.28.1",
   "pg8000>=1.31",
+  "prometheus-client>=0.19",
   "pydantic>=2",
   "pydantic-settings>=2",
+  "pyjwt>=2.8",
   "python-json-logger>=3",
   "sqlalchemy[asyncio]>=2",
   "tenacity>=9.1.4",

@@ -482,6 +482,16 @@ class ExperimentVariant(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100)
     weight: int = Field(..., gt=0, description="Relative selection weight (> 0)")
+    model: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=MODEL_PROFILE_PATTERN,
+        description=(
+            "Model profile name to use when this variant is selected. Defaults "
+            "to the active profile at creation time when omitted."
+        ),
+    )
     plugins: list[PluginSource] = Field(
         ...,
         min_length=1,
@@ -596,6 +606,34 @@ class CreatePluginAutomationRequest(BaseModel):
         return self
 
 
+def _resolve_experiment_variant_models(
+    variants: list[ExperimentVariant] | None,
+    user: AuthenticatedUser,
+    default_model: str | None = None,
+) -> list[ExperimentVariant] | None:
+    """Return variants with model profile names resolved for persistence.
+
+    Variant-level model profiles are stored in the generated experiment config so
+    each run can load the profile selected by weighted variant assignment. Missing
+    variant models use the automation-level model, which itself defaults to the
+    user's active profile at creation time.
+    """
+    if variants is None:
+        return None
+
+    return [
+        variant.model_copy(
+            update={
+                "model": resolve_model_profile_for_user(
+                    variant.model if variant.model is not None else default_model,
+                    user,
+                )
+            }
+        )
+        for variant in variants
+    ]
+
+
 def _generate_plugin_tarball(
     plugins: list[PluginSource] | None,
     prompt: str,
@@ -623,6 +661,7 @@ def _generate_plugin_tarball(
                 "experiment_id": experiment_id,
                 "variants": [
                     {
+                        "model": v.model,
                         "name": v.name,
                         "weight": v.weight,
                         "plugins": [p.model_dump(exclude_none=True) for p in v.plugins],
@@ -686,6 +725,9 @@ async def create_automation_from_plugin(
     - With repo_path: subdirectory for monorepos
     """
     model = resolve_model_profile_for_user(body.model, user)
+    variants = _resolve_experiment_variant_models(
+        body.variants, user, default_model=model
+    )
 
     # 1. Generate tarball with SDK code, plugin/experiment config, and prompt
     tarball_content = _generate_plugin_tarball(
@@ -693,7 +735,7 @@ async def create_automation_from_plugin(
         body.prompt,
         repos=body.repos,
         experiment_id=body.experiment_id,
-        variants=body.variants,
+        variants=variants,
     )
 
     # 2. Upload tarball to storage
