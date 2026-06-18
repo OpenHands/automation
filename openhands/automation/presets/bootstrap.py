@@ -1,8 +1,8 @@
-"""Cross-platform preset bootstrap for plugin automations.
+"""Cross-platform preset bootstrap shared by all preset types.
 
-This script runs before sdk_main.py and uses only the Python standard library.
-It creates the per-run virtual environment, installs the matching OpenHands SDK
-packages, then re-execs the generated main.py with the venv interpreter.
+This script runs before the generated main.py and uses only the Python standard
+library. It creates the per-run virtual environment, installs the matching
+OpenHands SDK packages, then re-execs main.py with the venv interpreter.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -77,7 +76,7 @@ def main() -> None:
     _run_checked(uv_path, "venv", str(VENV_DIR), "--python", PYTHON_REQUIREMENT, "--quiet")
 
     print(f"[bootstrap] Installing OpenHands SDK packages at version {sdk_version}")
-    install_args = [uv_path, "pip", "install", "--quiet"]
+    install_args = [uv_path, "pip", "install", "--python", str(_venv_python_path()), "--quiet"]
     install_args.extend(f"{package}=={sdk_version}" for package in SDK_PACKAGES)
     _run_checked(*install_args)
 

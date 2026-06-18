@@ -48,6 +48,7 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
+BOOTSTRAP_PATH = PRESETS_DIR / "bootstrap.py"
 PRESET_BOOTSTRAP_ENTRYPOINT = "python bootstrap.py"
 
 
@@ -75,7 +76,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
     if _PROMPT_PRESET_CACHE is None:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
-            "bootstrap.py": (PROMPT_PRESET_DIR / "bootstrap.py").read_text(),
+            "bootstrap.py": BOOTSTRAP_PATH.read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -89,7 +90,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
     if _PLUGIN_PRESET_CACHE is None:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
-            "bootstrap.py": (PLUGIN_PRESET_DIR / "bootstrap.py").read_text(),
+            "bootstrap.py": BOOTSTRAP_PATH.read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
