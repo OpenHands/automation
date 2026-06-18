@@ -193,8 +193,14 @@ async def _upload(
 
 
 def _get_python_launcher() -> str:
-    """Return a cross-platform Python launcher for inline runner commands."""
-    return "py -3" if os.name == "nt" else "python"
+    """Return a cross-platform Python launcher for inline runner commands.
+
+    Preset automations run inside sandboxes where uv is guaranteed to be
+    present but a bare ``python`` binary may not be on PATH.  ``uv run python``
+    delegates interpreter resolution to uv so we never rely on a system-level
+    Python installation.
+    """
+    return "uv run python"
 
 
 def _build_python_runner_command(

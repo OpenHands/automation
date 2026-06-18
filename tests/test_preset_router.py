@@ -118,13 +118,10 @@ class TestPresetFileSyntax:
 
 
 class TestPresetEntrypoint:
-    def test_get_preset_entrypoint_posix(self, monkeypatch):
-        monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
-        assert _get_preset_entrypoint() == "python bootstrap.py"
-
-    def test_get_preset_entrypoint_windows(self, monkeypatch):
-        monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
-        assert _get_preset_entrypoint() == "py -3 bootstrap.py"
+    def test_get_preset_entrypoint_uses_uv(self):
+        # uv is guaranteed in all preset sandboxes, so we never rely on a
+        # bare system-level Python binary.
+        assert _get_preset_entrypoint() == "uv run python bootstrap.py"
 
     def test_prompt_bootstrap_contains_cross_platform_venv_paths(self):
         bootstrap_path = PRESETS_DIR / "bootstrap.py"

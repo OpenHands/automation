@@ -12,7 +12,6 @@ Currently supported presets:
 import io
 import json
 import logging
-import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -49,17 +48,20 @@ PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 BOOTSTRAP_PATH = PRESETS_DIR / "bootstrap.py"
-PRESET_BOOTSTRAP_ENTRYPOINT = "python bootstrap.py"
+# uv is guaranteed to be present in all preset sandboxes; using ``uv run
+# python`` avoids assuming a system-level Python installation is available.
+PRESET_BOOTSTRAP_ENTRYPOINT = "uv run python bootstrap.py"
 
 
 def _get_preset_entrypoint() -> str:
-    """Return the preset entrypoint for the current host platform.
+    """Return the preset entrypoint.
 
-    Prompt and plugin presets now launch a Python bootstrap script that creates
-    the virtual environment and re-execs ``main.py`` from inside it. Native
-    Windows prefers the ``py`` launcher; other platforms use ``python``.
+    Prompt and plugin presets launch a Python bootstrap script that creates
+    the virtual environment and re-execs ``main.py`` from inside it.  We use
+    ``uv run python`` because uv is guaranteed to be present in the sandbox
+    whereas a bare ``python`` binary may not be on PATH.
     """
-    return "py -3 bootstrap.py" if os.name == "nt" else PRESET_BOOTSTRAP_ENTRYPOINT
+    return PRESET_BOOTSTRAP_ENTRYPOINT
 
 
 # Preset file caches to avoid I/O on every request
