@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openhands.automation.config import get_config
-from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.execution import (
+    _FALLBACK_TARBALL_PATH as TARBALL_PATH,
     DEFAULT_WORK_DIR,
     AutomationResult,
     DispatchResult,

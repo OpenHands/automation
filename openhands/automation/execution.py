@@ -26,11 +26,18 @@ from tenacity import (
 )
 
 from openhands.automation.config import get_config
-from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.sandbox import delete_sandbox
 
+
+# Fallback tarball destination when no per-run path is available.
+# Uses the platform temp directory so the path is valid on every OS
+# (Windows agent-servers reject bare POSIX /tmp/ paths).
+# Not a protocol constant — the sandbox has no fixed expectation for this
+# filename; it is only used by run_automation() (E2E test helper) and as a
+# last-resort fallback in execute_in_context() when run_id is absent.
+_FALLBACK_TARBALL_PATH = os.path.join(tempfile.gettempdir(), "automation.tar.gz")
 
 # Default working directory for cloud/container mode
 DEFAULT_WORK_DIR = "/workspace/project"
@@ -474,7 +481,7 @@ async def execute_in_context(
     tarball_path = (
         os.path.join(tempfile.gettempdir(), f"automation-{run_id}.tar.gz")
         if run_id and "/" not in run_id
-        else TARBALL_PATH
+        else _FALLBACK_TARBALL_PATH
     )
 
     try:
@@ -623,25 +630,27 @@ async def run_automation(
             if isinstance(tarball_source, bytes):
                 logger.info("Uploading tarball to sandbox", extra=_log_ctx())
                 await _upload(
-                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                    client, agent_url, session_key,
+                    tarball_source, _FALLBACK_TARBALL_PATH,
                 )
             else:
                 logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
-                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                    client, agent_url, session_key,
+                    tarball_source, _FALLBACK_TARBALL_PATH,
                 )
 
             if setup_script_path is None:
                 cmd = _build_python_runner_command(
                     entrypoint=entrypoint,
-                    tarball_path=TARBALL_PATH,
+                    tarball_path=_FALLBACK_TARBALL_PATH,
                     work_dir=work_dir,
                     env_vars=env_vars,
                 )
             else:
                 cmd = _build_shell_runner_command(
                     entrypoint=entrypoint,
-                    tarball_path=TARBALL_PATH,
+                    tarball_path=_FALLBACK_TARBALL_PATH,
                     work_dir=work_dir,
                     env_vars=env_vars,
                     setup_script_path=setup_script_path,
