@@ -339,6 +339,23 @@
     "tr": "Başarısız",
     "uk": "Невдало"
   },
+  "AUTOMATIONS$DETAIL$CANCELLED": {
+    "en": "Cancelled",
+    "ja": "キャンセル",
+    "zh-CN": "已取消",
+    "zh-TW": "已取消",
+    "ko-KR": "취소됨",
+    "no": "Avbrutt",
+    "ar": "أُلغيت",
+    "de": "Abgebrochen",
+    "fr": "Annulé",
+    "it": "Annullato",
+    "pt": "Cancelado",
+    "es": "Cancelado",
+    "ca": "Cancel·lat",
+    "tr": "İptal edildi",
+    "uk": "Скасовано"
+  },
   "AUTOMATIONS$DETAIL$PENDING": {
     "en": "Pending",
     "ja": "保留中",
