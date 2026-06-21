@@ -8,13 +8,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
-from openhands.automation.config import get_settings
+from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
     create_session_factory,
@@ -22,7 +21,9 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
+from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
+from openhands.automation.middleware import ApiKeyAwareCORSMiddleware
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
@@ -52,7 +53,10 @@ async def lifespan(app: FastAPI):
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-    logger.info("Starting OpenHands Automations Service")
+    logger.info(
+        "Starting OpenHands Automations Service",
+        extra={"kv_store_configured": get_config().kv.enabled},
+    )
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()
@@ -207,12 +211,12 @@ def _create_app() -> FastAPI:
 
 app = _create_app()
 
+# API-key requests (e.g. the local agent-server GUI calling directly from the
+# browser) get permissive CORS; cookie/session requests keep the strict
+# allowlist below. Mirrors the main cloud API's ApiKeyAwareCORSMiddleware.
 app.add_middleware(
-    CORSMiddleware,
+    ApiKeyAwareCORSMiddleware,
     allow_origins=_build_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 _base_path = get_settings().base_path
@@ -224,6 +228,7 @@ app.include_router(uploads_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
+app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 
 

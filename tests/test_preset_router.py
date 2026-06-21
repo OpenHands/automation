@@ -14,7 +14,9 @@ from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
+    _get_preset_entrypoint,
     _replace_prompt_in_tarball,
+    _resolve_experiment_variant_models,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -110,6 +112,30 @@ class TestPresetFileSyntax:
             "setup.sh must call ${AUTOMATION_API_URL}/sdk-version "
             "— do not hardcode the version"
         )
+
+
+class TestPresetEntrypoint:
+    def test_get_preset_entrypoint_posix(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "posix")
+        assert _get_preset_entrypoint() == ".venv/bin/python main.py"
+
+    def test_get_preset_entrypoint_windows(self, monkeypatch):
+        monkeypatch.setattr("openhands.automation.preset_router.os.name", "nt")
+        assert _get_preset_entrypoint() == ".venv/Scripts/python.exe main.py"
+
+    def test_prompt_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
+
+    def test_plugin_setup_sh_falls_back_when_python3_missing(self):
+        setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
+        content = setup_sh_path.read_text()
+        assert "command -v python3" in content
+        assert "command -v python" in content
+        assert "command -v py" in content
 
 
 class TestGenerateTarball:
@@ -427,7 +453,7 @@ class TestCreateAutomationFromPrompt:
         assert data["prompt"] == test_prompt
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -554,7 +580,7 @@ class TestCreateAutomationFromPrompt:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Print hello"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
@@ -923,6 +949,7 @@ class TestExperimentVariantValidation:
                     {
                         "name": "control",
                         "weight": 50,
+                        "model": "fast-profile",
                         "plugins": [{"source": "github:owner/repo", "ref": "v1"}],
                     },
                     {
@@ -937,8 +964,65 @@ class TestExperimentVariantValidation:
         )
         assert request.variants is not None
         assert len(request.variants) == 2
+        assert request.variants[0].model == "fast-profile"
+        assert request.variants[1].model is None
+
         assert request.plugins is None
         assert request.experiment_id == "my-experiment"
+
+    def test_variant_models_default_to_active_profile(self, mock_authenticated_user):
+        """Missing variant model profiles resolve to the active profile."""
+        from openhands.automation.preset_router import ExperimentVariant
+
+        mock_authenticated_user.model_profile_names = frozenset(
+            {"active-profile", "fast-profile"}
+        )
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                model="fast-profile",
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+
+        resolved = _resolve_experiment_variant_models(variants, mock_authenticated_user)
+
+        assert resolved is not None
+        assert resolved[0].model == "fast-profile"
+        assert resolved[1].model == "active-profile"
+
+    def test_unknown_variant_model_profile_rejected(self, mock_authenticated_user):
+        """Variant model profile names are validated when metadata is available."""
+        from fastapi import HTTPException
+
+        from openhands.automation.preset_router import ExperimentVariant
+
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        variants = [
+            ExperimentVariant(
+                name="control",
+                weight=50,
+                model="missing-profile",
+                plugins=[PluginSource(source="github:owner/repo", ref="v1")],
+            ),
+            ExperimentVariant(
+                name="treatment",
+                weight=50,
+                plugins=[PluginSource(source="github:owner/repo", ref="v2")],
+            ),
+        ]
+
+        with pytest.raises(HTTPException) as exc_info:
+            _resolve_experiment_variant_models(variants, mock_authenticated_user)
+        assert exc_info.value.detail == "Model profile `missing-profile` not found"
 
     def test_plugins_and_variants_mutually_exclusive(self):
         """Providing both plugins and variants raises error."""
@@ -1179,11 +1263,13 @@ class TestExperimentTarball:
             ExperimentVariant(
                 name="control",
                 weight=70,
+                model="fast-profile",
                 plugins=[PluginSource(source="github:owner/repo", ref="v1")],
             ),
             ExperimentVariant(
                 name="treatment",
                 weight=30,
+                model="reasoning-profile",
                 plugins=[PluginSource(source="github:owner/repo", ref="v2")],
             ),
         ]
@@ -1205,8 +1291,11 @@ class TestExperimentTarball:
             assert config["variants"][0]["weight"] == 70
             assert config["variants"][0]["plugins"][0]["source"] == "github:owner/repo"
             assert config["variants"][0]["plugins"][0]["ref"] == "v1"
+            assert config["variants"][0]["model"] == "fast-profile"
+
             assert config["variants"][1]["name"] == "treatment"
             assert config["variants"][1]["weight"] == 30
+            assert config["variants"][1]["model"] == "reasoning-profile"
 
     def test_standard_tarball_unchanged(self):
         """Non-experiment tarball still produces plugins_config.json."""
@@ -1284,7 +1373,7 @@ class TestCreateAutomationFromPlugin:
         assert data["prompt"] == "Review all Python files for security issues"
         assert data["trigger"]["type"] == "cron"
         assert data["trigger"]["schedule"] == "0 9 * * 1"
-        assert data["entrypoint"] == ".venv/bin/python main.py"
+        assert data["entrypoint"] == _get_preset_entrypoint()
         assert data["setup_script_path"] == "setup.sh"
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
@@ -1400,7 +1489,7 @@ class TestCreateAutomationFromPlugin:
         assert automation is not None
         assert automation.name == "Automation Record Test"
         assert automation.prompt == "Run plugin tasks"
-        assert automation.entrypoint == ".venv/bin/python main.py"
+        assert automation.entrypoint == _get_preset_entrypoint()
         assert automation.setup_script_path == "setup.sh"
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID

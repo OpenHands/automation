@@ -149,6 +149,7 @@ async def mark_run_status(
         AutomationRunStatus.COMPLETED,
         AutomationRunStatus.FAILED,
         AutomationRunStatus.CANCELLED,
+        AutomationRunStatus.SKIPPED,
     ):
         values["completed_at"] = now
         run.completed_at = now

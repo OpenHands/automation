@@ -67,6 +67,28 @@ Three repos work together:
 
 After pushing to the automation repo, update both files in the deploy repo.
 
+## Configuration
+
+Configuration is centralized in `config.py` using a composed `AppConfig` with typed sections:
+
+```python
+from automation.config import get_config
+
+config = get_config()
+config.service.db_host          # ServiceSettings (AUTOMATION_ prefix)
+config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
+config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
+config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
+config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
+config.log.log_level            # LogSettings (no prefix)
+```
+
+**Key principles:**
+- Use `get_config().<section>` instead of deprecated `get_settings()`
+- All environment variables documented in config class docstrings
+- Protocol constants (WORK_DIR, TARBALL_PATH) in `constants.py` - these cannot be changed without breaking compatibility
+- Shared logging context via `log_extra()` from `automation.utils`
+
 ## Build & Test Commands
 
 ```bash
@@ -82,6 +104,28 @@ OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
 # E2E test script (live sandbox, ~80s)
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
+
+## PR-Specific Documents
+
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+
+```bash
+mkdir -p .pr
+
+.pr/
+├── design.md       # Design decisions and architecture notes
+├── analysis.md     # Investigation or debugging notes
+└── notes.md        # Any other PR-specific content
+```
+
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. Fork PRs must remove `.pr/` manually before merge.
+
+Important notes:
+
+- Do not put anything in `.pr/` that needs to be preserved.
+- The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- For fork PRs, remove `.pr/` manually before merging.
+
 
 ## Frontend Hosting
 
