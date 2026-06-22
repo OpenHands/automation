@@ -272,7 +272,10 @@ with workspace_ctx as workspace:
         event_json = json.dumps(event_context["event"], indent=2)
         context_sections.append(f"""## Event Payload
 
-This automation was triggered by a webhook event:
+This automation was triggered by a webhook event. The full event payload is
+included below — use it directly. Do **not** try to read it from a shell
+environment variable (e.g. `$AUTOMATION_EVENT_PAYLOAD`); that variable is not
+set in your environment.
 
 ```json
 {event_json}
