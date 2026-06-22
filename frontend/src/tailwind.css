@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@config "../tailwind.config.js";
+
+@theme {
+  --color-primary: #c9b974;
+  --color-base: #0d0f11;
+  --color-base-secondary: #24272e;
+  --color-danger: #e76a5e;
+  --color-success: #a5e75e;
+  --color-basic: #9099ac;
+  --color-tertiary: #454545;
+  --color-tertiary-light: #b7bdc2;
+  --color-content: #ecedee;
+  --color-content-2: #f9fbfe;
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  opacity: 0;
+}
+
+.custom-scrollbar:hover::-webkit-scrollbar-thumb {
+  background: rgba(208, 217, 250, 0.3);
+  opacity: 1;
+}
+
+.custom-scrollbar:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(208, 217, 250, 0.5);
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.custom-scrollbar:hover {
+  scrollbar-color: rgba(208, 217, 250, 0.3) transparent;
+}

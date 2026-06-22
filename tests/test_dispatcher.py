@@ -6,24 +6,35 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 import asyncio
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from automation.dispatcher import (
+from openhands.automation.dispatcher import (
+    _build_event_payload,
+    _execute_run,
     dispatch_pending_runs,
     dispatcher_loop,
 )
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.utils import utcnow
-from automation.utils.run import mark_run_status
-from automation.utils.tarball_validation import is_http_url
+from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.utils import utcnow
+from openhands.automation.utils.run import mark_run_status
+from openhands.automation.utils.tarball_validation import is_http_url
 
 
 # Test UUIDs
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+
+
+@pytest.fixture
+def mock_client():
+    """Mock httpx.AsyncClient for tests."""
+    return MagicMock()
 
 
 class TestIsHttpUrl:
@@ -202,9 +213,9 @@ class TestMarkRunStatus:
 class TestDispatchPendingRuns:
     """Tests for dispatch_pending_runs function."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatches_pending_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Pending runs are dispatched and marked as RUNNING."""
         async with async_session_factory() as session:
@@ -228,7 +239,9 @@ class TestDispatchPendingRuns:
             await session.commit()
             run_id = run.id
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 1
         assert dispatched[0].id == run_id
@@ -241,9 +254,9 @@ class TestDispatchPendingRuns:
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Runs already in RUNNING status are not dispatched."""
         async with async_session_factory() as session:
@@ -267,13 +280,15 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 0
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_completed_runs(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Completed runs are not dispatched."""
         async with async_session_factory() as session:
@@ -298,13 +313,15 @@ class TestDispatchPendingRuns:
             session.add(run)
             await session.commit()
 
-        dispatched = await dispatch_pending_runs(async_session_factory, mock_settings)
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
 
         assert len(dispatched) == 0
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_respects_batch_size(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Only batch_size runs are dispatched at once."""
         async with async_session_factory() as session:
@@ -330,14 +347,14 @@ class TestDispatchPendingRuns:
             await session.commit()
 
         dispatched = await dispatch_pending_runs(
-            async_session_factory, mock_settings, batch_size=2
+            async_session_factory, mock_settings, mock_client, batch_size=2
         )
 
         assert len(dispatched) == 2
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_orders_by_created_at(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Oldest pending runs are dispatched first."""
         async with async_session_factory() as session:
@@ -369,7 +386,7 @@ class TestDispatchPendingRuns:
             old_run_id = old_run.id
 
         dispatched = await dispatch_pending_runs(
-            async_session_factory, mock_settings, batch_size=1
+            async_session_factory, mock_settings, mock_client, batch_size=1
         )
 
         assert len(dispatched) == 1
@@ -379,9 +396,9 @@ class TestDispatchPendingRuns:
 class TestDispatcherLoop:
     """Tests for dispatcher_loop function."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatcher_loop_exits_on_shutdown(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher exits gracefully when shutdown event is set."""
         shutdown_event = asyncio.Event()
@@ -404,7 +421,7 @@ class TestDispatcherLoop:
             task.cancel()
             pytest.fail("Dispatcher did not exit on shutdown signal")
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatcher_loop_dispatches_runs(
         self, mock_execute, async_session_factory, mock_settings, caplog
     ):
@@ -434,7 +451,7 @@ class TestDispatcherLoop:
 
         import logging
 
-        with caplog.at_level(logging.INFO, logger="automation.dispatcher"):
+        with caplog.at_level(logging.INFO, logger="openhands.automation.dispatcher"):
             task = asyncio.create_task(
                 dispatcher_loop(
                     async_session_factory,
@@ -467,9 +484,9 @@ class TestDispatcherLoop:
 class TestEffectiveTimeout:
     """Tests for effective timeout calculation in dispatcher."""
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_automation_timeout_when_set(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher uses automation's timeout when set."""
 
@@ -494,7 +511,7 @@ class TestEffectiveTimeout:
             session.add(run)
             await session.commit()
 
-        await dispatch_pending_runs(async_session_factory, mock_settings)
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
@@ -503,9 +520,9 @@ class TestEffectiveTimeout:
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout == 120
 
-    @patch("automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
-        self, mock_execute, async_session_factory, mock_settings
+        self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
         """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
         async with async_session_factory() as session:
@@ -529,7 +546,7 @@ class TestEffectiveTimeout:
             session.add(run)
             await session.commit()
 
-        await dispatch_pending_runs(async_session_factory, mock_settings)
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
@@ -537,3 +554,260 @@ class TestEffectiveTimeout:
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout is None
+
+
+class TestBuildEventPayload:
+    """Tests for _build_event_payload — ensures generated payloads produce
+    tag-safe trigger values (≤256 chars) while preserving the full trigger
+    dict in trigger_payload for downstream consumers.
+
+    See: https://github.com/OpenHands/automation/issues/111
+    """
+
+    def _make_automation(self, trigger: dict[str, Any] | None, **kw: Any) -> Automation:
+        defaults = dict(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run main.py",
+            enabled=True,
+        )
+        defaults.update(kw)
+        return Automation(trigger=cast(Any, trigger), **defaults)
+
+    def _make_run(self, automation: Automation, **kw) -> AutomationRun:
+        return AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+            **kw,
+        )
+
+    def test_cron_trigger_uses_type_string(self):
+        """Cron trigger → payload['trigger'] == 'cron' (not the full dict)."""
+        trigger = {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"}
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "cron"
+        assert payload["trigger_payload"] == trigger
+        assert payload["automation_name"] == "Test"
+
+    def test_event_trigger_uses_type_string(self):
+        """Event trigger preserves full dict in trigger_payload."""
+        trigger = {
+            "type": "event",
+            "source": "github",
+            "on": ["pull_request.labeled", "issues.labeled"],
+            "filter": (
+                "repository.full_name == 'OpenHands/software-agent-sdk' "
+                "&& label.name == 'oh-cloud-review' "
+                "&& (pull_request.number != null || issue.pull_request.url != null)"
+            ),
+        }
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "event"
+        assert payload["trigger_payload"] == trigger
+        assert payload["trigger_payload"]["source"] == "github"
+        assert payload["trigger_payload"]["filter"] == trigger["filter"]
+        # The trigger value must fit in a 256-char tag
+        assert len(str(payload["trigger"])) <= 256
+
+    def test_long_filter_does_not_exceed_tag_limit(self):
+        """A very long filter still produces a short tag value."""
+        long_filter = " && ".join([f"field_{i} == 'value_{i}'" for i in range(50)])
+        trigger = {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment.created",
+            "filter": long_filter,
+        }
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        # The full trigger dict string would be >256 chars
+        assert len(str(trigger)) > 256
+        # But payload['trigger'] is just the type string
+        assert payload["trigger"] == "event"
+        assert len(payload["trigger"]) <= 256
+        # Full dict is still available in trigger_payload
+        assert payload["trigger_payload"] == trigger
+
+    def test_event_payload_included_when_present(self):
+        """Run event_payload is passed through as 'event' key."""
+        trigger = {"type": "event", "source": "github", "on": "push"}
+        automation = self._make_automation(trigger)
+        event_data = {"action": "push", "ref": "refs/heads/main"}
+        run = self._make_run(automation, event_payload=event_data)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["event"] == event_data
+
+    def test_event_payload_omitted_when_none(self):
+        """No 'event' key when run has no event_payload."""
+        trigger = {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"}
+        automation = self._make_automation(trigger)
+        run = self._make_run(automation, event_payload=None)
+
+        payload = _build_event_payload(automation, run)
+
+        assert "event" not in payload
+
+    def test_model_included_when_present(self):
+        """Automation model is passed through for preset scripts."""
+        trigger = {"type": "cron", "schedule": "0 0 * * *", "timezone": "UTC"}
+        automation = self._make_automation(trigger, model="fast-profile")
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["model"] == "fast-profile"
+
+    def test_none_trigger_defaults_to_unknown(self):
+        """None trigger → 'unknown' type, trigger_payload is None."""
+        automation = self._make_automation(trigger=None)
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "unknown"
+        assert payload["trigger_payload"] is None
+
+    def test_empty_dict_trigger(self):
+        """Empty dict trigger → 'unknown' type, trigger_payload is empty dict."""
+        automation = self._make_automation(trigger={})
+        automation.trigger = {}
+        run = self._make_run(automation)
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["trigger"] == "unknown"
+        assert payload["trigger_payload"] == {}
+
+
+class TestExecuteRunConcurrencyLimit:
+    """When the org/workspace is at its concurrent-sandbox limit, the run is
+    marked SKIPPED (not FAILED) and the automation is left enabled."""
+
+    async def _make_running_run(self, async_session_factory):
+        """Create an automation + a RUNNING run (as the dispatcher leaves it
+        right before calling get_execution_context), with the automation
+        relationship eagerly loaded for _execute_run."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+            automation_id = automation.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id, automation_id
+
+    async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A ConcurrencyLimitReachedError from get_execution_context marks the
+        run SKIPPED (with completed_at, no error_detail) and does NOT disable
+        the automation."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(
+            side_effect=ConcurrencyLimitReachedError(
+                "You have reached your limit of 3 concurrent conversations."
+            )
+        )
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.completed_at is not None
+            assert updated.error_detail is None  # SKIPPED is not a failure
+
+            auto = (
+                (
+                    await session.execute(
+                        select(Automation).where(Automation.id == automation_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert auto.enabled is True  # transient org-level condition: not disabled
+
+        # No execution context was acquired, so there is nothing to release.
+        backend.release_context.assert_not_called()
+
+    async def test_generic_context_failure_still_marks_failed(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """Regression: a non-concurrency failure in get_execution_context still
+        marks the run FAILED — the new SKIPPED branch must not swallow it."""
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+
+        backend = MagicMock()
+        backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = (
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert updated.status == AutomationRunStatus.FAILED

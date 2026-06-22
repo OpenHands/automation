@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "0.1.0"
+version = "1.0.0a12"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -10,6 +10,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+  "aiosqlite>=0.20",
   "alembic>=1.14",
   "asyncpg>=0.30",
   "boto3>=1.35",
@@ -19,12 +20,18 @@ dependencies = [
   "fastapi>=0.115",
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
+  "jmespath>=1.0",
+  "openhands-sdk==1.29.0",
+  "openhands-workspace==1.29.0",
   "pg8000>=1.31",
+  "prometheus-client>=0.19",
   "pydantic>=2",
   "pydantic-settings>=2",
+  "pyjwt>=2.8",
   "python-json-logger>=3",
   "sqlalchemy[asyncio]>=2",
   "tenacity>=9.1.4",
+  "tzdata>=2024.1",
   "uvicorn[standard]>=0.30",
 ]
 
@@ -34,8 +41,16 @@ requires = [
   "hatchling",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
-packages = ["automation"]
+packages = ["openhands"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Include migrations folder inside the automation package
+# This allows alembic migrations to run when installed via pip/uvx
+"migrations" = "openhands/automation/migrations"
 
 [dependency-groups]
 dev = [
@@ -55,7 +70,7 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["automation/presets"]
+extend-exclude = ["openhands/automation/presets"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -83,7 +98,7 @@ extend-immutable-calls = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["automation"]
+known-first-party = ["openhands"]
 combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
@@ -104,12 +119,12 @@ asyncio_mode = "auto"
 
 [tool.pyright]
 include = [
-    "automation",
+    "openhands/automation",
     "tests",
 ]
 exclude = [
     "scripts/test_tarball",
-    "automation/presets",
+    "openhands/automation/presets",
 ]
 venvPath = "."
 venv = ".venv"

@@ -15,8 +15,9 @@ import os
 import pytest
 from testcontainers.minio import MinioContainer
 
-from automation.storage import S3FileStore
-from automation.storage.google_cloud import FileSizeLimitExceeded
+from openhands.automation.config import StorageSettings
+from openhands.automation.storage import S3FileStore
+from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +51,14 @@ def s3_store(minio_container):
     os.environ["AWS_S3_AUTO_CREATE_BUCKET"] = "true"
 
     # Create store with a test bucket
-    store = S3FileStore(bucket_name="integration-test-bucket")
+    settings = StorageSettings(
+        file_store="s3",
+        aws_s3_bucket="integration-test-bucket",
+        aws_s3_endpoint=endpoint,
+        aws_s3_secure=False,
+        aws_s3_auto_create_bucket=True,
+    )
+    store = S3FileStore(settings=settings)
 
     yield store
 
@@ -275,7 +283,14 @@ class TestBucketAutoCreation:
 
         # Create store with a unique bucket name
         unique_bucket = "auto-created-bucket-test"
-        store = S3FileStore(bucket_name=unique_bucket)
+        settings = StorageSettings(
+            file_store="s3",
+            aws_s3_bucket=unique_bucket,
+            aws_s3_endpoint=endpoint,
+            aws_s3_secure=False,
+            aws_s3_auto_create_bucket=True,
+        )
+        store = S3FileStore(settings=settings)
 
         # Bucket should work (was auto-created)
         store.write("test.txt", "works")
@@ -295,7 +310,14 @@ class TestBucketAutoCreation:
 
         # Create store with a bucket that doesn't exist
         unique_bucket = "should-not-exist-bucket"
-        store = S3FileStore(bucket_name=unique_bucket)
+        settings = StorageSettings(
+            file_store="s3",
+            aws_s3_bucket=unique_bucket,
+            aws_s3_endpoint=endpoint,
+            aws_s3_secure=False,
+            aws_s3_auto_create_bucket=False,
+        )
+        store = S3FileStore(settings=settings)
 
         # Operations should fail because bucket doesn't exist
         with pytest.raises(FileNotFoundError):

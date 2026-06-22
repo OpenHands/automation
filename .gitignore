@@ -183,3 +183,11 @@ cache
 
 .conversations*
 /workspace/
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.react-router/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/

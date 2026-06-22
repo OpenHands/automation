@@ -1,12 +1,16 @@
 #!/bin/bash
-# Install the OpenHands SDK from the saas-runtime-mode feature branch.
-# Once merged, switch to a released version or @main.
+# Install the OpenHands SDK from PyPI into an isolated virtual environment.
 set -e
 
-SDK_REF="feat/saas-runtime-mode"
-echo "[setup] installing openhands SDK ($SDK_REF)"
-pip install -q --no-cache-dir \
-  "openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-workspace" \
-  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-sdk" \
-  "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git@${SDK_REF}#subdirectory=openhands-tools"
-echo "[setup] done"
+SDK_VERSION="1.22.0"
+
+echo "[setup] Creating isolated virtual environment"
+uv venv .venv --quiet
+
+echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+uv pip install --quiet \
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}"
+
+echo "[setup] Done"

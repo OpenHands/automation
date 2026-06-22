@@ -1,0 +1,56 @@
+---
+# .github/workflows/precommit.yml
+name: ci
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: ['**']
+
+jobs:
+    backend:
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+
+            - name: Set up Python
+              uses: actions/setup-python@v6
+              with:
+                  python-version: '3.12'
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v7
+
+            - name: Install dependencies
+              run: uv sync --frozen --group dev
+
+            - name: Run pre-commit (all files)
+              run: uv run pre-commit run --all-files --show-diff-on-failure
+
+    frontend:
+        runs-on: ubuntu-24.04
+        defaults:
+            run:
+                working-directory: frontend
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: Setup Node
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 24
+
+            - name: NPM dependencies
+              run: npm ci
+
+            - name: Lint
+              run: npm run lint
+
+            - name: Test
+              run: npm run test
+
+            - name: Build
+              run: npm run build

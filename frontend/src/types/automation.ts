@@ -1,0 +1,52 @@
+export interface AutomationTrigger {
+  type: string;
+  schedule?: string;
+  schedule_human?: string;
+  timezone?: string;
+}
+
+export interface Automation {
+  id: string;
+  name: string;
+  trigger: AutomationTrigger;
+  enabled: boolean;
+  repository?: string;
+  /** Model profile name used for automation runs. */
+  model?: string | null;
+
+  created_at: string;
+  updated_at: string;
+  prompt: string | null;
+  branch?: string;
+  plugins?: string[];
+  notification?: string;
+  timezone?: string;
+  last_triggered_at?: string | null;
+}
+
+export interface AutomationsResponse {
+  automations: Automation[];
+  total: number;
+}
+
+export enum AutomationRunStatus {
+  PENDING = "PENDING",
+  RUNNING = "RUNNING",
+  COMPLETED = "COMPLETED",
+  FAILED = "FAILED",
+  SKIPPED = "SKIPPED",
+}
+
+export interface AutomationRun {
+  id: string;
+  status: AutomationRunStatus;
+  conversation_id: string | null;
+  error_detail: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface AutomationRunsResponse {
+  runs: AutomationRun[];
+  total: number;
+}

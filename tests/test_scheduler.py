@@ -7,19 +7,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from automation.models import Automation, AutomationRun, AutomationRunStatus
-from automation.scheduler import (
+from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
     poll_and_schedule,
     scheduler_loop,
 )
-from automation.utils import (
+from openhands.automation.utils import (
     get_next_fire_time,
     get_prev_fire_time,
     is_automation_due,
     utcnow,
 )
-from automation.utils.run import create_pending_run
+from openhands.automation.utils.run import create_pending_run
 
 
 UTC = UTC
@@ -693,8 +693,10 @@ class TestPollAndSchedule:
             await session.commit()
             automation_id = not_due_automation.id
 
-        # Poll - should return no runs since the automation is not due
-        runs = await poll_and_schedule(async_session_factory)
+        # Poll with the same 'now' used for last_triggered_at so that
+        # prev_fire_time (always ≤ now) can never exceed last_triggered_at,
+        # making the result deterministic regardless of minute boundaries.
+        runs = await poll_and_schedule(async_session_factory, now=now)
         assert len(runs) == 0
 
         # But last_polled_at should still be updated
@@ -748,11 +750,17 @@ class TestPollAndSchedule:
             not_due_id = not_due.id
             due_id = due.id
 
-        # First poll with batch_size=1: picks one automation (order not guaranteed)
-        runs_first = await poll_and_schedule(async_session_factory, batch_size=1)
+        # Both polls use the same 'now' so prev_fire_time (≤ now) can never
+        # exceed the not_due automation's last_triggered_at (= now), keeping
+        # the "not due" classification stable across minute boundaries.
+        runs_first = await poll_and_schedule(
+            async_session_factory, batch_size=1, now=now
+        )
 
         # Second poll with batch_size=1: should pick the OTHER automation
-        runs_second = await poll_and_schedule(async_session_factory, batch_size=1)
+        runs_second = await poll_and_schedule(
+            async_session_factory, batch_size=1, now=now
+        )
 
         # Together, we should have exactly 1 run (from the due automation)
         all_runs = runs_first + runs_second
@@ -824,7 +832,7 @@ class TestSchedulerLoop:
         # Run scheduler briefly with logging capture
         import logging
 
-        with caplog.at_level(logging.INFO, logger="automation.scheduler"):
+        with caplog.at_level(logging.INFO, logger="openhands.automation.scheduler"):
             task = asyncio.create_task(
                 scheduler_loop(
                     async_session_factory,

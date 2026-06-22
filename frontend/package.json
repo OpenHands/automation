@@ -1,0 +1,109 @@
+{
+  "name": "automations-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@react-router/node": "^7.12.0",
+    "@react-router/serve": "^7.12.0",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/react-query": "^5.90.19",
+    "axios": "1.13.5",
+    "clsx": "^2.1.1",
+    "i18next": "^25.8.0",
+    "i18next-browser-languagedetector": "^8.2.0",
+    "i18next-http-backend": "^3.0.2",
+    "isbot": "^5",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-hot-toast": "^2.6.0",
+    "react-i18next": "^16.5.3",
+    "react-router": "^7.12.0",
+    "sirv-cli": "^3.0.1",
+    "tailwind-merge": "^3.4.0",
+    "vite": "^7.3.1",
+    "zustand": "^5.0.10"
+  },
+  "scripts": {
+    "dev": "npm run make-i18n && cross-env VITE_MOCK_API=false react-router dev",
+    "dev:proxy": "node scripts/dev-proxy.mjs",
+    "dev:mock": "npm run make-i18n && cross-env VITE_MOCK_API=true react-router dev",
+    "build": "npm run make-i18n && react-router build",
+    "start": "npx sirv-cli build/ --single",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:coverage": "npm run make-i18n && vitest run --coverage",
+    "preview": "vite preview",
+    "make-i18n": "node scripts/make-i18n-translations.cjs",
+    "prelint": "npm run make-i18n",
+    "lint": "npm run typecheck && eslint src --ext .ts,.tsx,.js && prettier --check 'src/**/*.{ts,tsx}'",
+    "lint:fix": "eslint src --ext .ts,.tsx,.js --fix && prettier --write 'src/**/*.{ts,tsx}'",
+    "typecheck": "react-router typegen && tsc",
+    "typecheck:staged": "react-router typegen && npx tsc --noEmit --skipLibCheck",
+    "check-translation-completeness": "node scripts/check-translation-completeness.cjs",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "src/**/*.{ts,tsx,js}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "src/**/*.{ts,tsx}": [
+      "bash -c 'npm run typecheck:staged'"
+    ],
+    "src/**/*": [
+      "npm run check-translation-completeness"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
+    "@playwright/test": "^1.57.0",
+    "@react-router/dev": "^7.12.0",
+    "@tanstack/eslint-plugin-query": "^5.91.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.0.9",
+    "@types/react": "^19.2.9",
+    "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "@vitest/coverage-v8": "^4.0.17",
+    "cross-env": "^10.1.0",
+    "eslint": "^8.57.0",
+    "eslint-config-airbnb": "^19.0.4",
+    "eslint-config-airbnb-typescript": "^18.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-i18next": "^6.1.3",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-prettier": "^5.5.5",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-unused-imports": "^4.2.0",
+    "husky": "^9.1.7",
+    "jsdom": "^27.4.0",
+    "lint-staged": "^16.2.7",
+    "msw": "^2.13.2",
+    "prettier": "^3.8.0",
+    "tailwindcss": "^4.1.8",
+    "typescript": "^5.9.3",
+    "vite-plugin-svgr": "^5.2.0",
+    "vite-tsconfig-paths": "^6.0.4",
+    "vitest": "^4.0.14"
+  },
+  "packageManager": "npm@10.5.0",
+  "volta": {
+    "node": "22.12.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

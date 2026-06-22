@@ -6,31 +6,32 @@ Self-contained microservice that schedules and dispatches automation runs inside
 
 ```
 automation/
-├── automation/              # Main application package
-│   ├── app.py              # FastAPI app, lifespan, background tasks
-│   ├── auth.py             # API key auth via OpenHands /api/keys/current
-│   ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
-│   ├── constants.py        # Timeouts, polling intervals, sandbox constants
-│   ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
-│   ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
-│   ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
-│   ├── logger.py           # JSON structured logging configuration
-│   ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
-│   ├── router.py           # API routes (CRUD, trigger, callback, runs list)
-│   ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
-│   ├── schemas.py          # Pydantic request/response schemas
-│   ├── uploads.py          # Tarball upload router
-│   ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
-│   ├── storage/            # File storage abstraction
-│   │   ├── file_store.py   # Abstract base class for file storage
-│   │   └── google_cloud.py # GCS implementation
-│   └── utils/              # Utility modules
-│       ├── api_key.py      # Per-user API key minting via service key
-│       ├── cron.py         # Cron schedule utilities (next/prev fire time)
-│       ├── run.py          # Run status transitions (create, mark, update)
-│       ├── sandbox.py      # Sandbox verification and cleanup
-│       ├── tarball_validation.py  # Tarball path validation (internal/external)
-│       └── time.py         # UTC time helpers
+├── openhands/
+│   └── automation/          # Main application package (openhands.automation namespace)
+│       ├── app.py              # FastAPI app, lifespan, background tasks
+│       ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
+│       ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
+│       ├── constants.py        # Timeouts, polling intervals, sandbox constants
+│       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
+│       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│       ├── logger.py           # JSON structured logging configuration
+│       ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
+│       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
+│       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
+│       ├── schemas.py          # Pydantic request/response schemas
+│       ├── uploads.py          # Tarball upload router
+│       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── storage/            # File storage abstraction
+│       │   ├── file_store.py   # Abstract base class for file storage
+│       │   └── google_cloud.py # GCS implementation
+│       └── utils/              # Utility modules
+│           ├── api_key.py      # Per-user API key minting via service key
+│           ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│           ├── run.py          # Run status transitions (create, mark, update)
+│           ├── sandbox.py      # Sandbox verification and cleanup
+│           ├── tarball_validation.py  # Tarball path validation (internal/external)
+│           └── time.py         # UTC time helpers
 ├── containers/
 │   └── Dockerfile          # Container image definition
 ├── migrations/              # Alembic migrations
@@ -66,11 +67,33 @@ Three repos work together:
 
 After pushing to the automation repo, update both files in the deploy repo.
 
+## Configuration
+
+Configuration is centralized in `config.py` using a composed `AppConfig` with typed sections:
+
+```python
+from automation.config import get_config
+
+config = get_config()
+config.service.db_host          # ServiceSettings (AUTOMATION_ prefix)
+config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
+config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
+config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
+config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
+config.log.log_level            # LogSettings (no prefix)
+```
+
+**Key principles:**
+- Use `get_config().<section>` instead of deprecated `get_settings()`
+- All environment variables documented in config class docstrings
+- Protocol constants (WORK_DIR, TARBALL_PATH) in `constants.py` - these cannot be changed without breaking compatibility
+- Shared logging context via `log_extra()` from `automation.utils`
+
 ## Build & Test Commands
 
 ```bash
 # Pre-commit (run from repo root)
-pre-commit run --files automation/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
+pre-commit run --files openhands/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
 
 # Unit tests (no external deps, skips Docker-dependent tests)
 uv run pytest tests/ -v --ignore=tests/integration
@@ -81,6 +104,37 @@ OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
 # E2E test script (live sandbox, ~80s)
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
+
+## PR-Specific Documents
+
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+
+```bash
+mkdir -p .pr
+
+.pr/
+├── design.md       # Design decisions and architecture notes
+├── analysis.md     # Investigation or debugging notes
+└── notes.md        # Any other PR-specific content
+```
+
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. Fork PRs must remove `.pr/` manually before merge.
+
+Important notes:
+
+- Do not put anything in `.pr/` that needs to be preserved.
+- The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- For fork PRs, remove `.pr/` manually before merging.
+
+
+## Frontend Hosting
+
+The Docker image includes the built frontend SPA and serves it via FastAPI.
+
+- **Opt-in via `AUTOMATION_FRONTEND_DIR`** — set to the directory containing built assets. Empty = disabled (default locally). Dockerfile sets it to `/app/frontend-dist`.
+- **Mount path** derived from `base_url` via `Settings.frontend_path` (same pattern as `base_path`). Defaults to `/automations`.
+- **SPA fallback** via `_SPAStaticFiles.lookup_path` — unknown paths resolve to `index.html`.
+- **Cache**: `immutable` for hashed `assets/*`, `no-cache` for everything else.
 
 ## Dispatch Pipeline
 
@@ -121,9 +175,44 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Database
 
-- **Engine**: SQLAlchemy async with asyncpg; supports direct PostgreSQL (`AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc.) or GCP Cloud SQL connector (`AUTOMATION_GCP_DB_INSTANCE`)
-- **Migrations**: Alembic in `migrations/` directory
-- **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher polling, optimistic `UPDATE WHERE status=X` for callback/watchdog
+Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
+
+| Feature | PostgreSQL | SQLite |
+|---------|------------|--------|
+| Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
+| Driver | asyncpg | aiosqlite |
+| Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
+| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+
+### Writing Migrations
+
+Migrations must be **cross-database compatible**:
+
+```python
+# ✅ DO: Import and use generic SQLAlchemy types
+from sqlalchemy import Column, JSON, Uuid
+Column("id", Uuid, primary_key=True)
+Column("data", JSON, nullable=False)
+
+# ❌ DON'T: Use PostgreSQL-specific types
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+Column("id", UUID(as_uuid=True), ...)  # Won't work on SQLite
+Column("data", JSONB, ...)             # Won't work on SQLite
+```
+
+For PostgreSQL-only features (partial indexes, advisory locks), use conditionals:
+
+```python
+def _is_sqlite() -> bool:
+    return op.get_bind().dialect.name == "sqlite"
+
+def upgrade() -> None:
+    # ... create tables ...
+    if not _is_sqlite():
+        op.create_index("ix_partial", "table", ["col"], postgresql_where=...)
+```
+
+- **Locking patterns**: `FOR UPDATE SKIP LOCKED` in scheduler/dispatcher — check `using_sqlite()` to skip on SQLite
 
 ## Preset-Based Automation Creation
 
@@ -146,9 +235,9 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 #### Files
 
-- `automation/preset_router.py` - Endpoint and tarball generation logic
-- `automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
-- `automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
+- `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
+- `openhands/automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
+- `openhands/automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
 
 #### Request Schema
 
@@ -165,4 +254,51 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
-- Future presets (e.g., plugins) can be added as additional subdirectories under `automation/presets/`
+- Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
+
+## Release Procedure
+
+Releases publish `openhands-automation` to PyPI and retag the Docker image on GHCR. There are two paths:
+
+### Automated (preferred) — Prepare Release workflow
+
+1. Go to **Actions → Prepare Release** on GitHub and trigger it with the desired version (e.g. `1.0.0a3`).
+2. The workflow opens a PR that bumps `pyproject.toml` and regenerates `uv.lock`.
+3. Review and merge the PR.
+4. After merging, pull `main` and push a tag to trigger publishing:
+
+```bash
+git checkout main && git pull origin main
+git tag <version>          # e.g. git tag 1.0.0a3
+git push origin <version>
+```
+
+### Manual
+
+1. Edit `pyproject.toml` — set `version = "<new-version>"`.
+2. Regenerate the lock file: `uv lock`.
+3. Commit both files: `git commit -am "chore: bump version to <new-version>"`.
+4. Merge (or push directly to main if you have access).
+5. Tag and push (the tag can point to any commit, including a PR branch head):
+
+```bash
+git tag <version>          # e.g. git tag 1.0.0a3
+git push origin <version>
+```
+
+### What the tag triggers
+
+| Workflow | File | Action |
+|----------|------|--------|
+| Publish PyPI Package | `pypi-release.yml` | Builds and publishes `openhands-automation` to PyPI via OIDC trusted publishing |
+| Tag Docker images | `tag-image.yml` | Aliases the existing `sha-<commit>` GHCR image to the new tag (requires the Docker build for that commit to have run first) |
+
+### SDK dependency bumps
+
+When bumping `openhands-sdk` / `openhands-workspace` pins:
+1. Update both versions in `pyproject.toml` dependencies.
+2. Run `uv lock` to regenerate `uv.lock`.
+3. Bump the package version and follow the release procedure above.
+4. After publishing, update `AUTOMATION_SHA` in the deploy repo:
+   - `.github/workflows/deploy.yaml`
+   - `.github/workflows/deploy-automation.yaml`
