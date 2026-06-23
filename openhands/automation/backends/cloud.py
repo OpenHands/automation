@@ -157,12 +157,16 @@ class CloudSandboxBackend(ExecutionBackend):
             raise
 
     async def get_execution_context(
-        self, client: httpx.AsyncClient
+        self,
+        client: httpx.AsyncClient,
     ) -> ExecutionContext:
         """Create a sandbox and wait for it to be ready."""
 
         async def _do_acquire() -> tuple[str, str, str]:
-            return await self._create_and_wait(client, await self._ensure_api_key())
+            return await self._create_and_wait(
+                client,
+                await self._ensure_api_key(),
+            )
 
         sandbox_id, session_key, agent_url = await self._with_auth_retry(_do_acquire)
 
@@ -252,7 +256,10 @@ class CloudSandboxBackend(ExecutionBackend):
             ready_timeout = self._ready_timeout
 
         headers = {"Authorization": f"Bearer {api_key}"}
-        sandbox_id = await self._create_sandbox(client, headers)
+        sandbox_id = await self._create_sandbox(
+            client,
+            headers,
+        )
 
         elapsed = 0.0
         while elapsed < ready_timeout:
@@ -282,14 +289,17 @@ class CloudSandboxBackend(ExecutionBackend):
         raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
 
     async def _create_sandbox(
-        self, client: httpx.AsyncClient, headers: dict[str, str]
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
     ) -> str:
         """Create a sandbox and return its ID."""
 
         @self._retry
         async def _do_create():
             resp = await client.post(
-                f"{self.api_url}/api/v1/sandboxes", headers=headers
+                f"{self.api_url}/api/v1/sandboxes",
+                headers=headers,
             )
             # A concurrency-limit 429 is not transient: retrying won't free a
             # slot. Raise a non-HTTPStatusError so the retry predicate skips it

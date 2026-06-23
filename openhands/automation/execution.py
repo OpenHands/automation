@@ -80,7 +80,9 @@ def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
 
 
 async def _create_sandbox(
-    client: httpx.AsyncClient, api_url: str, headers: dict[str, str]
+    client: httpx.AsyncClient,
+    api_url: str,
+    headers: dict[str, str],
 ) -> str:
     """Create a sandbox and return its ID. Retries on rate limit."""
 
@@ -197,7 +199,8 @@ async def _bash(
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        sandbox_config = get_config().sandbox
+        timeout = sandbox_config.bash_timeout_for(sandbox_config.max_run_duration)
     resp = await client.post(
         f"{agent_url}/api/bash/execute_bash_command",
         json={"command": command, "timeout": timeout},
@@ -218,7 +221,8 @@ async def _start_bash(
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        sandbox_config = get_config().sandbox
+        timeout = sandbox_config.bash_timeout_for(sandbox_config.max_run_duration)
     http_timeout = get_config().http.http_timeout
     resp = await client.post(
         f"{agent_url}/api/bash/start_bash_command",
@@ -357,7 +361,7 @@ async def execute_in_context(
         tarball_source: Either raw bytes or URL string
         work_dir: Working directory for tarball extraction
         env_vars: Environment variables to export
-        timeout: Max execution time
+        timeout: Agent-server bash command timeout in seconds
         run_id: Run ID — used for logging and to derive an isolated tarball
             path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
@@ -367,7 +371,8 @@ async def execute_in_context(
         DispatchResult with success status
     """
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        sandbox_config = get_config().sandbox
+        timeout = sandbox_config.bash_timeout_for(sandbox_config.max_run_duration)
 
     env_vars = dict(env_vars) if env_vars else {}
 
@@ -482,8 +487,10 @@ async def run_automation(
     *work_dir* is the working directory for tarball extraction
     (default: /workspace/project).
     """
+    sandbox_config = get_config().sandbox
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        timeout = sandbox_config.max_run_duration
+    bash_timeout = sandbox_config.bash_timeout_for(timeout)
     http_timeout = get_config().http.http_long_timeout
 
     env_vars = dict(env_vars) if env_vars else {}
@@ -549,7 +556,7 @@ async def run_automation(
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
             exit_code, stdout, stderr = await _bash(
-                client, agent_url, session_key, cmd, timeout=timeout
+                client, agent_url, session_key, cmd, timeout=bash_timeout
             )
 
             success = exit_code == 0

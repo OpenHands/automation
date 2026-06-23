@@ -1,8 +1,8 @@
-"""Staleness watchdog for stuck RUNNING automation runs.
+"""Watchdog for RUNNING automation runs.
 
-Periodically scans for runs stuck in RUNNING state past their pre-computed
-``timeout_at`` deadline. Before marking as FAILED, attempts to verify the
-actual run status by querying the execution environment.
+Periodically scans for runs past their pre-computed ``timeout_at`` deadline,
+verifies their final state when possible, and marks stale/unverifiable runs
+FAILED.
 
 The ``timeout_at`` column is set to ``started_at + max_duration`` when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``).
@@ -38,6 +38,10 @@ async def _verify_and_mark_run(
 
     Mode-agnostic: all verification logic is encapsulated in the backend.
 
+    Args:
+        session: Database session.
+        run: RUNNING run to verify.
+        settings: Service settings, kept for API compatibility.
     Returns True if the run was marked with a terminal status.
     """
     run_id = str(run.id)
@@ -89,6 +93,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.COMPLETED,
                     completed_at=now,
+                    error_detail=None,
                 )
             )
 
@@ -146,8 +151,8 @@ async def _verify_and_mark_run(
         result = await session.execute(stmt)  # type: ignore[assignment]
         return result.rowcount > 0
 
-    # Verification failed - execution environment not available or command still running
-    # This likely means the sandbox crashed or was cleaned up
+    # Verification failed. For stale runs, this likely means the sandbox crashed or was
+    # cleaned up before the callback arrived.
     logger.warning(
         "Could not verify run status: %s, marking as timed out",
         verification.error,
@@ -278,9 +283,9 @@ async def watchdog_loop(
             break
 
         try:
-            marked = await mark_stale_runs(session_factory, settings)
-            if marked:
-                logger.info("Processed %d stale run(s)", marked)
+            stale = await mark_stale_runs(session_factory, settings)
+            if stale:
+                logger.info("Processed %d stale run(s)", stale)
         except Exception:
             logger.exception("Error in watchdog scan")
 

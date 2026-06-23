@@ -48,7 +48,7 @@ from functools import cached_property, lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -202,7 +202,9 @@ class SandboxSettings(BaseSettings):
     """Sandbox execution configuration.
 
     Environment variables (AUTOMATION_ prefix):
-        AUTOMATION_MAX_RUN_DURATION: Max run time in seconds (default: 600)
+        AUTOMATION_MAX_RUN_DURATION: Logical max run time in seconds (default: 1800)
+        AUTOMATION_BASH_TIMEOUT_GRACE_PERIOD: Extra seconds added to the logical
+            run timeout for the agent-server bash command timeout (default: 60)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
@@ -212,7 +214,8 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
     """
 
-    max_run_duration: int = 600  # 10 minutes
+    max_run_duration: int = 1800  # 30 minutes logical run budget
+    bash_timeout_grace_period: int = 60
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120
@@ -220,6 +223,33 @@ class SandboxSettings(BaseSettings):
     rate_limit_min_wait: int = 10
     rate_limit_max_wait: int = 60
     rate_limit_max_retries: int = 5
+
+    @field_validator(
+        "max_run_duration",
+        "sandbox_poll_interval",
+        "sandbox_ready_timeout",
+        "external_download_timeout",
+        "external_max_filesize",
+        "rate_limit_min_wait",
+        "rate_limit_max_wait",
+        "rate_limit_max_retries",
+    )
+    @classmethod
+    def _positive_int(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("value must be positive")
+        return v
+
+    @field_validator("bash_timeout_grace_period")
+    @classmethod
+    def _non_negative_int(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("value must be non-negative")
+        return v
+
+    def bash_timeout_for(self, logical_timeout: int) -> int:
+        """Return the agent-server bash timeout for a logical run timeout."""
+        return logical_timeout + self.bash_timeout_grace_period
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

@@ -143,8 +143,10 @@ async def mark_run_status(
     if status == AutomationRunStatus.RUNNING:
         values["started_at"] = now
         values["timeout_at"] = now + max_duration
+        values["error_detail"] = None
         run.started_at = now
         run.timeout_at = now + max_duration
+        run.error_detail = None
     elif status in (
         AutomationRunStatus.COMPLETED,
         AutomationRunStatus.FAILED,
@@ -154,9 +156,14 @@ async def mark_run_status(
         values["completed_at"] = now
         run.completed_at = now
 
-    if error_detail and status == AutomationRunStatus.FAILED:
-        values["error_detail"] = error_detail
-        run.error_detail = error_detail
+    if status == AutomationRunStatus.COMPLETED:
+        values["error_detail"] = None
+        run.error_detail = None
+
+    if status == AutomationRunStatus.FAILED:
+        if error_detail:
+            values["error_detail"] = error_detail
+            run.error_detail = error_detail
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)

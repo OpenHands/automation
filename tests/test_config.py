@@ -182,7 +182,9 @@ class TestSandboxSettings:
     def test_default_values(self):
         """Default values are reasonable."""
         settings = SandboxSettings()
-        assert settings.max_run_duration == 600
+        assert settings.max_run_duration == 1800
+        assert settings.bash_timeout_grace_period == 60
+        assert settings.bash_timeout_for(1800) == 1860
         assert settings.sandbox_poll_interval == 5
         assert settings.sandbox_ready_timeout == 300
         assert settings.rate_limit_min_wait == 10
@@ -193,9 +195,11 @@ class TestSandboxSettings:
         """Custom values are accepted."""
         settings = SandboxSettings(
             max_run_duration=1200,
+            bash_timeout_grace_period=30,
             sandbox_poll_interval=10,
         )
         assert settings.max_run_duration == 1200
+        assert settings.bash_timeout_for(1200) == 1230
         assert settings.sandbox_poll_interval == 10
 
 

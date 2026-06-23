@@ -44,7 +44,8 @@ class ExecutionBackend(ABC):
 
     @abstractmethod
     async def get_execution_context(
-        self, client: httpx.AsyncClient
+        self,
+        client: httpx.AsyncClient,
     ) -> ExecutionContext:
         """Get the execution context (agent server URL + credentials).
 
