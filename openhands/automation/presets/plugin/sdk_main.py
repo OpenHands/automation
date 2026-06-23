@@ -273,9 +273,7 @@ with workspace_ctx as workspace:
         context_sections.append(f"""## Event Payload
 
 This automation was triggered by a webhook event. The full event payload is
-included below — use it directly. Do **not** try to read it from a shell
-environment variable (e.g. `$AUTOMATION_EVENT_PAYLOAD`); that variable is not
-set in your environment.
+included below.
 
 ```json
 {event_json}
