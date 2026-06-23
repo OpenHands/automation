@@ -53,6 +53,8 @@ Env vars (Local mode):
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
+  AUTOMATION_USER_ID         - owner user ID for observability attribution (optional)
+  AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
 
@@ -62,6 +64,7 @@ Runtime-injected secrets (via conversation.update_secrets after Conversation cre
 
 """
 
+import inspect
 import json
 import os
 import random
@@ -87,6 +90,7 @@ session_key = (
     or os.environ.get("SESSION_API_KEY", "")
 )
 model_profile = os.environ.get("AUTOMATION_MODEL") or None
+automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
 
 print("=== EXECUTION MODE ===")
 print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
@@ -119,6 +123,8 @@ print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
 print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
+print(f"  AUTOMATION_USER_ID: {'OK' if automation_user_id else 'NONE'}")
+print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else 'NONE'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
@@ -128,6 +134,12 @@ from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
 
+
+def _conversation_supports_user_id() -> bool:
+    try:
+        return "user_id" in inspect.signature(Conversation.__new__).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -367,14 +379,17 @@ This automation was triggered by a webhook event:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
-    conversation = Conversation(
-        agent=agent,
-        workspace=workspace,
-        plugins=plugin_sources,  # All plugins loaded here
-        callbacks=[event_callback],
-        delete_on_close=False,  # Keep conversation history after completion
-        tags=experiment_tags or None,
-    )
+    conversation_kwargs = {
+        "agent": agent,
+        "workspace": workspace,
+        "plugins": plugin_sources,  # All plugins loaded here
+        "callbacks": [event_callback],
+        "delete_on_close": False,  # Keep conversation history after completion
+        "tags": experiment_tags or None,
+    }
+    if automation_user_id and _conversation_supports_user_id():
+        conversation_kwargs["user_id"] = automation_user_id
+    conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")

@@ -225,6 +225,8 @@ async def _execute_run(
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     env_vars["AUTOMATION_RUN_ID"] = run_id
+    env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
+    env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
     env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
