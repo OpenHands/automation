@@ -197,9 +197,28 @@ def sync_client(async_engine, async_session_factory):
 
 @pytest.fixture
 def mock_settings():
-    """Return a mock Settings instance for dispatcher tests."""
+    """Return a mock Settings instance for dispatcher tests.
+
+    Uses sandbox_cleanup_delay_mins=0 for immediate cleanup behavior
+    (legacy behavior, compatible with existing tests).
+    """
     return Settings(
         openhands_api_base_url="https://test.example.com",
         service_key="test-service-key",
         base_url="http://localhost:8000",
+        sandbox_cleanup_delay_mins=0,  # Immediate cleanup for existing tests
+    )
+
+
+@pytest.fixture
+def mock_settings_delayed_cleanup():
+    """Return a mock Settings instance with delayed sandbox cleanup.
+
+    Uses sandbox_cleanup_delay_mins=60 (1 hour delay).
+    """
+    return Settings(
+        openhands_api_base_url="https://test.example.com",
+        service_key="test-service-key",
+        base_url="http://localhost:8000",
+        sandbox_cleanup_delay_mins=60,  # 1 hour delay
     )

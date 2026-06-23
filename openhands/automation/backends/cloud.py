@@ -216,7 +216,8 @@ class CloudSandboxBackend(ExecutionBackend):
                 api_url=self.api_url,
                 api_key=await self._ensure_api_key(),
                 sandbox_id=sandbox_id,
-                keep_alive=self._run.keep_alive,
+                # Watchdog decides when to clean up (immediate or delayed).
+                keep_alive=True,
                 run_id=run_id,
                 bash_command_id=self._run.bash_command_id,
             )

@@ -181,6 +181,11 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Scheduled sandbox cleanup time for delayed cleanup after terminal status.
+    cleanup_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
     # Relationship back to automation
     automation: Mapped["Automation"] = relationship("Automation", back_populates="runs")
 

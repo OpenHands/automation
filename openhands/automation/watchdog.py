@@ -7,12 +7,14 @@ actual run status by querying the execution environment.
 The ``timeout_at`` column is set to ``started_at + max_duration`` when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``).
 
-The watchdog is mode-agnostic — all mode-specific logic is encapsulated
-in the ExecutionBackend (see automation/backends/).
+Also handles delayed cleanup of cloud sandboxes. The watchdog is mode-agnostic
+— all mode-specific logic is encapsulated in the ExecutionBackend (see
+automation/backends/).
 """
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
@@ -29,14 +31,37 @@ from openhands.automation.utils.time import utcnow
 logger = logging.getLogger("automation.watchdog")
 
 
+def _compute_cleanup_at(settings: Settings, now=None):
+    """Compute the delayed cleanup timestamp, or None for immediate cleanup."""
+    if now is None:
+        now = utcnow()
+    delay_mins = settings.sandbox_cleanup_delay_mins
+    if delay_mins <= 0:
+        return None
+    return now + timedelta(minutes=delay_mins)
+
+
+async def _cleanup_now(run: AutomationRun, run_id: str, extra: dict) -> None:
+    """Best-effort immediate cleanup via the run's execution backend."""
+    if run.keep_alive:
+        return
+    try:
+        await get_backend(run).cleanup_after_verification(run_id)
+    except Exception as e:
+        logger.warning("Cleanup after verification failed: %s", e, extra=extra)
+
+
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
-    settings: Settings,  # noqa: ARG001 - kept for API compatibility
+    settings: Settings,
 ) -> bool:
     """Verify run status via backend and mark accordingly.
 
     Mode-agnostic: all verification logic is encapsulated in the backend.
+    Cleanup is scheduled via ``cleanup_at`` when a positive cleanup delay is
+    configured; otherwise it is performed immediately after the terminal status
+    update wins the optimistic lock.
 
     Returns True if the run was marked with a terminal status.
     """
@@ -44,33 +69,40 @@ async def _verify_and_mark_run(
     sandbox_id = run.sandbox_id
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
+    cleanup_at = _compute_cleanup_at(settings, now)
 
-    # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
 
-    # Verify run status via backend
     try:
         logger.info("Verifying run status via backend", extra=extra)
         verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
+        values: dict = {
+            "status": AutomationRunStatus.FAILED,
+            "completed_at": now,
+            "error_detail": f"Timed out: verification failed: {e}",
+        }
+        if cleanup_at and not run.keep_alive:
+            values["cleanup_at"] = cleanup_at
         stmt = (
             update(AutomationRun)
             .where(
                 AutomationRun.id == run.id,
                 AutomationRun.status == AutomationRunStatus.RUNNING,
             )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail=f"Timed out: verification failed: {e}",
-            )
+            .values(**values)
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+        if result.rowcount > 0 and cleanup_at is None:
+            await _cleanup_now(run, run_id, extra)
         return result.rowcount > 0
 
     if verification.verified:
         exit_code = verification.exit_code
+        base_values: dict = {"completed_at": now}
+        if cleanup_at and not run.keep_alive:
+            base_values["cleanup_at"] = cleanup_at
 
         # exit_code == 0: Command completed successfully, we just missed the callback
         if exit_code == 0:
@@ -88,7 +120,7 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.COMPLETED,
-                    completed_at=now,
+                    **base_values,
                 )
             )
 
@@ -111,8 +143,8 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.FAILED,
-                    completed_at=now,
                     error_detail=f"Timed out: {error_msg}",
+                    **base_values,
                 )
             )
 
@@ -138,12 +170,14 @@ async def _verify_and_mark_run(
                 )
                 .values(
                     status=AutomationRunStatus.FAILED,
-                    completed_at=now,
                     error_detail=error_detail,
+                    **base_values,
                 )
             )
 
         result = await session.execute(stmt)  # type: ignore[assignment]
+        if result.rowcount > 0 and cleanup_at is None:
+            await _cleanup_now(run, run_id, extra)
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
@@ -153,14 +187,6 @@ async def _verify_and_mark_run(
         verification.error,
         extra=extra,
     )
-
-    # Clean up resources via backend (Cloud deletes sandbox, local is no-op)
-    # Skip cleanup if keep_alive is True — user wants to inspect the sandbox
-    if not run.keep_alive:
-        try:
-            await backend.cleanup_after_verification(run_id)
-        except Exception as e:
-            logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
     error_msg = verification.error or "no completion callback received"
 
@@ -173,19 +199,25 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
+    values: dict = {
+        "status": AutomationRunStatus.FAILED,
+        "completed_at": now,
+        "error_detail": f"Timed out: {error_msg}",
+    }
+    if cleanup_at and not run.keep_alive:
+        values["cleanup_at"] = cleanup_at
+
     stmt = (
         update(AutomationRun)
         .where(
             AutomationRun.id == run.id,
             AutomationRun.status == AutomationRunStatus.RUNNING,
         )
-        .values(
-            status=AutomationRunStatus.FAILED,
-            completed_at=now,
-            error_detail=f"Timed out: {error_msg}",
-        )
+        .values(**values)
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
+    if result.rowcount > 0 and cleanup_at is None:
+        await _cleanup_now(run, run_id, extra)
     return result.rowcount > 0
 
 
@@ -253,23 +285,78 @@ async def mark_stale_runs(
     return marked
 
 
+async def cleanup_pending_sandboxes(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,  # noqa: ARG001 - kept for watchdog API symmetry/tests
+) -> int:
+    """Clean up sandboxes for terminal runs past their cleanup deadline.
+
+    Finds runs where ``cleanup_at`` has passed, ``sandbox_id`` is still set,
+    and ``keep_alive`` is false. After successful backend cleanup, clears
+    ``sandbox_id`` and ``cleanup_at`` to prevent duplicate cleanup attempts.
+
+    Returns the number of runs cleaned up.
+    """
+    now = utcnow()
+    cleaned = 0
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(AutomationRun)
+            .options(selectinload(AutomationRun.automation))
+            .where(
+                AutomationRun.status.in_(
+                    [AutomationRunStatus.COMPLETED, AutomationRunStatus.FAILED]
+                ),
+                AutomationRun.cleanup_at.isnot(None),
+                AutomationRun.cleanup_at < now,
+                AutomationRun.sandbox_id.isnot(None),
+                AutomationRun.keep_alive == False,  # noqa: E712
+            )
+        )
+        runs_to_cleanup = result.scalars().all()
+
+        for run in runs_to_cleanup:
+            run_id = str(run.id)
+            extra = log_extra(run_id=run_id, sandbox_id=run.sandbox_id)
+            logger.info(
+                "Cleaning up sandbox (cleanup_at=%s, now=%s)",
+                run.cleanup_at,
+                now,
+                extra=extra,
+            )
+
+            try:
+                await get_backend(run).cleanup_after_verification(run_id)
+                stmt = (
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run.id)
+                    .values(sandbox_id=None, cleanup_at=None)
+                )
+                await session.execute(stmt)
+                cleaned += 1
+                logger.info("Sandbox cleanup completed", extra=extra)
+            except Exception:
+                logger.exception("Error cleaning up sandbox", extra=extra)
+
+        if cleaned:
+            await session.commit()
+
+    return cleaned
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Main watchdog loop — scans for stale runs periodically.
-
-    Args:
-        session_factory: Async session maker for database access.
-        settings: Application settings.
-        shutdown_event: Event to signal graceful shutdown.
-    """
+    """Main watchdog loop — scans for stale runs and delayed cleanup."""
     interval = settings.watchdog_interval_seconds
 
     logger.info(
-        "Watchdog started, scanning every %ds",
+        "Watchdog started, scanning every %ds (cleanup_delay=%d mins)",
         interval,
+        settings.sandbox_cleanup_delay_mins,
     )
 
     while True:
@@ -281,6 +368,10 @@ async def watchdog_loop(
             marked = await mark_stale_runs(session_factory, settings)
             if marked:
                 logger.info("Processed %d stale run(s)", marked)
+
+            cleaned = await cleanup_pending_sandboxes(session_factory, settings)
+            if cleaned:
+                logger.info("Cleaned up %d sandbox(es)", cleaned)
         except Exception:
             logger.exception("Error in watchdog scan")
 

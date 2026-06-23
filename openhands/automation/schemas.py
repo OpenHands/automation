@@ -630,6 +630,7 @@ class AutomationRunResponse(BaseModel):
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
+    cleanup_at: UtcDatetime | None
 
     model_config = {"from_attributes": True}
 

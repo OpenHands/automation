@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
@@ -338,7 +339,8 @@ async def complete_run(
     (by ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
-    If keep_alive is False, deletes the sandbox after updating the run status.
+    If keep_alive is False, cleanup is either scheduled for later via
+    ``cleanup_at`` or performed immediately when the cleanup delay is 0.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -371,6 +373,14 @@ async def complete_run(
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
 
+    from openhands.automation.config import get_settings
+
+    settings = get_settings()
+    if not run.keep_alive and run.sandbox_id and settings.sandbox_cleanup_delay_mins > 0:
+        values["cleanup_at"] = now + timedelta(
+            minutes=settings.sandbox_cleanup_delay_mins
+        )
+
     stmt = (
         update(AutomationRun)
         .where(
@@ -390,12 +400,12 @@ async def complete_run(
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
 
-    # Clean up sandbox if not keeping alive
-    if not run.keep_alive and run.sandbox_id:
-        # Fire-and-forget sandbox deletion in background
-        from openhands.automation.config import get_settings
-
-        settings = get_settings()
+    # Clean up sandbox immediately only when delayed cleanup is disabled.
+    if (
+        not run.keep_alive
+        and run.sandbox_id
+        and settings.sandbox_cleanup_delay_mins <= 0
+    ):
         api_key = user.api_key
         if api_key is None:
             # Cookie-authenticated users don't carry an API key;

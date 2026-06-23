@@ -409,6 +409,9 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+    # Delay after terminal run status before cloud sandbox cleanup, in minutes.
+    # Set to 0 for immediate cleanup.
+    sandbox_cleanup_delay_mins: int = 60
 
     # API pagination
     api_default_page_size: int = 50

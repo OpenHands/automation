@@ -388,7 +388,7 @@ class TestCloudSandboxBackend:
                 api_url="https://app.all-hands.dev",
                 api_key="sk-user",
                 sandbox_id="sandbox-123",
-                keep_alive=False,
+                keep_alive=True,
                 run_id="run-123",
                 bash_command_id="deadbeefcafebabe",
             )
