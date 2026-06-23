@@ -1,0 +1,34 @@
+{
+  "test_time": "2026-06-23T11:19:18.076020+00:00",
+  "results": [
+    {
+      "label": "BEFORE",
+      "returncode": -15,
+      "elapsed_s": 2.0,
+      "stdout": "[before] started -- sleeping 60 s to simulate a long-running LLM task",
+      "stderr": "",
+      "sigterm_after_s": 2.0,
+      "callbacks_fired": 0
+    },
+    {
+      "label": "AFTER",
+      "returncode": 143,
+      "elapsed_s": 2.03,
+      "stdout": "[after] started -- sleeping 60 s to simulate a long-running LLM task",
+      "stderr": "[termination] received SIGTERM, firing failure callback",
+      "sigterm_after_s": 2.0,
+      "callbacks_fired": 1
+    }
+  ],
+  "callbacks": [
+    {
+      "received_at": "2026-06-23T11:19:17.554184+00:00",
+      "payload": {
+        "status": "FAILED",
+        "run_id": "after-run-id",
+        "error": "Automation run terminated before completing: received SIGTERM"
+      },
+      "path": "/runs/after-run-id/complete"
+    }
+  ]
+}
