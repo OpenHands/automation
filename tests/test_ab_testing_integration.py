@@ -281,6 +281,49 @@ class TestABTestAutomationCreation:
         assert "selected_variant" in main_py
         assert "random.choices" in main_py
         assert "experiment_tags" in main_py
+        assert 'selected.get("model")' in main_py
+        assert 'experiment_tags["modelprofile"]' in main_py
+
+    async def test_variant_models_are_written_to_experiment_config(
+        self, client, mock_file_store, mock_authenticated_user
+    ):
+        """Variant LLM profiles are resolved and stored in experiment config."""
+        mock_authenticated_user.model_profile_names = frozenset(
+            {"active-profile", "fast-profile"}
+        )
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        payload = json.loads(json.dumps(self.AB_PAYLOAD))
+        payload["variants"][0]["model"] = "fast-profile"
+
+        resp = await client.post(
+            "/api/automation/v1/preset/plugin",
+            json=payload,
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["model"] == "active-profile"
+
+        files = _extract_tarball(mock_file_store)
+        config = json.loads(files["experiment_config.json"])
+
+        assert config["variants"][0]["model"] == "fast-profile"
+        assert config["variants"][1]["model"] == "active-profile"
+
+    async def test_unknown_variant_model_is_rejected(
+        self, client, mock_authenticated_user
+    ):
+        """Unknown variant-level LLM profile names are rejected."""
+        mock_authenticated_user.model_profile_names = frozenset({"active-profile"})
+        mock_authenticated_user.active_model_profile_name = "active-profile"
+        payload = json.loads(json.dumps(self.AB_PAYLOAD))
+        payload["variants"][0]["model"] = "missing-profile"
+
+        resp = await client.post(
+            "/api/automation/v1/preset/plugin",
+            json=payload,
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "Model profile `missing-profile` not found"
 
 
 class TestVariantSelectionLogic:

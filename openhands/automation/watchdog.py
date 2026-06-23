@@ -199,27 +199,40 @@ async def mark_stale_runs(
     Before marking as FAILED, attempts to verify the actual status by querying
     the sandbox. Uses optimistic locking so concurrent callbacks win.
 
+    Each run is processed in its own session so that row locks are released
+    immediately after commit rather than held for the duration of the batch.
+    This prevents lock contention with concurrent callback UPDATEs.
+
     Returns the number of runs marked with terminal status.
     """
     now = utcnow()
     marked = 0
 
     async with session_factory() as session:
-        # Fetch stale runs with their automation relationship for API key access
+        # Fetch stale run IDs only — close this session before doing any
+        # per-run work so we don't hold locks across slow verify calls.
         result = await session.execute(
-            select(AutomationRun)
-            .options(selectinload(AutomationRun.automation))
-            .where(
+            select(AutomationRun.id).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
                 AutomationRun.timeout_at.isnot(None),
                 AutomationRun.timeout_at < now,
             )
         )
-        stale_runs = result.scalars().all()
+        stale_run_ids = list(result.scalars().all())
 
-        for run in stale_runs:
-            run_id = str(run.id)
-            extra = log_extra(run_id=run_id, sandbox_id=run.sandbox_id)
+    for run_id in stale_run_ids:
+        async with session_factory() as session:
+            # Re-fetch with automation relationship inside a fresh session.
+            result = await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.id == run_id)
+            )
+            run = result.scalars().first()
+            if run is None:
+                continue
+
+            extra = log_extra(run_id=str(run_id), sandbox_id=run.sandbox_id)
 
             logger.info(
                 "Processing stale run (timeout_at=%s, now=%s)",
@@ -230,14 +243,12 @@ async def mark_stale_runs(
 
             try:
                 if await _verify_and_mark_run(session, run, settings):
+                    await session.commit()
                     marked += 1
                 else:
                     logger.info("Run already completed, skipping", extra=extra)
             except Exception:
                 logger.exception("Error processing stale run", extra=extra)
-
-        if marked:
-            await session.commit()
 
     return marked
 
