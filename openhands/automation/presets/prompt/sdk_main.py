@@ -131,6 +131,15 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
+# Install SIGTERM/SIGINT + atexit handlers that fire a FAILED completion
+# callback if the run is terminated (e.g. the service kills the bash command
+# on the 600s max_run_duration ceiling). Without this, a hard SIGTERM skips
+# the workspace context manager's __exit__ callback entirely and the run is
+# left for the watchdog. See presets/_termination.py for details.
+from _termination import install_termination_handlers, mark_completed
+
+install_termination_handlers()
+
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
@@ -376,3 +385,7 @@ This automation was triggered by a webhook event:
 
     print("\n=== RESULT ===")
     print("ALL_OK")
+
+# Record that we reached a clean exit so the atexit hook does not emit a
+# spurious FAILED callback during normal interpreter shutdown.
+mark_completed()
