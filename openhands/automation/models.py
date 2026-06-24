@@ -77,6 +77,11 @@ class Automation(Base):
     # Maximum execution time in seconds (None = use system default)
     timeout: Mapped[int | None] = mapped_column(nullable=True)
 
+    # If True, the automation service leaves the sandbox for the runtime TTL
+    # reaper instead of explicitly deleting it after a terminal run. Null/False
+    # means the automation service owns explicit cleanup.
+    keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
+
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
@@ -147,9 +152,6 @@ class AutomationRun(Base):
     timeout_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
-
-    # If True, sandbox is not deleted after run completes (for debugging)
-    keep_alive: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

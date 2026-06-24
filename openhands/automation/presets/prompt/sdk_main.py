@@ -186,6 +186,7 @@ else:
         local_agent_server_mode=True,
         cloud_api_url=api_url,
         cloud_api_key=api_key,
+        keep_alive=True,
     )
 
 # Enter workspace context EARLY - any exception from here on triggers callback

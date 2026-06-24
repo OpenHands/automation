@@ -3,7 +3,7 @@
 import io
 import tarfile
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -181,6 +181,7 @@ class TestCreateAutomation:
         assert data["tarball_path"] == "s3://bucket/path/to/code.tar.gz"
         assert data["setup_script_path"] == "setup.sh"
         assert data["entrypoint"] == "uv run script.py"
+        assert data["keep_alive"] is None
         assert data["enabled"] is True
         assert "id" in data
         assert data["user_id"] == str(TEST_USER_ID)
@@ -408,6 +409,35 @@ class TestCreateAutomation:
         assert response.status_code == 201
         data = response.json()
         assert data["timeout"] is None
+
+    async def test_create_automation_with_keep_alive_false(self, async_client):
+        """Automation can opt into explicit sandbox cleanup."""
+        payload = {
+            "name": "Immediate Cleanup",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "keep_alive": False,
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["keep_alive"] is False
+
+    async def test_create_automation_invalid_keep_alive_rejected(self, async_client):
+        """Invalid keep_alive value returns 422."""
+        payload = {
+            "name": "Bad Keep Alive",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "python main.py",
+            "keep_alive": "not-a-bool",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
 
     async def test_create_automation_timeout_zero_rejected(self, async_client):
         """Timeout of zero is rejected."""
@@ -1679,6 +1709,125 @@ class TestCompleteRun:
         data = response.json()
         assert data["status"] == "COMPLETED"
         assert data["conversation_id"] is None
+
+    async def test_complete_run_default_keep_alive_null_cleans_up_sandbox(
+        self, async_client, async_session
+    ):
+        """Default null keep_alive preserves explicit sandbox deletion."""
+        import asyncio
+
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Default Cleanup",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="sandbox-default",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch(
+            "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+        ) as mock_cleanup:
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+            await asyncio.sleep(0)
+
+        assert response.status_code == 200
+        mock_cleanup.assert_awaited_once()
+
+    async def test_complete_run_keep_alive_true_does_not_cleanup_sandbox(
+        self, async_client, async_session
+    ):
+        """keep_alive=true leaves cleanup to the runtime TTL reaper."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Keep Alive",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            keep_alive=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="sandbox-keep-alive",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch(
+            "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+        ) as mock_cleanup:
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+        mock_cleanup.assert_not_called()
+
+    async def test_complete_run_keep_alive_false_cleans_up_sandbox(
+        self, async_client, async_session
+    ):
+        """keep_alive=false preserves explicit sandbox deletion."""
+        import asyncio
+
+        from openhands.automation.models import (
+            AutomationRun,
+            AutomationRunStatus,
+        )
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Immediate Cleanup",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            keep_alive=False,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="sandbox-immediate",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch(
+            "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+        ) as mock_cleanup:
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+            await asyncio.sleep(0)
+
+        assert response.status_code == 200
+        mock_cleanup.assert_awaited_once()
 
     async def test_complete_run_not_running_returns_409(
         self, async_client, async_session

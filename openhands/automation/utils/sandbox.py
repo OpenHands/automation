@@ -132,20 +132,19 @@ async def verify_run_status(
     api_url: str,
     api_key: str,
     sandbox_id: str,
-    keep_alive: bool = False,
     run_id: str | None = None,
     bash_command_id: str | None = None,
 ) -> VerificationResult:
     """Verify an automation run's status by querying its sandbox.
 
     Connects to the sandbox, queries the last bash command's exit code,
-    and optionally deletes the sandbox.
+    without deleting the sandbox. Cleanup is handled by callers according to
+    the automation's sandbox cleanup policy.
 
     Args:
         api_url: OpenHands API URL
         api_key: API key for authentication
         sandbox_id: The sandbox to query
-        keep_alive: If True, don't delete the sandbox after verification
         run_id: Optional run ID for logging
         bash_command_id: Optional BashCommand id (hex) recorded for this
             run; scopes the BashOutput lookup to this specific command.
@@ -183,9 +182,6 @@ async def verify_run_status(
                 bash_result.error,
                 extra=extra,
             )
-            # Still try to clean up if needed
-            if not keep_alive:
-                await delete_sandbox(client, api_url, api_key, sandbox_id)
             return VerificationResult(
                 verified=False,
                 error=bash_result.error,
@@ -205,11 +201,6 @@ async def verify_run_status(
             success,
             extra=extra,
         )
-
-        # Clean up sandbox if not keeping alive
-        if not keep_alive:
-            logger.info("Deleting sandbox", extra=extra)
-            await delete_sandbox(client, api_url, api_key, sandbox_id)
 
         return VerificationResult(
             verified=True,
