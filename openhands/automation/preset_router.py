@@ -138,6 +138,14 @@ class CreatePromptAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    keep_alive: bool | None = Field(
+        default=None,
+        description=(
+            "If true, leave the sandbox for runtime TTL cleanup after the run "
+            "finishes. If false or null, explicitly clean it up after "
+            "completion (or after post-run callbacks, when configured)."
+        ),
+    )
     repos: list[RepoSource] | None = Field(
         default=None,
         description=(
@@ -443,6 +451,7 @@ async def create_automation_from_prompt(
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
+            keep_alive=body.keep_alive,
         )
         session.add(automation)
         await session.flush()
@@ -552,6 +561,14 @@ class CreatePluginAutomationRequest(BaseModel):
     timeout: int | None = Field(
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
+    )
+    keep_alive: bool | None = Field(
+        default=None,
+        description=(
+            "If true, leave the sandbox for runtime TTL cleanup after the run "
+            "finishes. If false or null, explicitly clean it up after "
+            "completion (or after post-run callbacks, when configured)."
+        ),
     )
     repos: list[RepoSource] | None = Field(
         default=None,
@@ -802,6 +819,7 @@ async def create_automation_from_plugin(
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
+            keep_alive=body.keep_alive,
         )
         session.add(automation)
         await session.flush()

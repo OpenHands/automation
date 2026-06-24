@@ -118,7 +118,7 @@ class ExecutionBackend(ABC):
     async def cleanup_after_verification(self, run_id: str) -> None:
         """Clean up resources after verification fails.
 
-        For Cloud mode: Deletes the sandbox (if not keep_alive).
+        For Cloud mode: Deletes the sandbox when called by policy-aware callers.
         For Local mode: No-op (persistent server).
 
         Args:

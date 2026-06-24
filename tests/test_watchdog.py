@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
 from openhands.automation.watchdog import _verify_and_mark_run
@@ -89,8 +93,49 @@ class TestVerifyAndMarkRunExitCodes:
                 await session.commit()
 
         assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as COMPLETED
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+            assert run.completed_at is not None
+            assert run.error_detail is None
+
+    @pytest.mark.asyncio
+    async def test_exit_code_0_keep_alive_true_skips_cleanup(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """keep_alive=true skips cleanup after verified terminal exit."""
+        run_id = automation_with_run["run_id"]
+
+        async with async_session_factory() as session:
+            automation = await session.get(
+                Automation, automation_with_run["automation"].id
+            )
+            automation.keep_alive = True
+            await session.commit()
+
+        verification = VerificationResult(
+            verified=True,
+            success=True,
+            exit_code=0,
+            stdout="Success output",
+            stderr="",
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is True
+        mock_backend.cleanup_after_verification.assert_not_called()
+
         async with async_session_factory() as session:
             run = await session.get(AutomationRun, run_id)
             assert run.status == AutomationRunStatus.COMPLETED
@@ -122,6 +167,7 @@ class TestVerifyAndMarkRunExitCodes:
                 await session.commit()
 
         assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as FAILED with timeout message
         async with async_session_factory() as session:
@@ -156,6 +202,7 @@ class TestVerifyAndMarkRunExitCodes:
                 await session.commit()
 
         assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as FAILED with timeout message
         async with async_session_factory() as session:
@@ -189,6 +236,7 @@ class TestVerifyAndMarkRunExitCodes:
                 await session.commit()
 
         assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as FAILED with exit code (not timeout)
         async with async_session_factory() as session:
@@ -224,6 +272,7 @@ class TestVerifyAndMarkRunExitCodes:
                 await session.commit()
 
         assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
 
         # Verify the run was marked as FAILED with exit code (not timeout)
         async with async_session_factory() as session:
@@ -237,10 +286,10 @@ class TestVerifyAndMarkRunVerificationFailed:
     """Tests for _verify_and_mark_run when verification fails."""
 
     @pytest.mark.asyncio
-    async def test_verification_failed_marks_timed_out(
+    async def test_verification_failed_with_null_keep_alive_cleans_up(
         self, async_session_factory, automation_with_run, mock_settings
     ):
-        """When verification fails (sandbox unavailable), mark as timed out."""
+        """Null keep_alive marks timed out and performs explicit cleanup."""
         run_id = automation_with_run["run_id"]
 
         verification = VerificationResult(
@@ -269,35 +318,17 @@ class TestVerifyAndMarkRunVerificationFailed:
             assert "Sandbox not available" in run.error_detail
 
     @pytest.mark.asyncio
-    async def test_verification_failed_no_cleanup_if_keep_alive(
-        self, async_session_factory, mock_settings
+    async def test_verification_failed_keep_alive_true_does_not_cleanup(
+        self, async_session_factory, automation_with_run, mock_settings
     ):
-        """When keep_alive is True, don't cleanup sandbox on verification failure."""
-        async with async_session_factory() as session:
-            automation = Automation(
-                user_id=TEST_USER_ID,
-                org_id=TEST_ORG_ID,
-                name="Keep Alive Automation",
-                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
-                tarball_path="s3://bucket/code.tar.gz",
-                entrypoint="uv run main.py",
-                enabled=True,
-            )
-            session.add(automation)
-            await session.commit()
+        """keep_alive=true leaves cleanup to the runtime TTL reaper."""
+        run_id = automation_with_run["run_id"]
 
-            now = utcnow()
-            run = AutomationRun(
-                automation_id=automation.id,
-                status=AutomationRunStatus.RUNNING,
-                sandbox_id="test-sandbox-456",
-                started_at=now - timedelta(minutes=5),
-                timeout_at=now - timedelta(minutes=1),
-                keep_alive=True,
-            )
-            session.add(run)
+        async with async_session_factory() as session:
+            automation_id = automation_with_run["automation"].id
+            automation = await session.get(Automation, automation_id)
+            automation.keep_alive = True
             await session.commit()
-            run_id = run.id
 
         verification = VerificationResult(
             verified=False,
@@ -314,5 +345,34 @@ class TestVerifyAndMarkRunVerificationFailed:
                 await session.commit()
 
         assert result is True
-        # Cleanup should NOT be called when keep_alive is True
         mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_verification_failed_keep_alive_false_cleans_up(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """keep_alive=false preserves explicit cleanup on verification failure."""
+        run_id = automation_with_run["run_id"]
+
+        async with async_session_factory() as session:
+            automation_id = automation_with_run["automation"].id
+            automation = await session.get(Automation, automation_id)
+            automation.keep_alive = False
+            await session.commit()
+
+        verification = VerificationResult(
+            verified=False,
+            error="Sandbox not available",
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
