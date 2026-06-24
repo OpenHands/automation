@@ -180,6 +180,7 @@ class TestGenerateTarball:
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
@@ -855,6 +856,7 @@ class TestGeneratePluginTarball:
             assert "from openhands.sdk.plugin import PluginSource" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content

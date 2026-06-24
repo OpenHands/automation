@@ -87,6 +87,7 @@ async def create_automation(
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
         timeout=body.timeout,
+        keep_alive=body.keep_alive,
     )
     session.add(auto)
     await session.flush()
@@ -338,7 +339,9 @@ async def complete_run(
     (by ``authenticate_request``) and the resulting user must own the run's
     parent automation.
 
-    If keep_alive is False, deletes the sandbox after updating the run status.
+    If keep_alive is not true, deletes the sandbox after updating the run
+    status. When post-run callbacks are configured, cleanup will happen after
+    callbacks instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -390,8 +393,9 @@ async def complete_run(
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
 
-    # Clean up sandbox if not keeping alive
-    if not run.keep_alive and run.sandbox_id:
+    # Clean up immediately when this automation owns explicit cleanup. Once
+    # post-run callbacks exist, this path should run them before deleting.
+    if run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings
 

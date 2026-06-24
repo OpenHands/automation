@@ -51,7 +51,6 @@ class TestLocalAgentServerBackend:
         run = MagicMock()
         run.id = "test-run-123"
         run.sandbox_id = None
-        run.keep_alive = False
         # Default to None — individual tests override when needed
         run.bash_command_id = None
         return run
@@ -266,7 +265,6 @@ class TestCloudSandboxBackend:
         """Create a mock AutomationRun."""
         run = MagicMock()
         run.sandbox_id = "sandbox-123"
-        run.keep_alive = False
         # Default to None — individual tests override when needed
         run.bash_command_id = None
         return run
@@ -388,14 +386,13 @@ class TestCloudSandboxBackend:
                 api_url="https://app.all-hands.dev",
                 api_key="sk-user",
                 sandbox_id="sandbox-123",
-                keep_alive=False,
                 run_id="run-123",
                 bash_command_id="deadbeefcafebabe",
             )
 
     @pytest.mark.asyncio
     async def test_cleanup_after_verification_deletes_sandbox(self, mock_run):
-        """cleanup_after_verification() deletes sandbox when not keep_alive."""
+        """cleanup_after_verification() deletes sandbox when called."""
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
 
         with (
@@ -417,19 +414,6 @@ class TestCloudSandboxBackend:
                 run_id="run-123",
             )
 
-    @pytest.mark.asyncio
-    async def test_cleanup_after_verification_skips_keep_alive(self, mock_run):
-        """cleanup_after_verification() skips cleanup when keep_alive=True."""
-        mock_run.keep_alive = True
-        backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
-
-        with patch(
-            "openhands.automation.backends.cloud.cleanup_sandbox",
-            new_callable=AsyncMock,
-        ) as mock_cleanup:
-            await backend.cleanup_after_verification("run-123")
-            mock_cleanup.assert_not_called()
-
 
 class TestGetBackend:
     """Tests for get_backend factory function."""
@@ -439,7 +423,6 @@ class TestGetBackend:
         """Create a mock AutomationRun."""
         run = MagicMock()
         run.sandbox_id = "sandbox-123"
-        run.keep_alive = False
         return run
 
     def test_local_mode(self, monkeypatch, mock_run):
@@ -537,7 +520,6 @@ class TestCloudSandboxConcurrencyLimit:
     def mock_run(self):
         run = MagicMock()
         run.sandbox_id = None
-        run.keep_alive = False
         run.bash_command_id = None
         return run
 

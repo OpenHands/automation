@@ -283,6 +283,14 @@ class CreateAutomationRequest(BaseModel):
         default=None,
         description="Maximum execution time in seconds (default: system maximum)",
     )
+    keep_alive: bool | None = Field(
+        default=None,
+        description=(
+            "If true, leave the sandbox for runtime TTL cleanup after the run "
+            "finishes. If false or null, explicitly clean it up after "
+            "completion (or after post-run callbacks, when configured)."
+        ),
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -336,6 +344,7 @@ class UpdateAutomationRequest(BaseModel):
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
     timeout: int | None = Field(default=None)
+    keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None
 
     @field_validator("tarball_path")
@@ -588,6 +597,7 @@ class AutomationResponse(BaseModel):
     setup_script_path: str | None
     entrypoint: str
     timeout: int | None
+    keep_alive: bool | None
     enabled: bool
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
@@ -624,7 +634,6 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     conversation_id: str | None
     timeout_at: UtcDatetime | None
-    keep_alive: bool
     sandbox_id: str | None
     bash_command_id: str | None = None
     created_at: UtcDatetime
