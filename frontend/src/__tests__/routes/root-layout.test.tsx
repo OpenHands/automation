@@ -57,7 +57,7 @@ describe("RootLayout", () => {
     localStorage.clear();
   });
 
-  it("renders outlet content when authenticated", async () => {
+  it("renders outlet content with a link back to OpenHands when authenticated", async () => {
     vi.spyOn(OpenHandsService, "authenticate").mockResolvedValue(true);
     vi.spyOn(OpenHandsService, "getMe").mockResolvedValue(mockUser);
     renderLayout();
@@ -65,6 +65,10 @@ describe("RootLayout", () => {
     await waitFor(() => {
       expect(screen.getByRole("main")).toBeInTheDocument();
     });
+
+    const backButton = screen.getByTestId("main-app-back-button");
+    expect(backButton).toHaveAttribute("href", "/");
+    expect(backButton).toHaveTextContent("NAVIGATION$BACK");
   });
 
   it("redirects to login when unauthenticated and no login method stored", async () => {
