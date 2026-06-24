@@ -408,7 +408,7 @@ class TestCreateAutomation:
 
         assert response.status_code == 201
         data = response.json()
-        assert data["timeout"] is None
+        assert data["timeout"] == 600
 
     async def test_create_automation_with_keep_alive_false(self, async_client):
         """Automation can opt into explicit sandbox cleanup."""

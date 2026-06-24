@@ -41,6 +41,14 @@ def validate_automation_timeout(timeout: int | None) -> int | None:
     return timeout
 
 
+def default_automation_timeout(timeout: int | None) -> int:
+    """Validate and default a timeout for newly-created automations."""
+    validated_timeout = validate_automation_timeout(timeout)
+    if validated_timeout is None:
+        return get_default_automation_timeout_seconds()
+    return validated_timeout
+
+
 def resolve_automation_timeout_seconds(timeout: int | None) -> int:
     """Return the effective run timeout in seconds.
 

@@ -38,6 +38,7 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
+    default_automation_timeout,
     validate_automation_timeout,
 )
 from openhands.sdk.plugin import PluginSource
@@ -459,7 +460,7 @@ async def create_automation_from_prompt(
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
-            timeout=body.timeout,
+            timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
         )
         session.add(automation)
@@ -832,7 +833,7 @@ async def create_automation_from_plugin(
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
-            timeout=body.timeout,
+            timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
         )
         session.add(automation)

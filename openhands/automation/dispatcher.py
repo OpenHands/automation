@@ -55,10 +55,7 @@ from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
 )
-from openhands.automation.utils.timeout import (
-    get_max_automation_timeout_seconds,
-    resolve_automation_timeout_seconds,
-)
+from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -352,7 +349,6 @@ async def dispatch_pending_runs(
     settings: ServiceSettings,
     client: httpx.AsyncClient,
     batch_size: int | None = None,
-    default_run_duration: timedelta | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
@@ -364,17 +360,11 @@ async def dispatch_pending_runs(
         settings: Service settings for API access
         client: HTTP client for API calls (shared across runs)
         batch_size: Number of pending runs to fetch per poll (from config if None)
-        default_run_duration: Default duration for runs without custom timeout
     """
     # Use config defaults if not provided
-    if batch_size is None or default_run_duration is None:
+    if batch_size is None:
         config = get_config()
-        if batch_size is None:
-            batch_size = config.service.dispatcher_batch_size
-        if default_run_duration is None:
-            default_run_duration = timedelta(
-                seconds=config.sandbox.default_run_duration
-            )
+        batch_size = config.service.dispatcher_batch_size
 
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
@@ -388,16 +378,11 @@ async def dispatch_pending_runs(
                 logger.info("Dispatching automation run", extra=extra)
                 # Use the same effective timeout as the bash command so the
                 # watchdog archives/cleans up stale sandboxes at the user-selected
-                # deadline (or the 10-minute default when unset).
-                if run.automation and run.automation.timeout is not None:
-                    run_timeout_seconds = resolve_automation_timeout_seconds(
-                        run.automation.timeout
-                    )
-                else:
-                    run_timeout_seconds = min(
-                        int(default_run_duration.total_seconds()),
-                        get_max_automation_timeout_seconds(),
-                    )
+                # deadline. Legacy runs without a stored timeout fall back to the
+                # configured default.
+                run_timeout_seconds = resolve_automation_timeout_seconds(
+                    run.automation.timeout if run.automation else None
+                )
                 await mark_run_status(
                     session,
                     run,
@@ -461,7 +446,6 @@ async def dispatcher_loop(
         interval_seconds = config.service.dispatcher_interval_seconds
     if batch_size is None:
         batch_size = config.service.dispatcher_batch_size
-    default_run_duration = timedelta(seconds=config.sandbox.default_run_duration)
     http_timeout = config.http.http_long_timeout
 
     logger.info(
@@ -482,7 +466,6 @@ async def dispatcher_loop(
                     settings=settings,
                     client=client,
                     batch_size=batch_size,
-                    default_run_duration=default_run_duration,
                 )
                 if dispatched:
                     logger.info("Dispatched %d run(s)", len(dispatched))
