@@ -62,6 +62,7 @@ class TestDeprecatedConstants:
             assert len(w) == 1
             assert issubclass(w[0].category, DeprecationWarning)
             assert "deprecated" in str(w[0].message).lower()
+            assert "default_run_duration" in str(w[0].message)
 
     def test_deprecated_constant_warns_once(self):
         """Repeated access to same constant only warns once."""
@@ -91,7 +92,7 @@ class TestDeprecatedConstants:
             warnings.simplefilter("ignore")
             assert (
                 constants.MAX_RUN_DURATION_SECONDS
-                == get_config().sandbox.max_run_duration
+                == get_config().sandbox.default_run_duration
             )
 
     def test_nonexistent_constant_raises_attribute_error(self):
@@ -182,8 +183,8 @@ class TestSandboxSettings:
     def test_default_values(self):
         """Default values are reasonable."""
         settings = SandboxSettings()
-        assert settings.max_run_duration == 600
-        assert settings.max_automation_timeout == 1800
+        assert settings.default_run_duration == 600
+        assert settings.max_run_duration == 1800
         assert settings.sandbox_poll_interval == 5
         assert settings.sandbox_ready_timeout == 300
         assert settings.rate_limit_min_wait == 10
@@ -193,12 +194,12 @@ class TestSandboxSettings:
     def test_custom_values(self):
         """Custom values are accepted."""
         settings = SandboxSettings(
-            max_run_duration=1200,
-            max_automation_timeout=2400,
+            default_run_duration=1200,
+            max_run_duration=2400,
             sandbox_poll_interval=10,
         )
-        assert settings.max_run_duration == 1200
-        assert settings.max_automation_timeout == 2400
+        assert settings.default_run_duration == 1200
+        assert settings.max_run_duration == 2400
         assert settings.sandbox_poll_interval == 10
 
 

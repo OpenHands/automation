@@ -534,7 +534,7 @@ class TestEffectiveTimeout:
     async def test_uses_default_timeout_when_not_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
+        """Dispatcher uses default_run_duration when automation timeout is None."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,

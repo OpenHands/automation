@@ -352,7 +352,7 @@ async def dispatch_pending_runs(
     settings: ServiceSettings,
     client: httpx.AsyncClient,
     batch_size: int | None = None,
-    max_run_duration: timedelta | None = None,
+    default_run_duration: timedelta | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
@@ -364,15 +364,17 @@ async def dispatch_pending_runs(
         settings: Service settings for API access
         client: HTTP client for API calls (shared across runs)
         batch_size: Number of pending runs to fetch per poll (from config if None)
-        max_run_duration: Default max duration for runs without custom timeout
+        default_run_duration: Default duration for runs without custom timeout
     """
     # Use config defaults if not provided
-    if batch_size is None or max_run_duration is None:
+    if batch_size is None or default_run_duration is None:
         config = get_config()
         if batch_size is None:
             batch_size = config.service.dispatcher_batch_size
-        if max_run_duration is None:
-            max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+        if default_run_duration is None:
+            default_run_duration = timedelta(
+                seconds=config.sandbox.default_run_duration
+            )
 
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
@@ -393,7 +395,7 @@ async def dispatch_pending_runs(
                     )
                 else:
                     run_timeout_seconds = min(
-                        int(max_run_duration.total_seconds()),
+                        int(default_run_duration.total_seconds()),
                         get_max_automation_timeout_seconds(),
                     )
                 await mark_run_status(
@@ -459,7 +461,7 @@ async def dispatcher_loop(
         interval_seconds = config.service.dispatcher_interval_seconds
     if batch_size is None:
         batch_size = config.service.dispatcher_batch_size
-    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+    default_run_duration = timedelta(seconds=config.sandbox.default_run_duration)
     http_timeout = config.http.http_long_timeout
 
     logger.info(
@@ -480,7 +482,7 @@ async def dispatcher_loop(
                     settings=settings,
                     client=client,
                     batch_size=batch_size,
-                    max_run_duration=max_run_duration,
+                    default_run_duration=default_run_duration,
                 )
                 if dispatched:
                     logger.info("Dispatched %d run(s)", len(dispatched))

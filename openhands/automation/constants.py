@@ -59,28 +59,56 @@ def __getattr__(name: str):
 
     # Map old constant names to new config paths
     deprecated_map = {
-        "MAX_RUN_DURATION": lambda: timedelta(seconds=config.sandbox.max_run_duration),
-        "MAX_RUN_DURATION_SECONDS": lambda: config.sandbox.max_run_duration,
-        "SANDBOX_POLL_INTERVAL": lambda: config.sandbox.sandbox_poll_interval,
-        "SANDBOX_READY_TIMEOUT": lambda: config.sandbox.sandbox_ready_timeout,
-        "EXTERNAL_DOWNLOAD_TIMEOUT": lambda: config.sandbox.external_download_timeout,
-        "EXTERNAL_MAX_FILESIZE": lambda: config.sandbox.external_max_filesize,
-        "RATE_LIMIT_MIN_WAIT": lambda: config.sandbox.rate_limit_min_wait,
-        "RATE_LIMIT_MAX_WAIT": lambda: config.sandbox.rate_limit_max_wait,
-        "RATE_LIMIT_MAX_RETRIES": lambda: config.sandbox.rate_limit_max_retries,
+        "MAX_RUN_DURATION": (
+            lambda: timedelta(seconds=config.sandbox.default_run_duration),
+            "default_run_duration",
+        ),
+        "MAX_RUN_DURATION_SECONDS": (
+            lambda: config.sandbox.default_run_duration,
+            "default_run_duration",
+        ),
+        "SANDBOX_POLL_INTERVAL": (
+            lambda: config.sandbox.sandbox_poll_interval,
+            "sandbox_poll_interval",
+        ),
+        "SANDBOX_READY_TIMEOUT": (
+            lambda: config.sandbox.sandbox_ready_timeout,
+            "sandbox_ready_timeout",
+        ),
+        "EXTERNAL_DOWNLOAD_TIMEOUT": (
+            lambda: config.sandbox.external_download_timeout,
+            "external_download_timeout",
+        ),
+        "EXTERNAL_MAX_FILESIZE": (
+            lambda: config.sandbox.external_max_filesize,
+            "external_max_filesize",
+        ),
+        "RATE_LIMIT_MIN_WAIT": (
+            lambda: config.sandbox.rate_limit_min_wait,
+            "rate_limit_min_wait",
+        ),
+        "RATE_LIMIT_MAX_WAIT": (
+            lambda: config.sandbox.rate_limit_max_wait,
+            "rate_limit_max_wait",
+        ),
+        "RATE_LIMIT_MAX_RETRIES": (
+            lambda: config.sandbox.rate_limit_max_retries,
+            "rate_limit_max_retries",
+        ),
     }
 
     if name in deprecated_map:
+        value_factory, config_name = deprecated_map[name]
         # Only warn once per constant to avoid log spam in hot paths
         if name not in _warned_constants:
             import warnings
 
             msg = (
                 f"constants.{name} is deprecated. "
-                f"Use get_config().sandbox.{name.lower()} instead."
+                f"Use get_config().sandbox.{config_name} instead."
             )
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
             _warned_constants.add(name)
-        return deprecated_map[name]()
+        return value_factory()
 
     raise AttributeError(f"module 'automation.constants' has no attribute {name!r}")

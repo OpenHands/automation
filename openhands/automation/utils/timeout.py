@@ -5,12 +5,12 @@ from openhands.automation.config import get_config
 
 def get_default_automation_timeout_seconds() -> int:
     """Return the configured default run timeout in seconds."""
-    return get_config().sandbox.max_run_duration
+    return get_config().sandbox.default_run_duration
 
 
 def get_max_automation_timeout_seconds() -> int:
     """Return the configured maximum user-provided run timeout in seconds."""
-    return get_config().sandbox.max_automation_timeout
+    return get_config().sandbox.max_run_duration
 
 
 def build_automation_timeout_description(*, include_default: bool) -> str:

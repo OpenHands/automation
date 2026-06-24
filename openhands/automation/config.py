@@ -202,9 +202,9 @@ class SandboxSettings(BaseSettings):
     """Sandbox execution configuration.
 
     Environment variables (AUTOMATION_ prefix):
-        AUTOMATION_MAX_RUN_DURATION: Default run time in seconds (default: 600)
-        AUTOMATION_MAX_AUTOMATION_TIMEOUT: Max user-configurable run time in
-            seconds (default: 1800)
+        AUTOMATION_DEFAULT_RUN_DURATION: Default run time in seconds (default: 600)
+        AUTOMATION_MAX_RUN_DURATION: Max user-configurable run time in seconds
+            (default: 1800)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
@@ -214,8 +214,8 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
     """
 
-    max_run_duration: int = 600  # 10 minutes
-    max_automation_timeout: int = 30 * 60  # 30 minutes
+    default_run_duration: int = 600  # 10 minutes
+    max_run_duration: int = 30 * 60  # 30 minutes
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120
@@ -533,7 +533,7 @@ class AppConfig:
         print(config.service.db_host)
         print(config.storage.file_store)
         print(config.log.log_level)
-        print(config.sandbox.max_run_duration)
+        print(config.sandbox.default_run_duration)
         print(config.kv.enabled)
     """
 
