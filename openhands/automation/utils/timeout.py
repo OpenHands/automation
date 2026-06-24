@@ -3,8 +3,26 @@
 from openhands.automation.config import get_config
 
 
-MAX_AUTOMATION_TIMEOUT_SECONDS = 30 * 60
-MAX_AUTOMATION_TIMEOUT_MINUTES = MAX_AUTOMATION_TIMEOUT_SECONDS // 60
+def get_default_automation_timeout_seconds() -> int:
+    """Return the configured default run timeout in seconds."""
+    return get_config().sandbox.max_run_duration
+
+
+def get_max_automation_timeout_seconds() -> int:
+    """Return the configured maximum user-provided run timeout in seconds."""
+    return get_config().sandbox.max_automation_timeout
+
+
+def build_automation_timeout_description(*, include_default: bool) -> str:
+    """Return a timeout field description using configured timeout values."""
+    max_timeout = get_max_automation_timeout_seconds()
+    if include_default:
+        default_timeout = get_default_automation_timeout_seconds()
+        return (
+            "Maximum execution time in seconds "
+            f"(default: {default_timeout} seconds, maximum: {max_timeout} seconds)"
+        )
+    return f"Maximum execution time in seconds (maximum: {max_timeout} seconds)"
 
 
 def validate_automation_timeout(timeout: int | None) -> int | None:
@@ -13,11 +31,12 @@ def validate_automation_timeout(timeout: int | None) -> int | None:
         return timeout
     if timeout <= 0:
         raise ValueError("timeout must be a positive number")
-    if timeout > MAX_AUTOMATION_TIMEOUT_SECONDS:
+
+    max_timeout = get_max_automation_timeout_seconds()
+    if timeout > max_timeout:
+        max_minutes = max_timeout // 60
         raise ValueError(
-            "timeout must not exceed "
-            f"{MAX_AUTOMATION_TIMEOUT_SECONDS} seconds "
-            f"({MAX_AUTOMATION_TIMEOUT_MINUTES} minutes)"
+            f"timeout must not exceed {max_timeout} seconds ({max_minutes} minutes)"
         )
     return timeout
 
@@ -25,9 +44,10 @@ def validate_automation_timeout(timeout: int | None) -> int | None:
 def resolve_automation_timeout_seconds(timeout: int | None) -> int:
     """Return the effective run timeout in seconds.
 
-    ``None`` preserves the configured service default (600 seconds by default), while
-    explicit user values are capped by the public API limit as a defense in depth.
+    ``None`` preserves the configured service default, while explicit user values
+    are capped by the configured public API limit as a defense in depth.
     """
-    default_timeout = get_config().sandbox.max_run_duration
-    effective_timeout = timeout if timeout is not None else default_timeout
-    return min(effective_timeout, MAX_AUTOMATION_TIMEOUT_SECONDS)
+    effective_timeout = (
+        timeout if timeout is not None else get_default_automation_timeout_seconds()
+    )
+    return min(effective_timeout, get_max_automation_timeout_seconds())

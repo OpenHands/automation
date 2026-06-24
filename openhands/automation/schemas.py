@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.utils.time import UtcDatetime
 from openhands.automation.utils.timeout import (
-    MAX_AUTOMATION_TIMEOUT_SECONDS,
+    build_automation_timeout_description,
     validate_automation_timeout,
 )
 
@@ -269,12 +269,7 @@ class CreateAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        gt=0,
-        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
-        description=(
-            "Maximum execution time in seconds (default: 600 seconds, "
-            "maximum: 1800 seconds)"
-        ),
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -338,9 +333,7 @@ class UpdateAutomationRequest(BaseModel):
     entrypoint: str | None = Field(default=None)
     timeout: int | None = Field(
         default=None,
-        gt=0,
-        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
-        description="Maximum execution time in seconds (maximum: 1800 seconds)",
+        description=build_automation_timeout_description(include_default=False),
     )
     keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None

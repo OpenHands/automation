@@ -56,7 +56,7 @@ from openhands.automation.utils.tarball_validation import (
     parse_internal_upload_id,
 )
 from openhands.automation.utils.timeout import (
-    MAX_AUTOMATION_TIMEOUT_SECONDS,
+    get_max_automation_timeout_seconds,
     resolve_automation_timeout_seconds,
 )
 
@@ -394,7 +394,7 @@ async def dispatch_pending_runs(
                 else:
                     run_timeout_seconds = min(
                         int(max_run_duration.total_seconds()),
-                        MAX_AUTOMATION_TIMEOUT_SECONDS,
+                        get_max_automation_timeout_seconds(),
                     )
                 await mark_run_status(
                     session,

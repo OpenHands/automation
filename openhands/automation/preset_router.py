@@ -37,7 +37,7 @@ from openhands.automation.utils.tarball_validation import (
     parse_internal_upload_id,
 )
 from openhands.automation.utils.timeout import (
-    MAX_AUTOMATION_TIMEOUT_SECONDS,
+    build_automation_timeout_description,
     validate_automation_timeout,
 )
 from openhands.sdk.plugin import PluginSource
@@ -140,12 +140,7 @@ class CreatePromptAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        gt=0,
-        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
-        description=(
-            "Maximum execution time in seconds (default: 600 seconds, "
-            "maximum: 1800 seconds)"
-        ),
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -574,12 +569,7 @@ class CreatePluginAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        gt=0,
-        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
-        description=(
-            "Maximum execution time in seconds (default: 600 seconds, "
-            "maximum: 1800 seconds)"
-        ),
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,

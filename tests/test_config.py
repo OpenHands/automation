@@ -183,6 +183,7 @@ class TestSandboxSettings:
         """Default values are reasonable."""
         settings = SandboxSettings()
         assert settings.max_run_duration == 600
+        assert settings.max_automation_timeout == 1800
         assert settings.sandbox_poll_interval == 5
         assert settings.sandbox_ready_timeout == 300
         assert settings.rate_limit_min_wait == 10
@@ -193,9 +194,11 @@ class TestSandboxSettings:
         """Custom values are accepted."""
         settings = SandboxSettings(
             max_run_duration=1200,
+            max_automation_timeout=2400,
             sandbox_poll_interval=10,
         )
         assert settings.max_run_duration == 1200
+        assert settings.max_automation_timeout == 2400
         assert settings.sandbox_poll_interval == 10
 
 
