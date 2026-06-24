@@ -112,6 +112,13 @@ class LocalAgentServerBackend(ExecutionBackend):
             sandbox_id=None,  # No sandbox in local mode
         )
 
+    async def get_existing_execution_context(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+    ) -> ExecutionContext:
+        """Return the persistent local agent server context."""
+        return await self.get_execution_context(client)
+
     async def release_context(
         self,
         client: httpx.AsyncClient,  # noqa: ARG002

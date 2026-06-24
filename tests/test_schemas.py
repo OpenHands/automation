@@ -11,7 +11,11 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from openhands.automation.schemas import (
+    AutomationCallback,
     AutomationResponse,
     AutomationRunResponse,
     RunStatus,
@@ -111,6 +115,7 @@ class TestAutomationResponseUtcSerialisation:
             entrypoint="python main.py",
             timeout=None,
             keep_alive=True,
+            callbacks=None,
             enabled=True,
             last_triggered_at=_NAIVE,
             created_at=_NAIVE,
@@ -135,3 +140,47 @@ class TestAutomationResponseUtcSerialisation:
         automation = self._make_automation(last_triggered_at=None)
         data = automation.model_dump(mode="json")
         assert data["last_triggered_at"] is None
+
+
+class TestAutomationCallbackValidation:
+    def test_entrypoint_callback_is_valid(self):
+        callback = AutomationCallback(
+            name="notify_failure",
+            on=["FAILED"],
+            entrypoint="python callbacks/on_failure.py",
+            timeout=60,
+        )
+
+        assert callback.entrypoint == "python callbacks/on_failure.py"
+        assert callback.inline_python is None
+
+    def test_inline_python_callback_is_valid(self):
+        callback = AutomationCallback(
+            name="mark_review_failed",
+            on=["FAILED"],
+            inline_python="print('failed')\n",
+        )
+
+        assert callback.inline_python == "print('failed')\n"
+        assert callback.entrypoint is None
+
+    def test_callback_rejects_both_code_sources(self):
+        with pytest.raises(ValidationError, match="exactly one"):
+            AutomationCallback(
+                name="bad",
+                on=["FAILED"],
+                entrypoint="python callbacks/bad.py",
+                inline_python="print('bad')\n",
+            )
+
+    def test_callback_rejects_neither_code_source(self):
+        with pytest.raises(ValidationError, match="exactly one"):
+            AutomationCallback(name="bad", on=["FAILED"])
+
+    def test_callback_rejects_duplicate_statuses(self):
+        with pytest.raises(ValidationError, match="unique"):
+            AutomationCallback(
+                name="bad",
+                on=["FAILED", "FAILED"],
+                entrypoint="python callbacks/bad.py",
+            )

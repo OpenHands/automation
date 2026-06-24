@@ -13,10 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.callbacks import (
+    cleanup_run_after_callbacks_if_ready,
+    complete_callback_records,
+    schedule_and_dispatch_callbacks_for_run,
+)
 from openhands.automation.db import get_session
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunCallback,
     AutomationRunStatus,
     TarballUpload,
 )
@@ -24,8 +30,10 @@ from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
+    AutomationRunCallbackResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
+    CallbackCompleteRequest,
     CreateAutomationRequest,
     RunCompleteRequest,
     UpdateAutomationRequest,
@@ -87,7 +95,12 @@ async def create_automation(
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
         timeout=body.timeout,
-        keep_alive=body.keep_alive,
+        keep_alive=body.keep_alive
+        if body.keep_alive is not None
+        else (True if body.callbacks else None),
+        callbacks=[c.model_dump(exclude_none=True) for c in body.callbacks]
+        if body.callbacks
+        else None,
     )
     session.add(auto)
     await session.flush()
@@ -153,6 +166,16 @@ async def update_automation(
 
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
+    if "callbacks" in update_data and body.callbacks is not None:
+        update_data["callbacks"] = [
+            c.model_dump(exclude_none=True) for c in body.callbacks
+        ]
+        if (
+            body.callbacks
+            and "keep_alive" not in update_data
+            and auto.keep_alive is None
+        ):
+            update_data["keep_alive"] = True
 
     original_prompt = auto.prompt
     for field, value in update_data.items():
@@ -393,9 +416,11 @@ async def complete_run(
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
 
-    # Clean up immediately when this automation owns explicit cleanup. Once
-    # post-run callbacks exist, this path should run them before deleting.
-    if run.sandbox_id and automation.keep_alive is not True:
+    callbacks_created = await schedule_and_dispatch_callbacks_for_run(session, run)
+
+    # Clean up immediately when this automation owns explicit cleanup and no
+    # post-run callbacks need to run first.
+    if callbacks_created == 0 and run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings
 
@@ -425,6 +450,64 @@ async def complete_run(
             )
 
     return AutomationRunResponse.model_validate(run)
+
+
+@router.post("/runs/{run_id}/callbacks/complete")
+async def complete_run_callbacks(
+    run_id: uuid.UUID,
+    body: CallbackCompleteRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Record completion of a post-run callback chain."""
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    await complete_callback_records(session, run, body.callbacks)
+    await cleanup_run_after_callbacks_if_ready(session, run)
+    logger.info("Run %s callback chain completion recorded", run_id)
+    return {"status": "ok"}
+
+
+@router.get("/runs/{run_id}/callbacks")
+async def list_run_callbacks(
+    run_id: uuid.UUID,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> list[AutomationRunCallbackResponse]:
+    """List post-run callback executions for a run."""
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    callback_result = await session.execute(
+        select(AutomationRunCallback)
+        .where(AutomationRunCallback.run_id == run_id)
+        .order_by(AutomationRunCallback.order)
+    )
+    return [
+        AutomationRunCallbackResponse.model_validate(callback)
+        for callback in callback_result.scalars().all()
+    ]
 
 
 # --- Run cancellation ---

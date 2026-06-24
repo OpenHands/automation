@@ -15,9 +15,11 @@ from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
     _get_preset_entrypoint,
+    _materialize_callback_files,
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.automation.schemas import AutomationCallback
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -154,6 +156,43 @@ class TestGenerateTarball:
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
             # as the SDK workspace now provides these methods directly
+
+    def test_generate_tarball_with_callback_files(self):
+        """Generated prompt tarball can include materialized callback files."""
+        tarball_bytes = _generate_tarball(
+            "Test prompt",
+            callback_files={"callbacks/notify.py": "print('done')\n"},
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
+            assert "callbacks/notify.py" in names
+            callback_file = tar.extractfile("callbacks/notify.py")
+            assert callback_file is not None
+            assert callback_file.read().decode("utf-8") == "print('done')\n"
+
+    def test_materialize_inline_callback_files(self):
+        """Inline preset callbacks are written to files and normalized."""
+        callbacks, files = _materialize_callback_files(
+            [
+                AutomationCallback(
+                    name="mark_review_failed",
+                    on=["FAILED"],
+                    inline_python="print('failed')\n",
+                    timeout=60,
+                )
+            ]
+        )
+
+        assert files == {"callbacks/mark_review_failed.py": "print('failed')\n"}
+        assert callbacks == [
+            {
+                "name": "mark_review_failed",
+                "on": ["FAILED"],
+                "timeout": 60,
+                "entrypoint": "python callbacks/mark_review_failed.py",
+            }
+        ]
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
