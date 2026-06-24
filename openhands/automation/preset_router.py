@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,10 @@ from openhands.automation.utils.model_profiles import resolve_model_profile_for_
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
+)
+from openhands.automation.utils.timeout import (
+    MAX_AUTOMATION_TIMEOUT_SECONDS,
+    validate_automation_timeout,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -136,7 +140,12 @@ class CreatePromptAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds (default: system maximum)",
+        gt=0,
+        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
+        description=(
+            "Maximum execution time in seconds (default: 600 seconds, "
+            "maximum: 1800 seconds)"
+        ),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -154,6 +163,11 @@ class CreatePromptAutomationRequest(BaseModel):
             "Can be a single repo or a list of repos."
         ),
     )
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return validate_automation_timeout(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -560,7 +574,12 @@ class CreatePluginAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds (default: system maximum)",
+        gt=0,
+        le=MAX_AUTOMATION_TIMEOUT_SECONDS,
+        description=(
+            "Maximum execution time in seconds (default: 600 seconds, "
+            "maximum: 1800 seconds)"
+        ),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -578,6 +597,11 @@ class CreatePluginAutomationRequest(BaseModel):
             "Can be a single repo or a list of repos."
         ),
     )
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return validate_automation_timeout(v)
 
     @model_validator(mode="before")
     @classmethod

@@ -55,6 +55,10 @@ from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
 )
+from openhands.automation.utils.timeout import (
+    MAX_AUTOMATION_TIMEOUT_SECONDS,
+    resolve_automation_timeout_seconds,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -189,13 +193,9 @@ async def _execute_run(
         if disable:
             await disable_automation(session_factory, automation.id, error)
 
-    # 1. Calculate effective timeout (doesn't depend on ctx)
-    max_run_duration = get_config().sandbox.max_run_duration
-    effective_timeout = (
-        min(automation.timeout, max_run_duration)
-        if automation.timeout
-        else max_run_duration
-    )
+    # 1. Calculate effective timeout (doesn't depend on ctx). This same value
+    # drives both the bash command timeout and the watchdog cleanup deadline.
+    effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
 
     # 2. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
@@ -384,17 +384,23 @@ async def dispatch_pending_runs(
             extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
-                # Use automation's custom timeout if set, otherwise use default
-                run_max_duration = (
-                    timedelta(seconds=run.automation.timeout)
-                    if run.automation and run.automation.timeout
-                    else max_run_duration
-                )
+                # Use the same effective timeout as the bash command so the
+                # watchdog archives/cleans up stale sandboxes at the user-selected
+                # deadline (or the 10-minute default when unset).
+                if run.automation and run.automation.timeout is not None:
+                    run_timeout_seconds = resolve_automation_timeout_seconds(
+                        run.automation.timeout
+                    )
+                else:
+                    run_timeout_seconds = min(
+                        int(max_run_duration.total_seconds()),
+                        MAX_AUTOMATION_TIMEOUT_SECONDS,
+                    )
                 await mark_run_status(
                     session,
                     run,
                     AutomationRunStatus.RUNNING,
-                    max_duration=run_max_duration,
+                    max_duration=timedelta(seconds=run_timeout_seconds),
                 )
                 dispatched_runs.append(run)
             except Exception:

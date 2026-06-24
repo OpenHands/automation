@@ -26,6 +26,7 @@ from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.sandbox import delete_sandbox
+from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 # Default working directory for cloud/container mode
@@ -197,7 +198,7 @@ async def _bash(
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        timeout = resolve_automation_timeout_seconds(None)
     resp = await client.post(
         f"{agent_url}/api/bash/execute_bash_command",
         json={"command": command, "timeout": timeout},
@@ -218,7 +219,7 @@ async def _start_bash(
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+        timeout = resolve_automation_timeout_seconds(None)
     http_timeout = get_config().http.http_timeout
     resp = await client.post(
         f"{agent_url}/api/bash/start_bash_command",
@@ -366,8 +367,7 @@ async def execute_in_context(
     Returns:
         DispatchResult with success status
     """
-    if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+    timeout = resolve_automation_timeout_seconds(timeout)
 
     env_vars = dict(env_vars) if env_vars else {}
 
@@ -482,8 +482,7 @@ async def run_automation(
     *work_dir* is the working directory for tarball extraction
     (default: /workspace/project).
     """
-    if timeout is None:
-        timeout = get_config().sandbox.max_run_duration
+    timeout = resolve_automation_timeout_seconds(timeout)
     http_timeout = get_config().http.http_long_timeout
 
     env_vars = dict(env_vars) if env_vars else {}

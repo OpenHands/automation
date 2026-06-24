@@ -7,9 +7,9 @@ from datetime import timedelta
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openhands.automation.config import get_config
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils.time import utcnow
+from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ async def mark_run_status(
         max_duration: Maximum run duration for computing timeout_at
     """
     if max_duration is None:
-        max_duration = timedelta(seconds=get_config().sandbox.max_run_duration)
+        max_duration = timedelta(seconds=resolve_automation_timeout_seconds(None))
 
     now = utcnow()
 
