@@ -33,6 +33,23 @@
     "tr": "Yükleniyor...",
     "uk": "Завантаження..."
   },
+  "NAVIGATION$BACK": {
+    "en": "Back",
+    "ja": "戻る",
+    "zh-CN": "返回",
+    "zh-TW": "返回",
+    "ko-KR": "뒤로",
+    "no": "Tilbake",
+    "ar": "رجوع",
+    "de": "Zurück",
+    "fr": "Retour",
+    "it": "Indietro",
+    "pt": "Voltar",
+    "es": "Volver",
+    "ca": "Enrere",
+    "tr": "Geri",
+    "uk": "Назад"
+  },
   "AUTOMATIONS$TITLE": {
     "en": "Automations",
     "ja": "オートメーション",
