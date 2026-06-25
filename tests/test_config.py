@@ -44,6 +44,19 @@ class TestLogSettings:
         assert settings.effective_automation_log_level == "DEBUG"
 
 
+class TestAutomationTimeouts:
+    """Tests for automation timeout policy helpers."""
+
+    def test_resolve_caps_stored_timeout_to_configured_max(self):
+        """Stored timeouts above the current max are capped at runtime."""
+        from openhands.automation.utils.timeout import (
+            resolve_automation_timeout_seconds,
+        )
+
+        max_duration = get_config().sandbox.max_run_duration
+        assert resolve_automation_timeout_seconds(max_duration + 600) == max_duration
+
+
 class TestBasePath:
     """Verify base_path is derived from base_url path + /api/automation."""
 

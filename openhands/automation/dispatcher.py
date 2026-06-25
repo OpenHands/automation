@@ -376,10 +376,6 @@ async def dispatch_pending_runs(
             extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
-                # Use the same effective timeout as the bash command so the
-                # watchdog archives/cleans up stale sandboxes at the user-selected
-                # deadline. Legacy runs without a stored timeout fall back to the
-                # configured default.
                 run_timeout_seconds = resolve_automation_timeout_seconds(
                     run.automation.timeout if run.automation else None
                 )

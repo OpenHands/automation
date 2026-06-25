@@ -14,7 +14,11 @@ def get_max_automation_timeout_seconds() -> int:
 
 
 def build_automation_timeout_description(*, include_default: bool) -> str:
-    """Return a timeout field description using configured timeout values."""
+    """Return import-time OpenAPI metadata using configured timeout values.
+
+    Runtime validation and dispatch use the helper functions below so they keep
+    reading current config even though Pydantic field descriptions are static.
+    """
     max_timeout = get_max_automation_timeout_seconds()
     if include_default:
         default_timeout = get_default_automation_timeout_seconds()
