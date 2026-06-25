@@ -1,5 +1,7 @@
 import React from "react";
 import { Outlet } from "react-router";
+import { useTranslation } from "react-i18next";
+import { I18nKey } from "#/i18n/declaration";
 import { useIsAuthed } from "#/hooks/use-is-authed";
 import { useMe } from "#/hooks/use-me";
 import { useAutoLogin } from "#/hooks/use-auto-login";
@@ -9,10 +11,26 @@ import { useOrgSync } from "#/hooks/use-org-sync";
 import { useThemeSync } from "#/hooks/use-theme-sync";
 import { ReauthModal } from "#/components/reauth-modal";
 import { LOCAL_STORAGE_KEYS } from "#/utils/local-storage";
+import ChevronLeftIcon from "#/icons/chevron-left.svg?react";
 
 export { ErrorBoundary } from "#/components/error-boundary";
 
+function getMainAppHref(): string {
+  if (typeof window === "undefined") {
+    return "/";
+  }
+
+  const automationsPathIndex = window.location.pathname.indexOf("/automations");
+  const prefix =
+    automationsPathIndex >= 0
+      ? window.location.pathname.slice(0, automationsPathIndex)
+      : "";
+
+  return `${prefix}/`;
+}
+
 export default function RootLayout() {
+  const { t } = useTranslation();
   const {
     data: isAuthed,
     isLoading: isAuthLoading,
@@ -86,6 +104,14 @@ export default function RootLayout() {
     <div className="min-h-screen bg-surface text-white">
       {renderReAuthModal && <ReauthModal />}
       <main className="mx-auto max-w-5xl px-8 py-8">
+        <a
+          href={getMainAppHref()}
+          data-testid="main-app-back-button"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-content-muted hover:text-content"
+        >
+          <ChevronLeftIcon className="size-4" />
+          {t(I18nKey.NAVIGATION$BACK)}
+        </a>
         <Outlet />
       </main>
     </div>
