@@ -141,7 +141,7 @@ class AutomationRun(Base):
         default=AutomationRunStatus.PENDING,
     )
 
-    # Error details if status is FAILED
+    # Human-readable error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Conversation created by the SDK script (set by completion callback)

@@ -474,7 +474,7 @@ class TestCreateAutomation:
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             "tarball_path": "s3://bucket/code.tar.gz",
             "entrypoint": "python main.py",
-            "timeout": 601,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+            "timeout": 1801,  # AUTOMATION_MAX_RUN_DURATION default is 1800
         }
 
         response = await async_client.post("/api/automation/v1", json=payload)
@@ -488,14 +488,14 @@ class TestCreateAutomation:
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             "tarball_path": "s3://bucket/code.tar.gz",
             "entrypoint": "python main.py",
-            "timeout": 600,  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+            "timeout": 1800,  # AUTOMATION_MAX_RUN_DURATION default is 1800
         }
 
         response = await async_client.post("/api/automation/v1", json=payload)
 
         assert response.status_code == 201
         data = response.json()
-        assert data["timeout"] == 600
+        assert data["timeout"] == 1800
 
 
 class TestListAutomations:
@@ -1148,7 +1148,7 @@ class TestUpdateAutomation:
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"timeout": 700},  # MAX_RUN_DURATION_SECONDS is 600 (10 minutes)
+            json={"timeout": 1801},  # AUTOMATION_MAX_RUN_DURATION default is 1800
         )
 
         assert response.status_code == 422

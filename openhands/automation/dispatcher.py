@@ -189,12 +189,21 @@ async def _execute_run(
         if disable:
             await disable_automation(session_factory, automation.id, error)
 
-    # 1. Calculate effective timeout (doesn't depend on ctx)
-    max_run_duration = get_config().sandbox.max_run_duration
-    effective_timeout = (
+    # 1. Calculate timeout budgets. The automation timeout is the logical
+    # deadline used by the watchdog; the bash timeout is an outer cap.
+    sandbox_config = get_config().sandbox
+    max_run_duration = sandbox_config.max_run_duration
+    logical_timeout = (
         min(automation.timeout, max_run_duration)
         if automation.timeout
         else max_run_duration
+    )
+    bash_timeout = sandbox_config.bash_timeout_for(logical_timeout)
+    logger.info(
+        "Run timeout budgets: logical=%ss bash=%ss",
+        logical_timeout,
+        bash_timeout,
+        extra=_log_ctx(),
     )
 
     # 2. Get execution context - if this fails, nothing to clean up
@@ -301,7 +310,7 @@ async def _execute_run(
             tarball_source=tarball_source,
             work_dir=work_dir,
             env_vars=env_vars,
-            timeout=effective_timeout,
+            timeout=bash_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
         )
@@ -384,12 +393,12 @@ async def dispatch_pending_runs(
             extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
-                # Use automation's custom timeout if set, otherwise use default
-                run_max_duration = (
-                    timedelta(seconds=run.automation.timeout)
-                    if run.automation and run.automation.timeout
-                    else max_run_duration
-                )
+                # Use the automation's logical timeout if set, capped by the
+                # service maximum so stale-run detection stays within policy.
+                timeout_seconds = int(max_run_duration.total_seconds())
+                if run.automation and run.automation.timeout:
+                    timeout_seconds = min(run.automation.timeout, timeout_seconds)
+                run_max_duration = timedelta(seconds=timeout_seconds)
                 await mark_run_status(
                     session,
                     run,
