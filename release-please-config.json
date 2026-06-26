@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-v-in-tag": false,
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "changelog-type": "github",
+      "skip-changelog": true,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "openhands/automation/__init__.py"
+        },
+        {
+          "type": "generic",
+          "path": "openhands/automation/app.py"
+        },
+        {
+          "type": "json",
+          "path": "frontend/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "frontend/package-lock.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "frontend/package-lock.json",
+          "jsonpath": "$.packages[''].version"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='openhands-automation')].version"
+        }
+      ]
+    }
+  }
+}
