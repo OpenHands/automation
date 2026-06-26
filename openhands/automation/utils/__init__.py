@@ -4,6 +4,7 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
+from openhands.automation.utils.async_utils import AsyncException, wait_all
 from openhands.automation.utils.cron import (
     get_next_fire_time,
     get_prev_fire_time,
@@ -15,6 +16,7 @@ from openhands.automation.utils.time import UtcDatetime, ensure_utc, utcnow
 
 __all__ = [
     "APIKeyError",
+    "AsyncException",
     "get_api_key_for_automation_run",
     "get_next_fire_time",
     "get_prev_fire_time",
@@ -23,4 +25,5 @@ __all__ = [
     "UtcDatetime",
     "ensure_utc",
     "utcnow",
+    "wait_all",
 ]
