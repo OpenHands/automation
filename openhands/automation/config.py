@@ -214,8 +214,8 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
     """
 
-    default_run_duration: int = 600  # 10 minutes
-    max_run_duration: int = 30 * 60  # 30 minutes
+    default_run_duration: int = 10 * 60  # 10 minutes
+    max_run_duration: int = 10 * 60  # 10 minutes
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120
