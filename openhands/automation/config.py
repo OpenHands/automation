@@ -215,7 +215,7 @@ class SandboxSettings(BaseSettings):
     """
 
     default_run_duration: int = 10 * 60  # 10 minutes
-    max_run_duration: int = 10 * 60  # 10 minutes
+    max_run_duration: int = 30 * 60  # 30 minutes
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120
