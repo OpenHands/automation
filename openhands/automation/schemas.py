@@ -6,7 +6,15 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from croniter import croniter
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
 from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
@@ -248,6 +256,72 @@ def _validate_command_string(
     return v
 
 
+_CALLBACK_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+
+
+class AutomationCallback(BaseModel):
+    """Post-run callback configuration for an automation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100)
+    on: list[Literal["COMPLETED", "FAILED"]] = Field(
+        default_factory=lambda: ["COMPLETED", "FAILED"],
+        min_length=1,
+        max_length=2,
+        description="Main run terminal statuses that trigger this callback.",
+    )
+    entrypoint: str | None = Field(
+        default=None,
+        description="Command to run inside the extracted automation work directory.",
+    )
+    inline_python: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50000,
+        description="Inline Python source to execute as the callback.",
+    )
+    timeout: int | None = Field(
+        default=None,
+        description="Maximum callback execution time in seconds.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not _CALLBACK_NAME_RE.match(v):
+            raise ValueError(
+                "callback name must contain only letters, numbers, underscores, "
+                "or hyphens"
+            )
+        return v
+
+    @field_validator("on")
+    @classmethod
+    def validate_on(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("callback statuses must be unique")
+        return v
+
+    @field_validator("entrypoint")
+    @classmethod
+    def validate_entrypoint(cls, v: str | None) -> str | None:
+        return _validate_command_string(v, "entrypoint")
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return _validate_timeout(v)
+
+    @model_validator(mode="after")
+    def validate_exactly_one_source(self) -> "AutomationCallback":
+        if (self.entrypoint is None) == (self.inline_python is None):
+            raise ValueError(
+                "callback must provide exactly one of entrypoint or inline_python"
+            )
+        return self
+
+
 # --- Requests ---
 
 
@@ -290,6 +364,10 @@ class CreateAutomationRequest(BaseModel):
             "finishes. If false or null, explicitly clean it up after "
             "completion (or after post-run callbacks, when configured)."
         ),
+    )
+    callbacks: list[AutomationCallback] | None = Field(
+        default=None,
+        description="Post-run callbacks to run after COMPLETED or FAILED runs.",
     )
 
     @field_validator("tarball_path")
@@ -345,6 +423,7 @@ class UpdateAutomationRequest(BaseModel):
     entrypoint: str | None = Field(default=None)
     timeout: int | None = Field(default=None)
     keep_alive: bool | None = Field(default=None)
+    callbacks: list[AutomationCallback] | None = Field(default=None)
     enabled: bool | None = None
 
     @field_validator("tarball_path")
@@ -598,6 +677,7 @@ class AutomationResponse(BaseModel):
     entrypoint: str
     timeout: int | None
     keep_alive: bool | None
+    callbacks: list[AutomationCallback] | None
     enabled: bool
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
@@ -623,6 +703,51 @@ class RunCompleteRequest(BaseModel):
     run_id: str | None = None
     conversation_id: str | None = None
     error: str | None = None
+
+
+class CallbackCompleteItem(BaseModel):
+    """Completion result for one post-run callback."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    name: str
+    status: Literal["COMPLETED", "FAILED"]
+    exit_code: int | None = None
+    stdout: str | None = Field(default=None, max_length=5000)
+    stderr: str | None = Field(default=None, max_length=5000)
+    error_detail: str | None = Field(default=None, max_length=5000)
+    started_at: UtcDatetime | None = None
+    completed_at: UtcDatetime | None = None
+
+
+class CallbackCompleteRequest(BaseModel):
+    """Completion payload from the in-sandbox callback chain wrapper."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    callbacks: list[CallbackCompleteItem] = Field(default_factory=list)
+
+
+class AutomationRunCallbackResponse(BaseModel):
+    """Response for a post-run callback execution."""
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    name: str
+    trigger_status: RunStatus
+    entrypoint: str
+    timeout: int | None
+    status: RunStatus
+    bash_command_id: str | None
+    error_detail: str | None
+    order: int
+    started_at: UtcDatetime | None
+    timeout_at: UtcDatetime | None
+    completed_at: UtcDatetime | None
+    created_at: UtcDatetime
+
+    model_config = {"from_attributes": True}
 
 
 class AutomationRunResponse(BaseModel):

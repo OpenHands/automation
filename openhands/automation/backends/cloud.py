@@ -27,6 +27,7 @@ from openhands.automation.utils.api_key import get_api_key_for_automation_run
 from openhands.automation.utils.sandbox import (
     cleanup_sandbox,
     delete_sandbox,
+    get_sandbox_agent_url,
     verify_run_status,
 )
 
@@ -172,6 +173,27 @@ class CloudSandboxBackend(ExecutionBackend):
             sandbox_id=sandbox_id,
             api_url=self.api_url,
             api_key=await self._ensure_api_key(),
+        )
+
+    async def get_existing_execution_context(
+        self, client: httpx.AsyncClient
+    ) -> ExecutionContext:
+        """Discover the existing sandbox's agent server context."""
+        sandbox_id = self._run.sandbox_id
+        if not sandbox_id:
+            raise RuntimeError("Run has no sandbox_id for callback execution")
+
+        api_key = await self._ensure_api_key()
+        result = await get_sandbox_agent_url(client, self.api_url, api_key, sandbox_id)
+        if result is None:
+            raise RuntimeError(f"Sandbox {sandbox_id} is not available")
+        agent_url, session_key = result
+        return ExecutionContext(
+            agent_url=agent_url,
+            session_key=session_key,
+            sandbox_id=sandbox_id,
+            api_url=self.api_url,
+            api_key=api_key,
         )
 
     async def release_context(

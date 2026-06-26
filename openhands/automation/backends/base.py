@@ -65,6 +65,17 @@ class ExecutionBackend(ABC):
         """
 
     @abstractmethod
+    async def get_existing_execution_context(
+        self, client: httpx.AsyncClient
+    ) -> ExecutionContext:
+        """Reconnect to an existing run execution context.
+
+        Used by post-run callbacks after the main run has already dispatched.
+        For Cloud mode this discovers the still-running sandbox by run.sandbox_id.
+        For Local mode this returns the configured persistent agent server.
+        """
+
+    @abstractmethod
     async def release_context(
         self, client: httpx.AsyncClient, ctx: ExecutionContext
     ) -> None:

@@ -28,7 +28,7 @@ from openhands.automation.auth import AuthenticatedUser, authenticate_request
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
-from openhands.automation.schemas import AutomationResponse, Trigger
+from openhands.automation.schemas import AutomationCallback, AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
@@ -146,6 +146,10 @@ class CreatePromptAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    callbacks: list[AutomationCallback] | None = Field(
+        default=None,
+        description="Post-run callbacks to run after COMPLETED or FAILED runs.",
+    )
     repos: list[RepoSource] | None = Field(
         default=None,
         description=(
@@ -177,7 +181,31 @@ def _add_file_to_tar(
     tar.addfile(info, io.BytesIO(content_bytes))
 
 
-def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> bytes:
+def _materialize_callback_files(
+    callbacks: list[AutomationCallback] | None,
+) -> tuple[list[dict[str, Any]] | None, dict[str, str]]:
+    """Return persisted callback config and files for inline preset callbacks."""
+    if not callbacks:
+        return None, {}
+
+    persisted: list[dict[str, Any]] = []
+    files: dict[str, str] = {}
+    for callback in callbacks:
+        data = callback.model_dump(exclude_none=True)
+        inline_python = data.pop("inline_python", None)
+        if inline_python is not None:
+            path = f"callbacks/{callback.name}.py"
+            files[path] = inline_python
+            data["entrypoint"] = f"python {path}"
+        persisted.append(data)
+    return persisted, files
+
+
+def _generate_tarball(
+    prompt: str,
+    repos: list[RepoSource] | None = None,
+    callback_files: dict[str, str] | None = None,
+) -> bytes:
     """Generate a tarball containing SDK code and the user's prompt.
 
     The tarball contains:
@@ -204,6 +232,10 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+
+        if callback_files:
+            for path, content in callback_files.items():
+                _add_file_to_tar(tar, path, content)
 
         # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
@@ -395,7 +427,10 @@ async def create_automation_from_prompt(
     model = resolve_model_profile_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
-    tarball_content = _generate_tarball(body.prompt, repos=body.repos)
+    callbacks, callback_files = _materialize_callback_files(body.callbacks)
+    tarball_content = _generate_tarball(
+        body.prompt, repos=body.repos, callback_files=callback_files
+    )
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
@@ -451,7 +486,10 @@ async def create_automation_from_prompt(
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
-            keep_alive=body.keep_alive,
+            keep_alive=body.keep_alive
+            if body.keep_alive is not None
+            else (True if callbacks else None),
+            callbacks=callbacks,
         )
         session.add(automation)
         await session.flush()
@@ -570,6 +608,10 @@ class CreatePluginAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    callbacks: list[AutomationCallback] | None = Field(
+        default=None,
+        description="Post-run callbacks to run after COMPLETED or FAILED runs.",
+    )
     repos: list[RepoSource] | None = Field(
         default=None,
         description=(
@@ -658,6 +700,7 @@ def _generate_plugin_tarball(
     *,
     experiment_id: str | None = None,
     variants: list[ExperimentVariant] | None = None,
+    callback_files: dict[str, str] | None = None,
 ) -> bytes:
     """Generate a tarball containing SDK code, plugin config, and prompt.
 
@@ -697,6 +740,10 @@ def _generate_plugin_tarball(
             _add_file_to_tar(
                 tar, "plugins_config.json", json.dumps(plugins_config, indent=2)
             )
+
+        if callback_files:
+            for path, content in callback_files.items():
+                _add_file_to_tar(tar, path, content)
 
         if repos:
             repos_config = [r.model_dump(exclude_none=True) for r in repos]
@@ -747,12 +794,14 @@ async def create_automation_from_plugin(
     )
 
     # 1. Generate tarball with SDK code, plugin/experiment config, and prompt
+    callbacks, callback_files = _materialize_callback_files(body.callbacks)
     tarball_content = _generate_plugin_tarball(
         body.plugins,
         body.prompt,
         repos=body.repos,
         experiment_id=body.experiment_id,
         variants=variants,
+        callback_files=callback_files,
     )
 
     # 2. Upload tarball to storage
@@ -819,7 +868,10 @@ async def create_automation_from_plugin(
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
             timeout=body.timeout,
-            keep_alive=body.keep_alive,
+            keep_alive=body.keep_alive
+            if body.keep_alive is not None
+            else (True if callbacks else None),
+            callbacks=callbacks,
         )
         session.add(automation)
         await session.flush()

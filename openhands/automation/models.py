@@ -44,6 +44,16 @@ class AutomationRunStatus(enum.Enum):
     SKIPPED = "SKIPPED"
 
 
+class AutomationRunCallbackStatus(enum.Enum):
+    """Status of a post-run callback execution."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -81,6 +91,10 @@ class Automation(Base):
     # reaper instead of explicitly deleting it after a terminal run. Null/False
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
+
+    # Post-run callback configuration. Each item contains name, on, entrypoint,
+    # timeout, and optionally inline_python before preset materialization.
+    callbacks: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
@@ -185,6 +199,9 @@ class AutomationRun(Base):
 
     # Relationship back to automation
     automation: Mapped["Automation"] = relationship("Automation", back_populates="runs")
+    callbacks: Mapped[list["AutomationRunCallback"]] = relationship(
+        "AutomationRunCallback", back_populates="run", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         # Partial index for efficient PENDING polling.
@@ -197,6 +214,61 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+    )
+
+
+class AutomationRunCallback(Base):
+    """A post-run callback execution for an automation run."""
+
+    __tablename__ = "automation_run_callbacks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    trigger_status: Mapped[AutomationRunStatus] = mapped_column(
+        Enum(AutomationRunStatus, native_enum=False, length=20),
+        nullable=False,
+    )
+    entrypoint: Mapped[str] = mapped_column(Text, nullable=False)
+    timeout: Mapped[int | None] = mapped_column(nullable=True)
+    status: Mapped[AutomationRunCallbackStatus] = mapped_column(
+        Enum(AutomationRunCallbackStatus, native_enum=False, length=20),
+        nullable=False,
+        default=AutomationRunCallbackStatus.PENDING,
+        index=True,
+    )
+    bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order: Mapped[int] = mapped_column(nullable=False, default=0)
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    timeout_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    run: Mapped["AutomationRun"] = relationship(
+        "AutomationRun", back_populates="callbacks"
+    )
+
+    __table_args__ = (
+        Index("ix_automation_run_callbacks_run_order", "run_id", "order"),
+        Index("ix_automation_run_callbacks_status_timeout", "status", "timeout_at"),
     )
 
 

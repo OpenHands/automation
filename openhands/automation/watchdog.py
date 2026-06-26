@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
+from openhands.automation.callbacks import schedule_and_dispatch_callbacks_for_run
 from openhands.automation.config import Settings
 from openhands.automation.models import (
     Automation,
@@ -91,6 +92,22 @@ async def _verify_and_mark_run(
             )
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+        if result.rowcount > 0:
+            await session.refresh(run)
+            callbacks_created = await schedule_and_dispatch_callbacks_for_run(
+                session, run
+            )
+            if callbacks_created == 0 and _should_cleanup_sandbox_after_terminal(
+                run, keep_alive
+            ):
+                try:
+                    await backend.cleanup_after_verification(run_id)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Cleanup after verification exception failed: %s",
+                        cleanup_error,
+                        extra=extra,
+                    )
         return result.rowcount > 0
 
     if verification.verified:
@@ -168,15 +185,22 @@ async def _verify_and_mark_run(
             )
 
         result = await session.execute(stmt)  # type: ignore[assignment]
-        if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
-            run, keep_alive
-        ):
-            try:
-                await backend.cleanup_after_verification(run_id)
-            except Exception as e:
-                logger.warning(
-                    "Cleanup after terminal verification failed: %s", e, extra=extra
-                )
+        if result.rowcount > 0:
+            await session.refresh(run)
+            callbacks_created = await schedule_and_dispatch_callbacks_for_run(
+                session, run
+            )
+            if callbacks_created == 0 and _should_cleanup_sandbox_after_terminal(
+                run, keep_alive
+            ):
+                try:
+                    await backend.cleanup_after_verification(run_id)
+                except Exception as e:
+                    logger.warning(
+                        "Cleanup after terminal verification failed: %s",
+                        e,
+                        extra=extra,
+                    )
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
@@ -186,14 +210,6 @@ async def _verify_and_mark_run(
         verification.error,
         extra=extra,
     )
-
-    # Clean up resources via backend only when the automation owns explicit
-    # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
-    if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-        try:
-            await backend.cleanup_after_verification(run_id)
-        except Exception as e:
-            logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
     error_msg = verification.error or "no completion callback received"
 
@@ -219,6 +235,16 @@ async def _verify_and_mark_run(
         )
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
+    if result.rowcount > 0:
+        await session.refresh(run)
+        callbacks_created = await schedule_and_dispatch_callbacks_for_run(session, run)
+        if callbacks_created == 0 and _should_cleanup_sandbox_after_terminal(
+            run, keep_alive
+        ):
+            try:
+                await backend.cleanup_after_verification(run_id)
+            except Exception as e:
+                logger.warning("Cleanup after verification failed: %s", e, extra=extra)
     return result.rowcount > 0
 
 
