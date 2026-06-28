@@ -625,6 +625,14 @@ class RunCompleteRequest(BaseModel):
     error: str | None = None
 
 
+class RunConversationRequest(BaseModel):
+    """Payload for associating a live conversation with a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(..., min_length=1, max_length=255)
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 

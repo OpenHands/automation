@@ -228,6 +228,7 @@ async def _execute_run(
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
     env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
+    env_vars["AUTOMATION_RUN_TIMEOUT"] = str(effective_timeout)
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )

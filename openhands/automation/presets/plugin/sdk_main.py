@@ -70,6 +70,7 @@ import os
 import random
 import sys
 import time
+import urllib.request
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -129,6 +130,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.llm.message import Message, TextContent
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
@@ -140,6 +142,56 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _preflight_llm(llm, label: str) -> None:
+    print(f"  preflight: {label}")
+    probe_timeout = 20 if llm.timeout is None else min(int(llm.timeout), 20)
+    probe_llm = llm.model_copy(update={"timeout": probe_timeout, "num_retries": 0})
+    started_at = time.time()
+    probe_llm.completion(
+        [Message(role="user", content=[TextContent(text="Reply with OK.")])],
+        max_tokens=8,
+    )
+    print(f"  preflight ok: {label} ({time.time() - started_at:.1f}s)")
+
+
+def _conversation_run_timeout() -> float:
+    raw_timeout = os.environ.get("AUTOMATION_RUN_TIMEOUT")
+    if not raw_timeout:
+        return 3600.0
+    try:
+        outer_timeout = float(raw_timeout)
+    except ValueError:
+        return 3600.0
+    if outer_timeout <= 90:
+        return max(30.0, outer_timeout - 10.0)
+    return outer_timeout - 60.0
+
+
+def _notify_conversation_started(conversation_id: str) -> None:
+    callback_url = os.environ.get("AUTOMATION_CALLBACK_URL")
+    if not callback_url:
+        return
+    if not callback_url.endswith("/complete"):
+        print("  conversation update skipped: callback URL has unexpected shape")
+        return
+    update_url = callback_url[: -len("/complete")] + "/conversation"
+    data = json.dumps({"conversation_id": str(conversation_id)}).encode()
+    request = urllib.request.Request(
+        update_url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            print(f"  conversation update sent: {response.status}")
+    except Exception as e:
+        print(f"  conversation update failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -236,6 +288,7 @@ with workspace_ctx as workspace:
     # Experiment-aware variant selection
     experiment_id: str | None = None
     selected_variant: str | None = None
+    experiment_variants: list[dict] | None = None
 
     if os.path.exists(EXPERIMENT_CONFIG_FILE):
         with open(EXPERIMENT_CONFIG_FILE) as f:
@@ -243,6 +296,7 @@ with workspace_ctx as workspace:
 
         experiment_id = experiment_config["experiment_id"]
         variants = experiment_config["variants"]
+        experiment_variants = variants
         weights = [v["weight"] for v in variants]
         selected = random.choices(variants, weights=weights, k=1)[0]
 
@@ -288,16 +342,6 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Deserialize plugin sources using Pydantic validation
-    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
-
-    print("\n=== PLUGINS CONFIG ===")
-    print(f"  loading {len(plugin_sources)} plugin(s):")
-    for ps in plugin_sources:
-        ref_str = f"@{ps.ref}" if ps.ref else ""
-        path_str = f" ({ps.repo_path})" if ps.repo_path else ""
-        print(f"    - {ps.source}{ref_str}{path_str}")
-
     # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
     try:
@@ -313,6 +357,54 @@ This automation was triggered by a webhook event:
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
+    try:
+        _preflight_llm(llm, model_profile or "DEFAULT")
+    except Exception as primary_error:
+        if not experiment_variants:
+            raise
+        print(
+            "  selected variant preflight failed; trying remaining variants: "
+            f"{type(primary_error).__name__}: {primary_error}"
+        )
+        fallback_errors = [f"{selected_variant}: {primary_error}"]
+        remaining_variants = [
+            v for v in experiment_variants if v.get("name") != selected_variant
+        ]
+        random.shuffle(remaining_variants)
+        for fallback_variant in remaining_variants:
+            fallback_model = fallback_variant.get("model") or model_profile
+            try:
+                fallback_llm = workspace.get_llm(profile_name=fallback_model)
+                _preflight_llm(fallback_llm, fallback_model or "DEFAULT")
+            except Exception as e:
+                fallback_errors.append(f"{fallback_variant.get('name')}: {e}")
+                print(
+                    "  fallback variant preflight failed: "
+                    f"{fallback_variant.get('name')}: {type(e).__name__}: {e}"
+                )
+                continue
+            selected_variant = fallback_variant["name"]
+            model_profile = fallback_model
+            plugins_config = fallback_variant["plugins"]
+            llm = fallback_llm
+            print(f"  using fallback variant: {selected_variant}")
+            break
+        else:
+            raise RuntimeError(
+                "All experiment variant LLM preflights failed: "
+                + "; ".join(fallback_errors)
+            ) from primary_error
+
+    # Deserialize plugin sources using Pydantic validation after any fallback
+    # variant selection has finalized the plugin configuration.
+    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
+
+    print("\n=== PLUGINS CONFIG ===")
+    print(f"  loading {len(plugin_sources)} plugin(s):")
+    for ps in plugin_sources:
+        ref_str = f"@{ps.ref}" if ps.ref else ""
+        path_str = f" ({ps.repo_path})" if ps.repo_path else ""
+        print(f"    - {ps.source}{ref_str}{path_str}")
 
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
@@ -409,10 +501,12 @@ This automation was triggered by a webhook event:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    _notify_conversation_started(str(conversation.id))
+
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
-        conversation.run()
+        conversation.run(timeout=_conversation_run_timeout())
 
         # Wait for the stream to settle
         while time.time() - last_event_time["ts"] < 2.0:
