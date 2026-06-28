@@ -134,7 +134,6 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
-from openhands.sdk.llm.message import Message, TextContent
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -145,18 +144,6 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
-
-
-def _preflight_llm(llm, label: str) -> None:
-    print(f"  preflight: {label}")
-    probe_timeout = 20 if llm.timeout is None else min(int(llm.timeout), 20)
-    probe_llm = llm.model_copy(update={"timeout": probe_timeout, "num_retries": 0})
-    started_at = time.time()
-    probe_llm.completion(
-        [Message(role="user", content=[TextContent(text="Reply with OK.")])],
-        max_tokens=8,
-    )
-    print(f"  preflight ok: {label} ({time.time() - started_at:.1f}s)")
 
 
 def _conversation_run_timeout() -> float:
@@ -334,8 +321,6 @@ This automation was triggered by a webhook event:
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
-    _preflight_llm(llm, model_profile or "DEFAULT")
-
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
     secrets = {}

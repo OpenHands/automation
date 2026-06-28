@@ -130,7 +130,6 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
-from openhands.sdk.llm.message import Message, TextContent
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
@@ -142,18 +141,6 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
-
-
-def _preflight_llm(llm, label: str) -> None:
-    print(f"  preflight: {label}")
-    probe_timeout = 20 if llm.timeout is None else min(int(llm.timeout), 20)
-    probe_llm = llm.model_copy(update={"timeout": probe_timeout, "num_retries": 0})
-    started_at = time.time()
-    probe_llm.completion(
-        [Message(role="user", content=[TextContent(text="Reply with OK.")])],
-        max_tokens=8,
-    )
-    print(f"  preflight ok: {label} ({time.time() - started_at:.1f}s)")
 
 
 def _conversation_run_timeout() -> float:
@@ -288,7 +275,6 @@ with workspace_ctx as workspace:
     # Experiment-aware variant selection
     experiment_id: str | None = None
     selected_variant: str | None = None
-    experiment_variants: list[dict] | None = None
 
     if os.path.exists(EXPERIMENT_CONFIG_FILE):
         with open(EXPERIMENT_CONFIG_FILE) as f:
@@ -296,7 +282,6 @@ with workspace_ctx as workspace:
 
         experiment_id = experiment_config["experiment_id"]
         variants = experiment_config["variants"]
-        experiment_variants = variants
         weights = [v["weight"] for v in variants]
         selected = random.choices(variants, weights=weights, k=1)[0]
 
@@ -357,46 +342,8 @@ This automation was triggered by a webhook event:
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
-    try:
-        _preflight_llm(llm, model_profile or "DEFAULT")
-    except Exception as primary_error:
-        if not experiment_variants:
-            raise
-        print(
-            "  selected variant preflight failed; trying remaining variants: "
-            f"{type(primary_error).__name__}: {primary_error}"
-        )
-        fallback_errors = [f"{selected_variant}: {primary_error}"]
-        remaining_variants = [
-            v for v in experiment_variants if v.get("name") != selected_variant
-        ]
-        random.shuffle(remaining_variants)
-        for fallback_variant in remaining_variants:
-            fallback_model = fallback_variant.get("model") or model_profile
-            try:
-                fallback_llm = workspace.get_llm(profile_name=fallback_model)
-                _preflight_llm(fallback_llm, fallback_model or "DEFAULT")
-            except Exception as e:
-                fallback_errors.append(f"{fallback_variant.get('name')}: {e}")
-                print(
-                    "  fallback variant preflight failed: "
-                    f"{fallback_variant.get('name')}: {type(e).__name__}: {e}"
-                )
-                continue
-            selected_variant = fallback_variant["name"]
-            model_profile = fallback_model
-            plugins_config = fallback_variant["plugins"]
-            llm = fallback_llm
-            print(f"  using fallback variant: {selected_variant}")
-            break
-        else:
-            raise RuntimeError(
-                "All experiment variant LLM preflights failed: "
-                + "; ".join(fallback_errors)
-            ) from primary_error
 
-    # Deserialize plugin sources using Pydantic validation after any fallback
-    # variant selection has finalized the plugin configuration.
+    # Deserialize plugin sources using Pydantic validation.
     plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
 
     print("\n=== PLUGINS CONFIG ===")

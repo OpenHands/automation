@@ -184,7 +184,6 @@ class TestGenerateTarball:
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
-            assert '_preflight_llm(llm, model_profile or "DEFAULT")' in main_content
             assert "_notify_conversation_started(str(conversation.id))" in main_content
             assert (
                 "conversation.run(timeout=_conversation_run_timeout())"
@@ -866,7 +865,6 @@ class TestGeneratePluginTarball:
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
-            assert "All experiment variant LLM preflights failed" in main_content
             assert "_notify_conversation_started(str(conversation.id))" in main_content
             assert (
                 "conversation.run(timeout=_conversation_run_timeout())"
