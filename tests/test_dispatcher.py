@@ -488,7 +488,7 @@ class TestEffectiveTimeout:
     async def test_uses_automation_timeout_when_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Dispatcher uses automation's timeout when set."""
+        """Dispatcher uses automation's timeout when set, even above default."""
 
         async with async_session_factory() as session:
             automation = Automation(
@@ -499,7 +499,7 @@ class TestEffectiveTimeout:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=True,
-                timeout=120,  # Custom timeout
+                timeout=1200,
             )
             session.add(automation)
             await session.commit()
@@ -510,21 +510,31 @@ class TestEffectiveTimeout:
             )
             session.add(run)
             await session.commit()
+            run_id = run.id
 
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
-        # The automation passed should have timeout=120
+        # The automation passed should have timeout=1200
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
-        assert run_arg.automation.timeout == 120
+        assert run_arg.automation.timeout == 1200
+
+        async with async_session_factory() as session:
+            updated_run = await session.get(AutomationRun, run_id)
+            assert updated_run is not None
+            assert updated_run.timeout_at is not None
+            assert updated_run.started_at is not None
+            assert (
+                updated_run.timeout_at - updated_run.started_at
+            ).total_seconds() == 1200
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
+        """Dispatcher uses default_run_duration when automation timeout is None."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
@@ -545,6 +555,7 @@ class TestEffectiveTimeout:
             )
             session.add(run)
             await session.commit()
+            run_id = run.id
 
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
@@ -554,6 +565,15 @@ class TestEffectiveTimeout:
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout is None
+
+        async with async_session_factory() as session:
+            updated_run = await session.get(AutomationRun, run_id)
+            assert updated_run is not None
+            assert updated_run.timeout_at is not None
+            assert updated_run.started_at is not None
+            assert (
+                updated_run.timeout_at - updated_run.started_at
+            ).total_seconds() == 600
 
 
 class TestBuildEventPayload:

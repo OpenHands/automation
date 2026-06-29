@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,11 @@ from openhands.automation.utils.model_profiles import resolve_model_profile_for_
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
+)
+from openhands.automation.utils.timeout import (
+    build_automation_timeout_description,
+    default_automation_timeout,
+    validate_automation_timeout,
 )
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -136,7 +141,7 @@ class CreatePromptAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds (default: system maximum)",
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -154,6 +159,11 @@ class CreatePromptAutomationRequest(BaseModel):
             "Can be a single repo or a list of repos."
         ),
     )
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return validate_automation_timeout(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -450,7 +460,7 @@ async def create_automation_from_prompt(
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
-            timeout=body.timeout,
+            timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
         )
         session.add(automation)
@@ -560,7 +570,7 @@ class CreatePluginAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds (default: system maximum)",
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -578,6 +588,11 @@ class CreatePluginAutomationRequest(BaseModel):
             "Can be a single repo or a list of repos."
         ),
     )
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        return validate_automation_timeout(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -818,7 +833,7 @@ async def create_automation_from_plugin(
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
-            timeout=body.timeout,
+            timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
         )
         session.add(automation)

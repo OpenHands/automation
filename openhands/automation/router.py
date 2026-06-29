@@ -44,6 +44,7 @@ from openhands.automation.utils.tarball_validation import (
     parse_internal_upload_id,
     validate_tarball_path,
 )
+from openhands.automation.utils.timeout import default_automation_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ async def create_automation(
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
-        timeout=body.timeout,
+        timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
     )
     session.add(auto)
