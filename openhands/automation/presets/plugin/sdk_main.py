@@ -130,6 +130,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -140,6 +141,30 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _resolve_agent(workspace, model_profile: str | None, cli_mode: bool = True):
+    """Build the correct agent for the server's configured agent_kind."""
+    agent_settings = workspace._fetch_agent_settings()
+    if isinstance(agent_settings, ACPAgentSettings):
+        print("  agent_kind: acp")
+        return agent_settings.create_agent()
+
+    try:
+        llm = workspace.get_llm(profile_name=model_profile)
+    except FileNotFoundError:
+        if not model_profile:
+            raise
+        print(
+            f"  profile {model_profile!r} not found; "
+            "falling back to active/default profile"
+        )
+        llm = workspace.get_llm()
+    print(f"  profile: {model_profile or 'DEFAULT'}")
+    print(f"  model: {llm.model}")
+    print(f"  api_key present: {bool(llm.api_key)}")
+    print("  agent_kind: openhands")
+    return get_default_agent(llm=llm, cli_mode=cli_mode)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -298,22 +323,6 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace/profile APIs
-    print("\n=== GET_LLM ===")
-    try:
-        llm = workspace.get_llm(profile_name=model_profile)
-    except FileNotFoundError:
-        if not model_profile:
-            raise
-        print(
-            f"  profile {model_profile!r} not found; "
-            "falling back to active/default profile"
-        )
-        llm = workspace.get_llm()
-    print(f"  profile: {model_profile or 'DEFAULT'}")
-    print(f"  model: {llm.model}")
-    print(f"  api_key present: {bool(llm.api_key)}")
-
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
     secrets = {}
@@ -337,30 +346,11 @@ This automation was triggered by a webhook event:
         # Not a hard failure — user may not have MCP configured
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-    # Build the agent, detecting the server's agent_kind so ACP deployments
-    # don't route the sentinel "acp" model through LiteLLM.
-    # See https://github.com/OpenHands/automation/issues/164 — when the agent
-    # server is configured with agent_kind="acp", the persisted llm.model is
-    # the sentinel "acp" (cost attribution only), not a real LiteLLM model.
-    # get_default_agent() would fail with LLMBadRequestError in that case, so
-    # we use settings.create_agent() which returns an ACPAgent for ACP settings
-    # and an Agent for openhands/llm settings.
+    # Build the correct agent for the server's configured agent_kind.
     print("\n=== AGENT ===")
-    from openhands.sdk.settings import ACPAgentSettings
+    agent = _resolve_agent(workspace, model_profile=model_profile, cli_mode=True)
 
-    agent_settings = workspace._fetch_agent_settings()
-    if isinstance(agent_settings, ACPAgentSettings):
-        agent = agent_settings.create_agent()
-        print("  agent_kind: acp")
-    else:
-        agent = get_default_agent(llm=llm, cli_mode=True)
-        print("  agent_kind: openhands")
-
-    # Add MCP config and agent_context using model_copy if configured
-    # (Plugin MCP configs will be merged when plugins are loaded).
-    # For ACP, get_mcp_config() returns {} (mcp_config only exists on
-    # OpenHandsAgentSettings), so the ACP agent's mcp_config from
-    # create_agent() is preserved.
+    # Apply MCP config and agent_context if configured.
     agent_updates = {}
     if mcp_config:
         agent_updates["mcp_config"] = mcp_config
