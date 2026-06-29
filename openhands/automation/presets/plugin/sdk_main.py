@@ -337,12 +337,30 @@ This automation was triggered by a webhook event:
         # Not a hard failure — user may not have MCP configured
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-    # Get default agent with tools and condenser (CLI mode to disable browser)
+    # Build the agent, detecting the server's agent_kind so ACP deployments
+    # don't route the sentinel "acp" model through LiteLLM.
+    # See https://github.com/OpenHands/automation/issues/164 — when the agent
+    # server is configured with agent_kind="acp", the persisted llm.model is
+    # the sentinel "acp" (cost attribution only), not a real LiteLLM model.
+    # get_default_agent() would fail with LLMBadRequestError in that case, so
+    # we use settings.create_agent() which returns an ACPAgent for ACP settings
+    # and an Agent for openhands/llm settings.
     print("\n=== AGENT ===")
-    agent = get_default_agent(llm=llm, cli_mode=True)
+    from openhands.sdk.settings import ACPAgentSettings
+
+    agent_settings = workspace._fetch_agent_settings()
+    if isinstance(agent_settings, ACPAgentSettings):
+        agent = agent_settings.create_agent()
+        print("  agent_kind: acp")
+    else:
+        agent = get_default_agent(llm=llm, cli_mode=True)
+        print("  agent_kind: openhands")
 
     # Add MCP config and agent_context using model_copy if configured
-    # (Plugin MCP configs will be merged when plugins are loaded)
+    # (Plugin MCP configs will be merged when plugins are loaded).
+    # For ACP, get_mcp_config() returns {} (mcp_config only exists on
+    # OpenHandsAgentSettings), so the ACP agent's mcp_config from
+    # create_agent() is preserved.
     agent_updates = {}
     if mcp_config:
         agent_updates["mcp_config"] = mcp_config

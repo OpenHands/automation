@@ -191,6 +191,10 @@ class TestGenerateTarball:
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
+            # ACP agent_kind detection (issue #164)
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -867,6 +871,10 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
+            # ACP agent_kind detection (issue #164)
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""
