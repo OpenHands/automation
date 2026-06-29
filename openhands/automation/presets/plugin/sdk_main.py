@@ -130,9 +130,10 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
+from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
-from common import resolve_agent
 
 
 def _conversation_supports_user_id() -> bool:
@@ -140,6 +141,15 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _resolve_agent(workspace, llm, cli_mode: bool = True):
+    """Get the correct agent for the server's configured agent_kind."""
+    agent_settings = workspace._fetch_agent_settings()
+    if isinstance(agent_settings, ACPAgentSettings):
+        return agent_settings.create_agent()
+    # Get default agent with tools and condenser (CLI mode to disable browser)
+    return get_default_agent(llm=llm, cli_mode=cli_mode)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -298,6 +308,22 @@ This automation was triggered by a webhook event:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
+    # Get LLM config via workspace/profile APIs
+    print("\n=== GET_LLM ===")
+    try:
+        llm = workspace.get_llm(profile_name=model_profile)
+    except FileNotFoundError:
+        if not model_profile:
+            raise
+        print(
+            f"  profile {model_profile!r} not found; "
+            "falling back to active/default profile"
+        )
+        llm = workspace.get_llm()
+    print(f"  profile: {model_profile or 'DEFAULT'}")
+    print(f"  model: {llm.model}")
+    print(f"  api_key present: {bool(llm.api_key)}")
+
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
     secrets = {}
@@ -322,9 +348,10 @@ This automation was triggered by a webhook event:
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
     print("\n=== AGENT ===")
-    agent = resolve_agent(workspace, model_profile=model_profile, cli_mode=True)
+    agent = _resolve_agent(workspace, llm=llm, cli_mode=True)
 
-    # Apply MCP config and agent_context if configured.
+    # Add MCP config and agent_context using model_copy if configured
+    # (Plugin MCP configs will be merged when plugins are loaded)
     agent_updates = {}
     if mcp_config:
         agent_updates["mcp_config"] = mcp_config
