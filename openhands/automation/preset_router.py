@@ -64,6 +64,14 @@ def _get_preset_entrypoint() -> str:
 # Preset file caches to avoid I/O on every request
 _PROMPT_PRESET_CACHE: dict[str, str] | None = None
 _PLUGIN_PRESET_CACHE: dict[str, str] | None = None
+_COMMON_PRESET: str | None = None
+
+
+def _load_common_preset() -> str:
+    global _COMMON_PRESET
+    if _COMMON_PRESET is None:
+        _COMMON_PRESET = (PRESETS_DIR / "common.py").read_text()
+    return _COMMON_PRESET
 
 
 def _load_prompt_preset_files() -> dict[str, str]:
@@ -202,6 +210,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "common.py", _load_common_preset())
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -670,6 +679,7 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "common.py", _load_common_preset())
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 

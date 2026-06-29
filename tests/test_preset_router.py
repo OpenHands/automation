@@ -150,10 +150,9 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "common.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
-            # Note: load_skills.py and clone_repos.py are no longer needed
-            # as the SDK workspace now provides these methods directly
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
@@ -172,6 +171,7 @@ class TestGenerateTarball:
         tarball_bytes = _generate_tarball(prompt)
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
             main_file = tar.extractfile("main.py")
             assert main_file is not None
             main_content = main_file.read().decode("utf-8")
@@ -182,19 +182,22 @@ class TestGenerateTarball:
             assert "OpenHandsCloudWorkspace" in main_content
             assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm(profile_name=model_profile)" in main_content
-            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
-            assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
-            # ACP agent_kind detection (issue #164)
-            assert "ACPAgentSettings" in main_content
-            assert "_fetch_agent_settings" in main_content
-            assert "create_agent()" in main_content
+            assert "from common import resolve_agent" in main_content
+            assert "common.py" in names
+
+            common_file = tar.extractfile("common.py")
+            assert common_file is not None
+            common_content = common_file.read().decode("utf-8")
+            assert "ACPAgentSettings" in common_content
+            assert "_fetch_agent_settings" in common_content
+            assert "create_agent()" in common_content
+            assert "get_default_agent" in common_content
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -808,6 +811,7 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "common.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -851,6 +855,7 @@ class TestGeneratePluginTarball:
         tarball_bytes = _generate_plugin_tarball(plugins, prompt)
 
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = tar.getnames()
             main_file = tar.extractfile("main.py")
             assert main_file is not None
             main_content = main_file.read().decode("utf-8")
@@ -862,8 +867,6 @@ class TestGeneratePluginTarball:
             assert "OpenHandsCloudWorkspace" in main_content
             assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
-            assert "workspace.get_llm(profile_name=model_profile)" in main_content
-            assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
@@ -871,10 +874,16 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
-            # ACP agent_kind detection (issue #164)
-            assert "ACPAgentSettings" in main_content
-            assert "_fetch_agent_settings" in main_content
-            assert "create_agent()" in main_content
+            assert "from common import resolve_agent" in main_content
+            assert "common.py" in names
+
+            common_file = tar.extractfile("common.py")
+            assert common_file is not None
+            common_content = common_file.read().decode("utf-8")
+            assert "ACPAgentSettings" in common_content
+            assert "_fetch_agent_settings" in common_content
+            assert "create_agent()" in common_content
+            assert "get_default_agent" in common_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""
