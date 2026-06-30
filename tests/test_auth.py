@@ -160,6 +160,7 @@ class TestAuthentication:
 
         assert result.active_model_profile_name is None
         # The profiles were parsed (scenario sanity) — only the active one is unset.
+        assert result.model_profile_names is not None
         assert "fast-profile" in result.model_profile_names
 
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
