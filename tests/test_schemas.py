@@ -11,9 +11,13 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
+    CronTrigger,
     RunStatus,
 )
 from openhands.automation.utils.time import ensure_utc
@@ -42,6 +46,24 @@ class TestEnsureUtc:
     def test_non_utc_aware_datetime_is_unchanged(self):
         result = ensure_utc(_OTHER_TZ)
         assert result is _OTHER_TZ
+
+
+class TestCronTriggerValidation:
+    def test_accepts_valid_cron_and_timezone(self):
+        trigger = CronTrigger(schedule="0 9 * * *", timezone="America/New_York")
+
+        assert trigger.schedule == "0 9 * * *"
+        assert trigger.timezone == "America/New_York"
+
+    def test_rejects_impossible_cron_schedule(self):
+        with pytest.raises(
+            ValidationError, match="cannot produce any future fire times"
+        ):
+            CronTrigger(schedule="0 0 31 2 *")
+
+    def test_rejects_invalid_timezone(self):
+        with pytest.raises(ValidationError, match="Invalid timezone"):
+            CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
 
 
 class TestAutomationRunResponseUtcSerialisation:
