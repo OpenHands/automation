@@ -9,15 +9,54 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from croniter import croniter
+from croniter import (
+    CroniterBadDateError,
+    CroniterBadTypeRangeError,
+    CroniterError,
+    croniter,
+)
 
 from openhands.automation.utils.time import utcnow
 
 
 if TYPE_CHECKING:
     from openhands.automation.models import Automation
+
+
+_CRON_VALIDATION_BASE_TIME = datetime(2026, 7, 1)
+
+
+def validate_timezone_name(timezone: str) -> str:
+    """Validate and return an IANA timezone name."""
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as e:
+        raise ValueError(f"Invalid timezone: {timezone}") from e
+    return timezone
+
+
+def validate_cron_schedule(cron_schedule: str) -> str:
+    """Validate that a cron expression is syntactically valid and can fire.
+
+    ``croniter.is_valid`` accepts impossible dates like ``0 0 31 2 *``.
+    Verify that croniter can compute at least one future fire time so these
+    schedules are rejected before they can poison scheduler polling.
+    """
+    if not croniter.is_valid(cron_schedule):
+        raise ValueError(f"Invalid cron expression: {cron_schedule}")
+
+    try:
+        croniter(cron_schedule, _CRON_VALIDATION_BASE_TIME).get_next(datetime)
+    except CroniterBadDateError as e:
+        raise ValueError(
+            f"Cron expression cannot produce any future fire times: {cron_schedule}"
+        ) from e
+    except (CroniterError, CroniterBadTypeRangeError) as e:
+        raise ValueError(f"Invalid cron expression: {cron_schedule}") from e
+
+    return cron_schedule
 
 
 def get_next_fire_time(

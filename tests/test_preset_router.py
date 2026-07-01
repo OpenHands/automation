@@ -641,6 +641,20 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 422
 
+    async def test_create_from_prompt_impossible_cron(self, async_client):
+        """Cron schedules that can never fire return 422."""
+        payload = {
+            "name": "Test",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 31 2 *"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+
     async def test_create_from_prompt_missing_trigger(self, async_client):
         """Missing trigger returns 422."""
         payload = {
