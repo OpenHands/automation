@@ -301,6 +301,7 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            setup_script_path=automation.setup_script_path,
         )
     except PermanentDispatchError as exc:
         logger.error(

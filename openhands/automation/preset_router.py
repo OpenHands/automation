@@ -12,7 +12,6 @@ Currently supported presets:
 import io
 import json
 import logging
-import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -53,17 +52,21 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
+BOOTSTRAP_PATH = PRESETS_DIR / "bootstrap.py"
+# uv is guaranteed to be present in all preset sandboxes; using ``uv run
+# python`` avoids assuming a system-level Python installation is available.
+PRESET_BOOTSTRAP_ENTRYPOINT = "uv run python bootstrap.py"
 
 
 def _get_preset_entrypoint() -> str:
-    """Return the preset entrypoint for the current host platform.
+    """Return the preset entrypoint.
 
-    Preset automations create their virtual environment inside the run working
-    directory. Cloud sandboxes use the POSIX layout (``.venv/bin/python``),
-    while native Windows uses ``.venv/Scripts/python.exe``.
+    Prompt and plugin presets launch a Python bootstrap script that creates
+    the virtual environment and re-execs ``main.py`` from inside it.  We use
+    ``uv run python`` because uv is guaranteed to be present in the sandbox
+    whereas a bare ``python`` binary may not be on PATH.
     """
-    python_path = ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
-    return f"{python_path} main.py"
+    return PRESET_BOOTSTRAP_ENTRYPOINT
 
 
 # Preset file caches to avoid I/O on every request
@@ -80,7 +83,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
     if _PROMPT_PRESET_CACHE is None:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
-            "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
+            "bootstrap.py": BOOTSTRAP_PATH.read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -94,7 +97,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
     if _PLUGIN_PRESET_CACHE is None:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
-            "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "bootstrap.py": BOOTSTRAP_PATH.read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -192,8 +195,8 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     The tarball contains:
     - main.py: SDK boilerplate that loads and executes the prompt
+    - bootstrap.py: Cross-platform bootstrap that installs SDK packages
     - prompt.txt: The user's prompt text
-    - setup.sh: Script to install the SDK
     - repos_config.json: (optional) Repository configuration for cloning
 
     Note: Clone and skill loading functionality is now provided by the SDK's
@@ -212,8 +215,8 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "bootstrap.py", preset_files["bootstrap.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
-        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
         # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
@@ -458,7 +461,7 @@ async def create_automation_from_prompt(
             model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
-            setup_script_path="setup.sh",
+            setup_script_path=None,
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
@@ -685,8 +688,8 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(tar, "bootstrap.py", preset_files["bootstrap.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
-        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
         if variants is not None:
             experiment_config = {
@@ -831,7 +834,7 @@ async def create_automation_from_plugin(
             model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
-            setup_script_path="setup.sh",
+            setup_script_path=None,
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
