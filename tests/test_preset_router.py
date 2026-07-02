@@ -152,8 +152,6 @@ class TestGenerateTarball:
             assert "main.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
-            # Note: load_skills.py and clone_repos.py are no longer needed
-            # as the SDK workspace now provides these methods directly
 
     def test_generate_tarball_prompt_content(self):
         """Generated tarball contains the user's prompt."""
@@ -188,9 +186,12 @@ class TestGenerateTarball:
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
-            assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
+            assert "get_default_agent" in main_content
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -913,6 +914,10 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
+            assert "get_default_agent" in main_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""
