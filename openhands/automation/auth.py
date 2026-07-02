@@ -131,7 +131,7 @@ def _extract_active_model_profile_name(data: dict) -> str | None:  # type: ignor
     if not isinstance(profiles_payload, dict):
         return None
 
-    active_profile = profiles_payload.get("active_profile")
+    active_profile = profiles_payload.get("active")
     return active_profile if isinstance(active_profile, str) else None
 
 

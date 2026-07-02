@@ -113,11 +113,11 @@ class TestAuthentication:
         users_me = {
             **MOCK_USERS_ME_RESPONSE,
             "llm_profiles": {
-                "active_profile": "fast-profile",
-                "profiles": [
-                    {"name": "fast-profile"},
-                    {"name": "careful-profile"},
-                ],
+                "active": "fast-profile",
+                "profiles": {
+                    "fast-profile": {"model": "anthropic/claude-haiku-4-5"},
+                    "careful-profile": {"model": "anthropic/claude-opus-4-8"},
+                },
             },
         }
         mock_response = MagicMock()
@@ -131,6 +131,37 @@ class TestAuthentication:
             {"fast-profile", "careful-profile"}
         )
         assert result.active_model_profile_name == "fast-profile"
+
+    async def test_authenticate_no_active_profile_when_none_selected(
+        self, mock_request, mock_http_client
+    ):
+        """No active profile yields ``active_model_profile_name = None``.
+
+        When the user has saved profiles but none is active, nothing is pinned,
+        so a new automation stores ``model = NULL`` and falls back to the
+        runtime default at execution time.
+        """
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {
+            **MOCK_USERS_ME_RESPONSE,
+            "llm_profiles": {
+                "profiles": {
+                    "fast-profile": {"model": "anthropic/claude-haiku-4-5"},
+                    "careful-profile": {"model": "anthropic/claude-opus-4-8"},
+                },
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.active_model_profile_name is None
+        # The profiles were parsed (scenario sanity) — only the active one is unset.
+        assert result.model_profile_names is not None
+        assert "fast-profile" in result.model_profile_names
 
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header and no cookie raises 401."""
