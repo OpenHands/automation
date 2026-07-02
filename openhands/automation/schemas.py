@@ -5,10 +5,13 @@ import uuid
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.utils.cron import (
+    validate_cron_schedule as validate_cron_schedule_value,
+    validate_timezone_name,
+)
 from openhands.automation.utils.time import UtcDatetime
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
@@ -38,9 +41,12 @@ class CronTrigger(BaseModel):
     @field_validator("schedule")
     @classmethod
     def validate_cron_schedule(cls, v: str) -> str:
-        if not croniter.is_valid(v):
-            raise ValueError(f"Invalid cron expression: {v}")
-        return v
+        return validate_cron_schedule_value(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        return validate_timezone_name(v)
 
 
 class EventTrigger(BaseModel):

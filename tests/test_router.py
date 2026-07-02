@@ -242,6 +242,48 @@ class TestCreateAutomation:
         assert len(schedule_errors) == 1
         assert "Invalid cron expression" in schedule_errors[0]["msg"]
 
+    async def test_create_automation_impossible_cron(self, async_client):
+        """Cron expressions that can never fire return 422."""
+        payload = {
+            "name": "Impossible Cron",
+            "trigger": {"type": "cron", "schedule": "0 0 31 2 *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        schedule_errors = [
+            e for e in detail if e["loc"] == ["body", "trigger", "cron", "schedule"]
+        ]
+        assert len(schedule_errors) == 1
+        assert "cannot produce any future fire times" in schedule_errors[0]["msg"]
+
+    async def test_create_automation_invalid_timezone(self, async_client):
+        """Invalid timezone names return 422."""
+        payload = {
+            "name": "Bad Timezone",
+            "trigger": {
+                "type": "cron",
+                "schedule": "0 9 * * *",
+                "timezone": "Not/A_Timezone",
+            },
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        timezone_errors = [
+            e for e in detail if e["loc"] == ["body", "trigger", "cron", "timezone"]
+        ]
+        assert len(timezone_errors) == 1
+        assert "Invalid timezone" in timezone_errors[0]["msg"]
+
     async def test_create_automation_missing_fields(self, async_client):
         """Missing required fields returns 422."""
         payload = {"name": "Incomplete"}

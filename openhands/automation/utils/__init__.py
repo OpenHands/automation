@@ -8,6 +8,8 @@ from openhands.automation.utils.cron import (
     get_next_fire_time,
     get_prev_fire_time,
     is_automation_due,
+    validate_cron_schedule,
+    validate_timezone_name,
 )
 from openhands.automation.utils.log_context import log_extra
 from openhands.automation.utils.time import UtcDatetime, ensure_utc, utcnow
@@ -19,6 +21,8 @@ __all__ = [
     "get_next_fire_time",
     "get_prev_fire_time",
     "is_automation_due",
+    "validate_cron_schedule",
+    "validate_timezone_name",
     "log_extra",
     "UtcDatetime",
     "ensure_utc",

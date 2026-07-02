@@ -11,13 +11,15 @@ SQLite deployments skip row locking (single-process mode assumed).
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfoNotFoundError
 
+from croniter import CroniterBadDateError, CroniterBadTypeRangeError, CroniterError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import Automation, AutomationRun
-from openhands.automation.utils import is_automation_due, utcnow
+from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
 from openhands.automation.utils.run import create_pending_run
 
 
@@ -28,6 +30,71 @@ DEFAULT_BATCH_SIZE = 50
 
 # Minimum interval between polling the same automation (seconds)
 POLL_INTERVAL_SECONDS = 60
+
+_SCHEDULE_EVALUATION_ERRORS = (
+    CroniterError,
+    CroniterBadTypeRangeError,
+    ZoneInfoNotFoundError,
+)
+
+
+def _schedule_log_extra(automation: Automation) -> dict[str, str | None]:
+    trigger = automation.trigger or {}
+    schedule = trigger.get("schedule")
+    timezone = trigger.get("timezone")
+    return {
+        "automation_id": str(automation.id),
+        "schedule": schedule if isinstance(schedule, str) else None,
+        "timezone": timezone if isinstance(timezone, str) else "UTC",
+    }
+
+
+def _disable_invalid_cron_automation(
+    automation: Automation,
+    *,
+    reason: str,
+    error: BaseException,
+) -> None:
+    automation.enabled = False
+    logger.error(
+        "Disabling automation with invalid cron trigger: %s",
+        reason,
+        exc_info=(type(error), error, error.__traceback__),
+        extra=_schedule_log_extra(automation),
+    )
+
+
+def _is_automation_due_safely(automation: Automation, now: datetime) -> bool:
+    try:
+        return is_automation_due(automation, now)
+    except CroniterBadDateError:
+        cron_extra = _schedule_log_extra(automation)
+        schedule = cron_extra["schedule"] or ""
+        timezone = cron_extra["timezone"] or "UTC"
+        try:
+            next_fire_time = get_next_fire_time(schedule, timezone, now)
+        except _SCHEDULE_EVALUATION_ERRORS as next_error:
+            _disable_invalid_cron_automation(
+                automation,
+                reason="cron schedule cannot produce fire times",
+                error=next_error,
+            )
+        else:
+            logger.warning(
+                "Cron schedule has no previous fire time; treating as not due",
+                extra={
+                    **_schedule_log_extra(automation),
+                    "next_fire_time": next_fire_time.isoformat(),
+                },
+            )
+        return False
+    except _SCHEDULE_EVALUATION_ERRORS as e:
+        _disable_invalid_cron_automation(
+            automation,
+            reason="cron schedule could not be evaluated",
+            error=e,
+        )
+        return False
 
 
 async def _fetch_enabled_automations(
@@ -120,7 +187,7 @@ async def poll_and_schedule(
             for automation in automations:
                 automation.last_polled_at = now
 
-        due_automations = [a for a in automations if is_automation_due(a, now)]
+        due_automations = [a for a in automations if _is_automation_due_safely(a, now)]
 
         for automation in due_automations:
             try:

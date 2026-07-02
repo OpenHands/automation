@@ -385,6 +385,55 @@ class TestPollAndSchedule:
         assert runs[0].automation_id == automation_id
         assert runs[0].status == AutomationRunStatus.PENDING
 
+    async def test_poll_disables_impossible_cron_without_blocking_batch(
+        self, async_session_factory
+    ):
+        """A bad stored cron row does not abort scheduling other automations."""
+        now = utcnow()
+        created_at = now - timedelta(minutes=5)
+
+        async with async_session_factory() as session:
+            invalid_automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Impossible Cron",
+                trigger={"type": "cron", "schedule": "0 0 31 2 *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                last_polled_at=None,
+                created_at=created_at,
+            )
+            due_automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Due Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                last_polled_at=None,
+                last_triggered_at=None,
+                created_at=created_at,
+            )
+            session.add_all([invalid_automation, due_automation])
+            await session.commit()
+            invalid_id = invalid_automation.id
+            due_id = due_automation.id
+
+        runs = await poll_and_schedule(async_session_factory, now=now)
+
+        assert len(runs) == 1
+        assert runs[0].automation_id == due_id
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Automation).where(Automation.id == invalid_id)
+            )
+            invalid_automation = result.scalars().one()
+            assert invalid_automation.enabled is False
+            assert invalid_automation.last_polled_at is not None
+
     async def test_poll_excludes_disabled(self, async_session_factory):
         """Disabled automations are not returned."""
         async with async_session_factory() as session:
