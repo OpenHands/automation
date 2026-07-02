@@ -163,6 +163,77 @@ class TestAuthentication:
         assert result.model_profile_names is not None
         assert "fast-profile" in result.model_profile_names
 
+    async def test_authenticate_incompatible_response_shape_raises_502(
+        self, mock_request, mock_http_client
+    ):
+        """An incompatible shape for a field we rely on fails fast as 502.
+
+        Modelling /users/me with pydantic means an upstream change to a field we
+        consume (here ``permissions`` returned as a string instead of a list)
+        surfaces immediately instead of being silently mis-parsed.
+        """
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {**MOCK_USERS_ME_RESPONSE, "permissions": "manage_automations"}
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert exc_info.value.status_code == 502
+
+    async def test_authenticate_tolerates_unrecognized_llm_profiles(
+        self, mock_request, mock_http_client
+    ):
+        """A malformed optional ``llm_profiles`` block never breaks auth.
+
+        Profile metadata is secondary, so an unrecognised shape yields no pinned
+        profile (fall back to the runtime default) rather than a failed auth.
+        """
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {**MOCK_USERS_ME_RESPONSE, "llm_profiles": "not-an-object"}
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.user_id == TEST_USER_ID
+        assert result.model_profile_names is None
+        assert result.active_model_profile_name is None
+
+    async def test_authenticate_accepts_nullable_optional_fields(
+        self, mock_request, mock_http_client
+    ):
+        """Upstream types email/role/permissions as nullable, so null is valid.
+
+        ``SaasUserInfo`` declares ``role``/``permissions`` as optional; the
+        endpoint can serialize them as ``null``. Those are a valid shape, not an
+        incompatible change, so auth succeeds with coalesced defaults rather
+        than failing fast.
+        """
+        mock_request.headers.get.return_value = "Bearer valid-api-key"
+        users_me = {
+            **MOCK_USERS_ME_RESPONSE,
+            "email": None,
+            "role": None,
+            "permissions": None,
+        }
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = users_me
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.user_id == TEST_USER_ID
+        assert result.email == ""
+        assert result.role == ""
+        assert result.permissions == []
+
     async def test_authenticate_missing_header(self, mock_request, mock_http_client):
         """Missing Authorization header and no cookie raises 401."""
         mock_request.headers.get.return_value = ""

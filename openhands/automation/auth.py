@@ -15,10 +15,12 @@ import logging
 import secrets
 import uuid
 from enum import StrEnum
+from typing import Any
 
 import httpx
 from cachetools import TTLCache
 from fastapi import Depends, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic.dataclasses import dataclass
 from tenacity import (
     RetryCallState,
@@ -105,34 +107,70 @@ class AuthenticatedUser:
     active_model_profile_name: str | None = None
 
 
-def _extract_model_profile_names(data: dict) -> frozenset[str] | None:  # type: ignore[type-arg]
-    """Extract model profile names from a users/me response when present."""
-    profiles_payload = data.get("llm_profiles")
-    if not isinstance(profiles_payload, dict):
-        return None
+class _LLMProfiles(BaseModel):
+    """Consuming subset of the upstream ``LLMProfiles`` model.
 
-    profiles = profiles_payload.get("profiles")
-    if isinstance(profiles, dict):
-        return frozenset(str(name) for name in profiles)
-    if isinstance(profiles, list):
-        names = {
-            str(profile["name"])
-            for profile in profiles
-            if isinstance(profile, dict) and isinstance(profile.get("name"), str)
-        }
-        return frozenset(names) if names else None
+    Mirrors ``openhands/app_server/settings/llm_profiles.py``: the
+    ``/api/v1/users/me`` response embeds ``llm_profiles`` as
+    ``{"profiles": {name: {...}}, "active": str | None}``. We only read the
+    profile names and the active name, so the profile values are typed ``Any``.
 
-    return None
+    Tolerant by design, matching upstream's "degrade rather than fail" stance
+    (its own validators drop invalid profiles and reconcile a stale ``active``):
+    this is optional secondary metadata, so an unexpected shape becomes "no
+    profiles" instead of failing authentication.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    profiles: dict[str, Any] = Field(default_factory=dict)
+    active: str | None = None
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _ignore_non_object_profiles(cls, v: Any) -> Any:
+        return v if isinstance(v, dict) else {}
+
+    @field_validator("active", mode="before")
+    @classmethod
+    def _ignore_non_string_active(cls, v: Any) -> Any:
+        return v if isinstance(v, str) else None
+
+    def profile_names(self) -> frozenset[str]:
+        """Return the set of saved profile names (empty when there are none)."""
+        return frozenset(self.profiles)
 
 
-def _extract_active_model_profile_name(data: dict) -> str | None:  # type: ignore[type-arg]
-    """Extract the active model profile name from a users/me response when present."""
-    profiles_payload = data.get("llm_profiles")
-    if not isinstance(profiles_payload, dict):
-        return None
+class _UsersMe(BaseModel):
+    """Consuming subset of the OpenHands ``/api/v1/users/me`` response.
 
-    active_profile = profiles_payload.get("active")
-    return active_profile if isinstance(active_profile, str) else None
+    Field types mirror the upstream ``SaasUserInfo`` model (which extends
+    ``UserInfo`` → ``Settings``): ``id``/``org_id``/``email``/``role`` are
+    ``str | None`` and ``permissions`` is ``list[str] | None`` — all nullable,
+    as the SaaS endpoint serializes them (e.g. as ``null`` without org context).
+
+    Modelling the response with pydantic means an incompatible upstream change
+    to a field we rely on fails fast (surfaced as a 502) instead of silently
+    mis-parsing — the failure mode that previously hid an ``active`` profile
+    field-name bug. ``extra="ignore"`` keeps us forward-compatible with new
+    response fields we do not read (such as ``org_name``).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = None
+    org_id: str | None = None
+    email: str | None = None
+    role: str | None = None
+    permissions: list[str] | None = None
+    llm_profiles: _LLMProfiles | None = None
+
+    @field_validator("llm_profiles", mode="before")
+    @classmethod
+    def _ignore_non_object_profiles(cls, v: Any) -> Any:
+        # Secondary metadata: anything that is not a JSON object is treated as
+        # absent so a shape change here can never break authentication.
+        return v if isinstance(v, dict) else None
 
 
 def clear_auth_cache() -> None:
@@ -326,36 +364,51 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
 
 
 def _parse_users_me(
-    data: dict, auth_method: AuthMethod, credential: str
-) -> AuthenticatedUser:  # type: ignore[type-arg]
-    """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response."""
-    user_id_raw = data.get("id")
-    org_id_raw = data.get("org_id")
-    if not user_id_raw or not org_id_raw:
+    data: dict[str, Any], auth_method: AuthMethod, credential: str
+) -> AuthenticatedUser:
+    """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response.
+
+    The response is validated through :class:`_UsersMe`, so an incompatible
+    upstream change to a field we rely on fails fast as a 502 rather than being
+    silently mis-parsed. The optional ``llm_profiles`` block stays tolerant.
+    """
+    try:
+        parsed = _UsersMe.model_validate(data)
+    except ValidationError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unexpected response shape from OpenHands API",
+        )
+
+    if not parsed.id or not parsed.org_id:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not determine user/org identity from OpenHands API",
         )
 
     try:
-        user_uuid = uuid.UUID(str(user_id_raw))
-        org_uuid = uuid.UUID(str(org_id_raw))
+        user_uuid = uuid.UUID(parsed.id)
+        org_uuid = uuid.UUID(parsed.org_id)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Invalid user_id or org_id format from OpenHands API",
         )
 
+    # Upstream types email/role/permissions as nullable; AuthenticatedUser
+    # requires non-null, so coalesce here (an authenticated automation user
+    # always has org context, which populates these).
+    profiles = parsed.llm_profiles
     return AuthenticatedUser(
         user_id=user_uuid,
         org_id=org_uuid,
-        email=data.get("email", ""),
-        role=data.get("role", ""),
-        permissions=data.get("permissions", []),
+        email=parsed.email or "",
+        role=parsed.role or "",
+        permissions=parsed.permissions or [],
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
-        model_profile_names=_extract_model_profile_names(data),
-        active_model_profile_name=_extract_active_model_profile_name(data),
+        model_profile_names=profiles.profile_names() if profiles else None,
+        active_model_profile_name=profiles.active if profiles else None,
     )
 
 
