@@ -1906,6 +1906,80 @@ class TestCompleteRun:
         assert "PENDING" in response.json()["detail"]
 
 
+class TestUpdateRunConversation:
+    """Tests for POST /runs/{run_id}/conversation endpoint."""
+
+    async def test_update_run_conversation_for_running_run(
+        self, async_client, async_session
+    ):
+        """A running run can be linked to its conversation before completion."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/conversation",
+            json={"conversation_id": "conv-live-123"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "RUNNING"
+        assert data["conversation_id"] == "conv-live-123"
+
+        await async_session.refresh(run)
+        assert run.conversation_id == "conv-live-123"
+        assert run.status == AutomationRunStatus.RUNNING
+
+    async def test_update_run_conversation_rejects_terminal_run(
+        self, async_client, async_session
+    ):
+        """Terminal runs are not mutated by the live conversation endpoint."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.FAILED,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/conversation",
+            json={"conversation_id": "conv-too-late"},
+        )
+
+        assert response.status_code == 409
+        assert "FAILED" in response.json()["detail"]
+
+
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
 

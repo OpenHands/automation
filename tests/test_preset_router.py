@@ -184,6 +184,11 @@ class TestGenerateTarball:
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
+            assert "_notify_conversation_started(str(conversation.id))" in main_content
+            assert (
+                "conversation.run(timeout=_conversation_run_timeout())"
+                in main_content
+            )
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
@@ -906,6 +911,11 @@ class TestGeneratePluginTarball:
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
+            assert "_notify_conversation_started(str(conversation.id))" in main_content
+            assert (
+                "conversation.run(timeout=_conversation_run_timeout())"
+                in main_content
+            )
             assert "workspace.get_secrets()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
