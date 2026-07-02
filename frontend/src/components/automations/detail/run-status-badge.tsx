@@ -22,6 +22,10 @@ const statusConfig: Record<
     label: I18nKey.AUTOMATIONS$DETAIL$FAILED,
     style: "border-status-fail-border bg-status-fail-bg text-status-fail-text",
   },
+  [AutomationRunStatus.CANCELLED]: {
+    label: I18nKey.AUTOMATIONS$DETAIL$CANCELLED,
+    style: "border-border bg-surface-elevated text-content-muted",
+  },
   [AutomationRunStatus.PENDING]: {
     label: I18nKey.AUTOMATIONS$DETAIL$PENDING,
     style: "border-border bg-surface-elevated text-content-muted",
@@ -41,6 +45,7 @@ function StatusIcon({ status }: { status: AutomationRunStatus }) {
     case AutomationRunStatus.COMPLETED:
       return <CheckCircleIcon className="size-3.5" />;
     case AutomationRunStatus.FAILED:
+    case AutomationRunStatus.CANCELLED:
       return <XCircleIcon className="size-3.5" />;
     default:
       return <ClockIcon className="size-3.5" />;
