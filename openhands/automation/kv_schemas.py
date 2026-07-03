@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --- Batch Operation Schemas ---
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class KVBatchOpSet(BaseModel):
     """Set operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["set"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -26,6 +27,7 @@ class KVBatchOpSet(BaseModel):
 
 class KVBatchOpDelete(BaseModel):
     """Delete operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["delete"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -33,6 +35,7 @@ class KVBatchOpDelete(BaseModel):
 
 class KVBatchOpIncr(BaseModel):
     """Increment operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["incr"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -41,6 +44,7 @@ class KVBatchOpIncr(BaseModel):
 
 class KVBatchOpDecr(BaseModel):
     """Decrement operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["decr"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -49,6 +53,7 @@ class KVBatchOpDecr(BaseModel):
 
 class KVBatchOpLPush(BaseModel):
     """Left push operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["lpush"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -57,6 +62,7 @@ class KVBatchOpLPush(BaseModel):
 
 class KVBatchOpRPush(BaseModel):
     """Right push operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["rpush"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -65,6 +71,7 @@ class KVBatchOpRPush(BaseModel):
 
 class KVBatchOpLPop(BaseModel):
     """Left pop operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["lpop"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -72,6 +79,7 @@ class KVBatchOpLPop(BaseModel):
 
 class KVBatchOpRPop(BaseModel):
     """Right pop operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["rpop"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -79,6 +87,7 @@ class KVBatchOpRPop(BaseModel):
 
 class KVBatchOpPatch(BaseModel):
     """Patch operation in a batch."""
+    model_config = ConfigDict(extra="forbid")
 
     op: Literal["patch"]
     key: str = Field(..., min_length=1, max_length=255)
@@ -102,6 +111,7 @@ KVBatchOperation = (
 
 class KVBatchRequest(BaseModel):
     """Request body for batch operations."""
+    model_config = ConfigDict(extra="forbid")
 
     if_version: int | None = Field(
         default=None,
@@ -152,11 +162,15 @@ class KVVersionMismatchResponse(BaseModel):
 class KVSetRequest(BaseModel):
     """Request body for setting a KV value (used when body is explicit)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     value: Any = Field(..., description="Any JSON-serializable value")
 
 
 class KVPatchRequest(BaseModel):
     """Request body for patching a nested path."""
+
+    model_config = ConfigDict(extra="forbid")
 
     path: str = Field(
         ..., description="Dot-notation path to update (e.g., 'database.port')"
@@ -167,11 +181,15 @@ class KVPatchRequest(BaseModel):
 class KVIncrRequest(BaseModel):
     """Request body for increment/decrement operations."""
 
+    model_config = ConfigDict(extra="forbid")
+
     by: int = Field(default=1, description="Amount to increment/decrement by")
 
 
 class KVListPushRequest(BaseModel):
     """Request body for list push operations."""
+
+    model_config = ConfigDict(extra="forbid")
 
     value: Any = Field(..., description="Value to push onto the list")
 
@@ -210,6 +228,7 @@ class KVSetResponse(BaseModel):
     key: str
     value: Any
     created: bool
+    version: int
     updated_at: str
 
 
@@ -232,6 +251,7 @@ class KVIncrResponse(BaseModel):
 
     key: str
     value: int
+    version: int
 
 
 class KVListLengthResponse(BaseModel):
@@ -239,6 +259,7 @@ class KVListLengthResponse(BaseModel):
 
     key: str
     length: int
+    version: int
 
 
 class KVConflictResponse(BaseModel):
