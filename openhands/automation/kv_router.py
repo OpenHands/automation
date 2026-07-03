@@ -527,6 +527,7 @@ async def set_value(
         key=key,
         value=body,
         created=created,
+        version=_get_version(state),
         updated_at=saved_row.updated_at.isoformat(),
     )
 
@@ -694,7 +695,7 @@ async def increment(
     _check_state_size(state, kv_config)
     await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
-    return KVIncrResponse(key=key, value=new_value)
+    return KVIncrResponse(key=key, value=new_value, version=_get_version(state))
 
 
 @router.post("/{key}/decr")
@@ -738,7 +739,7 @@ async def decrement(
     _check_state_size(state, kv_config)
     await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
-    return KVIncrResponse(key=key, value=new_value)
+    return KVIncrResponse(key=key, value=new_value, version=_get_version(state))
 
 
 @router.post("/{key}/lpush")
@@ -777,7 +778,7 @@ async def lpush(
     _check_state_size(state, kv_config)
     await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
-    return KVListLengthResponse(key=key, length=len(state[key]))
+    return KVListLengthResponse(key=key, length=len(state[key]), version=_get_version(state))
 
 
 @router.post("/{key}/rpush")
@@ -816,7 +817,7 @@ async def rpush(
     _check_state_size(state, kv_config)
     await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
 
-    return KVListLengthResponse(key=key, length=len(state[key]))
+    return KVListLengthResponse(key=key, length=len(state[key]), version=_get_version(state))
 
 
 @router.post("/{key}/lpop")
@@ -912,15 +913,12 @@ async def list_length(
     state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="key_not_found",
-        )
+        return KVListLengthResponse(key=key, length=0, version=_get_version(state))
 
     value = state[key]
     require_list(value)
 
-    return KVListLengthResponse(key=key, length=len(value))
+    return KVListLengthResponse(key=key, length=len(value), version=_get_version(state))
 
 
 # --- Batch Operations ---
