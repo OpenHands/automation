@@ -201,7 +201,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.1.1",  # x-release-please-version
+        version="1.1.2",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
