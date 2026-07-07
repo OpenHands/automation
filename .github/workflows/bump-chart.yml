@@ -1,0 +1,23 @@
+---
+# Opens a PR in OpenHands/OpenHands-Cloud pointing the automation chart's
+# image.tag at the release that was just tagged. release-please pushes the
+# semver tag (with the App token, so this trigger fires); tag-image.yml
+# retags the Docker image with the same tag concurrently.
+name: Bump chart image tag
+
+on:
+    push:
+        tags:
+            # Stable semver only — the chart forbids alpha/sha tags.
+            - '[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+    bump-chart:
+        # secrets: inherit forwards the org secrets RELEASE_APP_ID /
+        # RELEASE_APP_PRIVATE_KEY that the reusable workflow needs.
+        secrets: inherit
+        uses: OpenHands/OpenHands-Cloud/.github/workflows/bump-image-tag.yml@main
+        with:
+            component: automation
+            chart_file: charts/openhands/charts/automation/values.yaml
+            tag: ${{ github.ref_name }}
