@@ -358,12 +358,16 @@ async def test_receive_github_event_missing_signature(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_undetectable_payload(
+async def test_receive_github_event_undetectable_payload_returns_200(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that undetectable payload structure returns 400."""
+    """Payload whose structure doesn't match any known GitHub event is treated
+    as an unrecognized event type. We acknowledge the webhook with matched=0
+    rather than failing with 400, since the payload is structurally valid - the
+    service just doesn't have a detection rule for it. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Payload with payload that doesn't match any known GitHub event structure
@@ -379,8 +383,11 @@ async def test_receive_github_event_undetectable_payload(
         },
     )
 
-    assert response.status_code == 400
-    assert "Cannot detect github event type" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
@@ -410,18 +417,22 @@ async def test_receive_github_event_missing_payload(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_malformed_payload(
+async def test_receive_github_event_unrecognised_payload_shape_returns_200(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that malformed payload returns 400."""
+    """A claim of a known event_type with a payload that doesn't match the
+    service's detection rules is treated as an unrecognized event type and
+    acknowledged with matched=0 rather than failing with 400. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
-    # Payload with event_type but invalid payload for that type
+    # event_type says "push" but the inner payload doesn't have ref/commits,
+    # so the service can't recognise the event type
     payload = {
         "event_type": "push",
-        "payload": {"invalid": "data"},  # Missing required fields
+        "payload": {"invalid": "data"},
     }
     signature, body = sign_payload(payload, "test-secret")
 
@@ -434,8 +445,11 @@ async def test_receive_github_event_malformed_payload(
         },
     )
 
-    assert response.status_code == 400
-    assert "Failed to parse event" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
@@ -444,12 +458,21 @@ async def test_receive_github_event_unknown_event_type(
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that unknown GitHub event type returns 400."""
+    """Unknown GitHub event types are acknowledged with matched=0. The webhook
+    is well-formed and authenticated; the service simply doesn't have a
+    detection rule for the event type. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     payload = {
-        "event_type": "unknown_github_event",
-        "payload": {"data": "test"},
+        "event_type": "workflow_job",
+        "payload": {
+            "action": "in_progress",
+            "workflow_job": {"id": 1},
+            "repository": {"id": 1, "name": "r", "full_name": "o/r", "private": False},
+            "sender": {"id": 1, "login": "u"},
+            "installation": {"id": 1},
+        },
     }
     signature, body = sign_payload(payload, "test-secret")
 
@@ -462,8 +485,11 @@ async def test_receive_github_event_unknown_event_type(
         },
     )
 
-    assert response.status_code == 400
-    assert "Failed to parse event" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
