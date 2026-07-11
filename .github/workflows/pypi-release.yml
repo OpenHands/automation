@@ -21,9 +21,24 @@ jobs:
         permissions:
             id-token: write
             contents: read
+        outputs:
+            version: ${{ steps.version.outputs.version }}
         steps:
             - name: Checkout
               uses: actions/checkout@v4
+
+            - name: Read package version
+              id: version
+              run: |
+                  version=$(python - <<'PY'
+                  import tomllib
+                  from pathlib import Path
+
+                  data = tomllib.loads(Path("pyproject.toml").read_text())
+                  print(data["project"]["version"])
+                  PY
+                  )
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
 
             - name: Install uv
               uses: astral-sh/setup-uv@v7
@@ -38,3 +53,22 @@ jobs:
 
             - name: Publish to PyPI
               uses: pypa/gh-action-pypi-publish@release/v1
+
+    dispatch-agent-canvas-bump:
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            actions: write
+            contents: read
+        steps:
+            - name: Dispatch Agent Canvas dependency bump
+              env:
+                  AUTOMATION_VERSION: ${{ needs.release.outputs.version }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh workflow run bump-agent-canvas.yml \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --ref main \
+                    -f "automation_version=$AUTOMATION_VERSION"
+
+                  echo "Dispatched Agent Canvas bump for Automation $AUTOMATION_VERSION"
