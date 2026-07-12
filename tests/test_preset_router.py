@@ -642,6 +642,20 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 422
 
+    async def test_create_from_prompt_impossible_cron(self, async_client):
+        """Cron schedules that can never fire return 422."""
+        payload = {
+            "name": "Test",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 31 2 *"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+
     async def test_create_from_prompt_missing_trigger(self, async_client):
         """Missing trigger returns 422."""
         payload = {
@@ -673,6 +687,38 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["timeout"] == 120
+
+    async def test_create_from_prompt_without_timeout_defaults(
+        self, async_client, mock_file_store
+    ):
+        """Prompt preset stores the configured default timeout when omitted."""
+        payload = {
+            "name": "Default Timeout Test",
+            "prompt": "Short task",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["timeout"] == 600
+
+    async def test_create_from_prompt_timeout_exceeds_max_rejected(self, async_client):
+        """Prompt preset rejects timeouts over 30 minutes."""
+        payload = {
+            "name": "Timeout Test",
+            "prompt": "Long running task",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            "timeout": 1801,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
 
     async def test_create_from_prompt_name_max_length(self, async_client):
         """Name exceeding max length returns 422."""
@@ -1501,6 +1547,40 @@ class TestCreateAutomationFromPlugin:
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
         assert automation.org_id == TEST_ORG_ID
+
+    async def test_create_from_plugin_without_timeout_defaults(
+        self, async_client, mock_file_store
+    ):
+        """Plugin preset stores the configured default timeout when omitted."""
+        payload = {
+            "name": "Default Plugin Timeout Test",
+            "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            "prompt": "Run plugin tasks",
+            "trigger": {"type": "cron", "schedule": "30 10 * * 5"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["timeout"] == 600
+
+    async def test_create_from_plugin_timeout_exceeds_max_rejected(self, async_client):
+        """Plugin preset rejects timeouts over 30 minutes."""
+        payload = {
+            "name": "Plugin Timeout Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run plugin tasks",
+            "trigger": {"type": "cron", "schedule": "30 10 * * 5"},
+            "timeout": 1801,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
 
     async def test_create_from_plugin_missing_plugins(self, async_client):
         """Missing plugins returns 422."""

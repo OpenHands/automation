@@ -140,6 +140,18 @@ async def receive_event(
             )
     except HTTPException:
         raise  # Re-raise HTTPExceptions as-is
+    except ValueError as e:
+        # Unknown event type (e.g. a GitHub event we don't have a detection
+        # rule for). This is normal - the service supports a subset of event
+        # types from each source - so acknowledge the webhook with matched=0
+        # rather than failing with 400. See APP-2668.
+        logger.info(
+            "Ignoring unrecognized event from source=%s org=%s: %s",
+            source,
+            org_id,
+            e,
+        )
+        return EventResponse(received=True, matched=0, runs_created=[])
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
         raise HTTPException(status_code=400, detail=f"Failed to parse event: {e}")

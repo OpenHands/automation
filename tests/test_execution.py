@@ -259,6 +259,27 @@ class TestExecuteInContextErrors:
         assert "Connection timeout" in result.error
 
     @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_custom_timeout_is_passed_to_bash(self, mock_upload, mock_start_bash):
+        """execute_in_context passes above-default custom timeouts to bash."""
+        mock_start_bash.return_value = "cmd-1"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="test-session-key",
+            entrypoint="python main.py",
+            tarball_source=b"test tarball",
+            work_dir=DEFAULT_WORK_DIR,
+            timeout=1200,
+        )
+
+        assert result.success is True
+        mock_upload.assert_awaited_once()
+        assert mock_start_bash.await_args.kwargs["timeout"] == 1200
+
+    @pytest.mark.asyncio
     @patch("openhands.automation.execution._upload")
     async def test_permanent_error_with_bytes_tarball_reraises(self, mock_upload):
         """PermanentDispatchError during upload is also re-raised."""

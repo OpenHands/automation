@@ -5,12 +5,18 @@ import uuid
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
-from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.utils.cron import (
+    validate_cron_schedule as validate_cron_schedule_value,
+    validate_timezone_name,
+)
 from openhands.automation.utils.time import UtcDatetime
+from openhands.automation.utils.timeout import (
+    build_automation_timeout_description,
+    validate_automation_timeout,
+)
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -21,21 +27,6 @@ _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
 
 # Path traversal pattern
 _PATH_TRAVERSAL_RE = re.compile(r"(^|/)\.\.(/|$)")
-
-
-def _validate_timeout(v: int | None) -> int | None:
-    """Validate timeout is positive and within max allowed duration.
-
-    Shared validator used by CreateAutomationRequest and UpdateAutomationRequest.
-    """
-    if v is None:
-        return v
-    if v <= 0:
-        raise ValueError("timeout must be a positive number")
-    max_duration = get_config().sandbox.max_run_duration
-    if v > max_duration:
-        raise ValueError(f"timeout must not exceed {max_duration} seconds")
-    return v
 
 
 class CronTrigger(BaseModel):
@@ -50,9 +41,12 @@ class CronTrigger(BaseModel):
     @field_validator("schedule")
     @classmethod
     def validate_cron_schedule(cls, v: str) -> str:
-        if not croniter.is_valid(v):
-            raise ValueError(f"Invalid cron expression: {v}")
-        return v
+        return validate_cron_schedule_value(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        return validate_timezone_name(v)
 
 
 class EventTrigger(BaseModel):
@@ -281,7 +275,7 @@ class CreateAutomationRequest(BaseModel):
     )
     timeout: int | None = Field(
         default=None,
-        description="Maximum execution time in seconds (default: system maximum)",
+        description=build_automation_timeout_description(include_default=True),
     )
     keep_alive: bool | None = Field(
         default=None,
@@ -316,7 +310,7 @@ class CreateAutomationRequest(BaseModel):
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
-        return _validate_timeout(v)
+        return validate_automation_timeout(v)
 
 
 class UpdateAutomationRequest(BaseModel):
@@ -343,7 +337,10 @@ class UpdateAutomationRequest(BaseModel):
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
-    timeout: int | None = Field(default=None)
+    timeout: int | None = Field(
+        default=None,
+        description=build_automation_timeout_description(include_default=False),
+    )
     keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None
 
@@ -369,7 +366,7 @@ class UpdateAutomationRequest(BaseModel):
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
-        return _validate_timeout(v)
+        return validate_automation_timeout(v)
 
 
 # --- Webhook Schemas ---
