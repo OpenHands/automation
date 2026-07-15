@@ -24,11 +24,5 @@ WARNING: Changing any value here requires careful analysis of:
 # DO NOT CHANGE: Would break all existing automations and SDK integration.
 WORK_DIR = "/workspace/project"
 
-# Path where tarballs are extracted inside the sandbox. This is:
-# - Written by the sandbox initialization script
-# - Read by the automation entrypoint
-# DO NOT CHANGE: Would break tarball extraction in running sandboxes.
-TARBALL_PATH = "/tmp/automation.tar.gz"
-
 # model profile names mirror the agent-server profile-store constraints.
 MODEL_PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
