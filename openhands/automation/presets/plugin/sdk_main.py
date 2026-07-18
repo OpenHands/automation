@@ -70,6 +70,7 @@ import os
 import random
 import sys
 import time
+import urllib.request
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -140,6 +141,44 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _conversation_run_timeout() -> float:
+    raw_timeout = os.environ.get("AUTOMATION_RUN_TIMEOUT")
+    if not raw_timeout:
+        return 3600.0
+    try:
+        outer_timeout = float(raw_timeout)
+    except ValueError:
+        return 3600.0
+    if outer_timeout <= 90:
+        return max(30.0, outer_timeout - 10.0)
+    return outer_timeout - 60.0
+
+
+def _notify_conversation_started(conversation_id: str) -> None:
+    callback_url = os.environ.get("AUTOMATION_CALLBACK_URL")
+    if not callback_url:
+        return
+    if not callback_url.endswith("/complete"):
+        print("  conversation update skipped: callback URL has unexpected shape")
+        return
+    update_url = callback_url[: -len("/complete")] + "/conversation"
+    data = json.dumps({"conversation_id": str(conversation_id)}).encode()
+    request = urllib.request.Request(
+        update_url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            print(f"  conversation update sent: {response.status}")
+    except Exception as e:
+        print(f"  conversation update failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -288,16 +327,6 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Deserialize plugin sources using Pydantic validation
-    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
-
-    print("\n=== PLUGINS CONFIG ===")
-    print(f"  loading {len(plugin_sources)} plugin(s):")
-    for ps in plugin_sources:
-        ref_str = f"@{ps.ref}" if ps.ref else ""
-        path_str = f" ({ps.repo_path})" if ps.repo_path else ""
-        print(f"    - {ps.source}{ref_str}{path_str}")
-
     # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
     try:
@@ -313,6 +342,16 @@ This automation was triggered by a webhook event:
     print(f"  profile: {model_profile or 'DEFAULT'}")
     print(f"  model: {llm.model}")
     print(f"  api_key present: {bool(llm.api_key)}")
+
+    # Deserialize plugin sources using Pydantic validation.
+    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
+
+    print("\n=== PLUGINS CONFIG ===")
+    print(f"  loading {len(plugin_sources)} plugin(s):")
+    for ps in plugin_sources:
+        ref_str = f"@{ps.ref}" if ps.ref else ""
+        path_str = f" ({ps.repo_path})" if ps.repo_path else ""
+        print(f"    - {ps.source}{ref_str}{path_str}")
 
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
@@ -409,10 +448,12 @@ This automation was triggered by a webhook event:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    _notify_conversation_started(str(conversation.id))
+
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
-        conversation.run()
+        conversation.run(timeout=_conversation_run_timeout())
 
         # Wait for the stream to settle
         while time.time() - last_event_time["ts"] < 2.0:

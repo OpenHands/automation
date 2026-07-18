@@ -28,6 +28,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunConversationRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -317,6 +318,50 @@ async def list_automation_runs(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
     )
+
+
+# --- Run conversation metadata ---
+
+@router.post("/runs/{run_id}/conversation")
+async def update_run_conversation(
+    run_id: uuid.UUID,
+    body: RunConversationRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Associate a live conversation with an automation run.
+
+    Preset scripts call this immediately after creating the RemoteConversation so
+    the activity log can link to running or watchdog-failed runs even if the
+    process is later killed before the terminal completion callback fires.
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    if run.status not in {
+        AutomationRunStatus.PENDING,
+        AutomationRunStatus.RUNNING,
+    }:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected PENDING or RUNNING",
+        )
+
+    run.conversation_id = body.conversation_id
+    await session.flush()
+    await session.refresh(run)
+    logger.info("Run %s conversation_id=%s", run_id, body.conversation_id)
+    return AutomationRunResponse.model_validate(run)
 
 
 # --- Run completion callback ---
