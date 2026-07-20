@@ -46,6 +46,7 @@ from openhands.automation.utils.webhook import (
     get_event_automations,
     get_webhook_config,
     verify_signature,
+    verify_standard_webhooks,
 )
 
 
@@ -90,9 +91,8 @@ async def receive_event(
             detail=f"Unknown webhook source: {source}",
         )
 
-    # 3. Get signature from the configured header (source-specific)
+    # 3. Verify the signature according to the configured scheme.
     signature = request.headers.get(config.signature_header)
-
     if not signature:
         logger.warning(
             "Missing signature header '%s' for event from source=%s org_id=%s",
@@ -105,9 +105,24 @@ async def receive_event(
             detail=f"Missing signature header: {config.signature_header}",
         )
 
-    if not verify_signature(body, signature, config.secret):
+    if config.signature_scheme == "standard_webhooks":
+        # Standard Webhooks (e.g. GitLab 19.1+ signing tokens): the signature is
+        # a "v1,<base64>" value plus webhook-id / webhook-timestamp headers.
+        valid = verify_standard_webhooks(
+            body,
+            config.secret,
+            request.headers.get("webhook-id"),
+            request.headers.get("webhook-timestamp"),
+            signature,
+        )
+    else:
+        # Default: GitHub/Linear style hex HMAC over the raw body.
+        valid = verify_signature(body, signature, config.secret)
+
+    if not valid:
         logger.warning(
-            "Invalid signature for event from source=%s org_id=%s",
+            "Invalid signature (scheme=%s) for event from source=%s org_id=%s",
+            config.signature_scheme,
             source,
             org_id,
         )

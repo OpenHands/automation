@@ -9,8 +9,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode
-from openhands.automation.models import Automation, Base
-from openhands.automation.utils.webhook import get_event_automations, verify_signature
+from openhands.automation.models import Automation, Base, CustomWebhook
+from openhands.automation.utils.webhook import (
+    get_event_automations,
+    get_webhook_config,
+    verify_signature,
+    verify_standard_webhooks,
+)
 
 
 class TestVerifySignature:
@@ -320,3 +325,196 @@ class TestGetEventAutomationsSqliteJsonFiltering:
             assert result[0][0].id == active_automation.id
         finally:
             set_sqlite_mode(False)
+
+
+class TestVerifyStandardWebhooks:
+    """Tests for Standard Webhooks signature verification (GitLab 19.1+, Svix)."""
+
+    SECRET = "whsec_uX0GkGuuABEuIJhcJxNEotfG8+WjeIkZuJJqJdsm/CQ="
+    MSG_ID = "msg_2abc"
+    TS = "1752900000"
+
+    def _sign(
+        self,
+        payload: bytes,
+        secret: str | None = None,
+        msg_id: str | None = None,
+        ts: str | None = None,
+    ) -> str:
+        import base64 as _b64
+
+        secret = secret or self.SECRET
+        msg_id = msg_id or self.MSG_ID
+        ts = ts or self.TS
+        key_material = (
+            secret[len("whsec_") :] if secret.startswith("whsec_") else secret
+        )
+        try:
+            key = _b64.b64decode(key_material)
+        except Exception:
+            key = secret.encode()
+        signed = f"{msg_id}.{ts}.".encode() + payload
+        sig = _b64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+        return f"v1,{sig}"
+
+    def test_valid_signature(self):
+        payload = b'{"object_kind":"note"}'
+        header = self._sign(payload)
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, self.MSG_ID, self.TS, header, now=int(self.TS)
+            )
+            is True
+        )
+
+    def test_missing_headers_return_false(self):
+        payload = b"{}"
+        header = self._sign(payload)
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, None, self.TS, header, now=int(self.TS)
+            )
+            is False
+        )
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, self.MSG_ID, None, header, now=int(self.TS)
+            )
+            is False
+        )
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, self.MSG_ID, self.TS, None, now=int(self.TS)
+            )
+            is False
+        )
+
+    def test_expired_timestamp(self):
+        payload = b"{}"
+        header = self._sign(payload)
+        # now is 10 minutes after the signed timestamp -> outside 300s tolerance
+        assert (
+            verify_standard_webhooks(
+                payload,
+                self.SECRET,
+                self.MSG_ID,
+                self.TS,
+                header,
+                now=int(self.TS) + 600,
+            )
+            is False
+        )
+
+    def test_within_tolerance(self):
+        payload = b"{}"
+        header = self._sign(payload)
+        assert (
+            verify_standard_webhooks(
+                payload,
+                self.SECRET,
+                self.MSG_ID,
+                self.TS,
+                header,
+                now=int(self.TS) + 120,
+            )
+            is True
+        )
+
+    def test_tampered_body(self):
+        header = self._sign(b'{"object_kind":"note"}')
+        assert (
+            verify_standard_webhooks(
+                b'{"object_kind":"issue"}',
+                self.SECRET,
+                self.MSG_ID,
+                self.TS,
+                header,
+                now=int(self.TS),
+            )
+            is False
+        )
+
+    def test_wrong_secret(self):
+        payload = b"{}"
+        header = self._sign(payload, secret="whsec_" + "A" * 32)
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, self.MSG_ID, self.TS, header, now=int(self.TS)
+            )
+            is False
+        )
+
+    def test_multiple_space_separated_signatures(self):
+        payload = b"{}"
+        good = self._sign(payload)
+        header = (
+            f"v1,AAAA{good.split(',', 1)[1][4:]} {good}"  # a bogus one + the good one
+        )
+        assert (
+            verify_standard_webhooks(
+                payload, self.SECRET, self.MSG_ID, self.TS, header, now=int(self.TS)
+            )
+            is True
+        )
+
+    def test_bad_timestamp_not_int(self):
+        payload = b"{}"
+        header = self._sign(payload)
+        assert (
+            verify_standard_webhooks(
+                payload,
+                self.SECRET,
+                self.MSG_ID,
+                "not-a-number",
+                header,
+                now=int(self.TS),
+            )
+            is False
+        )
+
+
+class TestGetWebhookConfigSignatureScheme:
+    """get_webhook_config threads the custom webhook's signature_scheme through."""
+
+    @pytest.mark.asyncio
+    async def test_custom_webhook_standard_webhooks_scheme(self, sqlite_session):
+        org_id = uuid.uuid4()
+        sqlite_session.add(
+            CustomWebhook(
+                id=uuid.uuid4(),
+                org_id=org_id,
+                name="GitLab",
+                source="gitlab",
+                webhook_secret="whsec_uX0GkGuuABEuIJhcJxNEotfG8+WjeIkZuJJqJdsm/CQ=",
+                event_key_expr="object_kind",
+                signature_header="webhook-signature",
+                signature_scheme="standard_webhooks",
+                enabled=True,
+            )
+        )
+        await sqlite_session.commit()
+
+        config = await get_webhook_config("gitlab", org_id, sqlite_session)
+        assert config is not None
+        assert config.signature_scheme == "standard_webhooks"
+        assert config.signature_header == "webhook-signature"
+        assert config.is_builtin is False
+
+    @pytest.mark.asyncio
+    async def test_custom_webhook_defaults_to_hex_scheme(self, sqlite_session):
+        org_id = uuid.uuid4()
+        sqlite_session.add(
+            CustomWebhook(
+                id=uuid.uuid4(),
+                org_id=org_id,
+                name="Generic",
+                source="generic",
+                webhook_secret="a-secret-value",
+                enabled=True,
+            )
+        )
+        await sqlite_session.commit()
+
+        config = await get_webhook_config("generic", org_id, sqlite_session)
+        assert config is not None
+        assert config.signature_scheme == "hmac_sha256_hex"

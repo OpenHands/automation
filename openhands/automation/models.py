@@ -309,6 +309,18 @@ class CustomWebhook(Base):
         String(100), nullable=False, default="X-Signature-256"
     )
 
+    # Signature verification scheme. Determines how the HMAC carried in
+    # `signature_header` is computed/encoded:
+    # - "hmac_sha256_hex" (default): hex(HMAC-SHA256(secret, body)); GitHub/Linear
+    #   style, accepts an optional "sha256=" prefix.
+    # - "standard_webhooks": Standard Webhooks spec (standardwebhooks.com) used by
+    #   GitLab 19.1+ signing tokens, Svix, etc. Verifies a "v1,<base64>" value over
+    #   "{id}.{timestamp}.{body}" with key=base64decode(secret without "whsec_"),
+    #   plus a timestamp freshness check.
+    signature_scheme: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="hmac_sha256_hex"
+    )
+
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

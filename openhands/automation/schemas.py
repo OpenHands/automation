@@ -372,6 +372,9 @@ class UpdateAutomationRequest(BaseModel):
 # --- Webhook Schemas ---
 
 
+VALID_SIGNATURE_SCHEMES = {"hmac_sha256_hex", "standard_webhooks"}
+
+
 class WebhookConfig(BaseModel):
     """Configuration for processing a webhook."""
 
@@ -381,6 +384,7 @@ class WebhookConfig(BaseModel):
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
+    signature_scheme: str = "hmac_sha256_hex"  # HMAC scheme; see CustomWebhook model
 
 
 class EventResponse(BaseModel):
@@ -438,6 +442,16 @@ class CustomWebhookCreate(BaseModel):
             "Examples: 'X-Signature-256', 'Stripe-Signature', 'X-Slack-Signature'"
         ),
     )
+    signature_scheme: str = Field(
+        default="hmac_sha256_hex",
+        description=(
+            "HMAC signature scheme. 'hmac_sha256_hex' (default) verifies a hex "
+            "digest over the raw body (GitHub/Linear). 'standard_webhooks' follows "
+            "standardwebhooks.com (GitLab 19.1+ signing tokens, Svix): reads a "
+            "'v1,<base64>' value from `signature_header` (typically "
+            "'webhook-signature') with webhook-id/webhook-timestamp headers."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -464,6 +478,17 @@ class CustomWebhookCreate(BaseModel):
                 "starting and ending with alphanumeric"
             )
         return v_lower
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str) -> str:
+        """Validate the signature scheme is supported."""
+        if v not in VALID_SIGNATURE_SCHEMES:
+            raise ValueError(
+                f"Invalid signature_scheme '{v}'. Must be one of: "
+                f"{', '.join(sorted(VALID_SIGNATURE_SCHEMES))}"
+            )
+        return v
 
     @field_validator("event_key_expr")
     @classmethod
@@ -498,7 +523,21 @@ class CustomWebhookUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
+    signature_scheme: str | None = Field(default=None, max_length=50)
     enabled: bool | None = None
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str | None) -> str | None:
+        """Validate the signature scheme is supported if provided."""
+        if v is None:
+            return v
+        if v not in VALID_SIGNATURE_SCHEMES:
+            raise ValueError(
+                f"Invalid signature_scheme '{v}'. Must be one of: "
+                f"{', '.join(sorted(VALID_SIGNATURE_SCHEMES))}"
+            )
+        return v
 
     @field_validator("event_key_expr")
     @classmethod
@@ -539,6 +578,7 @@ class CustomWebhookResponse(BaseModel):
     webhook_url: str
     event_key_expr: str
     signature_header: str
+    signature_scheme: str
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime

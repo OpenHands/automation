@@ -5,9 +5,12 @@ Contains helpers for signature verification, webhook configuration lookup,
 and automation run creation for event-triggered automations.
 """
 
+import base64
+import binascii
 import hashlib
 import hmac
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -88,6 +91,78 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(computed, signature)
 
 
+# Standard Webhooks (https://www.standardwebhooks.com) — used by GitLab 19.1+
+# signing tokens, Svix, and others. Signature = base64(HMAC-SHA256(key, msg))
+# where msg = "{id}.{timestamp}.{body}" and key = base64decode(secret w/o whsec_).
+STANDARD_WEBHOOKS_TOLERANCE_SECONDS = 300
+
+
+def _standard_webhooks_key(secret: str) -> bytes:
+    """Derive the signing key from a Standard Webhooks secret.
+
+    Secrets are conventionally "whsec_<base64>": strip the prefix and
+    base64-decode. Fall back to raw UTF-8 bytes if not valid base64.
+    """
+    key_material = secret
+    if key_material.startswith("whsec_"):
+        key_material = key_material[len("whsec_") :]
+    try:
+        return base64.b64decode(key_material)
+    except (binascii.Error, ValueError):
+        return secret.encode("utf-8")
+
+
+def verify_standard_webhooks(
+    payload: bytes,
+    secret: str,
+    msg_id: str | None,
+    timestamp: str | None,
+    signature_header_value: str | None,
+    tolerance_seconds: int = STANDARD_WEBHOOKS_TOLERANCE_SECONDS,
+    now: int | None = None,
+) -> bool:
+    """Verify a Standard Webhooks signature.
+
+    Args:
+        payload: Raw request body bytes.
+        secret: Shared signing secret (e.g. "whsec_...").
+        msg_id: Value of the "webhook-id" header.
+        timestamp: Value of the "webhook-timestamp" header (unix seconds).
+        signature_header_value: Signature header value; a space-separated list
+            of "v1,<base64>" tokens.
+        tolerance_seconds: Max allowed clock skew (replay protection).
+        now: Current unix time; injectable for tests.
+
+    Returns:
+        True if a provided signature matches and the timestamp is fresh.
+    """
+    if not msg_id or not timestamp or not signature_header_value:
+        return False
+
+    try:
+        ts_int = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+
+    current = int(time.time()) if now is None else now
+    if abs(current - ts_int) > tolerance_seconds:
+        return False
+
+    key = _standard_webhooks_key(secret)
+    signed_content = f"{msg_id}.{timestamp}.".encode() + payload
+    expected = base64.b64encode(
+        hmac.new(key, signed_content, hashlib.sha256).digest()
+    ).decode("utf-8")
+
+    for token in signature_header_value.split():
+        # Each token is "v{version},{signature}"; we support v1.
+        _version, _, sig = token.partition(",")
+        candidate = sig if sig else token
+        if hmac.compare_digest(candidate, expected):
+            return True
+    return False
+
+
 async def get_webhook_config(
     source: str,
     org_id: uuid.UUID,
@@ -136,6 +211,7 @@ async def get_webhook_config(
             is_builtin=False,
             event_key_expr=webhook.event_key_expr,
             signature_header=webhook.signature_header,
+            signature_scheme=webhook.signature_scheme,
         )
     return None
 

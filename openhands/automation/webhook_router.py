@@ -62,6 +62,7 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         webhook_url=_build_webhook_url(webhook.org_id, webhook.source),
         event_key_expr=webhook.event_key_expr,
         signature_header=webhook.signature_header,
+        signature_scheme=webhook.signature_scheme,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -120,6 +121,7 @@ async def create_webhook(
         webhook_secret=secret,
         event_key_expr=data.event_key_expr,
         signature_header=data.signature_header,
+        signature_scheme=data.signature_scheme,
         enabled=True,
     )
 
