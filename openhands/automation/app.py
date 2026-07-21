@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
+from openhands.automation import __version__
 from openhands.automation.auth import create_http_client
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
@@ -260,6 +261,11 @@ async def readiness():
         )
 
 
+def _get_sdk_version() -> str:
+    """Return the installed OpenHands SDK package version."""
+    return importlib.metadata.version("openhands-sdk")
+
+
 @app.get("/sdk-version")
 @app.get(f"{_base_path}/sdk-version")
 async def sdk_version():
@@ -271,13 +277,30 @@ async def sdk_version():
     are available in the sandbox.
     """
     try:
-        version = importlib.metadata.version("openhands-sdk")
+        version = _get_sdk_version()
     except importlib.metadata.PackageNotFoundError:
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
     return {"version": version}
+
+
+@app.get("/server_info")
+@app.get(f"{_base_path}/server_info")
+async def server_info():
+    """Return public metadata about the automation service."""
+    try:
+        sdk_version = _get_sdk_version()
+    except importlib.metadata.PackageNotFoundError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "openhands-sdk package not found"},
+        )
+    return {
+        "package_version": __version__,
+        "sdk_version": sdk_version,
+    }
 
 
 # ---------------------------------------------------------------------------
