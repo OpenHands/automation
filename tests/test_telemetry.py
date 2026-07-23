@@ -22,6 +22,7 @@ from openhands.automation.models import (
 )
 from openhands.automation.schemas import TelemetryConsentRequest
 from openhands.automation.telemetry_router import set_telemetry_consent
+from openhands.automation.utils.version import get_server_version_info
 
 
 class _Response:
@@ -67,6 +68,12 @@ def _run(automation: Automation) -> AutomationRun:
         automation=automation,
         status=AutomationRunStatus.COMPLETED,
     )
+
+
+def _assert_server_version_properties(properties: dict) -> None:
+    expected = get_server_version_info()
+    assert properties["package_version"] == expected["package_version"]
+    assert properties["sdk_version"] == expected["sdk_version"]
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +130,8 @@ async def test_local_capture_uses_backend_id_and_frontend_property(monkeypatch):
     assert payload["event"] == "automation_run_completed"
     assert payload["distinct_id"] == "automation-backend:test"
     properties = payload["properties"]
+    _assert_server_version_properties(properties)
+
     assert properties["automation_backend_id"] == "automation-backend:test"
     assert properties["frontend_distinct_id"] == "ph-fe-123"
     assert properties["client_source"] == "agent_canvas"
@@ -511,6 +520,8 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["route_path"] == "/api/automation/v1/{automation_id}"
     assert properties["route_operation"] == "get_automation"
     assert properties["status_code"] == 200
+    _assert_server_version_properties(properties)
+
     assert properties["deployment_mode"] == "cloud"
     assert properties["cloud_user_id"] == str(user.user_id)
     assert properties["cloud_org_id"] == str(user.org_id)
