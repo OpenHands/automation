@@ -24,7 +24,10 @@ from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
-from openhands.automation.middleware import ApiKeyAwareCORSMiddleware
+from openhands.automation.middleware import (
+    ApiKeyAwareCORSMiddleware,
+    TelemetryContextMiddleware,
+)
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
@@ -211,6 +214,8 @@ def _create_app() -> FastAPI:
 
 
 app = _create_app()
+
+app.add_middleware(TelemetryContextMiddleware)
 
 # API-key requests (e.g. the local agent-server GUI calling directly from the
 # browser) get permissive CORS; cookie/session requests keep the strict

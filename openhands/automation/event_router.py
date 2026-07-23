@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
 from openhands.automation.schemas import EventResponse
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
     create_automation_run,
@@ -194,6 +195,12 @@ async def receive_event(
             automation, session, event_payload=event_payload
         )
         run_ids.append(str(run.id))
+        await capture_automation_event(
+            "automation_run_created",
+            automation=automation,
+            run=run,
+            properties={"trigger_source": "event", "event_source": source},
+        )
 
     await session.commit()
 

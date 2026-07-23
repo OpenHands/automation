@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
 from openhands.automation.utils.run import create_pending_run
 
@@ -193,6 +194,12 @@ async def poll_and_schedule(
             try:
                 run = await create_pending_run(session, automation)
                 created_runs.append(run)
+                await capture_automation_event(
+                    "automation_run_created",
+                    automation=automation,
+                    run=run,
+                    properties={"trigger_source": "cron"},
+                )
                 logger.info(
                     "Created pending run: run_id=%s automation_id=%s "
                     "name=%s schedule=%s",

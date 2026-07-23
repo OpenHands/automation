@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import (
@@ -384,6 +385,7 @@ async def regenerate_preset_prompt_tarball(
 @router.post("/prompt", status_code=status.HTTP_201_CREATED)
 async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
@@ -484,6 +486,13 @@ async def create_automation_from_prompt(
             "upload_id": str(upload_id),
             "prompt_length": len(body.prompt),
         },
+    )
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=automation,
+        properties={"creation_path": "prompt_preset"},
     )
 
     return AutomationResponse.model_validate(automation)
@@ -731,6 +740,7 @@ def _format_plugin_sources_for_description(plugins: list[PluginSource]) -> str:
 @router.post("/plugin", status_code=status.HTTP_201_CREATED)
 async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
@@ -862,5 +872,15 @@ async def create_automation_from_plugin(
         log_extra["plugin_count"] = len(body.plugins)
 
     logger.info("Created automation from plugin", extra=log_extra)
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=automation,
+        properties={
+            "creation_path": "plugin_preset",
+            "plugin_count": len(body.plugins or []),
+        },
+    )
 
     return AutomationResponse.model_validate(automation)
