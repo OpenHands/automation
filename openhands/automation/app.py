@@ -6,9 +6,8 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from time import perf_counter
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -28,14 +27,11 @@ from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
     ApiKeyAwareCORSMiddleware,
     TelemetryContextMiddleware,
+    api_route_telemetry_middleware,
 )
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
-from openhands.automation.telemetry import (
-    capture_api_route_event,
-    should_capture_api_route,
-)
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
@@ -221,30 +217,7 @@ def _create_app() -> FastAPI:
 app = _create_app()
 
 
-@app.middleware("http")
-async def api_route_telemetry_middleware(request: Request, call_next):
-    should_capture = should_capture_api_route(request)
-    started_at = perf_counter()
-
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        if should_capture:
-            await capture_api_route_event(
-                request,
-                status_code=500,
-                duration_ms=int((perf_counter() - started_at) * 1000),
-                exception_type=type(exc).__name__,
-            )
-        raise
-
-    if should_capture:
-        await capture_api_route_event(
-            request,
-            status_code=response.status_code,
-            duration_ms=int((perf_counter() - started_at) * 1000),
-        )
-    return response
+app.middleware("http")(api_route_telemetry_middleware)
 
 
 app.add_middleware(TelemetryContextMiddleware)

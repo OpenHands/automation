@@ -1,7 +1,9 @@
 """ASGI middleware for the automations service."""
 
 from dataclasses import dataclass
+from time import perf_counter
 
+from fastapi import Request
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -54,6 +56,36 @@ class TelemetryContextMiddleware:
                 build_telemetry_request_context(scope)
             )
         await self.app(scope, receive, send)
+
+
+async def api_route_telemetry_middleware(request: Request, call_next):
+    from openhands.automation.telemetry import (
+        capture_api_route_event,
+        should_capture_api_route,
+    )
+
+    should_capture = should_capture_api_route(request)
+    started_at = perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        if should_capture:
+            await capture_api_route_event(
+                request,
+                status_code=500,
+                duration_ms=int((perf_counter() - started_at) * 1000),
+                exception_type=type(exc).__name__,
+            )
+        raise
+
+    if should_capture:
+        await capture_api_route_event(
+            request,
+            status_code=response.status_code,
+            duration_ms=int((perf_counter() - started_at) * 1000),
+        )
+    return response
 
 
 # Header names (lowercase) that carry an explicit API key. Cookie auth is
