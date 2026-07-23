@@ -176,6 +176,49 @@ async def test_capture_is_disabled_without_posthog_key(monkeypatch):
     assert _MockAsyncClient.posts == []
 
 
+@pytest.mark.asyncio
+async def test_local_capture_requires_consented_frontend_distinct_id(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:local"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event(
+        "automation_created",
+        automation=_automation(),
+        request_context=TelemetryRequestContext(client_source="agent_canvas"),
+    )
+
+    assert _MockAsyncClient.posts == []
+
+
+@pytest.mark.asyncio
+async def test_cloud_capture_does_not_require_frontend_distinct_id(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:cloud"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event(
+        "automation_created",
+        automation=_automation(),
+    )
+
+    assert len(_MockAsyncClient.posts) == 1
+    _, payload = _MockAsyncClient.posts[0]
+    assert payload["distinct_id"] == "automation-backend:cloud"
+    assert payload["properties"]["deployment_mode"] == "cloud"
+
+
 def test_build_telemetry_request_context_extracts_canvas_headers():
     scope = {
         "headers": [
@@ -292,6 +335,9 @@ async def test_capture_api_route_event_in_local_mode_omits_cloud_identity(
     monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
 
     request = _request("/api/automation/v1/123", endpoint_name="get_automation")
+    request.state.telemetry_context = TelemetryRequestContext(
+        frontend_distinct_id="ph-fe-local"
+    )
     request.state.authenticated_user = AuthenticatedUser(
         user_id=uuid.uuid4(),
         org_id=uuid.uuid4(),

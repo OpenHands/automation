@@ -260,6 +260,9 @@ async def capture_automation_event(
         return
 
     context = request_context or get_request_telemetry_context(request)
+    if settings.is_local_mode and not context.frontend_distinct_id:
+        return
+
     backend_distinct_id = await get_automation_backend_distinct_id(
         request=request,
         session=session,

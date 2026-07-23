@@ -428,13 +428,6 @@ async def dispatch_pending_runs(
                 properties={"trigger_source": "dispatcher"},
                 session_factory=session_factory,
             )
-            await capture_automation_event(
-                "automation_run_started",
-                automation=run.automation,
-                run=run,
-                properties={"trigger_source": "dispatcher"},
-                session_factory=session_factory,
-            )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",
