@@ -33,7 +33,6 @@ TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
 API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
-_PUBLIC_API_ROUTE_PATHS = frozenset({"/health", "/ready", "/server_info"})
 
 
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
@@ -218,13 +217,8 @@ def should_capture_api_route(request: Request) -> bool:
     path = request.url.path
     settings = get_config().service
     base_path = settings.base_path.rstrip("/")
-    base_public_paths = {f"{base_path}{route}" for route in _PUBLIC_API_ROUTE_PATHS}
 
-    return (
-        path.startswith(f"{base_path}/v1")
-        or path in _PUBLIC_API_ROUTE_PATHS
-        or path in base_public_paths
-    )
+    return path.startswith(f"{base_path}/v1")
 
 
 async def capture_api_route_event(
