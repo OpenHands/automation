@@ -2,6 +2,7 @@ import uuid
 from typing import ClassVar
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -353,6 +354,57 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
         assert properties["frontend_distinct_id"] == "ph-fe-link"
         assert properties["client_source"] == "agent_canvas"
         assert properties["client_version"] == "1.2.3"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consent_route_rejects_cloud_mode(monkeypatch):
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        request = _request(
+            "/api/automation/v1/telemetry/consent",
+            endpoint_name="set_telemetry_consent",
+        )
+        user = AuthenticatedUser(
+            user_id=uuid.uuid4(),
+            org_id=uuid.uuid4(),
+            email="cloud@example.com",
+            role="admin",
+            permissions=["manage_automations"],
+            auth_method=AuthMethod.API_KEY,
+        )
+
+        async with session_factory() as session:
+            with pytest.raises(HTTPException) as exc_info:
+                await set_telemetry_consent(
+                    TelemetryConsentRequest(
+                        consent_granted=True,
+                        frontend_distinct_id="ph-fe-cloud",
+                    ),
+                    request,
+                    user,
+                    session,
+                )
+
+            assert exc_info.value.status_code == 400
+            assert "cloud mode" in str(exc_info.value.detail)
+            stored = await session.scalar(
+                select(AutomationServiceMetadata.value).where(
+                    AutomationServiceMetadata.key
+                    == telemetry.TELEMETRY_CONSENT_METADATA_KEY
+                )
+            )
+            assert stored is None
+            assert _MockAsyncClient.posts == []
     finally:
         await engine.dispose()
 

@@ -1,9 +1,10 @@
 """Telemetry configuration endpoints for the automation service."""
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.middleware import TelemetryRequestContext
 from openhands.automation.schemas import (
@@ -18,6 +19,10 @@ from openhands.automation.telemetry import (
 
 
 router = APIRouter(prefix="/v1/telemetry", tags=["Telemetry"])
+CLOUD_MODE_CONSENT_ERROR = (
+    "Telemetry consent is managed by the main OpenHands app in cloud mode."
+)
+
 
 _require_manage_automations = require_permission("manage_automations")
 
@@ -30,6 +35,12 @@ async def set_telemetry_consent(
     session: AsyncSession = Depends(get_session),
 ) -> TelemetryConsentResponse:
     """Persist frontend telemetry consent for local backend capture decisions."""
+    if not get_config().service.is_local_mode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=CLOUD_MODE_CONSENT_ERROR,
+        )
+
     consent_granted = await set_stored_telemetry_consent(
         session,
         consent_granted=body.consent_granted,
