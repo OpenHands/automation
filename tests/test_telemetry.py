@@ -120,6 +120,13 @@ async def test_local_capture_uses_backend_id_and_frontend_property(monkeypatch):
     assert properties["client_source"] == "agent_canvas"
     assert properties["automation_id"] == str(automation.id)
     assert properties["run_id"] == str(run.id)
+    assert properties["deployment_mode"] == "local"
+    assert "cloud_user_id" not in properties
+    assert "cloud_org_id" not in properties
+    assert "org_id" not in properties
+
+    assert "$groups" not in properties
+
     assert properties["trigger_source"] == "callback"
 
 
@@ -150,6 +157,8 @@ async def test_cloud_capture_uses_backend_id_and_org_properties(monkeypatch):
     assert properties["cloud_user_id"] == str(automation.user_id)
     assert properties["cloud_org_id"] == str(automation.org_id)
     assert properties["$groups"] == {"org": str(automation.org_id)}
+    assert "org_id" not in properties
+
     assert properties["creation_path"] == "prompt_preset"
     assert properties["frontend_distinct_id"] == "ph-fe-123"
     assert properties["automation_backend_id"] == "automation-backend:cloud"
@@ -263,6 +272,50 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["cloud_user_id"] == str(user.user_id)
     assert properties["cloud_org_id"] == str(user.org_id)
     assert properties["$groups"] == {"org": str(user.org_id)}
+    assert "org_id" not in properties
+    assert properties["success"] is True
+    assert properties["duration_ms"] == 12
+
+
+@pytest.mark.asyncio
+async def test_capture_api_route_event_in_local_mode_omits_cloud_identity(
+    monkeypatch,
+):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:local-api"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
+    request.state.authenticated_user = AuthenticatedUser(
+        user_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        email="local@example.com",
+        role="admin",
+        permissions=["manage_automations"],
+        auth_method=AuthMethod.LOCAL_API_KEY,
+    )
+
+    await telemetry.capture_api_route_event(
+        request,
+        status_code=200,
+        duration_ms=12,
+    )
+
+    _, payload = _MockAsyncClient.posts[0]
+    properties = payload["properties"]
+    assert payload["distinct_id"] == "automation-backend:local-api"
+    assert properties["deployment_mode"] == "local"
+    assert properties["automation_backend_id"] == "automation-backend:local-api"
+    assert "cloud_user_id" not in properties
+    assert "cloud_org_id" not in properties
+    assert "org_id" not in properties
+    assert "$groups" not in properties
 
     assert properties["success"] is True
     assert properties["duration_ms"] == 12
