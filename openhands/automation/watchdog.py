@@ -26,6 +26,7 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
 )
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.time import utcnow
 
@@ -91,6 +92,16 @@ async def _verify_and_mark_run(
             )
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+        if result.rowcount > 0:
+            await capture_automation_event(
+                "automation_run_failed",
+                automation=run.automation,
+                run=run,
+                properties={
+                    "trigger_source": "watchdog",
+                    "failure_kind": "verification_failed",
+                },
+            )
         return result.rowcount > 0
 
     if verification.verified:
@@ -168,6 +179,18 @@ async def _verify_and_mark_run(
             )
 
         result = await session.execute(stmt)  # type: ignore[assignment]
+        if result.rowcount > 0:
+            await capture_automation_event(
+                "automation_run_completed"
+                if exit_code == 0
+                else "automation_run_failed",
+                automation=run.automation,
+                run=run,
+                properties={
+                    "trigger_source": "watchdog",
+                    "verification_exit_code": exit_code,
+                },
+            )
         if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
             run, keep_alive
         ):
@@ -219,6 +242,16 @@ async def _verify_and_mark_run(
         )
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
+    if result.rowcount > 0:
+        await capture_automation_event(
+            "automation_run_failed",
+            automation=run.automation,
+            run=run,
+            properties={
+                "trigger_source": "watchdog",
+                "failure_kind": "timeout",
+            },
+        )
     return result.rowcount > 0
 
 

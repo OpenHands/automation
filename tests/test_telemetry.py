@@ -175,3 +175,65 @@ def test_build_telemetry_request_context_extracts_canvas_headers():
         client_source="agent_canvas",
         client_version="1.2.3",
     )
+
+
+class _Route:
+    path = "/api/automation/v1/{automation_id}"
+
+
+def _request(path: str, *, endpoint_name: str = "list_automations"):
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    def endpoint():
+        return None
+
+    endpoint.__name__ = endpoint_name
+    return telemetry.Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "client": ("testclient", 50000),
+            "endpoint": endpoint,
+            "route": _Route(),
+        },
+        receive,
+    )
+
+
+def test_should_capture_api_route_for_v1_and_public_paths():
+    assert telemetry.should_capture_api_route(_request("/api/automation/v1"))
+    assert telemetry.should_capture_api_route(_request("/sdk-version"))
+    assert telemetry.should_capture_api_route(_request("/api/automation/server_info"))
+    assert not telemetry.should_capture_api_route(_request("/docs"))
+    assert not telemetry.should_capture_api_route(_request("/automations"))
+
+
+@pytest.mark.asyncio
+async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
+    monkeypatch,
+):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    await telemetry.capture_api_route_event(
+        _request("/api/automation/v1/123", endpoint_name="get_automation"),
+        status_code=200,
+        duration_ms=12,
+    )
+
+    _, payload = _MockAsyncClient.posts[0]
+    assert payload["event"] == "automation_api_get_automation"
+    properties = payload["properties"]
+    assert properties["http_method"] == "GET"
+    assert properties["route_path"] == "/api/automation/v1/{automation_id}"
+    assert properties["route_operation"] == "get_automation"
+    assert properties["status_code"] == 200
+    assert properties["success"] is True
+    assert properties["duration_ms"] == 12

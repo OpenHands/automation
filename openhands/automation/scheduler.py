@@ -194,11 +194,23 @@ async def poll_and_schedule(
             try:
                 run = await create_pending_run(session, automation)
                 created_runs.append(run)
+                schedule_properties = {
+                    "trigger_source": "cron",
+                    "schedule": automation.trigger.get("schedule")
+                    if isinstance(automation.trigger, dict)
+                    else None,
+                }
+                await capture_automation_event(
+                    "automation_run_scheduled",
+                    automation=automation,
+                    run=run,
+                    properties=schedule_properties,
+                )
                 await capture_automation_event(
                     "automation_run_created",
                     automation=automation,
                     run=run,
-                    properties={"trigger_source": "cron"},
+                    properties=schedule_properties,
                 )
                 logger.info(
                     "Created pending run: run_id=%s automation_id=%s "

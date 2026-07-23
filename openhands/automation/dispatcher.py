@@ -408,10 +408,22 @@ async def dispatch_pending_runs(
                 dispatched_runs.append(run)
             except Exception:
                 logger.exception("Failed to dispatch run", extra=extra)
+                await capture_automation_event(
+                    "automation_run_dispatch_failed",
+                    automation=run.automation,
+                    run=run,
+                    properties={"trigger_source": "dispatcher"},
+                )
 
         await session.commit()
 
         for run in dispatched_runs:
+            await capture_automation_event(
+                "automation_run_dispatched",
+                automation=run.automation,
+                run=run,
+                properties={"trigger_source": "dispatcher"},
+            )
             await capture_automation_event(
                 "automation_run_started",
                 automation=run.automation,
