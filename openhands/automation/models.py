@@ -329,6 +329,26 @@ class CustomWebhook(Base):
     )
 
 
+class AutomationServiceMetadata(Base):
+    """Service-level metadata shared by all automation deployment modes."""
+
+    __tablename__ = "automation_service_metadata"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class AutomationKV(Base):
     """Single-document state store for automation persistence.
 

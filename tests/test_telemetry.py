@@ -2,6 +2,8 @@ import uuid
 from typing import ClassVar
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from openhands.automation import telemetry
 from openhands.automation.config import clear_config_cache
@@ -9,7 +11,13 @@ from openhands.automation.middleware import (
     TelemetryRequestContext,
     build_telemetry_request_context,
 )
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    AutomationServiceMetadata,
+    Base,
+)
 
 
 class _Response:
@@ -63,7 +71,6 @@ def _reset_config(monkeypatch):
         "AUTOMATION_POSTHOG_API_KEY",
         "AUTOMATION_POSTHOG_HOST",
         "AUTOMATION_AGENT_SERVER_URL",
-        "AUTOMATION_TELEMETRY_BACKEND_ID_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
     clear_config_cache()
@@ -73,16 +80,17 @@ def _reset_config(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_capture_uses_persistent_backend_id_and_frontend_property(
-    monkeypatch, tmp_path
-):
-    backend_id_path = tmp_path / "backend-id"
+async def test_local_capture_uses_backend_id_and_frontend_property(monkeypatch):
     monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
     monkeypatch.setenv("AUTOMATION_POSTHOG_HOST", "https://posthog.example")
     monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
-    monkeypatch.setenv("AUTOMATION_TELEMETRY_BACKEND_ID_PATH", str(backend_id_path))
     clear_config_cache()
     monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
 
     automation = _automation()
     run = _run(automation)
@@ -104,10 +112,9 @@ async def test_local_capture_uses_persistent_backend_id_and_frontend_property(
     url, payload = _MockAsyncClient.posts[0]
     assert url == "https://posthog.example/capture/"
     assert payload["event"] == "automation_run_completed"
-    assert payload["distinct_id"] == "ph-fe-123"
+    assert payload["distinct_id"] == "automation-backend:test"
     properties = payload["properties"]
-    assert properties["automation_backend_id"].startswith("automation-local:")
-    assert backend_id_path.read_text().strip() == properties["automation_backend_id"]
+    assert properties["automation_backend_id"] == "automation-backend:test"
     assert properties["frontend_distinct_id"] == "ph-fe-123"
     assert properties["client_source"] == "agent_canvas"
     assert properties["automation_id"] == str(automation.id)
@@ -116,15 +123,15 @@ async def test_local_capture_uses_persistent_backend_id_and_frontend_property(
 
 
 @pytest.mark.asyncio
-async def test_cloud_capture_uses_frontend_distinct_id_and_org_properties(
-    monkeypatch, tmp_path
-):
+async def test_cloud_capture_uses_backend_id_and_org_properties(monkeypatch):
     monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    monkeypatch.setenv(
-        "AUTOMATION_TELEMETRY_BACKEND_ID_PATH", str(tmp_path / "backend-id")
-    )
     clear_config_cache()
     monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:cloud"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
 
     automation = _automation()
 
@@ -136,7 +143,7 @@ async def test_cloud_capture_uses_frontend_distinct_id_and_org_properties(
     )
 
     _, payload = _MockAsyncClient.posts[0]
-    assert payload["distinct_id"] == "ph-fe-123"
+    assert payload["distinct_id"] == "automation-backend:cloud"
     properties = payload["properties"]
     assert properties["deployment_mode"] == "cloud"
     assert properties["cloud_user_id"] == str(automation.user_id)
@@ -144,7 +151,7 @@ async def test_cloud_capture_uses_frontend_distinct_id_and_org_properties(
     assert properties["$groups"] == {"org": str(automation.org_id)}
     assert properties["creation_path"] == "prompt_preset"
     assert properties["frontend_distinct_id"] == "ph-fe-123"
-    assert properties["automation_backend_id"].startswith("automation-local:")
+    assert properties["automation_backend_id"] == "automation-backend:cloud"
 
 
 @pytest.mark.asyncio
@@ -222,6 +229,11 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     clear_config_cache()
     monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
 
+    async def backend_id(**kwargs):
+        return "automation-backend:api"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
     await telemetry.capture_api_route_event(
         _request("/api/automation/v1/123", endpoint_name="get_automation"),
         status_code=200,
@@ -237,3 +249,39 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["status_code"] == 200
     assert properties["success"] is True
     assert properties["duration_ms"] == 12
+
+
+@pytest.mark.asyncio
+async def test_backend_distinct_id_is_db_backed_and_stable():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first = await telemetry.get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+        second = await telemetry.get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+
+        assert first is not None
+        assert first.startswith("automation-backend:")
+        assert second == first
+
+        async with session_factory() as session:
+            row_count = await session.scalar(
+                select(func.count()).select_from(AutomationServiceMetadata)
+            )
+            stored = await session.scalar(
+                select(AutomationServiceMetadata.value).where(
+                    AutomationServiceMetadata.key
+                    == telemetry.TELEMETRY_BACKEND_DISTINCT_ID_KEY
+                )
+            )
+
+        assert row_count == 1
+        assert stored == first
+    finally:
+        await engine.dispose()

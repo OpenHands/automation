@@ -205,12 +205,14 @@ async def poll_and_schedule(
                     automation=automation,
                     run=run,
                     properties=schedule_properties,
+                    session=session,
                 )
                 await capture_automation_event(
                     "automation_run_created",
                     automation=automation,
                     run=run,
                     properties=schedule_properties,
+                    session=session,
                 )
                 logger.info(
                     "Created pending run: run_id=%s automation_id=%s "

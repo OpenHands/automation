@@ -192,6 +192,7 @@ async def _execute_run(
             "automation_run_failed",
             automation=automation,
             run=run,
+            session_factory=session_factory,
             properties={
                 "trigger_source": "dispatcher",
                 "failure_kind": "dispatch_error",
@@ -220,6 +221,7 @@ async def _execute_run(
             "automation_run_skipped",
             automation=automation,
             run=run,
+            session_factory=session_factory,
             properties={
                 "trigger_source": "dispatcher",
                 "skip_reason": "concurrency_limit",
@@ -413,6 +415,7 @@ async def dispatch_pending_runs(
                     automation=run.automation,
                     run=run,
                     properties={"trigger_source": "dispatcher"},
+                    session=session,
                 )
 
         await session.commit()
@@ -423,12 +426,14 @@ async def dispatch_pending_runs(
                 automation=run.automation,
                 run=run,
                 properties={"trigger_source": "dispatcher"},
+                session_factory=session_factory,
             )
             await capture_automation_event(
                 "automation_run_started",
                 automation=run.automation,
                 run=run,
                 properties={"trigger_source": "dispatcher"},
+                session_factory=session_factory,
             )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),

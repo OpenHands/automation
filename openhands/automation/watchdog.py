@@ -97,6 +97,7 @@ async def _verify_and_mark_run(
                 "automation_run_failed",
                 automation=run.automation,
                 run=run,
+                session=session,
                 properties={
                     "trigger_source": "watchdog",
                     "failure_kind": "verification_failed",
@@ -186,6 +187,7 @@ async def _verify_and_mark_run(
                 else "automation_run_failed",
                 automation=run.automation,
                 run=run,
+                session=session,
                 properties={
                     "trigger_source": "watchdog",
                     "verification_exit_code": exit_code,
@@ -247,6 +249,7 @@ async def _verify_and_mark_run(
             "automation_run_failed",
             automation=run.automation,
             run=run,
+            session=session,
             properties={
                 "trigger_source": "watchdog",
                 "failure_kind": "timeout",
