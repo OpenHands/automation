@@ -211,7 +211,6 @@ def _base_properties(
                 {
                     "cloud_user_id": str(automation.user_id),
                     "cloud_org_id": str(automation.org_id),
-                    "org_id": str(automation.org_id),
                     "$groups": {"org": str(automation.org_id)},
                 }
             )
@@ -221,7 +220,6 @@ def _base_properties(
             {
                 "cloud_user_id": str(user.user_id),
                 "cloud_org_id": str(user.org_id),
-                "org_id": str(user.org_id),
                 "$groups": {"org": str(user.org_id)},
             }
         )

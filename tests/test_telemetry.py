@@ -262,7 +262,6 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["deployment_mode"] == "cloud"
     assert properties["cloud_user_id"] == str(user.user_id)
     assert properties["cloud_org_id"] == str(user.org_id)
-    assert properties["org_id"] == str(user.org_id)
     assert properties["$groups"] == {"org": str(user.org_id)}
 
     assert properties["success"] is True
