@@ -458,8 +458,11 @@ def _request(path: str, *, endpoint_name: str = "list_automations"):
 
 def test_should_capture_api_route_for_v1_and_public_paths():
     assert telemetry.should_capture_api_route(_request("/api/automation/v1"))
-    assert telemetry.should_capture_api_route(_request("/sdk-version"))
     assert telemetry.should_capture_api_route(_request("/api/automation/server_info"))
+    assert not telemetry.should_capture_api_route(_request("/sdk-version"))
+    assert not telemetry.should_capture_api_route(
+        _request("/api/automation/sdk-version")
+    )
     assert not telemetry.should_capture_api_route(_request("/docs"))
     assert not telemetry.should_capture_api_route(_request("/automations"))
 

@@ -33,9 +33,7 @@ TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
 API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
-_PUBLIC_API_ROUTE_PATHS = frozenset(
-    {"/health", "/ready", "/sdk-version", "/server_info"}
-)
+_PUBLIC_API_ROUTE_PATHS = frozenset({"/health", "/ready", "/server_info"})
 
 
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
