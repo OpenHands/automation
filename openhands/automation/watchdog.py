@@ -46,6 +46,13 @@ async def _get_automation_keep_alive(
     )
 
 
+def _loaded_automation(run: AutomationRun) -> Automation | None:
+    """Return the parent automation only when it is already loaded."""
+    if "automation" in inspect(run).unloaded:
+        return None
+    return run.automation
+
+
 def _should_cleanup_sandbox_after_terminal(
     run: AutomationRun, keep_alive: bool | None
 ) -> bool:
@@ -95,7 +102,7 @@ async def _verify_and_mark_run(
         if result.rowcount > 0:
             await capture_automation_event(
                 "automation_run_failed",
-                automation=run.automation,
+                automation=_loaded_automation(run),
                 run=run,
                 session=session,
                 properties={
@@ -185,7 +192,7 @@ async def _verify_and_mark_run(
                 "automation_run_completed"
                 if exit_code == 0
                 else "automation_run_failed",
-                automation=run.automation,
+                automation=_loaded_automation(run),
                 run=run,
                 session=session,
                 properties={
@@ -247,7 +254,7 @@ async def _verify_and_mark_run(
     if result.rowcount > 0:
         await capture_automation_event(
             "automation_run_failed",
-            automation=run.automation,
+            automation=_loaded_automation(run),
             run=run,
             session=session,
             properties={

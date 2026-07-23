@@ -228,6 +228,7 @@ def _base_properties(
                 "has_conversation_id": bool(run.conversation_id),
             }
         )
+        properties.setdefault("automation_id", str(run.automation_id))
         if run.started_at and run.completed_at:
             duration_ms = int(
                 (run.completed_at - run.started_at).total_seconds() * 1000
