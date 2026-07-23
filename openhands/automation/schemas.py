@@ -578,6 +578,21 @@ class CustomWebhookListResponse(BaseModel):
     total: int
 
 
+class TelemetryConsentRequest(BaseModel):
+    """Frontend telemetry consent state for local automation telemetry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    consent_granted: bool
+    frontend_distinct_id: str | None = Field(default=None, max_length=256)
+
+
+class TelemetryConsentResponse(BaseModel):
+    """Stored aggregate telemetry consent for this automation service."""
+
+    consent_granted: bool
+
+
 # --- Responses ---
 
 

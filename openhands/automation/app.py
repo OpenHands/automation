@@ -32,6 +32,7 @@ from openhands.automation.middleware import (
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
@@ -239,6 +240,8 @@ app.include_router(uploads_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
+app.include_router(telemetry_router, prefix=_base_path)
+
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 

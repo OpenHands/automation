@@ -1,5 +1,6 @@
 """Best-effort PostHog product telemetry for automation lifecycle events."""
 
+import json
 import logging
 import re
 import uuid
@@ -27,6 +28,9 @@ logger = logging.getLogger("automation.telemetry")
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
+TELEMETRY_CONSENT_METADATA_KEY = "posthog_frontend_consent_by_distinct_id"
+TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
+
 API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
 _PUBLIC_API_ROUTE_PATHS = frozenset(
@@ -86,6 +90,93 @@ async def get_automation_backend_distinct_id(
     except Exception:
         logger.debug("Failed to load automation telemetry backend ID", exc_info=True)
         return None
+
+
+def _normalize_frontend_distinct_id(frontend_distinct_id: str | None) -> str:
+    normalized = (frontend_distinct_id or "").strip()
+    return normalized[:256] or TELEMETRY_CONSENT_ANONYMOUS_ID
+
+
+def _parse_telemetry_consent_map(raw_value: str | None) -> dict[str, bool]:
+    if not raw_value:
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(frontend_id): consent
+        for frontend_id, consent in parsed.items()
+        if isinstance(consent, bool)
+    }
+
+
+async def _load_telemetry_consent_map(session: AsyncSession) -> dict[str, bool]:
+    raw_value = await session.scalar(
+        select(AutomationServiceMetadata.value).where(
+            AutomationServiceMetadata.key == TELEMETRY_CONSENT_METADATA_KEY
+        )
+    )
+    return _parse_telemetry_consent_map(raw_value)
+
+
+def has_granted_telemetry_consent(consents: dict[str, bool]) -> bool:
+    return any(consents.values())
+
+
+async def set_stored_telemetry_consent(
+    session: AsyncSession,
+    *,
+    consent_granted: bool,
+    frontend_distinct_id: str | None,
+) -> bool:
+    """Store frontend telemetry consent and return aggregate consent state."""
+    consents = await _load_telemetry_consent_map(session)
+    consents[_normalize_frontend_distinct_id(frontend_distinct_id)] = consent_granted
+    serialized = json.dumps(consents, sort_keys=True)
+    await session.execute(
+        text(
+            "INSERT INTO automation_service_metadata (key, value) "
+            "VALUES (:key, :value) "
+            "ON CONFLICT (key) DO UPDATE SET "
+            "value = :value, updated_at = CURRENT_TIMESTAMP"
+        ),
+        {"key": TELEMETRY_CONSENT_METADATA_KEY, "value": serialized},
+    )
+    return has_granted_telemetry_consent(consents)
+
+
+async def get_stored_telemetry_consent(
+    *,
+    request: Request | None = None,
+    session: AsyncSession | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> bool:
+    """Return whether any known frontend identity granted telemetry consent."""
+    try:
+        if session is not None:
+            return has_granted_telemetry_consent(
+                await _load_telemetry_consent_map(session)
+            )
+
+        if session_factory is None and request is not None:
+            session_factory = getattr(request.app.state, "session_factory", None)
+
+        if session_factory is None:
+            logger.debug(
+                "No database session available for automation telemetry consent"
+            )
+            return False
+
+        async with session_factory() as new_session:
+            return has_granted_telemetry_consent(
+                await _load_telemetry_consent_map(new_session)
+            )
+    except Exception:
+        logger.debug("Failed to load automation telemetry consent", exc_info=True)
+        return False
 
 
 def get_request_telemetry_context(request: Request | None) -> TelemetryRequestContext:
@@ -260,7 +351,11 @@ async def capture_automation_event(
         return
 
     context = request_context or get_request_telemetry_context(request)
-    if settings.is_local_mode and not context.frontend_distinct_id:
+    if settings.is_local_mode and not await get_stored_telemetry_consent(
+        request=request,
+        session=session,
+        session_factory=session_factory,
+    ):
         return
 
     backend_distinct_id = await get_automation_backend_distinct_id(
