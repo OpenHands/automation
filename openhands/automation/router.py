@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
@@ -31,6 +31,7 @@ from openhands.automation.schemas import (
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.api_key import (
     APIKeyError,
@@ -60,6 +61,7 @@ _require_manage_automations = require_permission("manage_automations")
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_automation(
     body: CreateAutomationRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
@@ -93,6 +95,13 @@ async def create_automation(
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=auto,
+        properties={"creation_path": "raw"},
+    )
     return AutomationResponse.model_validate(auto)
 
 
@@ -141,6 +150,7 @@ async def get_automation(
 async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
@@ -178,12 +188,20 @@ async def update_automation(
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
+    await capture_automation_event(
+        "automation_updated",
+        request=request,
+        user=user,
+        automation=auto,
+        properties={"updated_fields": sorted(update_data.keys())},
+    )
     return AutomationResponse.model_validate(auto)
 
 
 @router.delete("/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_automation(
     automation_id: uuid.UUID,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
@@ -192,6 +210,12 @@ async def delete_automation(
     auto.enabled = False
     auto.deleted_at = utcnow()
     await session.flush()
+    await capture_automation_event(
+        "automation_deleted",
+        request=request,
+        user=user,
+        automation=auto,
+    )
 
 
 @router.get("/{automation_id}/tarball")
@@ -267,6 +291,7 @@ async def download_automation_tarball(
 @router.post("/{automation_id}/dispatch", status_code=status.HTTP_201_CREATED)
 async def dispatch_automation(
     automation_id: uuid.UUID,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
@@ -279,6 +304,14 @@ async def dispatch_automation(
     run = await create_pending_run(session, auto)
     await session.flush()
     await session.refresh(run)
+    await capture_automation_event(
+        "automation_run_created",
+        request=request,
+        user=user,
+        automation=auto,
+        run=run,
+        properties={"trigger_source": "manual"},
+    )
     return AutomationRunResponse.model_validate(run)
 
 
@@ -326,6 +359,7 @@ async def list_automation_runs(
 async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
@@ -393,6 +427,16 @@ async def complete_run(
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    await capture_automation_event(
+        "automation_run_completed"
+        if new_status == AutomationRunStatus.COMPLETED
+        else "automation_run_failed",
+        request=request,
+        user=user,
+        automation=automation,
+        run=run,
+        properties={"trigger_source": "callback"},
+    )
 
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
@@ -434,6 +478,7 @@ async def complete_run(
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(
     run_id: uuid.UUID,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
@@ -491,6 +536,14 @@ async def cancel_run(
 
     await session.refresh(run)
     logger.info("Run %s cancelled by user", run_id)
+    await capture_automation_event(
+        "automation_run_cancelled",
+        request=request,
+        user=user,
+        automation=automation,
+        run=run,
+        properties={"trigger_source": "manual"},
+    )
 
     # Clean up sandbox for runs that were RUNNING
     if run.sandbox_id:

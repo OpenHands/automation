@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
 from openhands.automation.schemas import EventResponse
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
     create_automation_run,
@@ -151,6 +152,15 @@ async def receive_event(
             org_id,
             e,
         )
+        await capture_automation_event(
+            "automation_event_ignored",
+            request=request,
+            properties={
+                "event_source": source,
+                "org_id": str(org_id),
+                "ignore_reason": "unrecognized_event",
+            },
+        )
         return EventResponse(received=True, matched=0, runs_created=[])
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
@@ -161,6 +171,16 @@ async def receive_event(
         source,
         event.event_key,
         org_id,
+    )
+    await capture_automation_event(
+        "automation_event_received",
+        request=request,
+        properties={
+            "event_source": source,
+            "event_key": event.event_key,
+            "org_id": str(org_id),
+            "webhook_builtin": config.is_builtin,
+        },
     )
 
     # 6. Find matching automations
@@ -178,6 +198,17 @@ async def receive_event(
         len(automations),
         org_id,
     )
+    await capture_automation_event(
+        "automation_event_matched",
+        request=request,
+        properties={
+            "event_source": source,
+            "event_key": event.event_key,
+            "org_id": str(org_id),
+            "candidate_count": len(automations),
+            "matched_count": len(matched_automations),
+        },
+    )
 
     # 7. Create PENDING runs for matched automations
     # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
@@ -194,6 +225,25 @@ async def receive_event(
             automation, session, event_payload=event_payload
         )
         run_ids.append(str(run.id))
+        run_properties = {
+            "trigger_source": "event",
+            "event_source": source,
+            "event_key": event.event_key,
+        }
+        await capture_automation_event(
+            "automation_run_scheduled",
+            request=request,
+            automation=automation,
+            run=run,
+            properties=run_properties,
+        )
+        await capture_automation_event(
+            "automation_run_created",
+            request=request,
+            automation=automation,
+            run=run,
+            properties=run_properties,
+        )
 
     await session.commit()
 

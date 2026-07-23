@@ -348,6 +348,10 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_SERVICE_KEY: Service key for SaaS API (required in cloud mode)
         AUTOMATION_WEBHOOK_SECRET: Webhook signature secret (optional)
         AUTOMATION_OPENHANDS_API_BASE_URL: OpenHands API URL (default: https://app.all-hands.dev)
+
+        # Product telemetry (optional)
+        AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
+        AUTOMATION_POSTHOG_HOST: PostHog capture host (default: https://us.i.posthog.com)
     """
 
     # Database (PostgreSQL - Cloud mode)
@@ -445,6 +449,11 @@ class ServiceSettings(BaseSettings):
     # Event-based triggers: Shared secret for verifying webhook signatures
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
+
+    # Optional PostHog product telemetry. Capture remains disabled unless a
+    # project key is configured by the deployment.
+    posthog_api_key: str = ""
+    posthog_host: str = "https://us.i.posthog.com"
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

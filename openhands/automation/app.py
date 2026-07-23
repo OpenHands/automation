@@ -24,10 +24,15 @@ from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
-from openhands.automation.middleware import ApiKeyAwareCORSMiddleware
+from openhands.automation.middleware import (
+    ApiKeyAwareCORSMiddleware,
+    TelemetryContextMiddleware,
+    api_route_telemetry_middleware,
+)
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
@@ -212,6 +217,12 @@ def _create_app() -> FastAPI:
 
 app = _create_app()
 
+
+app.middleware("http")(api_route_telemetry_middleware)
+
+
+app.add_middleware(TelemetryContextMiddleware)
+
 # API-key requests (e.g. the local agent-server GUI calling directly from the
 # browser) get permissive CORS; cookie/session requests keep the strict
 # allowlist below. Mirrors the main cloud API's ApiKeyAwareCORSMiddleware.
@@ -229,6 +240,8 @@ app.include_router(uploads_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
+app.include_router(telemetry_router, prefix=_base_path)
+
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
 

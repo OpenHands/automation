@@ -254,6 +254,45 @@ class TestDispatchPendingRuns:
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
 
+    @patch(
+        "openhands.automation.dispatcher.capture_automation_event",
+        new_callable=AsyncMock,
+    )
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatch_emits_single_run_lifecycle_event(
+        self,
+        mock_execute,
+        mock_capture_event,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        """Dispatch is the canonical telemetry event for a run starting."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
+
+        emitted_events = [call.args[0] for call in mock_capture_event.await_args_list]
+        assert emitted_events == ["automation_run_dispatched"]
+
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
         self, mock_execute, async_session_factory, mock_settings, mock_client

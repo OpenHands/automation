@@ -41,6 +41,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     TarballUpload,
 )
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.kv import create_kv_token
@@ -187,6 +188,17 @@ async def _execute_run(
     async def _fail(error: str, disable: bool = False) -> None:
         """Mark run as failed and optionally disable the automation."""
         await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        await capture_automation_event(
+            "automation_run_failed",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+                "automation_disabled": disable,
+            },
+        )
         if disable:
             await disable_automation(session_factory, automation.id, error)
 
@@ -205,6 +217,16 @@ async def _execute_run(
             extra=_log_ctx(),
         )
         await mark_run_terminal(session_factory, run, AutomationRunStatus.SKIPPED)
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "concurrency_limit",
+            },
+        )
         return
     except Exception:
         logger.exception("Failed to get execution context", extra=_log_ctx())
@@ -388,10 +410,24 @@ async def dispatch_pending_runs(
                 dispatched_runs.append(run)
             except Exception:
                 logger.exception("Failed to dispatch run", extra=extra)
+                await capture_automation_event(
+                    "automation_run_dispatch_failed",
+                    automation=run.automation,
+                    run=run,
+                    properties={"trigger_source": "dispatcher"},
+                    session=session,
+                )
 
         await session.commit()
 
         for run in dispatched_runs:
+            await capture_automation_event(
+                "automation_run_dispatched",
+                automation=run.automation,
+                run=run,
+                properties={"trigger_source": "dispatcher"},
+                session_factory=session_factory,
+            )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",
