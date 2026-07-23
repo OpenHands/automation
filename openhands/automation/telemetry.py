@@ -97,6 +97,11 @@ def get_request_telemetry_context(request: Request | None) -> TelemetryRequestCo
     return build_telemetry_request_context(request.scope)
 
 
+def get_request_authenticated_user(request: Request) -> AuthenticatedUser | None:
+    user = getattr(request.state, "authenticated_user", None)
+    return user if isinstance(user, AuthenticatedUser) else None
+
+
 def _clean_event_suffix(value: str | None) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", value or "unknown").strip("_")
     return cleaned.lower() or "unknown"
@@ -144,6 +149,7 @@ async def capture_api_route_event(
     await capture_automation_event(
         f"{API_EVENT_PREFIX}_{operation}",
         request=request,
+        user=get_request_authenticated_user(request),
         properties={
             "http_method": request.method,
             "route_path": _route_template(request),

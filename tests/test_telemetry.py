@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from openhands.automation import telemetry
+from openhands.automation.auth import AuthenticatedUser, AuthMethod
 from openhands.automation.config import clear_config_cache
 from openhands.automation.middleware import (
     TelemetryRequestContext,
@@ -234,8 +235,19 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
 
     monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
 
+    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
+    user = AuthenticatedUser(
+        user_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        email="user@example.com",
+        role="admin",
+        permissions=["manage_automations"],
+        auth_method=AuthMethod.API_KEY,
+    )
+    request.state.authenticated_user = user
+
     await telemetry.capture_api_route_event(
-        _request("/api/automation/v1/123", endpoint_name="get_automation"),
+        request,
         status_code=200,
         duration_ms=12,
     )
@@ -247,6 +259,12 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["route_path"] == "/api/automation/v1/{automation_id}"
     assert properties["route_operation"] == "get_automation"
     assert properties["status_code"] == 200
+    assert properties["deployment_mode"] == "cloud"
+    assert properties["cloud_user_id"] == str(user.user_id)
+    assert properties["cloud_org_id"] == str(user.org_id)
+    assert properties["org_id"] == str(user.org_id)
+    assert properties["$groups"] == {"org": str(user.org_id)}
+
     assert properties["success"] is True
     assert properties["duration_ms"] == 12
 
