@@ -22,6 +22,7 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationServiceMetadata,
 )
+from openhands.automation.utils.version import get_server_version_info
 
 
 logger = logging.getLogger("automation.telemetry")
@@ -269,6 +270,7 @@ def _base_properties(
     properties: dict[str, Any] = {
         "deployment_mode": "local" if settings.is_local_mode else "cloud",
         "automation_service": "openhands_automation",
+        **get_server_version_info(missing_sdk_version="unknown"),
     }
 
     properties[AUTOMATION_BACKEND_ID_PROPERTY] = backend_distinct_id
