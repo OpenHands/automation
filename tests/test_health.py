@@ -105,7 +105,7 @@ class TestSdkVersionEndpoint:
     async def test_returns_503_when_package_not_found(self, health_client):
         """GET /sdk-version returns 503 when openhands-sdk is not installed."""
         with patch(
-            "openhands.automation.app.importlib.metadata.version",
+            "openhands.automation.utils.version.importlib.metadata.version",
             side_effect=importlib.metadata.PackageNotFoundError("openhands-sdk"),
         ):
             response = await health_client.get("/api/automation/sdk-version")
@@ -139,7 +139,7 @@ class TestServerInfoEndpoint:
     async def test_returns_503_when_sdk_package_not_found(self, health_client):
         """GET /server_info returns 503 when openhands-sdk is not installed."""
         with patch(
-            "openhands.automation.app.importlib.metadata.version",
+            "openhands.automation.utils.version.importlib.metadata.version",
             side_effect=importlib.metadata.PackageNotFoundError("openhands-sdk"),
         ):
             response = await health_client.get("/api/automation/server_info")

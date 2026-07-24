@@ -1,10 +1,10 @@
 """FastAPI application entrypoint."""
 
 import asyncio
-import importlib.metadata
 import logging
 import os
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from openhands.automation import __version__
 from openhands.automation.auth import create_http_client
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
@@ -34,6 +33,7 @@ from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
+from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
 
@@ -274,11 +274,6 @@ async def readiness():
         )
 
 
-def _get_sdk_version() -> str:
-    """Return the installed OpenHands SDK package version."""
-    return importlib.metadata.version("openhands-sdk")
-
-
 @app.get("/sdk-version")
 @app.get(f"{_base_path}/sdk-version")
 async def sdk_version():
@@ -290,8 +285,8 @@ async def sdk_version():
     are available in the sandbox.
     """
     try:
-        version = _get_sdk_version()
-    except importlib.metadata.PackageNotFoundError:
+        version = get_sdk_version()
+    except PackageNotFoundError:
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
@@ -304,16 +299,12 @@ async def sdk_version():
 async def server_info():
     """Return public metadata about the automation service."""
     try:
-        sdk_version = _get_sdk_version()
-    except importlib.metadata.PackageNotFoundError:
+        return get_server_version_info()
+    except PackageNotFoundError:
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return {
-        "package_version": __version__,
-        "sdk_version": sdk_version,
-    }
 
 
 # ---------------------------------------------------------------------------
