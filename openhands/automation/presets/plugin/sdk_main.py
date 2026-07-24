@@ -129,6 +129,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.mcp.config import coerce_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
@@ -140,6 +141,13 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _normalize_mcp_config(raw_mcp_config):
+    """Return a native SDK MCP map from native or {"mcpServers": ...} input."""
+    if not raw_mcp_config:
+        return {}
+    return coerce_mcp_config(raw_mcp_config)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -326,11 +334,11 @@ This automation was triggered by a webhook event:
 
     # Get MCP config via workspace
     print("\n=== GET_MCP_CONFIG ===")
-    mcp_config = None
+    mcp_config = {}
     try:
-        mcp_config = workspace.get_mcp_config()
-        if mcp_config and mcp_config.get("mcpServers"):
-            print(f"  servers: {list(mcp_config['mcpServers'].keys())}")
+        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+        if mcp_config:
+            print(f"  servers: {list(mcp_config.keys())}")
         else:
             print("  no MCP servers configured")
     except Exception as e:

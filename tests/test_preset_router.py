@@ -186,6 +186,12 @@ class TestGenerateTarball:
             assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
             assert "workspace.get_mcp_config()" in main_content
+            assert "coerce_mcp_config" in main_content
+            assert "def _normalize_mcp_config(raw_mcp_config):" in main_content
+            assert '{"mcpServers": ...}' in main_content
+            assert "_normalize_mcp_config(workspace.get_mcp_config())" in main_content
+            assert "list(mcp_config.keys())" in main_content
+            assert 'mcp_config.get("mcpServers")' not in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
             assert "get_default_agent" in main_content
@@ -907,6 +913,13 @@ class TestGeneratePluginTarball:
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
+            assert "workspace.get_mcp_config()" in main_content
+            assert "coerce_mcp_config" in main_content
+            assert "def _normalize_mcp_config(raw_mcp_config):" in main_content
+            assert '{"mcpServers": ...}' in main_content
+            assert "_normalize_mcp_config(workspace.get_mcp_config())" in main_content
+            assert "list(mcp_config.keys())" in main_content
+            assert 'mcp_config.get("mcpServers")' not in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
