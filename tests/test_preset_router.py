@@ -1,11 +1,14 @@
 """Tests for preset-based automation creation endpoint."""
 
+import ast
 import io
 import json
 import socket
 import tarfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +21,7 @@ from openhands.automation.preset_router import (
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -45,6 +49,29 @@ requires_docker = pytest.mark.skipif(
     not _docker_available(),
     reason="Docker not available for testcontainers",
 )
+
+
+def _load_preset_mcp_normalizer(
+    preset_name: str, *, with_coercer: bool = True
+) -> Callable[[Any], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_normalize_mcp_config"
+    )
+    namespace: dict[str, Any] = {
+        "_coerce_mcp_config": coerce_mcp_config if with_coercer else None
+    }
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any], Any], namespace["_normalize_mcp_config"])
 
 
 class TestPresetFileSyntax:
@@ -136,6 +163,45 @@ class TestPresetEntrypoint:
         assert "command -v python3" in content
         assert "command -v python" in content
         assert "command -v py" in content
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize(
+    ("raw_mcp_config", "expected_keys"),
+    [
+        ({"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}, ["fetch"]),
+        (
+            {"mcpServers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}},
+            ["fetch"],
+        ),
+        ({}, []),
+        (None, []),
+    ],
+)
+def test_preset_mcp_normalizer_accepts_native_wrapped_and_empty_shapes(
+    preset_name, raw_mcp_config, expected_keys
+):
+    normalize = _load_preset_mcp_normalizer(preset_name)
+
+    normalized = normalize(raw_mcp_config)
+
+    assert list(normalized) == expected_keys
+    if expected_keys:
+        assert dump_mcp_config(normalized)["fetch"] == {
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+        }
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
+    normalize = _load_preset_mcp_normalizer(preset_name, with_coercer=False)
+    wrapped_config = {"mcpServers": {"fetch": {"command": "uvx"}}}
+    native_config = {"fetch": {"command": "uvx"}}
+
+    assert normalize(wrapped_config) == native_config
+    assert normalize(native_config) == native_config
+    assert normalize(None) == {}
 
 
 class TestGenerateTarball:
@@ -907,6 +973,7 @@ class TestGeneratePluginTarball:
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
+            assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
