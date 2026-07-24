@@ -133,7 +133,11 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
-from openhands.sdk.mcp.config import coerce_mcp_config
+
+try:
+    from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
+except ImportError:
+    _coerce_mcp_config = None
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -147,10 +151,15 @@ def _conversation_supports_user_id() -> bool:
 
 
 def _normalize_mcp_config(raw_mcp_config):
-    """Return a native SDK MCP map from native or {"mcpServers": ...} input."""
     if not raw_mcp_config:
         return {}
-    return coerce_mcp_config(raw_mcp_config)
+    if _coerce_mcp_config is not None:
+        return _coerce_mcp_config(raw_mcp_config)
+    if isinstance(raw_mcp_config, dict) and isinstance(
+        raw_mcp_config.get("mcpServers"), dict
+    ):
+        return raw_mcp_config["mcpServers"]
+    return raw_mcp_config
 
 
 # Workspace base directory (for RemoteWorkspace working_dir).
