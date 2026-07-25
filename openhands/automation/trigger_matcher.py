@@ -24,12 +24,12 @@ from openhands.automation.schemas import EventTrigger
 logger = logging.getLogger("automation.trigger_matcher")
 
 
-def match_trigger_with_reason(
+def matches_trigger(
     trigger: EventTrigger,
     event_source: str,
     event_key: str,
     payload: dict[str, Any],
-) -> tuple[bool, str]:
+) -> bool:
     """
     Check if an event matches an event trigger.
 
@@ -40,7 +40,7 @@ def match_trigger_with_reason(
         payload: The webhook payload for filter evaluation
 
     Returns:
-        Tuple of whether the trigger matched and a diagnostic reason.
+        True if the event matches all trigger conditions
 
     Examples:
         >>> trigger = EventTrigger(
@@ -53,11 +53,11 @@ def match_trigger_with_reason(
     """
     # 1. Source must match
     if trigger.source != event_source:
-        return False, f"source mismatch: trigger_source={trigger.source}"
+        return False
 
     # 2. Event key must match one of the patterns
     if not _matches_event_key(event_key, trigger.on):
-        return False, f"event key mismatch: trigger_on={trigger.on}"
+        return False
 
     # 3. Filter expression must evaluate to true (if specified)
     if trigger.filter:
@@ -68,25 +68,12 @@ def match_trigger_with_reason(
                     trigger.filter,
                     event_key,
                 )
-                return False, f"filter mismatch: filter={trigger.filter}"
+                return False
         except FilterEvaluationError as e:
             logger.warning("Filter evaluation failed: %s", e)
-            return False, f"filter evaluation error: {e}"
+            return False
 
-    return True, "matched"
-
-
-def matches_trigger(
-    trigger: EventTrigger,
-    event_source: str,
-    event_key: str,
-    payload: dict[str, Any],
-) -> bool:
-    """Check if an event matches an event trigger."""
-    matched, _reason = match_trigger_with_reason(
-        trigger, event_source, event_key, payload
-    )
-    return matched
+    return True
 
 
 def _matches_event_key(event_key: str, on: str | list[str]) -> bool:
