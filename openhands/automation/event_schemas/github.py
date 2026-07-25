@@ -481,3 +481,11 @@ def parse_github_event_auto(payload: dict[str, Any]) -> GitHubEvent:
 def get_supported_event_types() -> list[str]:
     """Get list of all supported GitHub event types."""
     return list(GITHUB_PAYLOAD_CLASSES.keys())
+
+
+def get_event_detection_rules() -> list[dict[str, str]]:
+    """Get ordered GitHub event type detection rules."""
+    return [
+        {"event_type": event_type, "jmespath": expression}
+        for event_type, expression in GITHUB_DETECTION_RULES
+    ]

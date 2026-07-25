@@ -138,6 +138,62 @@ def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
     return f"sha256={sig}", body
 
 
+def sign_text(text: str, secret: str) -> str:
+    """Generate HMAC signature for a UTF-8 text payload."""
+    sig = hmac.new(secret.encode(), text.encode(), hashlib.sha256).hexdigest()
+    return f"sha256={sig}"
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_returns_supported_event_families(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": sign_text("github", "test-secret")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == "github"
+    assert data["event_types"] == [
+        "pull_request",
+        "pull_request_review",
+        "issues",
+        "issue_comment",
+        "push",
+        "release",
+    ]
+    assert data["event_detection_rules"][0] == {
+        "event_type": "pull_request_review",
+        "jmespath": "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",
+    }
+    assert {rule["event_type"] for rule in data["event_detection_rules"]} >= {
+        "pull_request",
+        "issue_comment",
+        "push",
+    }
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_rejects_invalid_signature(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": "sha256=invalid"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid signature"
+
+
 @pytest.mark.asyncio
 async def test_receive_github_event_no_matching_automations(
     async_client: AsyncClient,

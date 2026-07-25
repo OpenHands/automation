@@ -313,7 +313,7 @@ def _base_properties(
         properties.update(
             {
                 "run_id": str(run.id),
-                "run_status": run.status.value,
+                "run_status": run.status.value if run.status is not None else None,
                 "has_conversation_id": bool(run.conversation_id),
             }
         )

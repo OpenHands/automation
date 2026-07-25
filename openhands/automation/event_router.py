@@ -39,12 +39,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
-from openhands.automation.schemas import EventResponse
+from openhands.automation.event_schemas.github import (
+    get_event_detection_rules,
+    get_supported_event_types,
+)
+from openhands.automation.schemas import (
+    EventDetectionRule,
+    EventResponse,
+    RequestedEventTypesResponse,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
     create_automation_run,
     get_event_automations,
+    get_requested_event_types,
     get_webhook_config,
     verify_signature,
 )
@@ -53,6 +62,57 @@ from openhands.automation.utils.webhook import (
 logger = logging.getLogger("automation.event_router")
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
+
+
+@router.get("/{source}/requested-types", response_model=RequestedEventTypesResponse)
+async def requested_event_types(
+    source: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> RequestedEventTypesResponse:
+    """Return event types currently requested by enabled automations.
+
+    This endpoint is intended for trusted webhook forwarders. Built-in sources
+    authenticate with the same shared webhook secret used for event delivery.
+    The signature is computed over the UTF-8 source string.
+    """
+    config = await get_webhook_config(source, uuid.UUID(int=0), session)
+    if not config or not config.is_builtin:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown builtin webhook source: {source}",
+        )
+
+    signature = request.headers.get(config.signature_header)
+    if not signature:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing signature header: {config.signature_header}",
+        )
+    if not verify_signature(source.encode("utf-8"), signature, config.secret):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    if source == "github":
+        # GitHub forwarding is prefiltered at the event-family level. Return all
+        # event families automation can parse so webhook forwarding still works
+        # before any org has configured automations; automation performs the
+        # granular action/filter matching after receiving the event.
+        event_types = get_supported_event_types()
+    else:
+        event_types = await get_requested_event_types(source, session)
+    event_detection_rules = (
+        [
+            EventDetectionRule.model_validate(rule)
+            for rule in get_event_detection_rules()
+        ]
+        if source == "github"
+        else []
+    )
+    return RequestedEventTypesResponse(
+        source=source,
+        event_types=event_types,
+        event_detection_rules=event_detection_rules,
+    )
 
 
 @router.post("/{org_id}/{source}", response_model=EventResponse)
