@@ -145,51 +145,11 @@ def sign_text(text: str, secret: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_requested_github_event_types_returns_enabled_supported_triggers(
+async def test_requested_github_event_types_returns_supported_event_families(
     async_client: AsyncClient,
-    org_id: uuid.UUID,
-    async_session,
     monkeypatch: pytest.MonkeyPatch,
-    mock_authenticated_user,
 ):
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
-
-    automations = [
-        Automation(
-            id=uuid.uuid4(),
-            user_id=mock_authenticated_user.user_id,
-            org_id=org_id,
-            name="Push Automation",
-            tarball_path="oh-internal://uploads/test.tar.gz",
-            entrypoint="python main.py",
-            trigger={"type": "event", "source": "github", "on": "push"},
-        ),
-        Automation(
-            id=uuid.uuid4(),
-            user_id=mock_authenticated_user.user_id,
-            org_id=org_id,
-            name="PR Automation",
-            tarball_path="oh-internal://uploads/test.tar.gz",
-            entrypoint="python main.py",
-            trigger={
-                "type": "event",
-                "source": "github",
-                "on": ["pull_request.opened", "workflow_run.completed"],
-            },
-        ),
-        Automation(
-            id=uuid.uuid4(),
-            user_id=mock_authenticated_user.user_id,
-            org_id=org_id,
-            name="Disabled Issues Automation",
-            tarball_path="oh-internal://uploads/test.tar.gz",
-            entrypoint="python main.py",
-            enabled=False,
-            trigger={"type": "event", "source": "github", "on": "issues.opened"},
-        ),
-    ]
-    async_session.add_all(automations)
-    await async_session.commit()
 
     response = await async_client.get(
         "/api/automation/v1/events/github/requested-types",
@@ -199,7 +159,14 @@ async def test_requested_github_event_types_returns_enabled_supported_triggers(
     assert response.status_code == 200
     data = response.json()
     assert data["source"] == "github"
-    assert data["event_types"] == ["pull_request", "push"]
+    assert data["event_types"] == [
+        "pull_request",
+        "pull_request_review",
+        "issues",
+        "issue_comment",
+        "push",
+        "release",
+    ]
     assert data["event_detection_rules"][0] == {
         "event_type": "pull_request_review",
         "jmespath": "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",

@@ -92,12 +92,14 @@ async def requested_event_types(
     if not verify_signature(source.encode("utf-8"), signature, config.secret):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    supported_event_types = (
-        set(get_supported_event_types()) if source == "github" else None
-    )
-    event_types = await get_requested_event_types(
-        source, session, supported_event_types=supported_event_types
-    )
+    if source == "github":
+        # GitHub forwarding is prefiltered at the event-family level. Return all
+        # event families automation can parse so webhook forwarding still works
+        # before any org has configured automations; automation performs the
+        # granular action/filter matching after receiving the event.
+        event_types = get_supported_event_types()
+    else:
+        event_types = await get_requested_event_types(source, session)
     logger.info(
         "Requested event types for source=%s: event_types=%s",
         source,
