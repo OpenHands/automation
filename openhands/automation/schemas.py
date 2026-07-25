@@ -391,6 +391,13 @@ class EventResponse(BaseModel):
     runs_created: list[str]  # List of run IDs created
 
 
+class RequestedEventTypesResponse(BaseModel):
+    """Event types currently requested by enabled automations for a source."""
+
+    source: str
+    event_types: list[str]
+
+
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 

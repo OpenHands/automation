@@ -138,6 +138,87 @@ def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
     return f"sha256={sig}", body
 
 
+def sign_text(text: str, secret: str) -> str:
+    """Generate HMAC signature for a UTF-8 text payload."""
+    sig = hmac.new(secret.encode(), text.encode(), hashlib.sha256).hexdigest()
+    return f"sha256={sig}"
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_returns_enabled_supported_triggers(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    automations = [
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="Push Automation",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "github", "on": "push"},
+        ),
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="PR Automation",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={
+                "type": "event",
+                "source": "github",
+                "on": ["pull_request.opened", "workflow_run.completed"],
+            },
+        ),
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="Disabled Issues Automation",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            enabled=False,
+            trigger={"type": "event", "source": "github", "on": "issues.opened"},
+        ),
+    ]
+    async_session.add_all(automations)
+    await async_session.commit()
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": sign_text("github", "test-secret")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "source": "github",
+        "event_types": ["pull_request", "push"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_rejects_invalid_signature(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": "sha256=invalid"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid signature"
+
+
 @pytest.mark.asyncio
 async def test_receive_github_event_no_matching_automations(
     async_client: AsyncClient,

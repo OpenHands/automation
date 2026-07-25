@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.config import Settings, get_settings
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation, AutomationRun, CustomWebhook
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    CustomWebhook,
+)
 from openhands.automation.schemas import EventTrigger, WebhookConfig
 
 
@@ -210,6 +215,68 @@ async def get_event_automations(
     return result_pairs
 
 
+def _event_type_from_pattern(pattern: str) -> str:
+    return pattern.split(".", 1)[0].strip()
+
+
+async def get_requested_event_types(
+    source: str,
+    session: AsyncSession,
+    *,
+    supported_event_types: set[str] | None = None,
+) -> list[str]:
+    """Return source event types requested by enabled event automations.
+
+    Trigger patterns can include actions (``pull_request.opened``) or wildcards
+    (``pull_request.*``). The forwarding service only needs the top-level source
+    event type. Unsupported requested types are omitted when a supported set is
+    provided.
+    """
+    from sqlalchemy import func, literal
+
+    base_filters = [
+        Automation.enabled == True,  # noqa: E712
+        Automation.deleted_at.is_(None),
+    ]
+
+    if using_sqlite():
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
+        )
+    else:
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+
+    result = await session.execute(
+        select(Automation.trigger).where(*base_filters, trigger_filter)
+    )
+
+    supported = (
+        set(supported_event_types) if supported_event_types is not None else None
+    )
+    requested: set[str] = set()
+    for trigger_data in result.scalars().all():
+        try:
+            trigger = EventTrigger.model_validate(trigger_data)
+        except Exception as e:
+            logger.warning("Failed to parse event trigger for requested types: %s", e)
+            continue
+
+        for pattern in trigger.event_patterns:
+            event_type = _event_type_from_pattern(pattern)
+            if not event_type:
+                continue
+            if event_type == "*":
+                return sorted(supported) if supported is not None else ["*"]
+            if supported is None or event_type in supported:
+                requested.add(event_type)
+
+    return sorted(requested)
+
+
 async def create_automation_run(
     automation: Automation,
     session: AsyncSession,
@@ -231,6 +298,7 @@ async def create_automation_run(
     run = AutomationRun(
         id=uuid.uuid4(),
         automation_id=automation.id,
+        status=AutomationRunStatus.PENDING,
         event_payload=event_payload,
     )
     session.add(run)
