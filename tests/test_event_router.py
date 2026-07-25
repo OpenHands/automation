@@ -197,9 +197,17 @@ async def test_requested_github_event_types_returns_enabled_supported_triggers(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "source": "github",
-        "event_types": ["pull_request", "push"],
+    data = response.json()
+    assert data["source"] == "github"
+    assert data["event_types"] == ["pull_request", "push"]
+    assert data["event_detection_rules"][0] == {
+        "event_type": "pull_request_review",
+        "jmespath": "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",
+    }
+    assert {rule["event_type"] for rule in data["event_detection_rules"]} >= {
+        "pull_request",
+        "issue_comment",
+        "push",
     }
 
 

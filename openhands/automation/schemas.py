@@ -391,11 +391,19 @@ class EventResponse(BaseModel):
     runs_created: list[str]  # List of run IDs created
 
 
+class EventDetectionRule(BaseModel):
+    """Payload rule used to detect a source event type."""
+
+    event_type: str
+    jmespath: str
+
+
 class RequestedEventTypesResponse(BaseModel):
     """Event types currently requested by enabled automations for a source."""
 
     source: str
     event_types: list[str]
+    event_detection_rules: list[EventDetectionRule] = Field(default_factory=list)
 
 
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars

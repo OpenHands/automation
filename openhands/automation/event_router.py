@@ -39,8 +39,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
-from openhands.automation.event_schemas.github import get_supported_event_types
-from openhands.automation.schemas import EventResponse, RequestedEventTypesResponse
+from openhands.automation.event_schemas.github import (
+    get_event_detection_rules,
+    get_supported_event_types,
+)
+from openhands.automation.schemas import (
+    EventDetectionRule,
+    EventResponse,
+    RequestedEventTypesResponse,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -91,7 +98,19 @@ async def requested_event_types(
     event_types = await get_requested_event_types(
         source, session, supported_event_types=supported_event_types
     )
-    return RequestedEventTypesResponse(source=source, event_types=event_types)
+    event_detection_rules = (
+        [
+            EventDetectionRule.model_validate(rule)
+            for rule in get_event_detection_rules()
+        ]
+        if source == "github"
+        else []
+    )
+    return RequestedEventTypesResponse(
+        source=source,
+        event_types=event_types,
+        event_detection_rules=event_detection_rules,
+    )
 
 
 @router.post("/{org_id}/{source}", response_model=EventResponse)
