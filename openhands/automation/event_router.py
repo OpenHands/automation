@@ -49,7 +49,7 @@ from openhands.automation.schemas import (
     RequestedEventTypesResponse,
 )
 from openhands.automation.telemetry import capture_automation_event
-from openhands.automation.trigger_matcher import matches_trigger
+from openhands.automation.trigger_matcher import match_trigger_with_reason
 from openhands.automation.utils.webhook import (
     create_automation_run,
     get_event_automations,
@@ -97,6 +97,11 @@ async def requested_event_types(
     )
     event_types = await get_requested_event_types(
         source, session, supported_event_types=supported_event_types
+    )
+    logger.info(
+        "Requested event types for source=%s: event_types=%s",
+        source,
+        event_types,
     )
     event_detection_rules = (
         [
@@ -247,7 +252,24 @@ async def receive_event(
 
     for automation, trigger in automations:
         # Match trigger against webhook payload using JMESPath filter
-        if matches_trigger(trigger, source, event.event_key, webhook_payload):
+        matched, reason = match_trigger_with_reason(
+            trigger, source, event.event_key, webhook_payload
+        )
+        logger.info(
+            "Evaluated event trigger: org=%s source=%s event_key=%s "
+            "automation_id=%s automation_name=%s trigger_on=%s "
+            "trigger_filter=%s matched=%s reason=%s",
+            org_id,
+            source,
+            event.event_key,
+            automation.id,
+            automation.name,
+            trigger.on,
+            trigger.filter,
+            matched,
+            reason,
+        )
+        if matched:
             matched_automations.append(automation)
 
     logger.info(

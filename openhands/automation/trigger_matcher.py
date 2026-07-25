@@ -24,12 +24,12 @@ from openhands.automation.schemas import EventTrigger
 logger = logging.getLogger("automation.trigger_matcher")
 
 
-def matches_trigger(
+def match_trigger_with_reason(
     trigger: EventTrigger,
     event_source: str,
     event_key: str,
     payload: dict[str, Any],
-) -> bool:
+) -> tuple[bool, str]:
     """
     Check if an event matches an event trigger.
 
@@ -40,7 +40,7 @@ def matches_trigger(
         payload: The webhook payload for filter evaluation
 
     Returns:
-        True if the event matches all trigger conditions
+        Tuple of whether the trigger matched and a diagnostic reason.
 
     Examples:
         >>> trigger = EventTrigger(
@@ -53,11 +53,11 @@ def matches_trigger(
     """
     # 1. Source must match
     if trigger.source != event_source:
-        return False
+        return False, f"source mismatch: trigger_source={trigger.source}"
 
     # 2. Event key must match one of the patterns
     if not _matches_event_key(event_key, trigger.on):
-        return False
+        return False, f"event key mismatch: trigger_on={trigger.on}"
 
     # 3. Filter expression must evaluate to true (if specified)
     if trigger.filter:
@@ -68,12 +68,25 @@ def matches_trigger(
                     trigger.filter,
                     event_key,
                 )
-                return False
+                return False, f"filter mismatch: filter={trigger.filter}"
         except FilterEvaluationError as e:
             logger.warning("Filter evaluation failed: %s", e)
-            return False
+            return False, f"filter evaluation error: {e}"
 
-    return True
+    return True, "matched"
+
+
+def matches_trigger(
+    trigger: EventTrigger,
+    event_source: str,
+    event_key: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Check if an event matches an event trigger."""
+    matched, _reason = match_trigger_with_reason(
+        trigger, event_source, event_key, payload
+    )
+    return matched
 
 
 def _matches_event_key(event_key: str, on: str | list[str]) -> bool:
