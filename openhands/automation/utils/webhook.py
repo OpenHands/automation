@@ -300,6 +300,7 @@ async def create_automation_run(
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
         event_payload=event_payload,
+        telemetry_distinct_id=automation.telemetry_distinct_id,
     )
     session.add(run)
     return run

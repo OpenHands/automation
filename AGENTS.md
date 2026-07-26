@@ -105,6 +105,13 @@ OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
 
+## Product Telemetry Identity
+
+- Cloud product events use the server-authoritative Cloud user ID as the PostHog `distinct_id`; never trust a client telemetry header as Cloud identity.
+- Local Agent Canvas requests carry their consented PostHog identity in `X-OpenHands-Telemetry-Distinct-Id`. Store that value on newly created automations and runs so asynchronous lifecycle events retain the same identity.
+- Local events with no Canvas attribution fall back to the DB-backed automation backend ID. Keep `automation_backend_id` as an event property for installation analysis rather than substituting it for a known person identity.
+- Local consent is stored per frontend distinct ID. Attributed events require consent for their resolved identity; only unattributed backend-level events use the aggregate installation consent.
+
 ## PR-Specific Documents
 
 When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
