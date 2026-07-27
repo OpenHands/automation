@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    TarballUpload,
+    UploadStatus,
+)
 from openhands.automation.preset_router import _build_storage_path, _generate_tarball
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import (
@@ -168,7 +173,11 @@ class TestCreateAutomation:
             "entrypoint": "uv run script.py",
         }
 
-        response = await async_client.post("/api/automation/v1", json=payload)
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=payload,
+            headers={"X-OpenHands-Telemetry-Distinct-Id": "ph-fe-creator"},
+        )
 
         assert response.status_code == 201
         data = response.json()
@@ -185,6 +194,9 @@ class TestCreateAutomation:
         assert data["enabled"] is True
         assert "id" in data
         assert data["user_id"] == str(TEST_USER_ID)
+        automation = await async_session.get(Automation, uuid.UUID(data["id"]))
+        assert automation is not None
+        assert automation.telemetry_distinct_id == "ph-fe-creator"
 
     async def test_create_automation_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
@@ -1213,7 +1225,8 @@ class TestDispatchAutomation:
         await async_session.commit()
 
         response = await async_client.post(
-            f"/api/automation/v1/{automation.id}/dispatch"
+            f"/api/automation/v1/{automation.id}/dispatch",
+            headers={"X-OpenHands-Telemetry-Distinct-Id": "ph-fe-dispatcher"},
         )
 
         assert response.status_code == 201
@@ -1225,6 +1238,9 @@ class TestDispatchAutomation:
         assert "created_at" in data
         assert data["started_at"] is None
         assert data["completed_at"] is None
+        run = await async_session.get(AutomationRun, uuid.UUID(data["id"]))
+        assert run is not None
+        assert run.telemetry_distinct_id == "ph-fe-dispatcher"
 
     async def test_dispatch_automation_not_found(self, async_client):
         """Dispatching a nonexistent automation returns 404."""

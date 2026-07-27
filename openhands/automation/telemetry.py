@@ -151,13 +151,20 @@ async def get_stored_telemetry_consent(
     request: Request | None = None,
     session: AsyncSession | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    frontend_distinct_id: str | None = None,
 ) -> bool:
-    """Return whether any known frontend identity granted telemetry consent."""
+    """Return aggregate consent or consent for a specific frontend identity."""
+
+    def resolve(consents: dict[str, bool]) -> bool:
+        if frontend_distinct_id is None:
+            return has_granted_telemetry_consent(consents)
+        return consents.get(
+            _normalize_frontend_distinct_id(frontend_distinct_id), False
+        )
+
     try:
         if session is not None:
-            return has_granted_telemetry_consent(
-                await _load_telemetry_consent_map(session)
-            )
+            return resolve(await _load_telemetry_consent_map(session))
 
         if session_factory is None and request is not None:
             session_factory = getattr(request.app.state, "session_factory", None)
@@ -169,9 +176,7 @@ async def get_stored_telemetry_consent(
             return False
 
         async with session_factory() as new_session:
-            return has_granted_telemetry_consent(
-                await _load_telemetry_consent_map(new_session)
-            )
+            return resolve(await _load_telemetry_consent_map(new_session))
     except Exception:
         logger.debug("Failed to load automation telemetry consent", exc_info=True)
         return False
@@ -181,9 +186,21 @@ def get_request_telemetry_context(request: Request | None) -> TelemetryRequestCo
     if request is None:
         return TelemetryRequestContext()
     context = getattr(request.state, "telemetry_context", None)
-    if isinstance(context, TelemetryRequestContext):
+    if not isinstance(context, TelemetryRequestContext):
+        context = build_telemetry_request_context(request.scope)
+    return _trusted_telemetry_context(context)
+
+
+def _trusted_telemetry_context(
+    context: TelemetryRequestContext,
+) -> TelemetryRequestContext:
+    """Discard browser identity where Cloud must derive identity from auth."""
+    if get_config().service.is_local_mode:
         return context
-    return build_telemetry_request_context(request.scope)
+    return TelemetryRequestContext(
+        client_source=context.client_source,
+        client_version=context.client_version,
+    )
 
 
 def get_request_authenticated_user(request: Request) -> AuthenticatedUser | None:
@@ -254,8 +271,45 @@ def _trigger_type(automation: Automation | None) -> str | None:
     return str(trigger) if trigger is not None else None
 
 
-def _resolve_distinct_id(*, backend_distinct_id: str) -> str:
-    return backend_distinct_id
+def _resolve_local_frontend_distinct_id(
+    *,
+    request_context: TelemetryRequestContext,
+    automation: Automation | None,
+    run: AutomationRun | None,
+) -> str | None:
+    if run is not None and run.telemetry_distinct_id:
+        return run.telemetry_distinct_id
+    if request_context.frontend_distinct_id:
+        return request_context.frontend_distinct_id
+    if automation is not None:
+        return automation.telemetry_distinct_id
+    return None
+
+
+def _resolve_distinct_id(
+    *,
+    request_context: TelemetryRequestContext,
+    user: AuthenticatedUser | None,
+    automation: Automation | None,
+    run: AutomationRun | None,
+    backend_distinct_id: str,
+) -> str:
+    settings = get_config().service
+    if not settings.is_local_mode:
+        if user is not None:
+            return str(user.user_id)
+        if automation is not None:
+            return str(automation.user_id)
+        return backend_distinct_id
+
+    return (
+        _resolve_local_frontend_distinct_id(
+            request_context=request_context,
+            automation=automation,
+            run=run,
+        )
+        or backend_distinct_id
+    )
 
 
 def _base_properties(
@@ -344,11 +398,25 @@ async def capture_automation_event(
     if not settings.posthog_api_key:
         return
 
-    context = request_context or get_request_telemetry_context(request)
+    context = (
+        _trusted_telemetry_context(request_context)
+        if request_context is not None
+        else get_request_telemetry_context(request)
+    )
+    local_frontend_distinct_id = (
+        _resolve_local_frontend_distinct_id(
+            request_context=context,
+            automation=automation,
+            run=run,
+        )
+        if settings.is_local_mode
+        else None
+    )
     if settings.is_local_mode and not await get_stored_telemetry_consent(
         request=request,
         session=session,
         session_factory=session_factory,
+        frontend_distinct_id=local_frontend_distinct_id,
     ):
         return
 
@@ -373,7 +441,13 @@ async def capture_automation_event(
     payload = {
         "api_key": settings.posthog_api_key,
         "event": event,
-        "distinct_id": _resolve_distinct_id(backend_distinct_id=backend_distinct_id),
+        "distinct_id": _resolve_distinct_id(
+            request_context=context,
+            user=user,
+            automation=automation,
+            run=run,
+            backend_distinct_id=backend_distinct_id,
+        ),
         "properties": event_properties,
     }
 

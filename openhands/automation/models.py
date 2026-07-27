@@ -53,6 +53,9 @@ class Automation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
+    telemetry_distinct_id: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
 
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -133,6 +136,9 @@ class AutomationRun(Base):
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+    telemetry_distinct_id: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
     )
 
     status: Mapped[AutomationRunStatus] = mapped_column(

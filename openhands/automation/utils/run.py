@@ -79,6 +79,8 @@ async def disable_automation(
 async def create_pending_run(
     session: AsyncSession,
     automation: Automation,
+    *,
+    telemetry_distinct_id: str | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -98,6 +100,9 @@ async def create_pending_run(
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
+        telemetry_distinct_id=(
+            telemetry_distinct_id or automation.telemetry_distinct_id
+        ),
     )
     session.add(run)
 

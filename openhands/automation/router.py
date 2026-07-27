@@ -31,7 +31,10 @@ from openhands.automation.schemas import (
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.telemetry import capture_automation_event
+from openhands.automation.telemetry import (
+    capture_automation_event,
+    get_request_telemetry_context,
+)
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.api_key import (
     APIKeyError,
@@ -91,6 +94,9 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
+        telemetry_distinct_id=get_request_telemetry_context(
+            request
+        ).frontend_distinct_id,
     )
     session.add(auto)
     await session.flush()
@@ -301,7 +307,13 @@ async def dispatch_automation(
     picked up by the dispatcher and executed.
     """
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
-    run = await create_pending_run(session, auto)
+    run = await create_pending_run(
+        session,
+        auto,
+        telemetry_distinct_id=get_request_telemetry_context(
+            request
+        ).frontend_distinct_id,
+    )
     await session.flush()
     await session.refresh(run)
     await capture_automation_event(

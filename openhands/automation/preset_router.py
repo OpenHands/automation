@@ -30,7 +30,10 @@ from openhands.automation.db import get_session
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
-from openhands.automation.telemetry import capture_automation_event
+from openhands.automation.telemetry import (
+    capture_automation_event,
+    get_request_telemetry_context,
+)
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import (
@@ -464,6 +467,9 @@ async def create_automation_from_prompt(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
+            telemetry_distinct_id=get_request_telemetry_context(
+                request
+            ).frontend_distinct_id,
         )
         session.add(automation)
         await session.flush()
@@ -845,6 +851,9 @@ async def create_automation_from_plugin(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
+            telemetry_distinct_id=get_request_telemetry_context(
+                request
+            ).frontend_distinct_id,
         )
         session.add(automation)
         await session.flush()
