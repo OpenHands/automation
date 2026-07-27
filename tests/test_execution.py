@@ -5,6 +5,7 @@ Only tests pure logic that can run without a network.  The e2e flow
 """
 
 import io
+import subprocess
 import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,10 +18,13 @@ from openhands.automation.execution import (
     DEFAULT_WORK_DIR,
     AutomationResult,
     DispatchResult,
+    _env_command_prefix,
+    _serialize_env_vars,
     _shell_quote,
     _upload,
     build_tarball,
     execute_in_context,
+    run_automation,
 )
 
 
@@ -320,6 +324,98 @@ class TestExecuteInContextErrors:
         assert isinstance(result, DispatchResult)
         assert result.success is True
         assert result.sandbox_id == "test-sandbox-id"
+
+
+class TestPrivateEnvironmentInjection:
+    def test_env_file_is_loaded_and_removed(self, tmp_path):
+        env_path = tmp_path / "private.env"
+        value = "it's $private"
+        env_path.write_bytes(_serialize_env_vars({"PRIVATE_VALUE": value}))
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'{_env_command_prefix(str(env_path))}printf %s "$PRIVATE_VALUE"',
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.stdout == value
+        assert not env_path.exists()
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_execute_command_omits_env_values(self, mock_upload, mock_start_bash):
+        secret = "github_pat_" + "a" * 80
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        mock_start_bash.return_value = "cmd-123"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            env_vars={"GITHUB_TOKEN": secret, "QUOTED": "it's $private"},
+            run_id=run_id,
+        )
+
+        assert result.success is True
+        assert mock_upload.await_count == 2
+        env_upload = mock_upload.await_args_list[1]
+        assert env_upload.args[4] == f"/tmp/automation-{run_id}.tar.gz.env"
+        assert secret.encode() in env_upload.args[3]
+
+        command = mock_start_bash.await_args.args[3]
+        assert secret not in command
+        assert "it's $private" not in command
+        assert "set +x" in command
+        assert "chmod 600" in command
+        assert f"/tmp/automation-{run_id}.tar.gz.env" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_command_omits_session_key(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        session_key = "session_" + "b" * 64
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            session_key,
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        result = await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+        )
+
+        assert result.success is True
+        assert mock_upload.await_count == 2
+        assert session_key.encode() in mock_upload.await_args_list[1].args[3]
+        command = mock_bash.await_args.args[3]
+        assert session_key not in command
+        assert f"{TARBALL_PATH}.env" in command
 
 
 class TestPerRunTarballPath:
