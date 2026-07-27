@@ -186,9 +186,21 @@ def get_request_telemetry_context(request: Request | None) -> TelemetryRequestCo
     if request is None:
         return TelemetryRequestContext()
     context = getattr(request.state, "telemetry_context", None)
-    if isinstance(context, TelemetryRequestContext):
+    if not isinstance(context, TelemetryRequestContext):
+        context = build_telemetry_request_context(request.scope)
+    return _trusted_telemetry_context(context)
+
+
+def _trusted_telemetry_context(
+    context: TelemetryRequestContext,
+) -> TelemetryRequestContext:
+    """Discard browser identity where Cloud must derive identity from auth."""
+    if get_config().service.is_local_mode:
         return context
-    return build_telemetry_request_context(request.scope)
+    return TelemetryRequestContext(
+        client_source=context.client_source,
+        client_version=context.client_version,
+    )
 
 
 def get_request_authenticated_user(request: Request) -> AuthenticatedUser | None:
@@ -386,7 +398,11 @@ async def capture_automation_event(
     if not settings.posthog_api_key:
         return
 
-    context = request_context or get_request_telemetry_context(request)
+    context = (
+        _trusted_telemetry_context(request_context)
+        if request_context is not None
+        else get_request_telemetry_context(request)
+    )
     local_frontend_distinct_id = (
         _resolve_local_frontend_distinct_id(
             request_context=context,

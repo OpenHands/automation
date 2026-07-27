@@ -180,7 +180,7 @@ async def test_cloud_capture_uses_user_id_and_org_properties(monkeypatch):
     assert "org_id" not in properties
 
     assert properties["creation_path"] == "prompt_preset"
-    assert properties["frontend_distinct_id"] == "ph-fe-123"
+    assert "frontend_distinct_id" not in properties
     assert properties["automation_backend_id"] == "automation-backend:cloud"
 
 
@@ -537,6 +537,10 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
 
     request = _request("/api/automation/v1/123", endpoint_name="get_automation")
+    request.state.telemetry_context = TelemetryRequestContext(
+        frontend_distinct_id="untrusted-browser-id",
+        client_source="agent_canvas",
+    )
     user = AuthenticatedUser(
         user_id=uuid.uuid4(),
         org_id=uuid.uuid4(),
@@ -567,6 +571,8 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
     assert properties["cloud_user_id"] == str(user.user_id)
     assert properties["cloud_org_id"] == str(user.org_id)
     assert properties["$groups"] == {"org": str(user.org_id)}
+    assert "frontend_distinct_id" not in properties
+    assert properties["client_source"] == "agent_canvas"
     assert "org_id" not in properties
     assert properties["success"] is True
     assert properties["duration_ms"] == 12

@@ -196,7 +196,7 @@ class TestCreateAutomation:
         assert data["user_id"] == str(TEST_USER_ID)
         automation = await async_session.get(Automation, uuid.UUID(data["id"]))
         assert automation is not None
-        assert automation.telemetry_distinct_id == "ph-fe-creator"
+        assert automation.telemetry_distinct_id is None
 
     async def test_create_automation_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
@@ -1240,7 +1240,7 @@ class TestDispatchAutomation:
         assert data["completed_at"] is None
         run = await async_session.get(AutomationRun, uuid.UUID(data["id"]))
         assert run is not None
-        assert run.telemetry_distinct_id == "ph-fe-dispatcher"
+        assert run.telemetry_distinct_id is None
 
     async def test_dispatch_automation_not_found(self, async_client):
         """Dispatching a nonexistent automation returns 404."""
