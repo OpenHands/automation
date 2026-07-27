@@ -380,6 +380,73 @@ class TestPrivateEnvironmentInjection:
 
     @pytest.mark.asyncio
     @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_start_failure_removes_uploaded_env(
+        self,
+        mock_upload,
+        mock_start_bash,
+        mock_bash,
+    ):
+        client = AsyncMock()
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        env_path = f"/tmp/automation-{run_id}.tar.gz.env"
+        mock_start_bash.side_effect = RuntimeError("command startup failed")
+        mock_bash.return_value = (0, "", "")
+
+        result = await execute_in_context(
+            client=client,
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            env_vars={"PRIVATE_VALUE": "secret"},
+            run_id=run_id,
+        )
+
+        assert result.success is False
+        assert result.error == "command startup failed"
+        assert mock_upload.await_count == 2
+        mock_bash.assert_awaited_once_with(
+            client,
+            "https://agent.example.com",
+            "session-key",
+            f"rm -f -- '{env_path}'",
+            timeout=int(get_config().http.http_timeout),
+        )
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_cleanup_failure_preserves_permanent_start_error(
+        self,
+        mock_upload,
+        mock_start_bash,
+        mock_bash,
+    ):
+        start_error = PermanentDispatchError("permanent startup failure")
+        mock_start_bash.side_effect = start_error
+        mock_bash.side_effect = RuntimeError("cleanup failed")
+
+        with pytest.raises(PermanentDispatchError) as exc_info:
+            await execute_in_context(
+                client=AsyncMock(),
+                agent_url="https://agent.example.com",
+                session_key="session-key",
+                entrypoint="python main.py",
+                tarball_source=b"fake tarball bytes",
+                work_dir=DEFAULT_WORK_DIR,
+                env_vars={"PRIVATE_VALUE": "secret"},
+            )
+
+        assert exc_info.value is start_error
+        mock_upload.assert_awaited()
+        mock_bash.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
     @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
     @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
     @patch("openhands.automation.execution.httpx.AsyncClient")

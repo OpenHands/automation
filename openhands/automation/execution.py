@@ -383,6 +383,7 @@ async def execute_in_context(
         if run_id and "/" not in run_id
         else TARBALL_PATH
     )
+    env_path: str | None = None
 
     try:
         # Get tarball into environment: upload bytes or download from URL
@@ -420,6 +421,7 @@ async def execute_in_context(
         command_id = await _start_bash(
             client, agent_url, session_key, cmd, timeout=timeout
         )
+        env_path = None
         logger.info(
             "Entrypoint started (command_id=%s), disconnecting",
             command_id,
@@ -438,6 +440,25 @@ async def execute_in_context(
     except Exception as e:
         logger.exception("Execution failed", extra=_log_ctx())
         return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+    finally:
+        if env_path is not None:
+            try:
+                exit_code, _, stderr = await _bash(
+                    client,
+                    agent_url,
+                    session_key,
+                    f"rm -f -- {_shell_quote(env_path)}",
+                    timeout=int(get_config().http.http_timeout),
+                )
+                if exit_code != 0:
+                    raise RuntimeError(
+                        f"Environment file cleanup failed (exit={exit_code}): {stderr}"
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to remove private environment file",
+                    extra=_log_ctx(),
+                )
 
 
 @dataclass(frozen=True)
