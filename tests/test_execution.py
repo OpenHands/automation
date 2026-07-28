@@ -346,6 +346,51 @@ class TestPrivateEnvironmentInjection:
         assert result.stdout == value
         assert not env_path.exists()
 
+    def test_env_file_removed_when_sourcing_fails(self, tmp_path):
+        env_path = tmp_path / "private.env"
+        env_path.write_bytes(b"export BAD=(\n")
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{_env_command_prefix(str(env_path))}echo unreachable",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        assert "unreachable" not in result.stdout
+        assert not env_path.exists()
+
+    @pytest.mark.parametrize(
+        "name",
+        ["BAD-NAME", "1FOO", "A B", "", "FOO=x", "FOO;id"],
+    )
+    def test_rejects_invalid_env_var_names(self, name):
+        with pytest.raises(ValueError):
+            _serialize_env_vars({name: "value"})
+
+    def test_env_file_is_gone_before_the_entrypoint_runs(self, tmp_path):
+        env_path = tmp_path / "private.env"
+        env_path.write_bytes(_serialize_env_vars({"PRIVATE_VALUE": "secret"}))
+        quoted_path = _shell_quote(str(env_path))
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{_env_command_prefix(str(env_path))}"
+                f"test ! -e {quoted_path} && printf GONE",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert result.stdout == "GONE"
+
     @pytest.mark.asyncio
     @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
     @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
@@ -377,6 +422,32 @@ class TestPrivateEnvironmentInjection:
         assert "set +x" in command
         assert "chmod 600" in command
         assert f"/tmp/automation-{run_id}.tar.gz.env" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_successful_start_leaves_env_cleanup_to_the_command(
+        self,
+        mock_upload,
+        mock_start_bash,
+        mock_bash,
+    ):
+        mock_start_bash.return_value = "cmd-123"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            env_vars={"PRIVATE_VALUE": "secret"},
+        )
+
+        assert result.success is True
+        mock_upload.assert_awaited()
+        mock_bash.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
