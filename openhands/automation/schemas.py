@@ -3,7 +3,7 @@
 import re
 import uuid
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
@@ -675,3 +675,104 @@ class AutomationRunListResponse(BaseModel):
 
     runs: list[AutomationRunResponse]
     total: int
+
+
+# --- Capability and Preflight Schemas ---
+
+
+class CronCapabilities(BaseModel):
+    """Deployment constraints on cron triggers."""
+
+    min_interval_seconds: int = Field(
+        ...,
+        description="Shortest gap between fire times this deployment can honour",
+    )
+    timezones: list[str] = Field(..., description="Accepted IANA timezone names")
+
+
+class EventCapabilities(BaseModel):
+    """Deployment constraints on event triggers."""
+
+    filter_language: Literal["jmespath"] = "jmespath"
+    filter_functions: list[str] = Field(
+        ..., description="Functions a filter expression may call"
+    )
+
+
+class TriggerCapabilities(BaseModel):
+    """Per-trigger-kind constraints. A null kind is not supported here."""
+
+    cron: CronCapabilities
+    event: EventCapabilities | None = None
+
+
+class CapabilitiesResponse(BaseModel):
+    """What this deployment supports, discovered before a setup form renders."""
+
+    ready: bool = Field(..., description="Whether the service can accept new work")
+    trigger_kinds: list[str]
+    event_sources: list[str]
+    event_types: list[str] = Field(
+        ...,
+        description=(
+            "Event key patterns matched with the same wildcard syntax a "
+            "trigger's 'on' field uses. Only sources publishing a known "
+            "catalog contribute; a custom webhook's keys come from its own "
+            "event_key_expr."
+        ),
+    )
+    triggers: TriggerCapabilities
+    features: list[str]
+
+
+class DraftValidationError(BaseModel):
+    """A single problem with a draft, addressed to the field that caused it."""
+
+    field: str | None = Field(
+        ...,
+        description=(
+            "Dotted path into the draft, e.g. 'trigger.schedule' or "
+            "'repos[0].url'. Null when the problem spans the whole draft."
+        ),
+    )
+    code: str
+    message: str
+
+
+class ValidateDraftRequest(BaseModel):
+    """Request to validate a draft automation without creating it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: Literal["/v1/preset/prompt", "/v1/preset/plugin"] = Field(
+        ..., description="Creation endpoint the draft will be sent to"
+    )
+    draft: dict[str, Any] = Field(
+        ..., description="The request body that would be sent to that endpoint"
+    )
+    manifest_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Opaque caller identifier, logged for correlation only",
+    )
+    sample_event: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Raw provider payload to test an event trigger against, as the "
+            "webhook endpoint would receive it."
+        ),
+    )
+
+
+class ValidateDraftResponse(BaseModel):
+    """Outcome of validating a draft. An invalid draft is still a 200."""
+
+    valid: bool
+    errors: list[DraftValidationError] = Field(default_factory=list)
+    sample_event_matched: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the sample event would fire this trigger. Null when no "
+            "sample event was supplied or the trigger is not event-based."
+        ),
+    )
