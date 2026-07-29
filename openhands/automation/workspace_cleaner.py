@@ -9,12 +9,16 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
+from enum import Enum
+from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.models import AutomationRun, AutomationRunStatus
+from openhands.automation.utils import utcnow
 
 
 logger = logging.getLogger("automation.workspace_cleaner")
@@ -35,20 +39,43 @@ class PurgeResult:
 
     candidates_found: int = 0
     deleted: int = 0
+    missing: int = 0
+    refused: int = 0
     errors: int = 0
     bytes_freed: int = 0
 
 
-def _workspace_path(workspace_base: str, run_id: str) -> str:
-    return os.path.join(workspace_base, "automation-runs", run_id)
+class DeleteOutcome(Enum):
+    """Outcome of one bounded workspace deletion attempt."""
+
+    DELETED = "deleted"
+    MISSING = "missing"
+    REFUSED = "refused"
+    ERROR = "error"
 
 
-def _dir_size(path: str) -> int:
+@dataclass(frozen=True)
+class WorkspaceDeleteResult:
+    outcome: DeleteOutcome
+    bytes_freed: int = 0
+
+
+def _workspace_root(workspace_base: str | Path) -> Path:
+    """Return the normalized root that owns all automation run directories."""
+    return (Path(workspace_base).expanduser() / "automation-runs").resolve(strict=False)
+
+
+def _workspace_path(workspace_base: str | Path, run_id: UUID) -> Path:
+    """Build a run path from a typed database UUID, never from raw path input."""
+    return _workspace_root(workspace_base) / str(run_id)
+
+
+def _dir_size(path: Path) -> int:
     total = 0
     try:
         for dirpath, _dirnames, filenames in os.walk(path):
             for filename in filenames:
-                filepath = os.path.join(dirpath, filename)
+                filepath = Path(dirpath) / filename
                 try:
                     total += os.path.getsize(filepath)
                 except OSError:
@@ -58,21 +85,48 @@ def _dir_size(path: str) -> int:
     return total
 
 
-def _delete_workspace(workspace_path: str) -> int | None:
-    """Delete a workspace directory. Returns bytes freed or None on error."""
-    try:
-        size = _dir_size(workspace_path)
-    except OSError:
-        size = 0
+def _is_link_or_junction(path: Path) -> bool:
+    """Return whether path is a symlink or Windows directory junction."""
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or (is_junction is not None and is_junction())
+
+
+def _delete_workspace(
+    workspace_base: str | Path,
+    run_id: UUID,
+) -> WorkspaceDeleteResult:
+    """Delete one verified run directory without following root reparse points."""
+    runs_root = _workspace_root(workspace_base)
+    workspace_path = _workspace_path(workspace_base, run_id)
+
+    if _is_link_or_junction(workspace_path):
+        logger.warning("Refusing linked workspace path: %s", workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED)
+
+    if not workspace_path.exists():
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING)
 
     try:
-        shutil.rmtree(workspace_path)
-        return size
+        resolved_path = workspace_path.resolve(strict=True)
     except FileNotFoundError:
-        return 0
-    except OSError as e:
-        logger.warning("Failed to delete workspace %s: %s", workspace_path, e)
-        return None
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING)
+    except OSError as exc:
+        logger.warning("Failed to resolve workspace %s: %s", workspace_path, exc)
+        return WorkspaceDeleteResult(DeleteOutcome.ERROR)
+
+    if resolved_path.parent != runs_root or not resolved_path.is_dir():
+        logger.warning("Refusing workspace outside expected root: %s", workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED)
+
+    size = _dir_size(workspace_path)
+    try:
+        shutil.rmtree(workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.DELETED, size)
+    except FileNotFoundError:
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING)
+    except OSError as exc:
+        logger.warning("Failed to delete workspace %s: %s", workspace_path, exc)
+        return WorkspaceDeleteResult(DeleteOutcome.ERROR)
 
 
 async def purge_terminal_workspaces(
@@ -93,12 +147,19 @@ async def purge_terminal_workspaces(
         session_factory: Factory for async database sessions.
         workspace_base: Expanded base directory for workspaces.
         retention_seconds: Minimum age in seconds before a workspace is purged.
-        batch_size: Maximum number of workspaces to purge per call.
+        batch_size: Maximum number of existing workspaces to delete or attempt per
+            call. Missing directories do not consume the limit, preventing old
+            retained database rows from starving later cleanup candidates.
 
     Returns:
         PurgeResult with counts of candidates, deletions, errors, and bytes freed.
     """
-    cutoff = datetime.utcnow() - timedelta(seconds=retention_seconds)
+    if retention_seconds < 0:
+        raise ValueError("retention_seconds must be non-negative")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    cutoff = utcnow() - timedelta(seconds=retention_seconds)
     result = PurgeResult()
 
     async with session_factory() as session:
@@ -109,35 +170,48 @@ async def purge_terminal_workspaces(
                 AutomationRun.completed_at.isnot(None),
                 AutomationRun.completed_at < cutoff,
             )
-            .order_by(AutomationRun.completed_at.asc())
-            .limit(batch_size)
+            .order_by(AutomationRun.completed_at.asc(), AutomationRun.id.asc())
+            .execution_options(yield_per=batch_size)
         )
-        rows = await session.execute(stmt)
-        candidate_ids = [str(row[0]) for row in rows.fetchall()]
+        candidate_ids = await session.stream_scalars(stmt)
 
-    result.candidates_found = len(candidate_ids)
-    if not candidate_ids:
-        return result
-
-    logger.info("Found %d candidate workspaces for purge", result.candidates_found)
-
-    for run_id in candidate_ids:
-        workspace_path = _workspace_path(workspace_base, run_id)
-        bytes_freed = _delete_workspace(workspace_path)
-        if bytes_freed is not None:
-            result.deleted += 1
-            result.bytes_freed += bytes_freed
-            logger.debug(
-                "Purged workspace %s (%d bytes freed)", workspace_path, bytes_freed
+        async for run_id in candidate_ids:
+            result.candidates_found += 1
+            delete_result = await asyncio.to_thread(
+                _delete_workspace, workspace_base, run_id
             )
-        else:
-            result.errors += 1
+
+            if delete_result.outcome is DeleteOutcome.MISSING:
+                # Missing workspaces are expected after manual cleanup. Continue
+                # scanning so old missing rows cannot starve later real directories.
+                result.missing += 1
+                continue
+            if delete_result.outcome is DeleteOutcome.REFUSED:
+                result.refused += 1
+            elif delete_result.outcome is DeleteOutcome.ERROR:
+                result.errors += 1
+            else:
+                result.deleted += 1
+                result.bytes_freed += delete_result.bytes_freed
+                logger.debug(
+                    "Purged workspace for run %s (%d bytes freed)",
+                    run_id,
+                    delete_result.bytes_freed,
+                )
+
+            attempted_existing = result.deleted + result.refused + result.errors
+            if attempted_existing >= batch_size:
+                break
 
     logger.info(
-        "Purge complete: %d deleted, %d errors, %d bytes freed",
+        "Purge complete: %d deleted, %d missing, %d refused, %d errors, "
+        "%d bytes freed (%d candidates scanned)",
         result.deleted,
+        result.missing,
+        result.refused,
         result.errors,
         result.bytes_freed,
+        result.candidates_found,
     )
     return result
 
@@ -163,6 +237,9 @@ async def purger_loop(
         batch_size: Maximum workspaces purged per cycle.
         shutdown_event: Optional event to signal graceful shutdown.
     """
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+
     logger.info(
         "Workspace purger started: retention=%ds interval=%ds batch=%d",
         retention_seconds,
@@ -182,11 +259,14 @@ async def purger_loop(
                 retention_seconds=retention_seconds,
                 batch_size=batch_size,
             )
-            if result.deleted > 0 or result.errors > 0:
+            if result.deleted > 0 or result.errors > 0 or result.refused > 0:
                 logger.info(
-                    "Purge cycle: %d deleted (%d bytes), %d errors, %d candidates",
+                    "Purge cycle: %d deleted (%d bytes), %d missing, "
+                    "%d refused, %d errors, %d candidates",
                     result.deleted,
                     result.bytes_freed,
+                    result.missing,
+                    result.refused,
                     result.errors,
                     result.candidates_found,
                 )

@@ -48,7 +48,7 @@ from functools import cached_property, lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -423,11 +423,11 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
-    purger_interval_seconds: int = 3600  # 1 hour
-    purger_batch_size: int = 50
+    purger_interval_seconds: int = Field(default=3600, gt=0)  # 1 hour
+    purger_batch_size: int = Field(default=50, gt=0)
 
     # Workspace retention for local mode
-    workspace_retention_seconds: int = 604800  # 7 days
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
 
     # API pagination
     api_default_page_size: int = 50
