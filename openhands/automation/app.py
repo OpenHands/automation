@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -37,9 +38,43 @@ from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
+from openhands.automation.workspace_cleaner import (
+    purger_loop,
+    purge_terminal_workspaces,
+)
 
 
 logger = logging.getLogger("automation.app")
+
+
+if TYPE_CHECKING:
+    from openhands.automation.config import ServiceSettings
+
+
+async def _startup_purge(
+    session_factory: Any,
+    settings: "ServiceSettings",
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Run an initial workspace purge at startup without blocking startup."""
+    try:
+        await asyncio.sleep(2)
+        if shutdown_event.is_set():
+            return
+        result = await purge_terminal_workspaces(
+            session_factory=session_factory,
+            workspace_base=os.path.expanduser(settings.workspace_base or "/workspace"),
+            retention_seconds=settings.workspace_retention_seconds,
+            batch_size=settings.purger_batch_size,
+        )
+        if result.deleted > 0:
+            logger.info(
+                "Startup purge: %d workspaces deleted (%d bytes freed)",
+                result.deleted,
+                result.bytes_freed,
+            )
+    except Exception:
+        logger.exception("Startup workspace purge failed")
 
 
 @asynccontextmanager
@@ -162,6 +197,33 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Purger: removes old workspace directories in local mode only
+    purger_task: asyncio.Task | None = None
+    if settings.is_local_mode:
+        purger_task = asyncio.create_task(
+            purger_loop(
+                app.state.session_factory,
+                workspace_base=os.path.expanduser(
+                    settings.workspace_base or "/workspace"
+                ),
+                retention_seconds=settings.workspace_retention_seconds,
+                interval_seconds=settings.purger_interval_seconds,
+                batch_size=settings.purger_batch_size,
+                shutdown_event=shutdown_event,
+            )
+        )
+        app.state.purger_task = purger_task
+        logger.info("Background workspace purger started")
+
+        # Run an initial purge at startup without blocking
+        asyncio.create_task(
+            _startup_purge(
+                app.state.session_factory,
+                settings,
+                shutdown_event,
+            )
+        )
+
     yield
 
     # Shutdown
@@ -169,11 +231,15 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    for task_name, task in [
+    shutdown_tasks: list[tuple[str, asyncio.Task | None]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-    ]:
+        ("purger", purger_task),
+    ]
+    for task_name, task in shutdown_tasks:
+        if task is None:
+            continue
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
