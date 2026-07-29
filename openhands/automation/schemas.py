@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.utils.cron import (
@@ -680,7 +681,18 @@ class AutomationRunListResponse(BaseModel):
 # --- Capability and Preflight Schemas ---
 
 
-class CronCapabilities(BaseModel):
+class _SetupContractModel(BaseModel):
+    """Base for the extension-owned setup contract, which is camelCase.
+
+    The rest of this service is snake_case. These two endpoints answer a
+    contract authored in OpenHands/extensions, whose catalog, schema and
+    TypeScript types are camelCase throughout.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class CronCapabilities(_SetupContractModel):
     """Deployment constraints on cron triggers."""
 
     min_interval_seconds: int = Field(
@@ -690,7 +702,7 @@ class CronCapabilities(BaseModel):
     timezones: list[str] = Field(..., description="Accepted IANA timezone names")
 
 
-class EventCapabilities(BaseModel):
+class EventCapabilities(_SetupContractModel):
     """Deployment constraints on event triggers."""
 
     filter_language: Literal["jmespath"] = "jmespath"
@@ -699,14 +711,14 @@ class EventCapabilities(BaseModel):
     )
 
 
-class TriggerCapabilities(BaseModel):
-    """Per-trigger-kind constraints. A null kind is not supported here."""
+class TriggerCapabilities(_SetupContractModel):
+    """Per-trigger-kind constraints. A kind is present only when supported."""
 
-    cron: CronCapabilities
+    cron: CronCapabilities | None = None
     event: EventCapabilities | None = None
 
 
-class CapabilitiesResponse(BaseModel):
+class CapabilitiesResponse(_SetupContractModel):
     """What this deployment supports, discovered before a setup form renders."""
 
     ready: bool = Field(..., description="Whether the service can accept new work")
@@ -725,7 +737,7 @@ class CapabilitiesResponse(BaseModel):
     features: list[str]
 
 
-class DraftValidationError(BaseModel):
+class DraftValidationError(_SetupContractModel):
     """A single problem with a draft, addressed to the field that caused it."""
 
     field: str | None = Field(
@@ -739,7 +751,7 @@ class DraftValidationError(BaseModel):
     message: str
 
 
-class ValidateDraftRequest(BaseModel):
+class ValidateDraftRequest(_SetupContractModel):
     """Request to validate a draft automation without creating it."""
 
     model_config = ConfigDict(extra="forbid")
@@ -750,10 +762,10 @@ class ValidateDraftRequest(BaseModel):
     draft: dict[str, Any] = Field(
         ..., description="The request body that would be sent to that endpoint"
     )
-    manifest_id: str | None = Field(
+    automation_id: str | None = Field(
         default=None,
         max_length=255,
-        description="Opaque caller identifier, logged for correlation only",
+        description="Catalog entry the draft came from, logged for correlation only",
     )
     sample_event: dict[str, Any] | None = Field(
         default=None,
@@ -764,7 +776,7 @@ class ValidateDraftRequest(BaseModel):
     )
 
 
-class ValidateDraftResponse(BaseModel):
+class ValidateDraftResponse(_SetupContractModel):
     """Outcome of validating a draft. An invalid draft is still a 200."""
 
     valid: bool

@@ -64,18 +64,18 @@ _DRAFT_MODELS: dict[str, type[DraftModel]] = {
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
-    "conversation_dispatch",
-    "mcp_tools",
-    "preset_plugin",
-    "preset_prompt",
-    "repo_clone",
+    "conversationDispatch",
+    "mcpTools",
+    "presetPlugin",
+    "presetPrompt",
+    "repoClone",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.
 _TRIGGER_TAGS = frozenset({"cron", "event"})
 
 
-@router.get("/capabilities")
+@router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
@@ -87,6 +87,19 @@ async def get_capabilities(
     """
     config = get_config()
 
+    # In cloud mode every run needs a minted API key, which needs the service
+    # key. Without it the service accepts work it cannot execute, so it offers
+    # nothing rather than letting a setup form proceed into certain failure.
+    if not (config.service.is_local_mode or config.service.service_key):
+        return CapabilitiesResponse(
+            ready=False,
+            trigger_kinds=[],
+            event_sources=[],
+            event_types=[],
+            triggers=TriggerCapabilities(),
+            features=[],
+        )
+
     builtin_sources = sorted(BUILTIN_SOURCES) if config.service.webhook_secret else []
     event_sources = sorted(
         {*builtin_sources, *await _custom_sources(user.org_id, session)}
@@ -94,14 +107,12 @@ async def get_capabilities(
 
     features = [*_STATIC_FEATURES]
     if event_sources:
-        features.append("webhook_delivery")
+        features.append("webhookDelivery")
     if config.kv.enabled:
-        features.append("kv_store")
+        features.append("kvStore")
 
     return CapabilitiesResponse(
-        # In cloud mode every run needs a minted API key, which needs the
-        # service key. Without it the service accepts work it cannot execute.
-        ready=config.service.is_local_mode or bool(config.service.service_key),
+        ready=True,
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
         event_types=(
@@ -137,7 +148,7 @@ async def validate_draft(
     caused it. Only a malformed request envelope is a 4xx.
     """
     logger.info(
-        "Validating draft for %s (manifest_id=%s)", body.endpoint, body.manifest_id
+        "Validating draft for %s (automation_id=%s)", body.endpoint, body.automation_id
     )
 
     try:
@@ -187,7 +198,7 @@ async def validate_draft(
                 except ValueError as e:
                     errors.append(
                         DraftValidationError(
-                            field="sample_event",
+                            field="sampleEvent",
                             code="unparseable_sample_event",
                             message=str(e),
                         )
@@ -253,7 +264,7 @@ def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
     return [
         DraftValidationError(
             field="trigger.on",
-            code="event_type_not_supported",
+            code="event_type_not_delivered",
             message=f"This deployment cannot parse '{pattern}' events from GitHub.",
         )
         for pattern in trigger.event_patterns

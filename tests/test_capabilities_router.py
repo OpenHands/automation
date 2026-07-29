@@ -47,7 +47,12 @@ def with_trigger(draft: dict, **overrides: str) -> dict:
 
 def preflight(draft: dict, **extra: object) -> dict:
     """Build a preflight request body for the prompt-preset endpoint."""
-    return {"endpoint": "/v1/preset/prompt", "draft": draft, **extra}
+    return {
+        "automationId": "github-pr-reviewer",
+        "endpoint": "/v1/preset/prompt",
+        "draft": draft,
+        **extra,
+    }
 
 
 def comment_event(body: str) -> dict:
@@ -100,9 +105,9 @@ class TestGetCapabilities:
         assert response.status_code == 200
         body = response.json()
         assert body["ready"] is True
-        assert body["trigger_kinds"] == ["cron", "event"]
-        assert body["event_sources"] == ["bitbucket_data_center", "github", "jira_dc"]
-        assert body["event_types"] == [
+        assert body["triggerKinds"] == ["cron", "event"]
+        assert body["eventSources"] == ["bitbucket_data_center", "github", "jira_dc"]
+        assert body["eventTypes"] == [
             "issue_comment.*",
             "issues.*",
             "pull_request.*",
@@ -110,11 +115,11 @@ class TestGetCapabilities:
             "push",
             "release.*",
         ]
-        assert body["triggers"]["event"]["filter_language"] == "jmespath"
-        assert "icontains" in body["triggers"]["event"]["filter_functions"]
+        assert body["triggers"]["event"]["filterLanguage"] == "jmespath"
+        assert "icontains" in body["triggers"]["event"]["filterFunctions"]
         assert "UTC" in body["triggers"]["cron"]["timezones"]
-        assert "webhook_delivery" in body["features"]
-        assert "kv_store" in body["features"]
+        assert "webhookDelivery" in body["features"]
+        assert "kvStore" in body["features"]
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, monkeypatch
@@ -126,11 +131,11 @@ class TestGetCapabilities:
         response = await async_client.get(CAPABILITIES_URL)
 
         body = response.json()
-        assert body["trigger_kinds"] == ["cron"]
-        assert body["event_sources"] == []
-        assert body["event_types"] == []
-        assert body["triggers"]["event"] is None
-        assert "webhook_delivery" not in body["features"]
+        assert body["triggerKinds"] == ["cron"]
+        assert body["eventSources"] == []
+        assert body["eventTypes"] == []
+        assert "event" not in body["triggers"]
+        assert "webhookDelivery" not in body["features"]
 
     async def test_only_enabled_custom_sources_are_advertised(
         self, async_client, async_session, monkeypatch
@@ -160,8 +165,8 @@ class TestGetCapabilities:
         response = await async_client.get(CAPABILITIES_URL)
 
         body = response.json()
-        assert body["event_sources"] == ["linear"]
-        assert body["trigger_kinds"] == ["cron", "event"]
+        assert body["eventSources"] == ["linear"]
+        assert body["triggerKinds"] == ["cron", "event"]
 
     async def test_cloud_deployment_without_service_key_is_not_ready(
         self, async_client, monkeypatch
@@ -173,7 +178,11 @@ class TestGetCapabilities:
 
         response = await async_client.get(CAPABILITIES_URL)
 
-        assert response.json()["ready"] is False
+        body = response.json()
+        assert body["ready"] is False
+        assert body["triggerKinds"] == []
+        assert body["features"] == []
+        assert body["triggers"] == {}
 
     async def test_advertised_cron_floor_follows_the_scheduler_interval(
         self, async_client, monkeypatch
@@ -184,7 +193,7 @@ class TestGetCapabilities:
 
         response = await async_client.get(CAPABILITIES_URL)
 
-        assert response.json()["triggers"]["cron"]["min_interval_seconds"] == 300
+        assert response.json()["triggers"]["cron"]["minIntervalSeconds"] == 300
 
 
 class TestValidateDraft:
@@ -198,7 +207,7 @@ class TestValidateDraft:
         assert response.json() == {
             "valid": True,
             "errors": [],
-            "sample_event_matched": None,
+            "sampleEventMatched": None,
         }
 
     @pytest.mark.parametrize(
@@ -254,7 +263,7 @@ class TestValidateDraft:
         [
             pytest.param(
                 "pull_request_review_comment.created",
-                [("trigger.on", "event_type_not_supported")],
+                [("trigger.on", "event_type_not_delivered")],
                 id="type-the-deployment-cannot-parse",
             ),
             pytest.param("pull_request.*", [], id="wildcard-over-supported-types"),
@@ -300,12 +309,12 @@ class TestValidateDraft:
         """A real payload answers the question the filter expression asks."""
         response = await async_client.post(
             VALIDATE_URL,
-            json=preflight(EVENT_DRAFT, sample_event=comment_event(comment_body)),
+            json=preflight(EVENT_DRAFT, sampleEvent=comment_event(comment_body)),
         )
 
         body = response.json()
         assert body["valid"] is True
-        assert body["sample_event_matched"] is expected_match
+        assert body["sampleEventMatched"] is expected_match
 
     async def test_unparseable_sample_event_is_reported_as_an_error(
         self, async_client, configured_deployment
@@ -313,13 +322,13 @@ class TestValidateDraft:
         """A payload the service cannot recognise answers nothing."""
         response = await async_client.post(
             VALIDATE_URL,
-            json=preflight(EVENT_DRAFT, sample_event={"unrecognised": True}),
+            json=preflight(EVENT_DRAFT, sampleEvent={"unrecognised": True}),
         )
 
         body = response.json()
         assert body["valid"] is False
-        assert addressed_errors(body) == [("sample_event", "unparseable_sample_event")]
-        assert body["sample_event_matched"] is None
+        assert addressed_errors(body) == [("sampleEvent", "unparseable_sample_event")]
+        assert body["sampleEventMatched"] is None
 
     async def test_unknown_model_profile_is_reported_against_the_model_field(
         self, async_client, mock_authenticated_user
