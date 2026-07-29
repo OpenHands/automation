@@ -85,10 +85,20 @@ def reset_config_cache():
 
 
 @pytest.fixture
-def configured_deployment(monkeypatch):
+def ready_deployment(monkeypatch):
+    """A deployment that can mint the API key every run needs.
+
+    Nothing is advertised at all without it, so a test asserting on what a
+    deployment offers has to say so rather than inherit it from the environment.
+    """
+    monkeypatch.setenv("AUTOMATION_SERVICE_KEY", "service-key")
+    clear_config_cache()
+
+
+@pytest.fixture
+def configured_deployment(ready_deployment, monkeypatch):
     """A deployment that receives webhooks, mints API keys, and stores state."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "webhook-secret")
-    monkeypatch.setenv("AUTOMATION_SERVICE_KEY", "service-key")
     monkeypatch.setenv("AUTOMATION_KV_SECRET", "kv-secret")
     clear_config_cache()
 
@@ -122,7 +132,7 @@ class TestGetCapabilities:
         assert "kvStore" in body["features"]
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
-        self, async_client, monkeypatch
+        self, async_client, ready_deployment, monkeypatch
     ):
         """No webhook secret means no event can arrive, so none is offered."""
         monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
@@ -138,7 +148,7 @@ class TestGetCapabilities:
         assert "webhookDelivery" not in body["features"]
 
     async def test_only_enabled_custom_sources_are_advertised(
-        self, async_client, async_session, monkeypatch
+        self, async_client, async_session, ready_deployment, monkeypatch
     ):
         """An organization's own webhooks make event triggers available again."""
         monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
@@ -185,7 +195,7 @@ class TestGetCapabilities:
         assert body["triggers"] == {}
 
     async def test_advertised_cron_floor_follows_the_scheduler_interval(
-        self, async_client, monkeypatch
+        self, async_client, ready_deployment, monkeypatch
     ):
         """A slower scheduler raises the shortest interval it can honour."""
         monkeypatch.setenv("AUTOMATION_SCHEDULER_INTERVAL_SECONDS", "300")
