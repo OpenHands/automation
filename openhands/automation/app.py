@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
+from openhands.automation.capabilities_router import router as capabilities_router
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
@@ -237,6 +238,7 @@ _base_path = get_settings().base_path
 # The main router has /v1/{automation_id} which would match any /v1/<path>
 # and fail UUID validation.
 app.include_router(uploads_router, prefix=_base_path)
+app.include_router(capabilities_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
