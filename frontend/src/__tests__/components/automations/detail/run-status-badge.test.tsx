@@ -16,6 +16,13 @@ describe("RunStatusBadge", () => {
     expect(screen.getByText("AUTOMATIONS$DETAIL$FAILED")).toBeInTheDocument();
   });
 
+  it("renders cancelled label for cancelled status", () => {
+    render(<RunStatusBadge status={AutomationRunStatus.CANCELLED} />);
+    expect(
+      screen.getByText("AUTOMATIONS$DETAIL$CANCELLED"),
+    ).toBeInTheDocument();
+  });
+
   it("renders pending label for pending status", () => {
     render(<RunStatusBadge status={AutomationRunStatus.PENDING} />);
     expect(screen.getByText("AUTOMATIONS$DETAIL$PENDING")).toBeInTheDocument();
