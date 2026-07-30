@@ -1,13 +1,21 @@
 """Tests for the scheduler module."""
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.db import set_sqlite_mode, using_sqlite
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    Base,
+)
 from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
     poll_and_schedule,
@@ -32,6 +40,63 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def _utc(*args: int) -> datetime:
     """Create a UTC-aware datetime for test assertions."""
     return datetime(*args, tzinfo=UTC)
+
+
+@pytest.fixture
+async def sqlite_session_factory():
+    """Create an isolated in-memory SQLite session factory."""
+    previous_sqlite_mode = using_sqlite()
+    sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
+    previous_sqlalchemy_level = sqlalchemy_logger.level
+    set_sqlite_mode(True)
+    sqlalchemy_logger.setLevel(logging.WARNING)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+    finally:
+        await engine.dispose()
+        set_sqlite_mode(previous_sqlite_mode)
+        sqlalchemy_logger.setLevel(previous_sqlalchemy_level)
+
+
+@pytest.fixture
+def scheduler_telemetry_events(monkeypatch):
+    """Capture scheduler telemetry without invoking the telemetry backend."""
+    event_names: list[str] = []
+
+    async def record_event(event_name, *args, **kwargs):
+        event_names.append(event_name)
+
+    monkeypatch.setattr(
+        "openhands.automation.scheduler.capture_automation_event",
+        record_event,
+    )
+    return event_names
+
+
+def _due_automation(name: str, now: datetime) -> Automation:
+    return Automation(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name=name,
+        trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+        tarball_path="s3://bucket/code.tar.gz",
+        entrypoint="uv run main.py",
+        enabled=True,
+        last_triggered_at=now - timedelta(minutes=2),
+        created_at=now - timedelta(minutes=5),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize SQLite timestamps for deterministic comparisons."""
+    return value.replace(tzinfo=UTC)
 
 
 class TestGetNextFireTime:
@@ -360,6 +425,203 @@ class TestIsAutomationDue:
 
 class TestPollAndSchedule:
     """Tests for poll_and_schedule function (atomic poll + run creation)."""
+
+    @pytest.mark.parametrize(
+        "active_status",
+        [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING],
+    )
+    async def test_poll_skips_due_automation_with_active_run(
+        self,
+        sqlite_session_factory,
+        active_status,
+        scheduler_telemetry_events,
+        caplog,
+    ):
+        """An in-flight run prevents a second cron-created run."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        original_last_triggered_at = now - timedelta(minutes=2)
+        async with sqlite_session_factory() as session:
+            automation = _due_automation("Blocked", now)
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=active_status,
+                )
+            )
+            await session.commit()
+            automation_id = automation.id
+
+        with caplog.at_level(logging.INFO, logger="automation.scheduler"):
+            created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+
+        assert created_runs == []
+        assert scheduler_telemetry_events == []
+        async with sqlite_session_factory() as session:
+            run_count = await session.scalar(
+                select(func.count())
+                .select_from(AutomationRun)
+                .where(AutomationRun.automation_id == automation_id)
+            )
+            assert run_count == 1
+            updated = await session.get(Automation, automation_id)
+            assert updated is not None
+            assert _as_utc(updated.last_polled_at) == now
+            assert _as_utc(updated.last_triggered_at) == original_last_triggered_at
+
+        skip_record = next(
+            record
+            for record in caplog.records
+            if record.getMessage() == "Skipping cron run for active automation"
+        )
+        assert skip_record.automation_id == str(automation_id)
+        assert skip_record.existing_run_status == active_status.value
+        assert skip_record.trigger_source == "cron"
+        assert skip_record.skip_reason == "automation_run_in_flight"
+
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.FAILED,
+            AutomationRunStatus.CANCELLED,
+            AutomationRunStatus.SKIPPED,
+        ],
+    )
+    async def test_poll_overlap_guard_allows_terminal_run(
+        self, sqlite_session_factory, terminal_status, scheduler_telemetry_events
+    ):
+        """Terminal history does not block a new cron run."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        async with sqlite_session_factory() as session:
+            automation = _due_automation("Terminal history", now)
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationRun(automation_id=automation.id, status=terminal_status)
+            )
+            await session.commit()
+            automation_id = automation.id
+
+        created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+
+        assert [run.automation_id for run in created_runs] == [automation_id]
+        assert scheduler_telemetry_events == [
+            "automation_run_scheduled",
+            "automation_run_created",
+        ]
+
+    async def test_poll_overlap_guard_allows_automation_without_run(
+        self, sqlite_session_factory, scheduler_telemetry_events
+    ):
+        """A due automation without run history is scheduled normally."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        async with sqlite_session_factory() as session:
+            automation = _due_automation("Free", now)
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+
+        created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+
+        assert [run.automation_id for run in created_runs] == [automation_id]
+        assert scheduler_telemetry_events == [
+            "automation_run_scheduled",
+            "automation_run_created",
+        ]
+
+    async def test_poll_overlap_guard_is_per_automation(
+        self, sqlite_session_factory, scheduler_telemetry_events
+    ):
+        """A blocked automation does not prevent another due automation."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        async with sqlite_session_factory() as session:
+            blocked = _due_automation("Blocked", now)
+            free = _due_automation("Free", now)
+            session.add_all([blocked, free])
+            await session.flush()
+            session.add(
+                AutomationRun(
+                    automation_id=blocked.id,
+                    status=AutomationRunStatus.PENDING,
+                )
+            )
+            await session.commit()
+            blocked_id = blocked.id
+            free_id = free.id
+
+        created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+
+        assert [run.automation_id for run in created_runs] == [free_id]
+        assert scheduler_telemetry_events == [
+            "automation_run_scheduled",
+            "automation_run_created",
+        ]
+        async with sqlite_session_factory() as session:
+            blocked_run_count = await session.scalar(
+                select(func.count())
+                .select_from(AutomationRun)
+                .where(AutomationRun.automation_id == blocked_id)
+            )
+            assert blocked_run_count == 1
+
+    async def test_poll_overlap_guard_preserves_batch_rotation(
+        self, sqlite_session_factory, scheduler_telemetry_events
+    ):
+        """A skipped automation rotates behind an eligible automation."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        async with sqlite_session_factory() as session:
+            blocked = _due_automation("Blocked first", now)
+            blocked.last_polled_at = now - timedelta(hours=2)
+            free = _due_automation("Free second", now)
+            free.last_polled_at = now - timedelta(hours=1)
+            session.add_all([blocked, free])
+            await session.flush()
+            session.add(
+                AutomationRun(
+                    automation_id=blocked.id,
+                    status=AutomationRunStatus.RUNNING,
+                )
+            )
+            await session.commit()
+            free_id = free.id
+
+        first_runs = await poll_and_schedule(
+            sqlite_session_factory, batch_size=1, now=now
+        )
+        second_runs = await poll_and_schedule(
+            sqlite_session_factory, batch_size=1, now=now
+        )
+
+        assert first_runs == []
+        assert [run.automation_id for run in second_runs] == [free_id]
+        assert scheduler_telemetry_events == [
+            "automation_run_scheduled",
+            "automation_run_created",
+        ]
+
+    async def test_poll_overlap_guard_leaves_not_due_automation_untriggered(
+        self, sqlite_session_factory, scheduler_telemetry_events
+    ):
+        """A polled automation that is not due remains untriggered."""
+        now = _utc(2026, 7, 30, 12, 0, 30)
+        async with sqlite_session_factory() as session:
+            automation = _due_automation("Not due", now)
+            automation.last_triggered_at = now
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+
+        created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+
+        assert created_runs == []
+        assert scheduler_telemetry_events == []
+        async with sqlite_session_factory() as session:
+            updated = await session.get(Automation, automation_id)
+            assert updated is not None
+            assert _as_utc(updated.last_polled_at) == now
+            assert _as_utc(updated.last_triggered_at) == now
 
     async def test_poll_creates_runs_for_due_automations(self, async_session_factory):
         """Creates pending runs for automations that are due."""

@@ -18,7 +18,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
 from openhands.automation.utils.run import create_pending_run
@@ -142,6 +146,24 @@ async def _fetch_enabled_automations(
     return list(result.scalars().all())
 
 
+async def _get_in_flight_run_status(
+    session: AsyncSession,
+    automation: Automation,
+) -> AutomationRunStatus | None:
+    """Return an active run status for an automation, if one exists."""
+    result = await session.execute(
+        select(AutomationRun.status)
+        .where(
+            AutomationRun.automation_id == automation.id,
+            AutomationRun.status.in_(
+                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+            ),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def poll_and_schedule(
     session_factory: async_sessionmaker[AsyncSession],
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -152,8 +174,9 @@ async def poll_and_schedule(
     Fetches enabled automations (using FOR UPDATE SKIP LOCKED on PostgreSQL for
     multi-worker safety), updates last_polled_at for ALL fetched automations
     (to ensure fair batch rotation), filters to those that are due, and creates
-    PENDING runs. All within a single transaction so row locks are held throughout
-    and no schedules can be lost or duplicated.
+    PENDING runs only when the automation has no in-flight run. All within a single
+    transaction so row locks are held throughout and no schedules can be lost or
+    duplicated by concurrent scheduler workers.
 
     Note: SQLite deployments skip row locking (single-process mode assumed).
 
@@ -192,6 +215,19 @@ async def poll_and_schedule(
 
         for automation in due_automations:
             try:
+                in_flight_status = await _get_in_flight_run_status(session, automation)
+                if in_flight_status is not None:
+                    logger.info(
+                        "Skipping cron run for active automation",
+                        extra={
+                            "automation_id": str(automation.id),
+                            "existing_run_status": in_flight_status.value,
+                            "trigger_source": "cron",
+                            "skip_reason": "automation_run_in_flight",
+                        },
+                    )
+                    continue
+
                 run = await create_pending_run(session, automation)
                 created_runs.append(run)
                 schedule_properties = {
@@ -243,8 +279,9 @@ async def scheduler_loop(
 ) -> None:
     """Main scheduler loop that polls for due automations.
 
-    For each due automation, creates a PENDING run in the automation_runs table.
-    The dispatcher (separate process) picks up PENDING runs and executes them.
+    For each due automation without a PENDING or RUNNING run, creates a PENDING run
+    in the automation_runs table. The dispatcher picks up PENDING runs and executes
+    them.
 
     Args:
         session_factory: SQLAlchemy async session factory
