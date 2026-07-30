@@ -492,6 +492,23 @@
     "tr": "Konuşma oluşturulmadı",
     "uk": "Розмову не створено"
   },
+  "AUTOMATIONS$DETAIL$VIEW_CONVERSATION": {
+    "en": "View conversation",
+    "ja": "会話を表示",
+    "zh-CN": "查看对话",
+    "zh-TW": "查看對話",
+    "ko-KR": "대화 보기",
+    "no": "Vis samtale",
+    "ar": "عرض المحادثة",
+    "de": "Unterhaltung anzeigen",
+    "fr": "Voir la conversation",
+    "it": "Visualizza conversazione",
+    "pt": "Ver conversa",
+    "es": "Ver conversación",
+    "ca": "Mostra la conversa",
+    "tr": "Konuşmayı görüntüle",
+    "uk": "Переглянути розмову"
+  },
   "AUTOMATIONS$DETAIL$TIME_JUST_NOW": {
     "en": "Just now",
     "ja": "たった今",

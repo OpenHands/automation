@@ -52,12 +52,13 @@ describe("ActivityLogItem", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders as a link when conversation_id exists", () => {
+  it("renders an explicit conversation link when conversation_id exists", () => {
     const run = createRun({ conversation_id: "conv-abc123" });
     render(<ActivityLogItem run={run} />);
 
-    const link = screen.getByRole("link");
+    const link = screen.getByRole("link", { name: /view conversation/i });
     expect(link).toBeInTheDocument();
+    expect(link).toHaveTextContent("AUTOMATIONS$DETAIL$VIEW_CONVERSATION");
     expect(link).toHaveAttribute(
       "href",
       "https://app.all-hands.dev/conversations/conv-abc123",
@@ -91,13 +92,12 @@ describe("ActivityLogItem", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("has hover cursor and styles when conversation exists", () => {
+  it("styles the visible conversation link when conversation exists", () => {
     const run = createRun({ conversation_id: "conv-123" });
     render(<ActivityLogItem run={run} />);
 
-    const link = screen.getByRole("link");
-    expect(link.className).toContain("cursor-pointer");
-    expect(link.className).toContain("hover:bg-surface-elevated");
+    const link = screen.getByRole("link", { name: /view conversation/i });
+    expect(link.className).toContain("hover:underline");
   });
 
   it("has default cursor when no conversation exists", () => {

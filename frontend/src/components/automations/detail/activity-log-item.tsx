@@ -60,37 +60,35 @@ export function ActivityLogItem({ run, timeZone }: ActivityLogItemProps) {
     timeZone,
   );
 
-  const content = (
-    <>
-      <div className="flex items-center gap-3">
-        <span className="text-sm text-content">{runTimestamp}</span>
-        {!hasConversation && (
-          <span className="text-xs text-content-muted italic">
-            ({t(I18nKey.AUTOMATIONS$DETAIL$NO_CONVERSATION)})
-          </span>
-        )}
-      </div>
-      <RunStatusBadge status={run.status} />
-    </>
-  );
-
   if (hasConversation && run.conversation_id) {
     return (
-      <a
-        href={getConversationUrl(run.conversation_id)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center justify-between px-5 py-3 transition-colors cursor-pointer hover:bg-surface-elevated focus:bg-surface-elevated focus:outline-none"
-        aria-label={`View conversation for run at ${runTimestamp}`}
-      >
-        {content}
-      </a>
+      <div className="flex items-center justify-between px-5 py-3">
+        <span className="text-sm text-content">{runTimestamp}</span>
+        <div className="flex items-center gap-3">
+          <RunStatusBadge status={run.status} />
+          <a
+            href={getConversationUrl(run.conversation_id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-medium text-primary hover:underline focus:underline focus:outline-none"
+            aria-label={`View conversation for run at ${runTimestamp}`}
+          >
+            {t(I18nKey.AUTOMATIONS$DETAIL$VIEW_CONVERSATION)}
+          </a>
+        </div>
+      </div>
     );
   }
 
   return (
     <div className="flex items-center justify-between px-5 py-3 cursor-default">
-      {content}
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-content">{runTimestamp}</span>
+        <span className="text-xs text-content-muted italic">
+          ({t(I18nKey.AUTOMATIONS$DETAIL$NO_CONVERSATION)})
+        </span>
+      </div>
+      <RunStatusBadge status={run.status} />
     </div>
   );
 }
