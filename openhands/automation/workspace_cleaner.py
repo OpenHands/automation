@@ -61,8 +61,13 @@ class WorkspaceDeleteResult:
 
 
 def _workspace_root(workspace_base: str | Path) -> Path:
-    """Return the normalized root that owns all automation run directories."""
-    return (Path(workspace_base).expanduser() / "automation-runs").resolve(strict=False)
+    """Return the normalized root that owns all automation run directories.
+
+    Resolve the configured base, but deliberately do not resolve the
+    ``automation-runs`` child. The deletion guard must still be able to detect
+    if that child has been replaced with a symlink or Windows junction.
+    """
+    return Path(workspace_base).expanduser().resolve(strict=False) / "automation-runs"
 
 
 def _workspace_path(workspace_base: str | Path, run_id: UUID) -> Path:
@@ -99,6 +104,10 @@ def _delete_workspace(
     runs_root = _workspace_root(workspace_base)
     workspace_path = _workspace_path(workspace_base, run_id)
 
+    if _is_link_or_junction(runs_root):
+        logger.warning("Refusing linked workspace root: %s", runs_root)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED)
+
     if _is_link_or_junction(workspace_path):
         logger.warning("Refusing linked workspace path: %s", workspace_path)
         return WorkspaceDeleteResult(DeleteOutcome.REFUSED)
@@ -107,6 +116,7 @@ def _delete_workspace(
         return WorkspaceDeleteResult(DeleteOutcome.MISSING)
 
     try:
+        resolved_root = runs_root.resolve(strict=True)
         resolved_path = workspace_path.resolve(strict=True)
     except FileNotFoundError:
         return WorkspaceDeleteResult(DeleteOutcome.MISSING)
@@ -114,7 +124,7 @@ def _delete_workspace(
         logger.warning("Failed to resolve workspace %s: %s", workspace_path, exc)
         return WorkspaceDeleteResult(DeleteOutcome.ERROR)
 
-    if resolved_path.parent != runs_root or not resolved_path.is_dir():
+    if resolved_path.parent != resolved_root or not resolved_path.is_dir():
         logger.warning("Refusing workspace outside expected root: %s", workspace_path)
         return WorkspaceDeleteResult(DeleteOutcome.REFUSED)
 

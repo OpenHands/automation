@@ -180,6 +180,25 @@ class TestDeleteWorkspace:
         assert delete_result.outcome is DeleteOutcome.REFUSED
         assert marker.exists()
 
+    def test_refuses_symlinked_workspace_root(self, workspace_base, tmp_path):
+        run_id = _run_id()
+        outside = tmp_path / "outside-root"
+        workspace = outside / str(run_id)
+        workspace.mkdir(parents=True)
+        marker = workspace / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        runs_root = cleaner._workspace_root(workspace_base)
+        runs_root.parent.mkdir(parents=True)
+        try:
+            runs_root.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+
+        delete_result = _delete_workspace(workspace_base, run_id)
+
+        assert delete_result.outcome is DeleteOutcome.REFUSED
+        assert marker.exists()
+
     def test_refuses_detected_junction(self, workspace_base, monkeypatch):
         run_id = _run_id()
         path = _make_workspace(workspace_base, run_id)
@@ -187,6 +206,23 @@ class TestDeleteWorkspace:
             cleaner,
             "_is_link_or_junction",
             lambda candidate: candidate == path,
+        )
+
+        delete_result = _delete_workspace(workspace_base, run_id)
+
+        assert delete_result.outcome is DeleteOutcome.REFUSED
+        assert path.exists()
+
+    def test_refuses_detected_workspace_root_junction(
+        self, workspace_base, monkeypatch
+    ):
+        run_id = _run_id()
+        path = _make_workspace(workspace_base, run_id)
+        runs_root = cleaner._workspace_root(workspace_base)
+        monkeypatch.setattr(
+            cleaner,
+            "_is_link_or_junction",
+            lambda candidate: candidate == runs_root,
         )
 
         delete_result = _delete_workspace(workspace_base, run_id)
