@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode, using_sqlite
@@ -534,7 +534,7 @@ class TestPollAndSchedule:
     async def test_poll_overlap_guard_is_per_automation(
         self, sqlite_session_factory, scheduler_telemetry_events
     ):
-        """A blocked automation does not prevent another due automation."""
+        """One batch query isolates active runs by automation."""
         now = _utc(2026, 7, 30, 12, 0, 30)
         async with sqlite_session_factory() as session:
             blocked = _due_automation("Blocked", now)
@@ -551,9 +551,29 @@ class TestPollAndSchedule:
             blocked_id = blocked.id
             free_id = free.id
 
-        created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+        active_run_queries: list[str] = []
+
+        def capture_active_run_query(
+            connection, cursor, statement, parameters, context, executemany
+        ):
+            if "FROM automation_runs" in statement:
+                active_run_queries.append(statement)
+
+        engine = sqlite_session_factory.kw["bind"]
+        event.listen(
+            engine.sync_engine, "before_cursor_execute", capture_active_run_query
+        )
+        try:
+            created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                capture_active_run_query,
+            )
 
         assert [run.automation_id for run in created_runs] == [free_id]
+        assert len(active_run_queries) == 1
         assert scheduler_telemetry_events == [
             "automation_run_scheduled",
             "automation_run_created",

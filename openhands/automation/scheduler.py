@@ -11,6 +11,7 @@ SQLite deployments skip row locking (single-process mode assumed).
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfoNotFoundError
 
 from croniter import CroniterBadDateError, CroniterBadTypeRangeError, CroniterError
@@ -40,6 +41,11 @@ _SCHEDULE_EVALUATION_ERRORS = (
     CroniterError,
     CroniterBadTypeRangeError,
     ZoneInfoNotFoundError,
+)
+
+_IN_FLIGHT_RUN_STATUSES = (
+    AutomationRunStatus.PENDING,
+    AutomationRunStatus.RUNNING,
 )
 
 
@@ -146,22 +152,22 @@ async def _fetch_enabled_automations(
     return list(result.scalars().all())
 
 
-async def _get_in_flight_run_status(
+async def _get_in_flight_run_statuses(
     session: AsyncSession,
-    automation: Automation,
-) -> AutomationRunStatus | None:
-    """Return an active run status for an automation, if one exists."""
+    automations: list[Automation],
+) -> dict[UUID, AutomationRunStatus]:
+    """Return one active run status for each automation that has one."""
+    automation_ids = [automation.id for automation in automations]
+    if not automation_ids:
+        return {}
+
     result = await session.execute(
-        select(AutomationRun.status)
-        .where(
-            AutomationRun.automation_id == automation.id,
-            AutomationRun.status.in_(
-                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
-            ),
+        select(AutomationRun.automation_id, AutomationRun.status).where(
+            AutomationRun.automation_id.in_(automation_ids),
+            AutomationRun.status.in_(_IN_FLIGHT_RUN_STATUSES),
         )
-        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return {automation_id: status for automation_id, status in result}
 
 
 async def poll_and_schedule(
@@ -212,10 +218,11 @@ async def poll_and_schedule(
                 automation.last_polled_at = now
 
         due_automations = [a for a in automations if _is_automation_due_safely(a, now)]
+        in_flight_statuses = await _get_in_flight_run_statuses(session, due_automations)
 
         for automation in due_automations:
             try:
-                in_flight_status = await _get_in_flight_run_status(session, automation)
+                in_flight_status = in_flight_statuses.get(automation.id)
                 if in_flight_status is not None:
                     logger.info(
                         "Skipping cron run for active automation",
