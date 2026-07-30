@@ -1921,6 +1921,73 @@ class TestCompleteRun:
         assert response.status_code == 409
         assert "PENDING" in response.json()["detail"]
 
+    async def _running_run(self, async_session):
+        """Create an automation with a single RUNNING run."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return run
+
+    async def test_complete_run_saves_cost(self, async_client, async_session):
+        """Complete endpoint stores the accumulated LLM cost reported by the SDK."""
+        run = await self._running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "cost": 0.4213},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["cost"] == 0.4213
+        await async_session.refresh(run)
+        assert run.cost == 0.4213
+
+    async def test_complete_run_saves_cost_for_failed_runs(
+        self, async_client, async_session
+    ):
+        """Failed runs record their cost too — they still spent money."""
+        run = await self._running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "boom", "cost": 1.5},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["cost"] == 1.5
+
+    async def test_complete_run_without_cost_leaves_it_unset(
+        self, async_client, async_session
+    ):
+        """Callbacks from SDK versions that don't report cost still succeed."""
+        run = await self._running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["cost"] is None
+        await async_session.refresh(run)
+        assert run.cost is None
+
 
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
