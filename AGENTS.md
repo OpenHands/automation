@@ -134,15 +134,6 @@ Important notes:
 - For fork PRs, remove `.pr/` manually before merging.
 
 
-## Frontend Hosting
-
-The Docker image includes the built frontend SPA and serves it via FastAPI.
-
-- **Opt-in via `AUTOMATION_FRONTEND_DIR`** — set to the directory containing built assets. Empty = disabled (default locally). Dockerfile sets it to `/app/frontend-dist`.
-- **Mount path** derived from `base_url` via `Settings.frontend_path` (same pattern as `base_path`). Defaults to `/automations`.
-- **SPA fallback** via `_SPAStaticFiles.lookup_path` — unknown paths resolve to `index.html`.
-- **Cache**: `immutable` for hashed `assets/*`, `no-cache` for everything else.
-
 ## Dispatch Pipeline
 
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:
@@ -297,12 +288,10 @@ A single repo version is applied to every embedded location (configured in
 |------|-------------------|
 | `pyproject.toml` (`[project].version`) | native `python` release-type |
 | `uv.lock` (root package) | `toml` updater (`$.package[?(@.name.value=='openhands-automation')].version`) |
-| `frontend/package.json` | `json` updater (`$.version`) |
-| `frontend/package-lock.json` | `json` updater (`$.version` and `$.packages[''].version`) |
 | `openhands/automation/__init__.py` (`__version__`) | `generic` updater (`# x-release-please-version`) |
 | `openhands/automation/app.py` (FastAPI `version=`) | `generic` updater (`# x-release-please-version`) |
 
-The lock files are bumped so the release PR's own CI (`uv sync --frozen`, `npm ci`)
+The lock file is bumped so the release PR's own CI (`uv sync --frozen`)
 stays green. Keep the `# x-release-please-version` annotations on the `__init__.py`
 and `app.py` version lines.
 
