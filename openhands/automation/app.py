@@ -16,8 +16,10 @@ from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
+    DB_AUTH_ERROR_HINT,
     create_engine,
     create_session_factory,
+    is_database_auth_error,
     set_sqlite_mode,
 )
 from openhands.automation.dispatcher import dispatcher_loop
@@ -269,7 +271,13 @@ async def readiness():
             await conn.execute(text("SELECT 1"))
         return {"status": "ready"}
     except Exception as e:
-        logger.error("Readiness check failed: %s", e, exc_info=True)
+        if is_database_auth_error(e):
+            # Probes fire every few seconds — a full InvalidPasswordError
+            # traceback per probe floods log aggregators. Log concisely with
+            # an actionable hint instead.
+            logger.error("Readiness check failed: %s. %s", e, DB_AUTH_ERROR_HINT)
+        else:
+            logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
             status_code=503,
             content={"status": "not_ready", "error": "database unavailable"},

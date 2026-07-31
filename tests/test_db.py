@@ -6,14 +6,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from asyncpg.exceptions import (
+    InvalidAuthorizationSpecificationError,
+    InvalidPasswordError,
+)
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from openhands.automation import db as db_module
 from openhands.automation.config import ServiceSettings
 from openhands.automation.db import (
+    DB_AUTH_ERROR_MAX_BACKOFF_SECONDS,
     _build_asyncpg_connect_args,
     _build_pg8000_connect_args,
     _create_sqlite_engine,
+    is_database_auth_error,
     is_sqlite_url,
+    next_poll_interval,
     normalize_sqlite_url_for_alembic,
     set_sqlite_mode,
     using_sqlite,
@@ -330,3 +338,73 @@ class TestSqliteMigrations:
         )
         # The migration should fail (non-zero exit code)
         assert result.returncode != 0
+
+
+class TestIsDatabaseAuthError:
+    """Regression tests for asyncpg InvalidPasswordError detection.
+
+    Datadog error pattern: asyncpg.exceptions.InvalidPasswordError spiking on
+    service `automation`. Background loops must recognize the auth failure
+    (even when wrapped by SQLAlchemy) so they can back off instead of
+    retrying at full speed and flooding the logs.
+    """
+
+    def test_direct_invalid_password_error(self):
+        assert is_database_auth_error(InvalidPasswordError("bad password")) is True
+
+    def test_direct_invalid_authorization_error(self):
+        exc = InvalidAuthorizationSpecificationError("no role")
+        assert is_database_auth_error(exc) is True
+
+    def test_sqlalchemy_wrapped_invalid_password_error(self):
+        """SQLAlchemy wraps DBAPI errors — the driver error is in `orig`."""
+        orig = InvalidPasswordError(
+            'password authentication failed for user "postgres"'
+        )
+        wrapped = DBAPIError.instance(
+            "SELECT 1", None, orig, Exception, connection_invalidated=True
+        )
+        assert is_database_auth_error(wrapped) is True
+
+    def test_cause_chained_invalid_password_error(self):
+        """Auth error reachable only through __cause__ is detected."""
+        try:
+            try:
+                raise InvalidPasswordError("bad password")
+            except InvalidPasswordError as inner:
+                raise RuntimeError("connection failed") from inner
+        except RuntimeError as outer:
+            assert is_database_auth_error(outer) is True
+
+    def test_non_auth_error(self):
+        assert is_database_auth_error(ValueError("boom")) is False
+
+    def test_wrapped_non_auth_error(self):
+        orig = ConnectionRefusedError("connection refused")
+        wrapped = OperationalError("SELECT 1", None, orig)
+        assert is_database_auth_error(wrapped) is False
+
+    def test_cyclic_exception_chain_terminates(self):
+        """A pathological self-referencing chain must not loop forever."""
+        exc = RuntimeError("boom")
+        exc.__cause__ = exc
+        assert is_database_auth_error(exc) is False
+
+
+class TestNextPollInterval:
+    """Tests for exponential backoff on persistent DB auth failures."""
+
+    def test_no_failures_returns_base_interval(self):
+        assert next_poll_interval(10, 0) == 10
+
+    def test_backoff_doubles_per_failure(self):
+        assert next_poll_interval(10, 1) == 20
+        assert next_poll_interval(10, 2) == 40
+        assert next_poll_interval(10, 3) == 80
+
+    def test_backoff_is_capped(self):
+        assert next_poll_interval(10, 50) == DB_AUTH_ERROR_MAX_BACKOFF_SECONDS
+        assert next_poll_interval(60, 10) == DB_AUTH_ERROR_MAX_BACKOFF_SECONDS
+
+    def test_negative_failures_returns_base_interval(self):
+        assert next_poll_interval(10, -1) == 10

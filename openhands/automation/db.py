@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
+from asyncpg.exceptions import InvalidAuthorizationSpecificationError
 from fastapi import Request
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
@@ -28,6 +29,54 @@ from openhands.automation.config import ServiceSettings, get_config
 
 logger = logging.getLogger("automation.db")
 SUPPORTED_DB_SSL_MODES = {"prefer", "require", "disable"}
+
+# Cap for the exponential backoff applied by background loops when the
+# database rejects our credentials (see next_poll_interval).
+DB_AUTH_ERROR_MAX_BACKOFF_SECONDS = 300.0
+
+DB_AUTH_ERROR_HINT = (
+    "Database authentication failed — the configured credentials were rejected "
+    "by the server. Check AUTOMATION_DB_USER/AUTOMATION_DB_PASS (or the "
+    "credentials in AUTOMATION_DB_URL); if the database password was rotated, "
+    "the service must be redeployed with the new secret. Retrying will not "
+    "succeed until the credentials are fixed."
+)
+
+
+def is_database_auth_error(exc: BaseException) -> bool:
+    """Return True if the exception is a database authentication failure.
+
+    Detects asyncpg's InvalidPasswordError / InvalidAuthorizationSpecificationError
+    (28P01 / 28000) anywhere in the exception chain. SQLAlchemy wraps DBAPI
+    errors (exposing the driver error via ``orig`` and ``__cause__``), so the
+    full chain is walked rather than only checking the top-level exception.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, InvalidAuthorizationSpecificationError):
+            return True
+        orig = getattr(current, "orig", None)
+        current = orig or current.__cause__ or current.__context__
+    return False
+
+
+def next_poll_interval(
+    base_interval: float,
+    consecutive_auth_failures: int,
+    max_backoff: float = DB_AUTH_ERROR_MAX_BACKOFF_SECONDS,
+) -> float:
+    """Compute the wait before the next poll cycle, backing off on auth errors.
+
+    Invalid database credentials never resolve on their own, so retrying at the
+    normal poll interval (as fast as every 10s for the dispatcher) floods the
+    logs and the database with doomed connection attempts. Doubles the interval
+    per consecutive auth failure, capped at ``max_backoff``.
+    """
+    if consecutive_auth_failures <= 0:
+        return base_interval
+    return min(base_interval * (2**consecutive_auth_failures), max_backoff)
 
 
 def _normalize_db_ssl_mode(db_ssl_mode: str | None) -> str | None:

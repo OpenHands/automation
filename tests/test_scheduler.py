@@ -916,6 +916,81 @@ class TestSchedulerLoop:
             assert runs[0].status == AutomationRunStatus.PENDING
 
 
+class TestSchedulerLoopDbAuthFailure:
+    """Regression tests for the asyncpg InvalidPasswordError Datadog spike.
+
+    When database credentials are invalid (e.g. after a password rotation),
+    every poll cycle fails with asyncpg.exceptions.InvalidPasswordError.
+    The loop must survive, log a concise actionable error instead of a full
+    traceback per cycle, and back off exponentially instead of hammering the
+    database at the normal poll interval.
+    """
+
+    async def test_loop_survives_auth_error_and_backs_off(self, caplog, monkeypatch):
+        import logging
+
+        from asyncpg.exceptions import InvalidPasswordError
+        from sqlalchemy.exc import DBAPIError
+
+        from openhands.automation import scheduler as scheduler_module
+
+        def make_auth_error():
+            orig = InvalidPasswordError(
+                'password authentication failed for user "postgres"'
+            )
+            return DBAPIError.instance(
+                "SELECT 1", None, orig, Exception, connection_invalidated=True
+            )
+
+        async def failing_poll(*args, **kwargs):
+            raise make_auth_error()
+
+        monkeypatch.setattr(scheduler_module, "poll_and_schedule", failing_poll)
+
+        # Spy on next_poll_interval to verify the backoff is actually applied
+        backoff_calls: list[tuple[float, int]] = []
+        real_next_poll_interval = scheduler_module.next_poll_interval
+
+        def spy_next_poll_interval(base_interval, consecutive_auth_failures):
+            backoff_calls.append((base_interval, consecutive_auth_failures))
+            # Return a tiny wait so the test runs multiple cycles quickly
+            real_next_poll_interval(base_interval, consecutive_auth_failures)
+            return 0.01
+
+        monkeypatch.setattr(
+            scheduler_module, "next_poll_interval", spy_next_poll_interval
+        )
+
+        shutdown_event = asyncio.Event()
+        with caplog.at_level(logging.ERROR, logger="automation.scheduler"):
+            task = asyncio.create_task(
+                scheduler_loop(
+                    # Never touched: poll_and_schedule is patched to raise
+                    None,  # type: ignore[arg-type]
+                    interval_seconds=10,
+                    shutdown_event=shutdown_event,
+                )
+            )
+            # Let it run a few failing poll cycles
+            await asyncio.sleep(0.2)
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        # The loop survived repeated auth failures and logged the hint
+        auth_records = [
+            r for r in caplog.records if "Database authentication failed" in r.message
+        ]
+        assert auth_records, "Expected concise auth-failure log with hint"
+        # Only the first failure carries the full traceback
+        assert sum(1 for r in auth_records if r.exc_info) <= 1
+
+        # Backoff was computed with an increasing consecutive-failure count
+        assert backoff_calls
+        failure_counts = [count for _, count in backoff_calls]
+        assert failure_counts[0] == 1
+        assert failure_counts == sorted(failure_counts)
+
+
 class TestCreatePendingRun:
     """Tests for create_pending_run function."""
 

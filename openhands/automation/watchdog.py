@@ -21,6 +21,11 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import Settings
+from openhands.automation.db import (
+    DB_AUTH_ERROR_HINT,
+    is_database_auth_error,
+    next_poll_interval,
+)
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -348,6 +353,8 @@ async def watchdog_loop(
         interval,
     )
 
+    consecutive_auth_failures = 0
+
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
             logger.info("Watchdog received shutdown signal, exiting")
@@ -357,15 +364,31 @@ async def watchdog_loop(
             marked = await mark_stale_runs(session_factory, settings)
             if marked:
                 logger.info("Processed %d stale run(s)", marked)
-        except Exception:
-            logger.exception("Error in watchdog scan")
+            consecutive_auth_failures = 0
+        except Exception as exc:
+            if is_database_auth_error(exc):
+                consecutive_auth_failures += 1
+                # Concise error (full traceback only on the first failure) —
+                # repeating identical InvalidPasswordError stack traces every
+                # cycle floods log aggregators without adding information.
+                logger.error(
+                    "Watchdog scan failed: %s (%d consecutive failures). %s",
+                    exc,
+                    consecutive_auth_failures,
+                    DB_AUTH_ERROR_HINT,
+                    exc_info=consecutive_auth_failures == 1,
+                )
+            else:
+                consecutive_auth_failures = 0
+                logger.exception("Error in watchdog scan")
 
+        wait_seconds = next_poll_interval(interval, consecutive_auth_failures)
         if shutdown_event is not None:
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=wait_seconds)
                 logger.info("Watchdog received shutdown signal, exiting")
                 break
             except TimeoutError:
                 pass
         else:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(wait_seconds)

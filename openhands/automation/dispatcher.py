@@ -28,7 +28,12 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
-from openhands.automation.db import using_sqlite
+from openhands.automation.db import (
+    DB_AUTH_ERROR_HINT,
+    is_database_auth_error,
+    next_poll_interval,
+    using_sqlite,
+)
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     PermanentDispatchError,
@@ -486,6 +491,8 @@ async def dispatcher_loop(
         batch_size,
     )
 
+    consecutive_auth_failures = 0
+
     async with httpx.AsyncClient(timeout=http_timeout) as client:
         while True:
             if shutdown_event is not None and shutdown_event.is_set():
@@ -503,17 +510,34 @@ async def dispatcher_loop(
                     logger.info("Dispatched %d run(s)", len(dispatched))
                 else:
                     logger.debug("No pending runs to dispatch")
-            except Exception:
-                logger.error("Error dispatching pending runs", exc_info=True)
+                consecutive_auth_failures = 0
+            except Exception as exc:
+                if is_database_auth_error(exc):
+                    consecutive_auth_failures += 1
+                    # Concise error (full traceback only on the first failure)
+                    # — repeating identical InvalidPasswordError stack traces
+                    # every 10s floods log aggregators without adding info.
+                    logger.error(
+                        "Dispatcher poll cycle failed: %s "
+                        "(%d consecutive failures). %s",
+                        exc,
+                        consecutive_auth_failures,
+                        DB_AUTH_ERROR_HINT,
+                        exc_info=consecutive_auth_failures == 1,
+                    )
+                else:
+                    consecutive_auth_failures = 0
+                    logger.error("Error dispatching pending runs", exc_info=True)
 
+            wait_seconds = next_poll_interval(
+                interval_seconds, consecutive_auth_failures
+            )
             if shutdown_event is not None:
                 try:
-                    await asyncio.wait_for(
-                        shutdown_event.wait(), timeout=interval_seconds
-                    )
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=wait_seconds)
                     logger.info("Dispatcher received shutdown signal, exiting")
                     break
                 except TimeoutError:
                     pass
             else:
-                await asyncio.sleep(interval_seconds)
+                await asyncio.sleep(wait_seconds)
