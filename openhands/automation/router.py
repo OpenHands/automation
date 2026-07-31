@@ -393,16 +393,13 @@ async def list_automation_runs(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     status: list[AutomationRunStatus] | None = Query(default=None),
-    started_after: datetime | None = Query(default=None),
-    started_before: datetime | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
     Returns runs ordered by creation time (latest first), with pagination.
-    Optional ``status``, ``started_after``, and ``started_before`` filters
-    match the Activity Log export endpoint.
+    Optional ``status`` filter; date-range filters live on the export endpoint.
     """
     # Verify the automation exists and belongs to the user
     await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -411,8 +408,8 @@ async def list_automation_runs(
         session,
         automation_id,
         statuses=status,
-        started_after=started_after,
-        started_before=started_before,
+        started_after=None,
+        started_before=None,
         limit=limit,
         offset=offset,
     )
