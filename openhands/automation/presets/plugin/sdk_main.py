@@ -435,18 +435,10 @@ This automation was triggered by a webhook event:
         while time.time() - last_event_time["ts"] < 2.0:
             time.sleep(0.1)
 
+        cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
+        print(f"  cost: {cost}")
         print(f"  events received: {len(received_events)}")
     finally:
-        # Report cost even when the run failed — failed runs still spend.
-        # This read falls back to the agent server when no state is cached,
-        # and on the failure path the server may already be gone, so never
-        # let it mask the original exception.
-        try:
-            stats = conversation.conversation_stats.get_combined_metrics()
-            print(f"  cost: {stats.accumulated_cost}")
-            workspace.register_cost(stats.accumulated_cost)
-        except Exception as e:
-            print(f"  warning: could not record cost: {e}")
         conversation.close()
 
     print("  conversation completed successfully")
