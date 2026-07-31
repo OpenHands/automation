@@ -1,9 +1,14 @@
 """FastAPI router for the automations CRUD API."""
 
 import asyncio
+import csv
+import io
+import json
 import logging
 import re
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -24,10 +29,13 @@ from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
+    AutomationRunExportResponse,
+    AutomationRunExportRow,
     AutomationRunListResponse,
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunStatus,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -42,6 +50,10 @@ from openhands.automation.utils.api_key import (
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run_query import (
+    count_automation_runs,
+    select_automation_runs,
+)
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -327,36 +339,83 @@ async def dispatch_automation(
     return AutomationRunResponse.model_validate(run)
 
 
+@router.get("/{automation_id}/runs/export", response_model=None)
+async def export_automation_runs(
+    automation_id: uuid.UUID,
+    format: Literal["json", "csv"] = Query(default="json"),
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    status: list[AutomationRunStatus] | None = Query(default=None),
+    started_after: datetime | None = Query(default=None),
+    started_before: datetime | None = Query(default=None),
+    conversation_base_url: str | None = Query(default=None),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Export filtered Activity Log rows as JSON or CSV (paginated).
+
+    Uses the same filter contract as ``GET /{automation_id}/runs``.
+    """
+    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+
+    total, runs = await _fetch_filtered_runs(
+        session,
+        automation_id,
+        statuses=status,
+        started_after=started_after,
+        started_before=started_before,
+        limit=limit,
+        offset=offset,
+    )
+    rows = [
+        _to_export_row(run, auto, conversation_base_url=conversation_base_url)
+        for run in runs
+    ]
+
+    if format == "json":
+        body = AutomationRunExportResponse(
+            runs=rows,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+        return Response(
+            content=body.model_dump_json(),
+            media_type="application/json",
+        )
+
+    return _csv_export_response(auto.name, rows)
+
+
 @router.get("/{automation_id}/runs")
 async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    status: list[AutomationRunStatus] | None = Query(default=None),
+    started_after: datetime | None = Query(default=None),
+    started_before: datetime | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
     Returns runs ordered by creation time (latest first), with pagination.
+    Optional ``status``, ``started_after``, and ``started_before`` filters
+    match the Activity Log export endpoint.
     """
     # Verify the automation exists and belongs to the user
     await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
-    # Count total runs for this automation
-    count_result = await session.execute(
-        select(func.count()).where(AutomationRun.automation_id == automation_id)
+    total, runs = await _fetch_filtered_runs(
+        session,
+        automation_id,
+        statuses=status,
+        started_after=started_after,
+        started_before=started_before,
+        limit=limit,
+        offset=offset,
     )
-    total = count_result.scalar() or 0
-
-    # Fetch paginated runs ordered by latest first
-    result = await session.execute(
-        select(AutomationRun)
-        .where(AutomationRun.automation_id == automation_id)
-        .order_by(AutomationRun.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
-    runs = result.scalars().all()
 
     return AutomationRunListResponse(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
@@ -588,6 +647,115 @@ async def cancel_run(
 
 
 # --- Helpers ---
+
+
+_EXPORT_CSV_COLUMNS = (
+    "run_id",
+    "automation_id",
+    "automation_name",
+    "trigger",
+    "start_time",
+    "end_time",
+    "duration_seconds",
+    "status",
+    "conversation_id",
+    "conversation_url",
+    "error",
+)
+
+
+async def _fetch_filtered_runs(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    *,
+    statuses: list[AutomationRunStatus] | None,
+    started_after: datetime | None,
+    started_before: datetime | None,
+    limit: int,
+    offset: int,
+) -> tuple[int, list[AutomationRun]]:
+    """Shared list/export fetch: filtered count + paginated rows."""
+    total = await count_automation_runs(
+        session,
+        automation_id,
+        statuses=statuses,
+        started_after=started_after,
+        started_before=started_before,
+    )
+    result = await session.execute(
+        select_automation_runs(
+            automation_id,
+            statuses=statuses,
+            started_after=started_after,
+            started_before=started_before,
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+    return total, list(result.scalars().all())
+
+
+def _conversation_url(
+    conversation_id: str | None,
+    conversation_base_url: str | None,
+) -> str | None:
+    if not conversation_id:
+        return None
+    path = f"/conversations/{conversation_id}"
+    if not conversation_base_url:
+        return path
+    return f"{conversation_base_url.rstrip('/')}{path}"
+
+
+def _to_export_row(
+    run: AutomationRun,
+    automation: Automation,
+    *,
+    conversation_base_url: str | None,
+) -> AutomationRunExportRow:
+    start = run.started_at or run.created_at
+    end = run.completed_at
+    duration: float | None = None
+    if start is not None and end is not None:
+        duration = (end - start).total_seconds()
+
+    return AutomationRunExportRow(
+        run_id=run.id,
+        automation_id=run.automation_id,
+        automation_name=automation.name,
+        trigger=dict(automation.trigger) if automation.trigger else {},
+        start_time=start,
+        end_time=end,
+        duration_seconds=duration,
+        status=RunStatus(run.status.value),
+        conversation_id=run.conversation_id,
+        conversation_url=_conversation_url(run.conversation_id, conversation_base_url),
+        error=run.error_detail,
+    )
+
+
+def _csv_export_response(
+    automation_name: str,
+    rows: list[AutomationRunExportRow],
+) -> Response:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_EXPORT_CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        payload = row.model_dump(mode="json")
+        payload["trigger"] = json.dumps(payload["trigger"], separators=(",", ":"))
+        writer.writerow(payload)
+
+    safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", automation_name) or "automation"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_name}.activity-log.csv"'
+            )
+        },
+    )
 
 
 async def _get_user_automation(

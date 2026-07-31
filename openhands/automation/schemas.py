@@ -678,6 +678,31 @@ class AutomationRunListResponse(BaseModel):
     total: int
 
 
+class AutomationRunExportRow(BaseModel):
+    """One Activity Log row for CSV/JSON export."""
+
+    run_id: uuid.UUID
+    automation_id: uuid.UUID
+    automation_name: str
+    trigger: dict
+    start_time: UtcDatetime | None
+    end_time: UtcDatetime | None
+    duration_seconds: float | None
+    status: RunStatus
+    conversation_id: str | None
+    conversation_url: str | None
+    error: str | None
+
+
+class AutomationRunExportResponse(BaseModel):
+    """Paginated machine-readable Activity Log export (JSON)."""
+
+    runs: list[AutomationRunExportRow]
+    total: int
+    limit: int
+    offset: int
+
+
 # --- Capability and Preflight Schemas ---
 
 

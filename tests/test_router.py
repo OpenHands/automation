@@ -1580,6 +1580,163 @@ class TestListAutomationRuns:
         assert data["total"] == 60
         assert len(data["runs"]) == 50  # Default limit
 
+    async def test_list_runs_filter_by_status(self, async_client, async_session):
+        """Optional status filter returns only matching runs."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Filter Status Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+        async_session.add_all(
+            [
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.FAILED,
+                ),
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.COMPLETED,
+                ),
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.FAILED,
+                ),
+            ]
+        )
+        await async_session.commit()
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs",
+            params=[("status", "FAILED")],
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert len(data["runs"]) == 2
+        assert all(r["status"] == "FAILED" for r in data["runs"])
+
+
+class TestExportAutomationRuns:
+    """Tests for GET /v1/{id}/runs/export endpoint."""
+
+    async def _seed_runs(self, async_session):
+        from datetime import timedelta
+
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Export Me",
+            trigger={"type": "cron", "schedule": "0 9 * * 1-5", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.flush()
+
+        now = utcnow()
+        failed = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.FAILED,
+            conversation_id="conv-fail",
+            error_detail="boom",
+            started_at=now - timedelta(hours=2),
+            completed_at=now - timedelta(hours=1),
+            created_at=now - timedelta(hours=2),
+        )
+        completed = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.COMPLETED,
+            conversation_id="conv-ok",
+            started_at=now - timedelta(minutes=30),
+            completed_at=now - timedelta(minutes=10),
+            created_at=now - timedelta(minutes=30),
+        )
+        async_session.add_all([failed, completed])
+        await async_session.commit()
+        return automation, failed, completed
+
+    async def test_export_json_includes_conversation_url(
+        self, async_client, async_session
+    ):
+        automation, failed, _completed = await self._seed_runs(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs/export",
+            params={
+                "format": "json",
+                "conversation_base_url": "http://localhost:8000",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["limit"] == 500
+        assert data["offset"] == 0
+        assert len(data["runs"]) == 2
+
+        by_id = {r["run_id"]: r for r in data["runs"]}
+        row = by_id[str(failed.id)]
+        assert row["automation_id"] == str(automation.id)
+        assert row["automation_name"] == "Export Me"
+        assert row["trigger"]["type"] == "cron"
+        assert row["status"] == "FAILED"
+        assert row["conversation_id"] == "conv-fail"
+        assert row["conversation_url"] == "http://localhost:8000/conversations/conv-fail"
+        assert row["error"] == "boom"
+        assert row["duration_seconds"] == 3600.0
+
+    async def test_export_honours_status_filter(self, async_client, async_session):
+        automation, _failed, completed = await self._seed_runs(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs/export",
+            params=[("format", "json"), ("status", "COMPLETED")],
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["runs"][0]["run_id"] == str(completed.id)
+        assert data["runs"][0]["conversation_url"] == "/conversations/conv-ok"
+
+    async def test_export_csv(self, async_client, async_session):
+        automation, _failed, _completed = await self._seed_runs(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs/export",
+            params={"format": "csv"},
+        )
+
+        assert response.status_code == 200
+        assert "text/csv" in response.headers["content-type"]
+        assert "activity-log.csv" in response.headers["content-disposition"]
+        text = response.text
+        header = text.splitlines()[0]
+        assert "run_id" in header
+        assert "conversation_url" in header
+        assert "Export Me" in text or "Export" in text
+        assert "conv-fail" in text
+        assert "conv-ok" in text
+
+    async def test_export_not_found(self, async_client):
+        fake_id = uuid.uuid4()
+        response = await async_client.get(
+            f"/api/automation/v1/{fake_id}/runs/export",
+            params={"format": "json"},
+        )
+        assert response.status_code == 404
+
 
 class TestBackwardCompatibility:
     """Tests ensuring existing cron triggers work with discriminated union."""
