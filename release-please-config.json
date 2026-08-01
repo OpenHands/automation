@@ -17,21 +17,6 @@
           "path": "openhands/automation/app.py"
         },
         {
-          "type": "json",
-          "path": "frontend/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "frontend/package-lock.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "frontend/package-lock.json",
-          "jsonpath": "$.packages[''].version"
-        },
-        {
           "type": "toml",
           "path": "uv.lock",
           "jsonpath": "$.package[?(@.name.value=='openhands-automation')].version"
