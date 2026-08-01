@@ -2,14 +2,12 @@
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
@@ -306,56 +304,4 @@ async def server_info():
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
-        )
-
-
-# ---------------------------------------------------------------------------
-# Frontend static file hosting (opt-in via AUTOMATION_FRONTEND_DIR)
-# ---------------------------------------------------------------------------
-_settings = get_settings()
-_frontend_dir = _settings.frontend_dir
-if _frontend_dir:
-    _frontend_path = Path(_frontend_dir)
-    if not _frontend_path.is_dir():
-        logger.warning(
-            "AUTOMATION_FRONTEND_DIR=%s is not a directory — frontend hosting disabled",
-            _frontend_dir,
-        )
-    else:
-        _frontend_mount = _settings.frontend_path
-        logger.info("Serving frontend from %s at %s", _frontend_dir, _frontend_mount)
-
-        _index_full_path = str(_frontend_path / "index.html")
-        _index_stat = os.stat(_index_full_path)
-
-        class _SPAStaticFiles(StaticFiles):
-            """StaticFiles that falls back to index.html for SPA client routes."""
-
-            def lookup_path(self, path: str) -> tuple[str, os.stat_result | None]:
-                full_path, stat_result = super().lookup_path(path)
-                if stat_result is None:
-                    # Unknown path → serve index.html for client-side routing
-                    return _index_full_path, _index_stat
-                return full_path, stat_result
-
-            def file_response(self, full_path, stat_result, scope, status_code=200):
-                response = super().file_response(
-                    full_path, stat_result, scope, status_code
-                )
-                # Hashed assets are immutable; everything else (especially
-                # index.html) must be revalidated on every request.
-                if "/assets/" in str(full_path):
-                    response.headers["Cache-Control"] = (
-                        "public, max-age=31536000, immutable"
-                    )
-                else:
-                    response.headers.setdefault(
-                        "Cache-Control", "no-cache, must-revalidate"
-                    )
-                return response
-
-        app.mount(
-            _frontend_mount,
-            _SPAStaticFiles(directory=_frontend_path, html=True),
-            name="frontend",
         )
