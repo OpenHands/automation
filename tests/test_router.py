@@ -1580,50 +1580,6 @@ class TestListAutomationRuns:
         assert data["total"] == 60
         assert len(data["runs"]) == 50  # Default limit
 
-    async def test_list_runs_filter_by_status(self, async_client, async_session):
-        """Optional status filter returns only matching runs."""
-        from openhands.automation.models import AutomationRun, AutomationRunStatus
-
-        automation = Automation(
-            user_id=TEST_USER_ID,
-            org_id=TEST_ORG_ID,
-            name="Filter Status Automation",
-            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-            tarball_path="s3://bucket/code.tar.gz",
-            entrypoint="uv run script.py",
-        )
-        async_session.add(automation)
-        await async_session.flush()
-        async_session.add_all(
-            [
-                AutomationRun(
-                    automation_id=automation.id,
-                    status=AutomationRunStatus.FAILED,
-                ),
-                AutomationRun(
-                    automation_id=automation.id,
-                    status=AutomationRunStatus.COMPLETED,
-                ),
-                AutomationRun(
-                    automation_id=automation.id,
-                    status=AutomationRunStatus.FAILED,
-                ),
-            ]
-        )
-        await async_session.commit()
-
-        response = await async_client.get(
-            f"/api/automation/v1/{automation.id}/runs",
-            params=[("status", "FAILED")],
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["total"] == 2
-        assert len(data["runs"]) == 2
-        assert all(r["status"] == "FAILED" for r in data["runs"])
-
-
 class TestExportAutomationRuns:
     """Tests for GET /v1/{id}/runs/export endpoint."""
 
@@ -1695,20 +1651,6 @@ class TestExportAutomationRuns:
         assert row["conversation_url"] == "http://localhost:8000/conversations/conv-fail"
         assert row["error"] == "boom"
         assert row["duration_seconds"] == 3600.0
-
-    async def test_export_honours_status_filter(self, async_client, async_session):
-        automation, _failed, completed = await self._seed_runs(async_session)
-
-        response = await async_client.get(
-            f"/api/automation/v1/{automation.id}/runs/export",
-            params=[("format", "json"), ("status", "COMPLETED")],
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["total"] == 1
-        assert data["runs"][0]["run_id"] == str(completed.id)
-        assert data["runs"][0]["conversation_url"] == "/conversations/conv-ok"
 
     async def test_export_csv(self, async_client, async_session):
         automation, _failed, _completed = await self._seed_runs(async_session)

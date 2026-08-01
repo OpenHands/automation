@@ -7,7 +7,6 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -345,25 +344,16 @@ async def export_automation_runs(
     format: Literal["json", "csv"] = Query(default="json"),
     limit: int = Query(default=500, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-    status: list[AutomationRunStatus] | None = Query(default=None),
-    started_after: datetime | None = Query(default=None),
-    started_before: datetime | None = Query(default=None),
     conversation_base_url: str | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Export filtered Activity Log rows as JSON or CSV (paginated).
-
-    Uses the same filter contract as ``GET /{automation_id}/runs``.
-    """
+    """Export Activity Log rows as JSON or CSV (paginated)."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
-    total, runs = await _fetch_filtered_runs(
+    total, runs = await _fetch_runs(
         session,
         automation_id,
-        statuses=status,
-        started_after=started_after,
-        started_before=started_before,
         limit=limit,
         offset=offset,
     )
@@ -392,24 +382,19 @@ async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    status: list[AutomationRunStatus] | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
     Returns runs ordered by creation time (latest first), with pagination.
-    Optional ``status`` filter; date-range filters live on the export endpoint.
     """
     # Verify the automation exists and belongs to the user
     await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
-    total, runs = await _fetch_filtered_runs(
+    total, runs = await _fetch_runs(
         session,
         automation_id,
-        statuses=status,
-        started_after=None,
-        started_before=None,
         limit=limit,
         offset=offset,
     )
@@ -661,33 +646,17 @@ _EXPORT_CSV_COLUMNS = (
 )
 
 
-async def _fetch_filtered_runs(
+async def _fetch_runs(
     session: AsyncSession,
     automation_id: uuid.UUID,
     *,
-    statuses: list[AutomationRunStatus] | None,
-    started_after: datetime | None,
-    started_before: datetime | None,
     limit: int,
     offset: int,
 ) -> tuple[int, list[AutomationRun]]:
-    """Shared list/export fetch: filtered count + paginated rows."""
-    total = await count_automation_runs(
-        session,
-        automation_id,
-        statuses=statuses,
-        started_after=started_after,
-        started_before=started_before,
-    )
+    """Shared list/export fetch: count + paginated rows."""
+    total = await count_automation_runs(session, automation_id)
     result = await session.execute(
-        select_automation_runs(
-            automation_id,
-            statuses=statuses,
-            started_after=started_after,
-            started_before=started_before,
-        )
-        .offset(offset)
-        .limit(limit)
+        select_automation_runs(automation_id).offset(offset).limit(limit)
     )
     return total, list(result.scalars().all())
 
