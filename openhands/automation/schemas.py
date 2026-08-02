@@ -722,6 +722,10 @@ class CapabilitiesResponse(_SetupContractModel):
     """What this deployment supports, discovered before a setup form renders."""
 
     ready: bool = Field(..., description="Whether the service can accept new work")
+    max_automation_timeout_seconds: int = Field(
+        ...,
+        description="Maximum timeout the service accepts for an automation run",
+    )
     trigger_kinds: list[str]
     event_sources: list[str]
     event_types: list[str] = Field(

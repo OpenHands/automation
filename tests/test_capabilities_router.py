@@ -131,6 +131,18 @@ class TestGetCapabilities:
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
 
+    async def test_advertises_the_configured_timeout_ceiling(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """The setup client learns the same maximum the API enforces."""
+        monkeypatch.setenv("AUTOMATION_MAX_RUN_DURATION", "900")
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        assert response.status_code == 200
+        assert response.json()["maxAutomationTimeoutSeconds"] == 900
+
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch
     ):
