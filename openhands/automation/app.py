@@ -30,6 +30,10 @@ from openhands.automation.middleware import (
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.telemetry import (
+    close_telemetry_http_client,
+    get_telemetry_http_client,
+)
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
@@ -65,6 +69,7 @@ async def lifespan(app: FastAPI):
 
     # Create shared httpx client for auth (stored in app.state for DI)
     app.state.http_client = create_http_client()
+    get_telemetry_http_client()
 
     # Create engine and session factory, store in app.state
     engine_result = await create_engine(settings)
@@ -183,6 +188,7 @@ async def lifespan(app: FastAPI):
                 pass
 
     await app.state.http_client.aclose()
+    await close_telemetry_http_client()
     await app.state.engine_result.dispose()
     logger.info("Automations service shut down")
 
