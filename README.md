@@ -95,3 +95,7 @@ containers/          # Docker configuration
 ## Deployment
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
+
+### Multi-worker / multi-replica
+
+Uvicorn starts the cron scheduler, run dispatcher, and staleness watchdog once per worker process. For multi-worker deployments, run those loops in a single dedicated process (`AUTOMATION_ENABLE_BACKGROUND_WORKERS=true`, the default) and set `AUTOMATION_ENABLE_BACKGROUND_WORKERS=false` on request-serving replicas so they only handle HTTP.
