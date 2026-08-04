@@ -148,6 +148,7 @@ def _build_event_payload(
         "trigger_payload": automation.trigger,
         "automation_id": str(automation.id),
         "automation_name": automation.name,
+        "run_id": str(run.id),
     }
     if run.event_payload:
         payload["event"] = run.event_payload
