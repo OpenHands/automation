@@ -1,6 +1,7 @@
 """Version metadata helpers for the automation service."""
 
 import importlib.metadata
+from functools import lru_cache
 from typing import TypedDict
 
 from openhands.automation import __version__
@@ -14,6 +15,7 @@ class ServerVersionInfo(TypedDict):
     sdk_version: str
 
 
+@lru_cache(maxsize=1)
 def get_sdk_version() -> str:
     return importlib.metadata.version(SDK_PACKAGE_NAME)
 
