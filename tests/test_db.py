@@ -252,8 +252,22 @@ class TestSqliteMigrations:
             run_indexes = {
                 index["name"] for index in inspector.get_indexes("automation_runs")
             }
+            automation_indexes = {
+                index["name"] for index in inspector.get_indexes("automations")
+            }
+            assert "ix_automation_runs_automation_id" in run_indexes
             assert "ix_automation_runs_status_created_at" in run_indexes
             assert "ix_automation_runs_status_timeout_at" in run_indexes
+            assert "ix_automation_runs_timeout_at" not in run_indexes
+            assert automation_indexes.isdisjoint(
+                {
+                    "ix_automations_user_id",
+                    "ix_automations_org_id",
+                    "ix_automations_enabled",
+                    "ix_automations_deleted_at",
+                    "ix_automations_last_polled_at",
+                }
+            )
 
             engine.dispose()
         finally:
