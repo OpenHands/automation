@@ -93,6 +93,7 @@ async def get_capabilities(
     if not (config.service.is_local_mode or config.service.service_key):
         return CapabilitiesResponse(
             ready=False,
+            max_automation_timeout_seconds=config.sandbox.max_run_duration,
             trigger_kinds=[],
             event_sources=[],
             event_types=[],
@@ -113,6 +114,7 @@ async def get_capabilities(
 
     return CapabilitiesResponse(
         ready=True,
+        max_automation_timeout_seconds=config.sandbox.max_run_duration,
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
         event_types=(
