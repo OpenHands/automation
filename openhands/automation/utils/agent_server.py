@@ -112,6 +112,10 @@ class VerificationResult:
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    # True when verification could not be completed due to a transient
+    # infrastructure fault (rate limit, timeout, 5xx). Callers must leave the
+    # run RUNNING and retry later — never treat this as terminal absence.
+    retryable: bool = False
 
 
 async def verify_run_on_agent_server(
