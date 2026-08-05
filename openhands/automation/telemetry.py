@@ -26,6 +26,7 @@ from openhands.automation.utils.version import get_server_version_info
 
 
 logger = logging.getLogger("automation.telemetry")
+_telemetry_http_client: httpx.AsyncClient | None = None
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
@@ -34,6 +35,23 @@ TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
 API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
+
+
+def get_telemetry_http_client() -> httpx.AsyncClient:
+    """Return the process-wide client used for PostHog capture requests."""
+    global _telemetry_http_client
+    if _telemetry_http_client is None:
+        _telemetry_http_client = httpx.AsyncClient(timeout=2.0)
+    return _telemetry_http_client
+
+
+async def close_telemetry_http_client() -> None:
+    """Close the shared telemetry client and clear it for future lifespans."""
+    global _telemetry_http_client
+    client = _telemetry_http_client
+    _telemetry_http_client = None
+    if client is not None:
+        await client.aclose()
 
 
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
@@ -452,11 +470,10 @@ async def capture_automation_event(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.post(
-                f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-                json=payload,
-            )
-            response.raise_for_status()
+        response = await get_telemetry_http_client().post(
+            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
+            json=payload,
+        )
+        response.raise_for_status()
     except Exception:
         logger.debug("Failed to capture automation telemetry event", exc_info=True)

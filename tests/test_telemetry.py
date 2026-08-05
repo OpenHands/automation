@@ -34,9 +34,11 @@ class _Response:
 
 class _MockAsyncClient:
     posts: ClassVar[list[tuple[str, dict]]] = []
+    instances: ClassVar[list["_MockAsyncClient"]] = []
 
     def __init__(self, *args, **kwargs) -> None:
-        pass
+        self.closed = False
+        self.instances.append(self)
 
     async def __aenter__(self):
         return self
@@ -47,6 +49,9 @@ class _MockAsyncClient:
     async def post(self, url: str, json: dict) -> _Response:
         self.posts.append((url, json))
         return _Response()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _automation(telemetry_distinct_id: str | None = None) -> Automation:
@@ -89,8 +94,40 @@ def _reset_config(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     clear_config_cache()
     _MockAsyncClient.posts.clear()
+    _MockAsyncClient.instances.clear()
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", None)
     yield
     clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_capture_reuses_shared_http_client(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    await telemetry.capture_automation_event("automation_created")
+    await telemetry.capture_automation_event("automation_event_received")
+
+    assert len(_MockAsyncClient.instances) == 1
+    assert len(_MockAsyncClient.posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_close_telemetry_http_client_allows_clean_restart(monkeypatch):
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+    first_client = telemetry.get_telemetry_http_client()
+
+    await telemetry.close_telemetry_http_client()
+
+    assert first_client.closed is True
+    second_client = telemetry.get_telemetry_http_client()
+    assert second_client is not first_client
 
 
 @pytest.mark.asyncio
