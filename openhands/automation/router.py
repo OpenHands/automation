@@ -418,6 +418,8 @@ async def complete_run(
     }
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
+    if body.cost is not None:
+        values["cost"] = body.cost
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
 
