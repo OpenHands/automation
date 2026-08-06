@@ -34,7 +34,7 @@ The script:
   6. Gets secrets via workspace.get_secrets()
   7. Gets MCP config via workspace.get_mcp_config()
   8. Gets default agent with tools and condenser
-  9. Creates a RemoteConversation and injects secrets
+  9. Creates a RemoteConversation, sets a descriptive title, and injects secrets
   10. Sends the user's prompt (with event context if available) and runs
   11. On context manager exit, the workspace sends a completion callback
 
@@ -73,6 +73,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -160,6 +161,44 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
+
+def _build_conversation_title(event_context) -> str | None:
+    """Build a descriptive conversation title from the automation event context.
+
+    Returns "{automation_name} — {repo}#{number}" for PR/issue events,
+    "{automation_name} — {timestamp}" otherwise, or None when no automation
+    name is available (keeps the agent-server's default autotitle behavior).
+    """
+    if not isinstance(event_context, dict):
+        return None
+    name = event_context.get("automation_name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = " ".join(name.split())
+
+    context = None
+    event = event_context.get("event")
+    if isinstance(event, dict):
+        repo = event.get("repository")
+        repo_name = repo.get("full_name") if isinstance(repo, dict) else None
+        number = None
+        for key in ("pull_request", "issue"):
+            obj = event.get(key)
+            if isinstance(obj, dict):
+                candidate = obj.get("number")
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    number = candidate
+                    break
+        if number is None:
+            candidate = event.get("number")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                number = candidate
+        if isinstance(repo_name, str) and repo_name and number is not None:
+            context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
+    if context is None:
+        context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f"{name} — {context}"[:200]
 
 
 # Workspace base directory (for RemoteWorkspace working_dir).
@@ -362,6 +401,22 @@ This automation was triggered by a webhook event:
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
+
+    # Set a descriptive title so automation runs are distinguishable in the
+    # conversation panel — otherwise the agent-server's autotitle falls back
+    # to a truncated prompt prefix. Failure is non-fatal; the run continues.
+    conversation_title = _build_conversation_title(event_context)
+    if conversation_title:
+        try:
+            resp = workspace.client.patch(
+                f"/api/conversations/{conversation.id}",
+                json={"title": conversation_title},
+            )
+            resp.raise_for_status()
+            print(f"  title: {conversation_title}")
+        except Exception as e:
+            # Not a hard failure — autotitle fallback still applies
+            print(f"  set title failed (non-fatal): {e}")
 
     # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
