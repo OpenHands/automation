@@ -161,7 +161,7 @@ Completion is handled asynchronously:
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
-| `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script |
+| `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 
