@@ -198,6 +198,20 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
+    async def test_create_automation_preset_metadata_is_null(self, async_client):
+        """Custom SDK automations are created without preset metadata."""
+        payload = {
+            "name": "My Test Automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] is None
+
     async def test_create_automation_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
@@ -1073,6 +1087,35 @@ class TestUpdateAutomation:
 
         # The superseded tarball file is removed so storage doesn't grow unbounded.
         assert old_storage_path not in preset_store._storage
+
+    async def test_update_prompt_syncs_preset_metadata(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing the prompt updates the prompt recorded in preset metadata."""
+        # Arrange — a preset automation whose metadata records the original prompt.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        automation.preset_metadata = {
+            "preset_type": "prompt",
+            "prompt": "Original prompt",
+            "repos": [{"url": "owner/repo"}],
+        }
+        await async_session.commit()
+
+        # Act — edit the prompt.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert — the metadata prompt follows the edit; other keys are preserved.
+        assert response.status_code == 200
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Updated prompt",
+            "repos": [{"url": "owner/repo"}],
+        }
 
     async def test_update_name_does_not_regenerate_preset_tarball(
         self, async_client, async_session, preset_store

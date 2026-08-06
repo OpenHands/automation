@@ -61,6 +61,11 @@ class Automation(Base):
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Preset-specific metadata (populated by preset endpoints; NULL for custom
+    # SDK automations).
+    # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
+    preset_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Model profile name to use for automation runs.
     # None is only used for legacy/local fallback.
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
