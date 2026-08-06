@@ -22,6 +22,7 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationServiceMetadata,
 )
+from openhands.automation.utils.time import ensure_utc
 from openhands.automation.utils.version import get_server_version_info
 
 
@@ -374,7 +375,10 @@ def _base_properties(
         properties.setdefault("automation_id", str(run.automation_id))
         if run.started_at and run.completed_at:
             duration_ms = int(
-                (run.completed_at - run.started_at).total_seconds() * 1000
+                (
+                    ensure_utc(run.completed_at) - ensure_utc(run.started_at)
+                ).total_seconds()
+                * 1000
             )
             properties["duration_ms"] = duration_ms
 
@@ -394,6 +398,34 @@ async def capture_automation_event(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Capture a sanitized automation product event without affecting callers."""
+    try:
+        await _capture_automation_event(
+            event,
+            request=request,
+            request_context=request_context,
+            user=user,
+            automation=automation,
+            run=run,
+            properties=properties,
+            session=session,
+            session_factory=session_factory,
+        )
+    except Exception:
+        logger.debug("Failed to capture automation telemetry event", exc_info=True)
+
+
+async def _capture_automation_event(
+    event: str,
+    *,
+    request: Request | None = None,
+    request_context: TelemetryRequestContext | None = None,
+    user: AuthenticatedUser | None = None,
+    automation: Automation | None = None,
+    run: AutomationRun | None = None,
+    properties: dict[str, Any] | None = None,
+    session: AsyncSession | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
     settings = get_config().service
     if not settings.posthog_api_key:
         return
@@ -451,12 +483,9 @@ async def capture_automation_event(
         "properties": event_properties,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.post(
-                f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-                json=payload,
-            )
-            response.raise_for_status()
-    except Exception:
-        logger.debug("Failed to capture automation telemetry event", exc_info=True)
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        response = await client.post(
+            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
+            json=payload,
+        )
+        response.raise_for_status()
