@@ -5,8 +5,8 @@ table so preset endpoints can record the configuration used to build the
 automation (preset type, prompt, plugins, repos) for the UI to consume.
 Custom SDK automations leave it NULL.
 
-Revision ID: 013
-Revises: 012
+Revision ID: 014
+Revises: 013
 Create Date: 2026-08-01
 """
 
@@ -16,8 +16,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "013"
-down_revision: str = "012"
+revision: str = "014"
+down_revision: str = "013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
