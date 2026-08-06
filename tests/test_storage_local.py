@@ -350,13 +350,13 @@ class TestGetFileStoreFactory:
 class TestStorageSettingsValidation:
     """Test StorageSettings validation for local backend."""
 
-    def test_local_requires_storage_path(self):
-        """LOCAL_STORAGE_PATH is required when FILE_STORE=local."""
-        with pytest.raises(ValueError, match="LOCAL_STORAGE_PATH is required"):
-            StorageSettings(file_store="local", local_storage_path=None)
+    def test_local_default_storage_path(self):
+        """LOCAL_STORAGE_PATH defaults to a user home directory path."""
+        settings = StorageSettings(file_store="local")
+        assert settings.local_storage_path == Path("~/.openhands/automation/storage")
 
     def test_local_with_storage_path_succeeds(self, tmp_path: Path):
         """StorageSettings validates successfully with LOCAL_STORAGE_PATH."""
         settings = make_local_settings(str(tmp_path))
         assert settings.file_store == "local"
-        assert settings.local_storage_path == str(tmp_path)
+        assert settings.local_storage_path == tmp_path
