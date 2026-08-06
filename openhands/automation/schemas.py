@@ -620,6 +620,7 @@ class AutomationResponse(BaseModel):
 
     name: str
     prompt: str | None
+    preset_metadata: dict | None = None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None

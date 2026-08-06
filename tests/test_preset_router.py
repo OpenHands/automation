@@ -668,6 +668,53 @@ class TestCreateAutomationFromPrompt:
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
 
+    async def test_create_from_prompt_stores_preset_metadata(self, async_client):
+        """Prompt preset records preset metadata without repos when none given."""
+        test_prompt = "Summarize open PRs"
+        payload = {
+            "name": "Metadata Test",
+            "prompt": test_prompt,
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": test_prompt,
+        }
+
+    async def test_create_from_prompt_stores_repos_in_preset_metadata(
+        self, async_client
+    ):
+        """Prompt preset records requested repos in preset metadata."""
+        payload = {
+            "name": "Metadata Repos Test",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [
+                {"url": "owner/repo1", "ref": "main", "provider": "github"},
+                {"url": "owner/repo2", "provider": "github"},
+            ],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Summarize open PRs",
+            "repos": [
+                {"url": "owner/repo1", "ref": "main", "provider": "github"},
+                {"url": "owner/repo2", "provider": "github"},
+            ],
+        }
+
     async def test_create_from_prompt_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
@@ -1639,6 +1686,34 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_stores_preset_metadata(self, async_client):
+        """Plugin preset records plugins and repos in preset metadata."""
+        payload = {
+            "name": "Metadata Test",
+            "plugins": [
+                {"source": "github:owner/code-review-plugin", "ref": "v1.0.0"},
+                {"source": "github:owner/security-plugin"},
+            ],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [{"url": "owner/repo", "ref": "main", "provider": "github"}],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "plugin",
+            "prompt": "Review all Python files for security issues",
+            "plugins": [
+                {"source": "github:owner/code-review-plugin", "ref": "v1.0.0"},
+                {"source": "github:owner/security-plugin"},
+            ],
+            "repos": [{"url": "owner/repo", "ref": "main", "provider": "github"}],
+        }
 
     async def test_create_from_plugin_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user

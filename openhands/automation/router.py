@@ -190,6 +190,10 @@ async def update_automation(
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path
+        # Keep preset metadata in sync with the edited prompt. Reassign the
+        # whole dict: in-place mutation of a JSON column is not change-tracked.
+        if auto.preset_metadata is not None:
+            auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()

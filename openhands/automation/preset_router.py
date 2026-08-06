@@ -454,12 +454,20 @@ async def create_automation_from_prompt(
     # 3. Create the automation referencing the internal upload
     tarball_path = build_internal_url(upload_id)
 
+    preset_metadata: dict[str, Any] = {
+        "preset_type": "prompt",
+        "prompt": body.prompt,
+    }
+    if body.repos:
+        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+
     try:
         automation = Automation(
             user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
@@ -838,12 +846,24 @@ async def create_automation_from_plugin(
     # 3. Create the automation referencing the internal upload
     tarball_path = build_internal_url(upload_id)
 
+    preset_metadata: dict[str, Any] = {
+        "preset_type": "plugin",
+        "prompt": body.prompt,
+    }
+    if body.plugins:
+        preset_metadata["plugins"] = [
+            p.model_dump(exclude_none=True) for p in body.plugins
+        ]
+    if body.repos:
+        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+
     try:
         automation = Automation(
             user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
             prompt=body.prompt,
+            preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
