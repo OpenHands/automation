@@ -651,6 +651,7 @@ class RunCompleteRequest(BaseModel):
     run_id: str | None = None
     conversation_id: str | None = None
     error: str | None = None
+    cost: float | None = None
 
 
 class AutomationRunResponse(BaseModel):
@@ -661,6 +662,7 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     conversation_id: str | None
+    cost: float | None = None
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
