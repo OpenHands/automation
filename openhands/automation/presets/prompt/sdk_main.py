@@ -393,15 +393,17 @@ This automation was triggered by a webhook event:
     # Build conversation tags so automation-created conversations are
     # distinguishable from GUI/API conversations in PostHog and the
     # conversation panel. These tags flow through the SDK → agent server
-    # and are stored on StoredConversation.tags, where the SaaS backend
-    # (or agent-server telemetry) can include them in analytics events.
+    # and are stored on StoredConversation.tags, where the SaaS backend's
+    # detect_automation_trigger() picks them up and sets trigger=AUTOMATION.
+    #
+    # Tag keys must be lowercase alphanumeric only (SDK rule: ^[a-z0-9]+$).
+    # The SaaS backend checks for: automationtrigger, automationid,
+    # automationrunid — see enterprise webhook_router.py
+    # detect_automation_trigger().
     automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
-    automation_org_id = os.environ.get("AUTOMATION_ORG_ID") or None
-    conversation_tags = {"source": "automation"}
+    conversation_tags = {"automationtrigger": "true"}
     if automation_run_id:
-        conversation_tags["automation_run_id"] = automation_run_id
-    if automation_org_id:
-        conversation_tags["automation_org_id"] = automation_org_id
+        conversation_tags["automationrunid"] = automation_run_id
 
     conversation_kwargs = {
         "agent": agent,

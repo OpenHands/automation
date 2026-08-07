@@ -438,13 +438,11 @@ This automation was triggered by a webhook event:
 
     # Merge automation source tags so plugin-based automation conversations
     # are also distinguishable in PostHog. See prompt/sdk_main.py for details.
+    # The SaaS backend's detect_automation_trigger() checks for these keys.
     automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
-    automation_org_id = os.environ.get("AUTOMATION_ORG_ID") or None
-    conversation_tags = {"source": "automation", **experiment_tags}
+    conversation_tags = {"automationtrigger": "true", **experiment_tags}
     if automation_run_id:
-        conversation_tags["automation_run_id"] = automation_run_id
-    if automation_org_id:
-        conversation_tags["automation_org_id"] = automation_org_id
+        conversation_tags["automationrunid"] = automation_run_id
 
     conversation_kwargs = {
         "agent": agent,
