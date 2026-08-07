@@ -436,13 +436,23 @@ This automation was triggered by a webhook event:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
+    # Merge automation source tags so plugin-based automation conversations
+    # are also distinguishable in PostHog. See prompt/sdk_main.py for details.
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
+    automation_org_id = os.environ.get("AUTOMATION_ORG_ID") or None
+    conversation_tags = {"source": "automation", **experiment_tags}
+    if automation_run_id:
+        conversation_tags["automation_run_id"] = automation_run_id
+    if automation_org_id:
+        conversation_tags["automation_org_id"] = automation_org_id
+
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
         "callbacks": [event_callback],
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": experiment_tags or None,
+        "tags": conversation_tags,
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
