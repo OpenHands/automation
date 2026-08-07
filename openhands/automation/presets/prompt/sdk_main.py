@@ -400,6 +400,10 @@ This automation was triggered by a webhook event:
         conversation_kwargs["user_id"] = automation_user_id
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
+
+    # Register conversation ID with workspace for completion callback
+    workspace.register_conversation(str(conversation.id))
+
     print(f"  conversation created: {type(conversation).__name__}")
 
     # Set a descriptive title so automation runs are distinguishable in the
