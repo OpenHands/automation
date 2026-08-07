@@ -2,10 +2,13 @@
 
 import warnings
 
+import pytest
+
 from openhands.automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
+    ServiceSettings,
     Settings,
     clear_config_cache,
     get_config,
@@ -55,6 +58,22 @@ class TestAutomationTimeouts:
 
         max_duration = get_config().sandbox.max_run_duration
         assert resolve_automation_timeout_seconds(max_duration + 600) == max_duration
+
+
+class TestCronIntervalSettings:
+    def test_default_disables_minimum_cron_interval(self, monkeypatch):
+        monkeypatch.delenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", raising=False)
+
+        assert ServiceSettings().min_cron_interval_seconds == 0
+
+    def test_loads_minimum_cron_interval_from_environment(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", "300")
+
+        assert ServiceSettings().min_cron_interval_seconds == 300
+
+    def test_rejects_negative_minimum_cron_interval(self):
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            ServiceSettings(min_cron_interval_seconds=-1)
 
 
 class TestBasePath:

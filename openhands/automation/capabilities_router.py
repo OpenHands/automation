@@ -233,7 +233,12 @@ async def _custom_sources(org_id: uuid.UUID, session: AsyncSession) -> list[str]
 
 def _cron_interval_floor() -> int:
     """Shortest interval between fires the scheduler can actually honour."""
-    return max(POLL_INTERVAL_SECONDS, get_config().service.scheduler_interval_seconds)
+    settings = get_config().service
+    return max(
+        POLL_INTERVAL_SECONDS,
+        settings.scheduler_interval_seconds,
+        settings.min_cron_interval_seconds,
+    )
 
 
 def _cron_errors(trigger: CronTrigger) -> list[DraftValidationError]:
