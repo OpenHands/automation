@@ -23,6 +23,7 @@ from openhands.automation.utils.log_context import log_extra
 __all__ = [
     "BashCommandResult",
     "VerificationResult",
+    "SandboxLookupTransientError",
     "get_last_bash_command_result",
     "get_sandbox_agent_url",
     "delete_sandbox",
@@ -33,6 +34,19 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+class SandboxLookupTransientError(Exception):
+    """Sandbox API could not be checked due to a transient fault.
+
+    Distinct from "sandbox absent": rate limits, timeouts, and 5xx responses
+    carry no information about whether the sandbox still exists.
+    """
+
+
+def _is_transient_http_status(status_code: int) -> bool:
+    """Return True for HTTP statuses that do not prove sandbox absence."""
+    return status_code == 429 or status_code >= 500
+
+
 async def get_sandbox_agent_url(
     client: httpx.AsyncClient,
     api_url: str,
@@ -41,8 +55,14 @@ async def get_sandbox_agent_url(
 ) -> tuple[str, str] | None:
     """Get the agent server URL and session key for a sandbox.
 
-    Returns (agent_url, session_key) if the sandbox is running with an agent server,
-    or None if the sandbox is not available.
+    Returns (agent_url, session_key) if the sandbox is running with an agent
+    server, or None if the sandbox is confirmed unavailable (empty result, not
+    RUNNING, or no AGENT_SERVER URL).
+
+    Raises:
+        SandboxLookupTransientError: When the sandbox API cannot be checked
+            due to rate limiting, server errors, or transport failures. Callers
+            must not treat this as proof the sandbox is gone.
 
     Cloud mode only — discovers agent server via sandbox API.
     """
@@ -65,9 +85,36 @@ async def get_sandbox_agent_url(
             if url_info.get("name") == "AGENT_SERVER":
                 return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
         return None
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status == 404:
+            # Explicit not-found from the API — same as an empty list.
+            return None
+        if _is_transient_http_status(status):
+            logger.warning(
+                "Transient sandbox API error for %s: HTTP %s",
+                sandbox_id,
+                status,
+            )
+            raise SandboxLookupTransientError(
+                f"Sandbox API temporarily unavailable (HTTP {status})"
+            ) from e
+        # Other 4xx (e.g. 401/403) are not proof the sandbox is gone; retry.
+        logger.warning(
+            "Sandbox API HTTP error for %s: HTTP %s",
+            sandbox_id,
+            status,
+        )
+        raise SandboxLookupTransientError(f"Sandbox API error (HTTP {status})") from e
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        logger.warning("Sandbox API transport error for %s: %s", sandbox_id, e)
+        raise SandboxLookupTransientError(f"Sandbox API transport error: {e}") from e
+    except SandboxLookupTransientError:
+        raise
     except Exception as e:
+        # Unknown failures must not collapse into "absent" (None).
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
-        return None
+        raise SandboxLookupTransientError(f"Sandbox API lookup failed: {e}") from e
 
 
 async def delete_sandbox(
@@ -153,14 +200,29 @@ async def verify_run_status(
             the sandbox runs other bash commands during the run.
 
     Returns:
-        VerificationResult with the verification outcome
+        VerificationResult with the verification outcome. When the sandbox
+        API cannot be checked due to a transient fault, ``retryable=True``
+        so callers leave the run RUNNING for a later tick.
     """
     api_url = api_url.rstrip("/")
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Get sandbox agent URL
-        result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+        try:
+            result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+        except SandboxLookupTransientError as e:
+            logger.warning(
+                "Transient sandbox lookup failure during verification: %s",
+                e,
+                extra=extra,
+            )
+            return VerificationResult(
+                verified=False,
+                error=str(e),
+                retryable=True,
+            )
+
         if result is None:
             logger.info("Sandbox not available for verification", extra=extra)
             return VerificationResult(
