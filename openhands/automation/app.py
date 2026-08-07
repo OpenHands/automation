@@ -40,6 +40,75 @@ from openhands.automation.webhook_router import router as webhook_router
 logger = logging.getLogger("automation.app")
 
 
+def start_background_worker_tasks(
+    app: FastAPI,
+    settings,
+    shutdown_event: asyncio.Event,
+) -> list[tuple[str, asyncio.Task]]:
+    """Start scheduler/dispatcher/watchdog when this process owns them.
+
+    Returns the started ``(name, task)`` pairs so lifespan can await them on
+    shutdown. When ``settings.enable_background_workers`` is False, no tasks
+    are created (request-serving replicas in a multi-worker deployment).
+    """
+    app.state.scheduler_task = None
+    app.state.dispatcher_task = None
+    app.state.watchdog_task = None
+
+    if not settings.enable_background_workers:
+        logger.info(
+            "Background workers disabled "
+            "(AUTOMATION_ENABLE_BACKGROUND_WORKERS=false); "
+            "scheduler/dispatcher/watchdog will not start in this process"
+        )
+        return []
+
+    # Scheduler: polls automations and creates PENDING runs
+    scheduler_task = asyncio.create_task(
+        scheduler_loop(
+            app.state.session_factory,
+            interval_seconds=settings.scheduler_interval_seconds,
+            shutdown_event=shutdown_event,
+        )
+    )
+    app.state.scheduler_task = scheduler_task
+    logger.info("Background scheduler started")
+
+    # Dispatcher: picks up PENDING runs and dispatches them
+    if not settings.base_url:
+        logger.warning(
+            "AUTOMATION_BASE_URL not set — using localhost. "
+            "Sandboxes in the cloud won't be able to reach this URL."
+        )
+    dispatcher_task = asyncio.create_task(
+        dispatcher_loop(
+            app.state.session_factory,
+            settings=settings,
+            interval_seconds=settings.dispatcher_interval_seconds,
+            shutdown_event=shutdown_event,
+        )
+    )
+    app.state.dispatcher_task = dispatcher_task
+    logger.info("Background dispatcher started")
+
+    # Watchdog: marks stale RUNNING runs as FAILED
+    watchdog_task = asyncio.create_task(
+        watchdog_loop(
+            app.state.session_factory,
+            settings=settings,
+            shutdown_event=shutdown_event,
+        )
+    )
+    app.state.watchdog_task = watchdog_task
+    logger.info("Background watchdog started")
+
+    return [
+        ("scheduler", scheduler_task),
+        ("dispatcher", dispatcher_task),
+        ("watchdog", watchdog_task),
+    ]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -117,48 +186,9 @@ async def lifespan(app: FastAPI):
             msg = f"SQLite migration failed. Database may be inconsistent: {e}"
             raise RuntimeError(msg) from e
 
-    # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
-
-    # Scheduler: polls automations and creates PENDING runs
-    scheduler_task = asyncio.create_task(
-        scheduler_loop(
-            app.state.session_factory,
-            interval_seconds=settings.scheduler_interval_seconds,
-            shutdown_event=shutdown_event,
-        )
-    )
-    app.state.scheduler_task = scheduler_task
-    logger.info("Background scheduler started")
-
-    # Dispatcher: picks up PENDING runs and dispatches them
-    if not settings.base_url:
-        logger.warning(
-            "AUTOMATION_BASE_URL not set — using localhost. "
-            "Sandboxes in the cloud won't be able to reach this URL."
-        )
-    dispatcher_task = asyncio.create_task(
-        dispatcher_loop(
-            app.state.session_factory,
-            settings=settings,
-            interval_seconds=settings.dispatcher_interval_seconds,
-            shutdown_event=shutdown_event,
-        )
-    )
-    app.state.dispatcher_task = dispatcher_task
-    logger.info("Background dispatcher started")
-
-    # Watchdog: marks stale RUNNING runs as FAILED
-    watchdog_task = asyncio.create_task(
-        watchdog_loop(
-            app.state.session_factory,
-            settings=settings,
-            shutdown_event=shutdown_event,
-        )
-    )
-    app.state.watchdog_task = watchdog_task
-    logger.info("Background watchdog started")
+    background_tasks = start_background_worker_tasks(app, settings, shutdown_event)
 
     yield
 
@@ -166,12 +196,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down background tasks...")
     shutdown_event.set()
 
-    # Wait for all tasks to exit gracefully
-    for task_name, task in [
-        ("scheduler", scheduler_task),
-        ("dispatcher", dispatcher_task),
-        ("watchdog", watchdog_task),
-    ]:
+    # Wait for started tasks to exit gracefully (no-op when workers disabled)
+    for task_name, task in background_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
