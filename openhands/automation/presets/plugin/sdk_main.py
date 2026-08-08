@@ -436,12 +436,18 @@ This automation was triggered by a webhook event:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
-    # Merge automation source tags so plugin-based automation conversations
-    # are also distinguishable in PostHog. See prompt/sdk_main.py for details.
-    # The SaaS backend's detect_automation_trigger() checks for these keys.
-    automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
-    conversation_tags = {"automationtrigger": "true", **experiment_tags}
-    if automation_run_id:
+    # Cloud workspaces supply richer automation tags (for example, whether the
+    # trigger was cron or webhook). Only add fallback tags in local mode.
+    default_tags = workspace.default_conversation_tags or {}
+    conversation_tags = dict(experiment_tags)
+    if not any(
+        default_tags.get(key)
+        for key in ("automationtrigger", "automationid", "automationrunid")
+    ):
+        conversation_tags["automationtrigger"] = "automation"
+
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
+    if automation_run_id and not default_tags.get("automationrunid"):
         conversation_tags["automationrunid"] = automation_run_id
 
     conversation_kwargs = {

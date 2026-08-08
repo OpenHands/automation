@@ -390,19 +390,18 @@ This automation was triggered by a webhook event:
         received_events.append(event)
         last_event_time["ts"] = time.time()
 
-    # Build conversation tags so automation-created conversations are
-    # distinguishable from GUI/API conversations in PostHog and the
-    # conversation panel. These tags flow through the SDK → agent server
-    # and are stored on StoredConversation.tags, where the SaaS backend's
-    # detect_automation_trigger() picks them up and sets trigger=AUTOMATION.
-    #
-    # Tag keys must be lowercase alphanumeric only (SDK rule: ^[a-z0-9]+$).
-    # The SaaS backend checks for: automationtrigger, automationid,
-    # automationrunid — see enterprise webhook_router.py
-    # detect_automation_trigger().
-    automation_run_id = os.environ.get("AUTOMATION_RUN_ID") or None
-    conversation_tags = {"automationtrigger": "true"}
-    if automation_run_id:
+    # Cloud workspaces supply richer automation tags (for example, whether the
+    # trigger was cron or webhook). Only add fallback tags in local mode.
+    default_tags = workspace.default_conversation_tags or {}
+    conversation_tags: dict[str, str] = {}
+    if not any(
+        default_tags.get(key)
+        for key in ("automationtrigger", "automationid", "automationrunid")
+    ):
+        conversation_tags["automationtrigger"] = "automation"
+
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
+    if automation_run_id and not default_tags.get("automationrunid"):
         conversation_tags["automationrunid"] = automation_run_id
 
     conversation_kwargs = {
@@ -410,7 +409,7 @@ This automation was triggered by a webhook event:
         "workspace": workspace,
         "callbacks": [event_callback],
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": conversation_tags,
+        "tags": conversation_tags or None,
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
