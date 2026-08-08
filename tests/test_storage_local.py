@@ -19,7 +19,7 @@ from openhands.automation.storage.google_cloud import (
 )
 
 
-def make_local_settings(base_path: str, **kwargs) -> StorageSettings:
+def make_local_settings(base_path: Path, **kwargs) -> StorageSettings:
     """Create StorageSettings for local backend."""
     return StorageSettings(
         file_store="local",
@@ -357,6 +357,6 @@ class TestStorageSettingsValidation:
 
     def test_local_with_storage_path_succeeds(self, tmp_path: Path):
         """StorageSettings validates successfully with LOCAL_STORAGE_PATH."""
-        settings = make_local_settings(str(tmp_path))
+        settings = make_local_settings(tmp_path)
         assert settings.file_store == "local"
         assert settings.local_storage_path == tmp_path
