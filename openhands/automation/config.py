@@ -45,6 +45,7 @@ different values, use monkeypatching or reload the affected modules.
 import os
 import warnings
 from functools import cached_property, lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -100,12 +101,12 @@ class StorageSettings(BaseSettings):
     """File storage backend configuration.
 
     The automation service supports three storage backends:
-    - GCS (Google Cloud Storage) - default
+    - Local (local filesystem) - default, for self-hosted deployments
+    - GCS (Google Cloud Storage)
     - S3 (AWS S3 or S3-compatible like MinIO)
-    - Local (local filesystem for self-hosted deployments)
 
     Environment variables (no prefix, follows SDK conventions):
-        FILE_STORE: Backend type, "gcs", "s3", or "local" (default: "gcs")
+        FILE_STORE: Backend type, "local", "gcs", or "s3" (default: "local")
 
         # GCS settings
         GCS_BUCKET_NAME: GCS bucket name (required if FILE_STORE=gcs)
@@ -118,7 +119,7 @@ class StorageSettings(BaseSettings):
         AWS_S3_AUTO_CREATE_BUCKET: Auto-create bucket if missing (default: "false")
 
         # Local settings
-        LOCAL_STORAGE_PATH: Base directory for local storage (required if local)
+        LOCAL_STORAGE_PATH: Base directory for local storage
 
         # Size limits
         MAX_UPLOAD_SIZE: Max tarball upload size in bytes (default: 1MB)
@@ -129,7 +130,7 @@ class StorageSettings(BaseSettings):
         AWS_SECRET_ACCESS_KEY: AWS secret key
     """
 
-    file_store: Literal["gcs", "s3", "local"] = "gcs"
+    file_store: Literal["local", "gcs", "s3"] = "local"
 
     # GCS settings
     gcs_bucket_name: str | None = None
@@ -142,7 +143,7 @@ class StorageSettings(BaseSettings):
     aws_s3_auto_create_bucket: bool = False
 
     # Local settings
-    local_storage_path: str | None = None
+    local_storage_path: Path = Path("~/.openhands/automation/storage")
 
     # Size limits
     max_upload_size: int = 1 * 1024 * 1024  # 1 MB
@@ -154,12 +155,10 @@ class StorageSettings(BaseSettings):
     def validate_bucket_for_backend(self) -> "StorageSettings":
         """Ensure the appropriate bucket/path is configured for the selected backend."""
         if self.file_store == "gcs" and not self.gcs_bucket_name:
-            raise ValueError(
-                "GCS_BUCKET_NAME is required when FILE_STORE=gcs (or not set)"
-            )
+            raise ValueError("GCS_BUCKET_NAME is required when FILE_STORE=gcs")
         if self.file_store == "s3" and not self.aws_s3_bucket:
             raise ValueError("AWS_S3_BUCKET is required when FILE_STORE=s3")
-        if self.file_store == "local" and not self.local_storage_path:
+        if self.file_store == "local" and not str(self.local_storage_path):
             raise ValueError("LOCAL_STORAGE_PATH is required when FILE_STORE=local")
         return self
 
