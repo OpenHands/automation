@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -35,6 +35,7 @@ from openhands.automation.exceptions import (
     TarballNotFoundError,
 )
 from openhands.automation.execution import execute_in_context
+from openhands.automation.health import classify_exception
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -46,7 +47,6 @@ from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.run import (
-    disable_automation,
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
@@ -57,6 +57,7 @@ from openhands.automation.utils.tarball_validation import (
     parse_internal_upload_id,
 )
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.sdk.event.error_classification import FailureKind
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -110,7 +111,15 @@ async def _poll_pending_runs(
     select_query = (
         select(AutomationRun)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            AutomationRun.automation.has(
+                and_(
+                    Automation.enabled.is_(True),
+                    Automation.deleted_at.is_(None),
+                )
+            ),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -185,9 +194,25 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    async def _fail(error: str, disable: bool = False) -> None:
-        """Mark run as failed and optionally disable the automation."""
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+    async def _fail(
+        error: str,
+        failure_kind: FailureKind | str | None = None,
+        blocking_reason: str | None = None,
+    ) -> None:
+        """Mark a run failed and apply the shared automation health policy."""
+        failure = classify_exception(RuntimeError(error))
+        resolved_kind = (
+            failure.kind if failure_kind is None else FailureKind(failure_kind)
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            error,
+            failure_kind=resolved_kind,
+            blocking_reason=blocking_reason,
+            threshold=settings.unhealthy_failure_threshold,
+        )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -195,12 +220,9 @@ async def _execute_run(
             session_factory=session_factory,
             properties={
                 "trigger_source": "dispatcher",
-                "failure_kind": "dispatch_error",
-                "automation_disabled": disable,
+                "failure_kind": resolved_kind.value,
             },
         )
-        if disable:
-            await disable_automation(session_factory, automation.id, error)
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
@@ -228,9 +250,9 @@ async def _execute_run(
             },
         )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
-        await _fail("Failed to get execution context")
+        await _fail(str(exc) or "Failed to get execution context")
         return
 
     logger.info(
@@ -290,13 +312,13 @@ async def _execute_run(
             )
     except PermanentDispatchError as exc:
         logger.error(
-            "Permanent dispatch error, disabling automation: %s",
+            "Permanent dispatch error: %s",
             exc,
             exc_info=True,
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(str(exc), failure_kind=FailureKind.CONFIG)
         return
     except (APIKeyError, ValueError) as exc:
         logger.error(
@@ -306,7 +328,7 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc))
+        await _fail(str(exc), failure_kind=classify_exception(exc).kind)
         return
 
     # 5. Execute in context
@@ -326,20 +348,22 @@ async def _execute_run(
         )
     except PermanentDispatchError as exc:
         logger.error(
-            "Permanent dispatch error, disabling automation: %s",
+            "Permanent dispatch error: %s",
             exc,
             exc_info=True,
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(str(exc), failure_kind=FailureKind.CONFIG)
         return
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
         )
         await backend.release_context(client, ctx)
-        await _fail("Internal error")
+        await _fail(
+            str(exc) or "Internal error", failure_kind=classify_exception(exc).kind
+        )
         return
 
     # 6. Handle result
@@ -363,7 +387,8 @@ async def _execute_run(
         "Execution failed: %s", result.error, extra=_log_ctx(sandbox_id=ctx.sandbox_id)
     )
     await backend.release_context(client, ctx)
-    await _fail(result.error or "Execution failed")
+    error = result.error or "Execution failed"
+    await _fail(error, failure_kind=classify_exception(RuntimeError(error)).kind)
 
 
 async def dispatch_pending_runs(
@@ -453,10 +478,15 @@ async def _execute_run_safe(
     extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory, client)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
         await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            str(exc) or "Internal error",
+            failure_kind=classify_exception(exc).kind,
+            threshold=settings.unhealthy_failure_threshold,
         )
 
 

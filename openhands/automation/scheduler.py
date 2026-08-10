@@ -22,6 +22,7 @@ from openhands.automation.models import Automation, AutomationRun
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
 from openhands.automation.utils.run import create_pending_run
+from openhands.sdk.event.error_classification import FailureKind
 
 
 logger = logging.getLogger("automation.scheduler")
@@ -57,6 +58,8 @@ def _disable_invalid_cron_automation(
     error: BaseException,
 ) -> None:
     automation.enabled = False
+    automation.disabled_reason = reason
+    automation.disabled_failure_kind = FailureKind.CONFIG.value
     logger.error(
         "Disabling automation with invalid cron trigger: %s",
         reason,

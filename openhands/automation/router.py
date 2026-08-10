@@ -41,7 +41,7 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run import apply_terminal_health, create_pending_run
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -174,6 +174,11 @@ async def update_automation(
     original_prompt = auto.prompt
     for field, value in update_data.items():
         setattr(auto, field, value)
+
+    if update_data.get("enabled") is True:
+        auto.consecutive_failure_count = 0
+        auto.disabled_reason = None
+        auto.disabled_failure_kind = None
 
     # A preset automation bakes its prompt into the tarball the dispatcher
     # executes; the `prompt` column is metadata only. When the prompt actually
@@ -311,6 +316,12 @@ async def dispatch_automation(
     picked up by the dispatcher and executed.
     """
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    if not auto.enabled:
+        reason = auto.disabled_reason or "Automation is disabled"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Automation is disabled: {reason}",
+        )
     run = await create_pending_run(
         session,
         auto,
@@ -426,6 +437,10 @@ async def complete_run(
         values["cost"] = body.cost
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
+    if body.failure_kind is not None:
+        values["failure_kind"] = body.failure_kind.value
+    if body.blocking_reason is not None:
+        values["blocking_reason"] = body.blocking_reason
 
     stmt = (
         update(AutomationRun)
@@ -443,7 +458,23 @@ async def complete_run(
             detail=f"Run is {run.status.value}, expected RUNNING",
         )
 
-    await session.refresh(run)
+    run.status = new_status
+    run.completed_at = now
+    if body.status == "FAILED" and body.error:
+        run.error_detail = body.error
+    if body.conversation_id:
+        run.conversation_id = body.conversation_id
+    if body.cost is not None:
+        run.cost = body.cost
+
+    await apply_terminal_health(
+        session,
+        run,
+        new_status,
+        error=body.error,
+        failure_kind=body.failure_kind,
+        blocking_reason=body.blocking_reason,
+    )
     logger.info("Run %s → %s", run_id, new_status.value)
     await capture_automation_event(
         "automation_run_completed"

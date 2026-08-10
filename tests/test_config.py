@@ -57,6 +57,17 @@ class TestAutomationTimeouts:
         assert resolve_automation_timeout_seconds(max_duration + 600) == max_duration
 
 
+class TestAutomationHealthSettings:
+    def test_unhealthy_failure_threshold_defaults_to_three(self):
+        assert Settings().unhealthy_failure_threshold == 3
+
+    def test_unhealthy_failure_threshold_rejects_zero(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            Settings(unhealthy_failure_threshold=0)
+
+
 class TestBasePath:
     """Verify base_path is derived from base_url path + /api/automation."""
 

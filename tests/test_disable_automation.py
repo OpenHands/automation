@@ -230,7 +230,7 @@ class TestDownloadInternalTarball:
 
 @requires_docker
 class TestExecuteRunDisablesAutomation:
-    """Tests that _execute_run disables automation on permanent errors."""
+    """Tests that _execute_run records permanent errors for health tracking."""
 
     @patch("openhands.automation.dispatcher.execute_in_context")
     @patch("openhands.automation.dispatcher.get_backend")
@@ -251,6 +251,7 @@ class TestExecuteRunDisablesAutomation:
         )
 
         mock_get_backend.return_value = _create_mock_backend()
+        mock_settings.unhealthy_failure_threshold = 1
 
         # Create an automation with a non-existent internal tarball
         fake_upload_id = uuid.uuid4()
@@ -295,6 +296,8 @@ class TestExecuteRunDisablesAutomation:
             )
             automation = result.scalars().first()
             assert automation.enabled is False
+            assert automation.disabled_reason is not None
+            assert automation.disabled_failure_kind == "config"
 
         # Verify run was marked as FAILED
         async with async_session_factory() as session:

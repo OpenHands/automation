@@ -326,6 +326,38 @@ class TestDispatchPendingRuns:
         assert len(dispatched) == 0
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_does_not_dispatch_runs_for_disabled_automations(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Pending work is not dispatched after its automation is disabled."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Disabled",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=False,
+            )
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.PENDING,
+                )
+            )
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+
+        assert dispatched == []
+        mock_execute.assert_not_awaited()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_completed_runs(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):

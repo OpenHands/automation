@@ -918,6 +918,37 @@ class TestUpdateAutomation:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
+    async def test_reenable_automation_clears_health_reason(
+        self, async_client, async_session
+    ):
+        """Explicit re-enable clears the persisted auto-disable explanation."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Unhealthy",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=False,
+            consecutive_failure_count=3,
+            disabled_reason="Model is no longer available",
+            disabled_failure_kind="config",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"enabled": True},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is True
+        assert data["consecutive_failure_count"] == 0
+        assert data["disabled_reason"] is None
+        assert data["disabled_failure_kind"] is None
+
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""
         automation = Automation(
@@ -1313,6 +1344,30 @@ class TestDispatchAutomation:
         )
 
         assert response.status_code == 404
+
+    async def test_dispatch_automation_disabled(self, async_client, async_session):
+        """Disabled automations cannot receive new manual runs."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Disabled Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=False,
+            disabled_reason="Repeated invalid API key",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "Automation is disabled: Repeated invalid API key"
+        )
 
     async def test_dispatch_automation_cross_org_returns_404(
         self, async_client, async_session
@@ -2030,6 +2085,26 @@ class TestCompleteRun:
         assert response.json()["cost"] is None
         await async_session.refresh(run)
         assert run.cost is None
+
+    async def test_complete_run_persists_blocking_metadata(
+        self, async_client, async_session
+    ):
+        """SDK callbacks can persist an agent-reported blocking reason."""
+        run = await self._running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "COMPLETED",
+                "failure_kind": "agent_action",
+                "blocking_reason": "MCP integration is not connected",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["failure_kind"] == "agent_action"
+        assert data["blocking_reason"] == "MCP integration is not connected"
 
 
 class TestDownloadTarball:

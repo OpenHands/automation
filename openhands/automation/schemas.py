@@ -18,6 +18,7 @@ from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
     validate_automation_timeout,
 )
+from openhands.sdk.event.error_classification import FailureKind
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -628,6 +629,9 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
+    consecutive_failure_count: int = 0
+    disabled_reason: str | None = None
+    disabled_failure_kind: str | None = None
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -653,6 +657,8 @@ class RunCompleteRequest(BaseModel):
     conversation_id: str | None = None
     error: str | None = None
     cost: float | None = None
+    failure_kind: FailureKind | None = None
+    blocking_reason: str | None = Field(default=None, max_length=2000)
 
 
 class AutomationRunResponse(BaseModel):
@@ -662,6 +668,8 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    failure_kind: str | None = None
+    blocking_reason: str | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None

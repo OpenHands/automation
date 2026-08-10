@@ -432,6 +432,10 @@ class TestPollAndSchedule:
             )
             invalid_automation = result.scalars().one()
             assert invalid_automation.enabled is False
+            assert invalid_automation.disabled_reason == (
+                "cron schedule cannot produce fire times"
+            )
+            assert invalid_automation.disabled_failure_kind == "config"
             assert invalid_automation.last_polled_at is not None
 
     async def test_poll_excludes_disabled(self, async_session_factory):

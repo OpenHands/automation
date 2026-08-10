@@ -14,13 +14,13 @@ in the ExecutionBackend (see automation/backends/).
 import asyncio
 import logging
 
-from sqlalchemy import inspect, select, update
-from sqlalchemy.engine import CursorResult
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import Settings
+from openhands.automation.health import classify_exception
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -28,7 +28,9 @@ from openhands.automation.models import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
+from openhands.automation.utils.run import mark_run_terminal_in_session
 from openhands.automation.utils.time import utcnow
+from openhands.sdk.event.error_classification import FailureKind
 
 
 logger = logging.getLogger("automation.watchdog")
@@ -60,10 +62,38 @@ def _should_cleanup_sandbox_after_terminal(
     return bool(run.sandbox_id) and keep_alive is not True
 
 
+async def _mark_terminal(
+    session: AsyncSession,
+    run: AutomationRun,
+    settings: Settings,
+    status: AutomationRunStatus,
+    *,
+    error: str | None = None,
+    failure_kind: FailureKind | str | None = None,
+) -> AutomationRun | None:
+    """Finish a run through the shared health policy and return its DB row."""
+    marked = await mark_run_terminal_in_session(
+        session,
+        run.id,
+        status,
+        error=error,
+        failure_kind=failure_kind,
+        threshold=settings.unhealthy_failure_threshold,
+    )
+    if marked is not None:
+        run.status = marked.status
+        run.completed_at = marked.completed_at
+        run.error_detail = marked.error_detail
+        run.failure_kind = marked.failure_kind
+        run.blocking_reason = marked.blocking_reason
+        run.automation = marked.automation
+    return marked
+
+
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
-    settings: Settings,  # noqa: ARG001 - kept for API compatibility
+    settings: Settings,
 ) -> bool:
     """Verify run status via backend and mark accordingly.
 
@@ -74,8 +104,6 @@ async def _verify_and_mark_run(
     run_id = str(run.id)
     sandbox_id = run.sandbox_id
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
-    now = utcnow()
-
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
     keep_alive = await _get_automation_keep_alive(session, run)
@@ -86,20 +114,15 @@ async def _verify_and_mark_run(
         verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
-        stmt = (
-            update(AutomationRun)
-            .where(
-                AutomationRun.id == run.id,
-                AutomationRun.status == AutomationRunStatus.RUNNING,
-            )
-            .values(
-                status=AutomationRunStatus.FAILED,
-                completed_at=now,
-                error_detail=f"Timed out: verification failed: {e}",
-            )
+        marked = await _mark_terminal(
+            session,
+            run,
+            settings,
+            AutomationRunStatus.FAILED,
+            error=f"Timed out: verification failed: {e}",
+            failure_kind=classify_exception(e).kind,
         )
-        result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
-        if result.rowcount > 0:
+        if marked is not None:
             await capture_automation_event(
                 "automation_run_failed",
                 automation=_loaded_automation(run),
@@ -110,7 +133,7 @@ async def _verify_and_mark_run(
                     "failure_kind": "verification_failed",
                 },
             )
-        return result.rowcount > 0
+        return marked is not None
 
     if verification.verified:
         exit_code = verification.exit_code
@@ -123,17 +146,8 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.COMPLETED,
-                    completed_at=now,
-                )
-            )
+            terminal_error = None
+            terminal_kind = None
 
         # exit_code == -1 or None: Command was killed/timed out by bash service
         elif exit_code is None or exit_code == -1:
@@ -146,18 +160,8 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.FAILED,
-                    completed_at=now,
-                    error_detail=f"Timed out: {error_msg}",
-                )
-            )
+            terminal_error = f"Timed out: {error_msg}"
+            terminal_kind = FailureKind.TRANSIENT
 
         # Any other exit code: Command failed with an actual error
         else:
@@ -173,21 +177,24 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
-            stmt = (
-                update(AutomationRun)
-                .where(
-                    AutomationRun.id == run.id,
-                    AutomationRun.status == AutomationRunStatus.RUNNING,
-                )
-                .values(
-                    status=AutomationRunStatus.FAILED,
-                    completed_at=now,
-                    error_detail=error_detail,
-                )
+            terminal_error = error_detail
+            terminal_kind = (
+                FailureKind.CONFIG
+                if exit_code == 127
+                else classify_exception(RuntimeError(error_detail)).kind
             )
 
-        result = await session.execute(stmt)  # type: ignore[assignment]
-        if result.rowcount > 0:
+        marked = await _mark_terminal(
+            session,
+            run,
+            settings,
+            AutomationRunStatus.COMPLETED
+            if exit_code == 0
+            else AutomationRunStatus.FAILED,
+            error=terminal_error,
+            failure_kind=terminal_kind,
+        )
+        if marked is not None:
             await capture_automation_event(
                 "automation_run_completed"
                 if exit_code == 0
@@ -200,7 +207,7 @@ async def _verify_and_mark_run(
                     "verification_exit_code": exit_code,
                 },
             )
-        if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
+        if marked is not None and _should_cleanup_sandbox_after_terminal(
             run, keep_alive
         ):
             try:
@@ -209,7 +216,7 @@ async def _verify_and_mark_run(
                 logger.warning(
                     "Cleanup after terminal verification failed: %s", e, extra=extra
                 )
-        return result.rowcount > 0
+        return marked is not None
 
     # Verification failed - execution environment not available or command still running
     # This likely means the sandbox crashed or was cleaned up
@@ -238,20 +245,15 @@ async def _verify_and_mark_run(
         extra=extra,
     )
 
-    stmt = (
-        update(AutomationRun)
-        .where(
-            AutomationRun.id == run.id,
-            AutomationRun.status == AutomationRunStatus.RUNNING,
-        )
-        .values(
-            status=AutomationRunStatus.FAILED,
-            completed_at=now,
-            error_detail=f"Timed out: {error_msg}",
-        )
+    marked = await _mark_terminal(
+        session,
+        run,
+        settings,
+        AutomationRunStatus.FAILED,
+        error=f"Timed out: {error_msg}",
+        failure_kind=FailureKind.TRANSIENT,
     )
-    result = await session.execute(stmt)  # type: ignore[assignment]
-    if result.rowcount > 0:
+    if marked is not None:
         await capture_automation_event(
             "automation_run_failed",
             automation=_loaded_automation(run),
@@ -262,7 +264,7 @@ async def _verify_and_mark_run(
                 "failure_kind": "timeout",
             },
         )
-    return result.rowcount > 0
+    return marked is not None
 
 
 async def mark_stale_runs(

@@ -93,6 +93,11 @@ class Automation(Base):
 
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+    consecutive_failure_count: Mapped[int] = mapped_column(
+        default=0, server_default=text("0"), nullable=False
+    )
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_failure_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -155,6 +160,8 @@ class AutomationRun(Base):
 
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
