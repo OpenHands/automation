@@ -282,6 +282,71 @@ class TestVerifyAndMarkRunExitCodes:
             assert "Timed out" not in run.error_detail
 
 
+class TestVerifyAndMarkRunFirstRunOutcome:
+    """First-run outcome recording when the watchdog terminates a run."""
+
+    @pytest.mark.asyncio
+    async def test_watchdog_failure_records_watchdog_stage(
+        self, async_session_factory, mock_settings
+    ):
+        """A stale template run failed by the watchdog records its stage."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Template Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=60,
+                preset_metadata={
+                    "preset_type": "prompt",
+                    "prompt": "p",
+                    "template": {"id": "tpl", "version": "1.0.0"},
+                },
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+
+            now = utcnow()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                sandbox_id="test-sandbox-123",
+                started_at=now - timedelta(minutes=5),
+                timeout_at=now - timedelta(minutes=1),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        verification = VerificationResult(
+            verified=True,
+            success=False,
+            exit_code=3,
+            stdout="",
+            stderr="boom",
+        )
+        mock_backend = _create_mock_backend(verification)
+
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is True
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            first_run = automation.preset_metadata["first_run"]
+            assert first_run["status"] == "failure"
+            assert first_run["failure_stage"] == "watchdog"
+
+
 class TestVerifyAndMarkRunVerificationFailed:
     """Tests for _verify_and_mark_run when verification fails."""
 

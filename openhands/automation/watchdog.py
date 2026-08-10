@@ -28,6 +28,7 @@ from openhands.automation.models import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
+from openhands.automation.utils.run import record_first_run_outcome
 from openhands.automation.utils.time import utcnow
 
 
@@ -109,6 +110,9 @@ async def _verify_and_mark_run(
                     "trigger_source": "watchdog",
                     "failure_kind": "verification_failed",
                 },
+            )
+            await record_first_run_outcome(
+                run, AutomationRunStatus.FAILED, "watchdog", session=session
             )
         return result.rowcount > 0
 
@@ -200,6 +204,14 @@ async def _verify_and_mark_run(
                     "verification_exit_code": exit_code,
                 },
             )
+            await record_first_run_outcome(
+                run,
+                AutomationRunStatus.COMPLETED
+                if exit_code == 0
+                else AutomationRunStatus.FAILED,
+                "watchdog",
+                session=session,
+            )
         if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
             run, keep_alive
         ):
@@ -261,6 +273,9 @@ async def _verify_and_mark_run(
                 "trigger_source": "watchdog",
                 "failure_kind": "timeout",
             },
+        )
+        await record_first_run_outcome(
+            run, AutomationRunStatus.FAILED, "watchdog", session=session
         )
     return result.rowcount > 0
 
