@@ -31,6 +31,7 @@ from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
 )
 from openhands.automation.git_sync.loop import (
+    GIT_SYNC_LAST_COMMIT_KEY,
     GIT_SYNC_LAST_ERROR_AT_KEY,
     GIT_SYNC_LAST_ERROR_KEY,
 )
@@ -381,6 +382,71 @@ class TestRunSyncCycle:
         assert result.exported == 0
         assert result.imported == 0
         assert result.pushed_commit is None
+
+    async def test_changing_path_re_exports_under_the_new_path(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        """Changing `git_sync_path` must relocate the automations.
+
+        Nothing about the automations changes, so none are dirty and the
+        export step would write nothing under the new path -- it would stay
+        empty while the old path silently kept the only copy. The old
+        directory is intentionally left behind, so both must be present.
+        """
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        moved = git_settings.model_copy(update={"git_sync_path": "custom-path"})
+        result = await run_sync_cycle(sqlite_session_factory, moved, service_settings)
+
+        assert result.exported == 1
+        assert result.pushed_commit is not None
+        assert result.deleted_in_db == 0, "a path change must not delete anything"
+
+        verify_dir = origin.parent / "verify_moved_path"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(verify_dir)],
+            check=True,
+            capture_output=True,
+        )
+        moved_dir = verify_dir / "custom-path" / "my-first-automation"
+        assert (moved_dir / "automation.yaml").is_file()
+        assert (moved_dir / "tarball" / "main.py").read_text() == "print(1)"
+        # Left in place on purpose; the cycle warns about it instead.
+        assert (
+            verify_dir / "automations" / "my-first-automation" / "automation.yaml"
+        ).is_file()
+
+    async def test_changing_path_does_not_soft_delete_automations(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        """A path change must never be read as a deletion.
+
+        The import runs before the export and scans the new, still-empty
+        path. With an unreachable base commit it can't diff and falls back
+        to a full scan, which drops the "untouched by this range" guard --
+        leaving its "directory disappeared" branch free to soft-delete every
+        automation at once. Only the dirty flag stops it.
+        """
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        # Unreachable base -> diff fails -> full-scan fallback.
+        async with sqlite_session_factory() as session:
+            await set_service_metadata(session, GIT_SYNC_LAST_COMMIT_KEY, "0" * 40)
+            await session.commit()
+
+        moved = git_settings.model_copy(update={"git_sync_path": "elsewhere"})
+        result = await run_sync_cycle(sqlite_session_factory, moved, service_settings)
+
+        assert result.deleted_in_db == 0
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation is not None
+            assert automation.deleted_at is None
+            assert automation.enabled is True
 
     async def test_repointing_repo_url_pushes_without_newly_dirty_work(
         self,

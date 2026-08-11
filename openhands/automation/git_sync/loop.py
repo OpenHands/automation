@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -64,6 +64,7 @@ from openhands.automation.utils.timeout import validate_automation_timeout
 logger = logging.getLogger("automation.git_sync")
 
 GIT_SYNC_LAST_COMMIT_KEY = "git_sync_last_commit"
+GIT_SYNC_LAST_PATH_KEY = "git_sync_last_path"
 GIT_SYNC_LAST_RUN_AT_KEY = "git_sync_last_run_at"
 GIT_SYNC_LAST_ERROR_KEY = "git_sync_last_error"
 GIT_SYNC_LAST_ERROR_AT_KEY = "git_sync_last_error_at"
@@ -517,6 +518,45 @@ async def _import_from_git(
         await session.delete(state)
 
 
+async def _handle_path_change(
+    session: AsyncSession, workdir: Path, old_path: str, new_path: str
+) -> None:
+    """Re-export every automation after `git_sync_path` changes.
+
+    The automations themselves didn't change, so none of them are dirty and
+    the export step would write nothing under the new location -- the new
+    path would stay empty while the old one silently kept serving stale
+    copies. Marking them dirty makes the export rewrite all of them there
+    (`_export_dirty_automations` already writes whenever the target
+    directory is missing, regardless of content hash).
+
+    Doubles as protection for the import step, which runs first: a
+    non-dirty state whose directory is absent from the still-empty new path
+    would otherwise be read as an automation deleted in git and soft-deleted.
+
+    The old directory is deliberately left in place rather than deleted --
+    removing files from the user's repo on a config change is not this
+    loop's call to make -- so it is reported loudly instead.
+    """
+    await session.execute(update(AutomationGitSyncState).values(dirty=True))
+
+    old_root = workdir / old_path
+    leftover = (
+        sum(1 for entry in old_root.iterdir() if entry.is_dir())
+        if old_root.is_dir()
+        else 0
+    )
+    logger.warning(
+        "git-sync path changed (%r -> %r); re-exporting all automations "
+        "under the new path. %d automation director(y/ies) remain at %r, "
+        "are no longer synced, and must be deleted manually if unwanted.",
+        old_path,
+        new_path,
+        leftover,
+        old_path,
+    )
+
+
 # --- Export (DB -> git) -------------------------------------------------------
 
 
@@ -632,6 +672,18 @@ async def _run_sync_cycle_locked(
     # can take up to git_sync_git_timeout_seconds.
     async with session_factory() as session:
         last_commit = await get_service_metadata(session, GIT_SYNC_LAST_COMMIT_KEY)
+
+        # Before the import: a path change leaves the new sync_root empty,
+        # and the import's "directory disappeared" branch would read that as
+        # every automation having been deleted in git.
+        last_path = await get_service_metadata(session, GIT_SYNC_LAST_PATH_KEY)
+        if last_path is not None and last_path != git_settings.git_sync_path:
+            await _handle_path_change(
+                session, workdir, last_path, git_settings.git_sync_path
+            )
+        await set_service_metadata(
+            session, GIT_SYNC_LAST_PATH_KEY, git_settings.git_sync_path
+        )
 
         if head is not None and head != last_commit:
             await _import_from_git(
