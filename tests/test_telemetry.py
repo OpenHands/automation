@@ -110,6 +110,53 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
     assert properties["consecutive_failure_count"] == 3
 
 
+@pytest.mark.parametrize(
+    ("status", "failure_kind", "blocking_reason", "consecutive_failure_count"),
+    [
+        (
+            AutomationRunStatus.FAILED,
+            "auth",
+            "The configured API key was rejected",
+            1,
+        ),
+        (
+            AutomationRunStatus.COMPLETED,
+            "agent_action",
+            "MCP integration is not connected",
+            1,
+        ),
+        (AutomationRunStatus.FAILED, "transient", None, 0),
+    ],
+)
+def test_base_properties_includes_callback_and_watchdog_health_metadata(
+    status,
+    failure_kind,
+    blocking_reason,
+    consecutive_failure_count,
+):
+    automation = _automation()
+    automation.consecutive_failure_count = consecutive_failure_count
+    run = _run(automation)
+    run.status = status
+    run.failure_kind = failure_kind
+    run.blocking_reason = blocking_reason
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=run,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["failure_kind"] == failure_kind
+    assert properties["blocking_reason"] == blocking_reason
+    assert properties["consecutive_failure_count"] == consecutive_failure_count
+    assert properties["automation_enabled"] is True
+    assert properties["disabled_reason"] is None
+    assert properties["disabled_failure_kind"] is None
+
+
 def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     monkeypatch.setattr(
         telemetry,
