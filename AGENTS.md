@@ -274,11 +274,16 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   (metadata) plus its tarball contents extracted under `tarball/**`.
 - `git_sync/router.py` exposes `GET /v1/git-sync/status`,
   `PUT /v1/git-sync/config`, and `POST /v1/git-sync/sync` (manual trigger).
-- **Sync is manual by default**: `AUTOMATION_GIT_SYNC_INTERVAL_SECONDS`
-  defaults to `0`, which starts no background loop — a cycle runs only when
-  `POST /v1/git-sync/sync` is called. Set a positive interval to also poll
-  periodically. Either way one cycle is the same bidirectional pull → import
-  → export → push; there's no way to run a single direction.
+- **Sync is manual by default**: the interval defaults to `0`, meaning a
+  cycle runs only when `POST /v1/git-sync/sync` is called. Set a positive
+  `interval_seconds` via `PUT /v1/git-sync/config` (the UI) to also sync
+  automatically. Unlike every other git-sync setting it has **no environment
+  variable** — it is runtime-only config, stored with the other overrides
+  (see `DEFAULT_SYNC_INTERVAL_SECONDS` in `git_sync/config_override.py`).
+  The background loop always runs so a newly-set interval takes effect
+  without a restart; while the interval is 0 it idles without syncing.
+  Either way one cycle is the same bidirectional pull → import → export →
+  push; there's no way to run a single direction.
 - Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
   on every create/update/delete via the API; the sync loop treats a dirty
   automation as authoritative over a conflicting git-side change for the same

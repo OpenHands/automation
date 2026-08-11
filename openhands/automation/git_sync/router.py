@@ -14,6 +14,7 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
     resolve_effective_git_sync_settings,
+    resolve_effective_sync_interval_seconds,
 )
 from openhands.automation.git_sync.loop import (
     GIT_SYNC_LAST_COMMIT_KEY,
@@ -44,6 +45,7 @@ _background_sync_tasks: set[asyncio.Task] = set()
 # Maps the config-update request's short field names to GitSyncSettings attrs.
 _CONFIG_OVERRIDE_FIELDS = {
     "enabled": "git_sync_enabled",
+    "interval_seconds": "git_sync_interval_seconds",
     "repo_url": "git_sync_repo_url",
     "branch": "git_sync_branch",
     "path": "git_sync_path",
@@ -77,6 +79,7 @@ async def _build_status_response(
         branch=git_settings.git_sync_branch,
         path=git_settings.git_sync_path,
         encryption_enabled=bool(git_settings.git_sync_encryption_key),
+        interval_seconds=await resolve_effective_sync_interval_seconds(session),
         last_synced_commit=last_commit,
         last_synced_at=datetime.fromisoformat(last_run_at) if last_run_at else None,
         last_error=last_error or None,

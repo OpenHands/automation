@@ -28,6 +28,7 @@ from openhands.automation.git_sync.client import (
 )
 from openhands.automation.git_sync.config_override import (
     resolve_effective_git_sync_settings,
+    resolve_effective_sync_interval_seconds,
 )
 from openhands.automation.git_sync.serializer import (
     DeserializedAutomation,
@@ -62,6 +63,11 @@ from openhands.automation.utils.timeout import validate_automation_timeout
 
 
 logger = logging.getLogger("automation.git_sync")
+
+# How often the loop re-reads config while sync is manual-only. This is the
+# worst-case delay before an interval set from the UI takes effect, so it is
+# kept short; the tick is a single indexed metadata read, not a sync.
+_IDLE_POLL_SECONDS = 15
 
 GIT_SYNC_LAST_COMMIT_KEY = "git_sync_last_commit"
 GIT_SYNC_LAST_PATH_KEY = "git_sync_last_path"
@@ -751,35 +757,43 @@ async def git_sync_loop(
     each cycle re-resolves runtime config overrides (PUT /v1/git-sync/config)
     and no-ops if they've paused sync, without killing this task.
 
-    Returns immediately when the poll interval is 0 (the default), leaving
-    sync to run only when triggered via POST /v1/git-sync/sync.
+    The sync interval is runtime-configurable, so this task runs even while
+    sync is manual-only (interval 0): it idles, re-reading the interval every
+    `_IDLE_POLL_SECONDS`, and starts syncing once a positive one is set --
+    without a restart. It never syncs while the interval is 0.
     """
     config = get_config()
     git_settings = config.git_sync
     service_settings = config.service
-    interval = git_settings.git_sync_interval_seconds
-
-    if interval <= 0:
-        logger.info(
-            "Git sync is manual-only (interval=%s); syncing only when "
-            "POST /v1/git-sync/sync is called",
-            interval,
-        )
-        return
 
     logger.info(
-        "Git sync started, polling every %ds (repo=%s branch=%s path=%s)",
-        interval,
+        "Git sync loop started (repo=%s branch=%s path=%s); interval is set "
+        "from the UI, 0 means manual-only",
         git_settings.git_sync_repo_url,
         git_settings.git_sync_branch,
         git_settings.git_sync_path,
     )
 
+    async def _next_interval() -> float:
+        """How long to sleep before the next tick.
+
+        While manual-only there is nothing to wait for, so fall back to a
+        short idle poll -- that is what lets a newly-set interval take
+        effect without a restart.
+        """
+        async with session_factory() as session:
+            interval = await resolve_effective_sync_interval_seconds(session)
+        return float(interval) if interval > 0 else float(_IDLE_POLL_SECONDS)
+
     async def _cycle() -> None:
         async with session_factory() as session:
             effective = await resolve_effective_git_sync_settings(session, git_settings)
+            interval = await resolve_effective_sync_interval_seconds(session)
         if not (service_settings.is_local_mode and effective.enabled):
             logger.debug("Git sync paused via runtime config; skipping this cycle")
+            return
+        if interval <= 0:
+            logger.debug("Git sync is manual-only; skipping this automatic cycle")
             return
 
         result = await run_sync_cycle(session_factory, effective, service_settings)
@@ -809,7 +823,7 @@ async def git_sync_loop(
 
     await run_periodic_loop(
         _cycle,
-        interval_seconds=interval,
+        interval_seconds=_next_interval,
         shutdown_event=shutdown_event,
         logger=logger,
         name="Git sync",

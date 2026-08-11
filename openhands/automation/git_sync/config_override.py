@@ -19,16 +19,46 @@ from openhands.automation.utils.service_metadata import (
 
 GIT_SYNC_CONFIG_OVERRIDE_KEY = "git_sync_config_override"
 
+# The sync interval is runtime-only config: unlike the repo, branch, path,
+# credentials and author, it has no environment variable and is set solely
+# from the UI (PUT /v1/git-sync/config). It rides in the same override blob
+# but is not a GitSyncSettings field, so it is filtered out before the blob
+# is merged onto that model.
+SYNC_INTERVAL_OVERRIDE_KEY = "git_sync_interval_seconds"
+
+# 0 means manual-only: nothing syncs until POST /v1/git-sync/sync is called.
+DEFAULT_SYNC_INTERVAL_SECONDS = 0
+
+
+async def _load_overrides(session: AsyncSession) -> dict[str, Any]:
+    raw = await get_service_metadata(session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
+    return json.loads(raw) if raw else {}
+
 
 async def resolve_effective_git_sync_settings(
     session: AsyncSession, git_settings: GitSyncSettings
 ) -> GitSyncSettings:
     """Merge persisted runtime overrides over the env-var defaults."""
-    raw = await get_service_metadata(session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
-    if not raw:
+    overrides = {
+        key: value
+        for key, value in (await _load_overrides(session)).items()
+        if key != SYNC_INTERVAL_OVERRIDE_KEY
+    }
+    if not overrides:
         return git_settings
-    overrides = json.loads(raw)
     return git_settings.model_copy(update=overrides)
+
+
+async def resolve_effective_sync_interval_seconds(session: AsyncSession) -> int:
+    """Seconds between automatic syncs; 0 means manual-only.
+
+    A stored value that isn't a non-negative int is ignored rather than
+    allowed to crash or busy-spin the sync loop.
+    """
+    value = (await _load_overrides(session)).get(SYNC_INTERVAL_OVERRIDE_KEY)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return DEFAULT_SYNC_INTERVAL_SECONDS
+    return value
 
 
 async def apply_git_sync_config_override(

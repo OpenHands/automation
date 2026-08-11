@@ -120,6 +120,45 @@ class TestGitSyncConfig:
             clear_config_cache()
 
 
+class TestGitSyncInterval:
+    async def test_defaults_to_manual_only(self, async_client):
+        response = await async_client.get("/api/automation/v1/git-sync/status")
+        assert response.json()["interval_seconds"] == 0
+
+    async def test_set_and_cleared_via_config(self, async_client):
+        put = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"interval_seconds": 300}
+        )
+        assert put.status_code == 200
+        assert put.json()["interval_seconds"] == 300
+
+        status = await async_client.get("/api/automation/v1/git-sync/status")
+        assert status.json()["interval_seconds"] == 300
+
+        # null clears the override, back to manual-only.
+        cleared = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"interval_seconds": None}
+        )
+        assert cleared.json()["interval_seconds"] == 0
+
+    async def test_rejects_a_negative_interval(self, async_client):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"interval_seconds": -1}
+        )
+        assert response.status_code == 422
+
+    async def test_setting_interval_leaves_other_fields_alone(self, async_client):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"branch": "develop"}
+        )
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"interval_seconds": 60}
+        )
+        body = response.json()
+        assert body["branch"] == "develop"
+        assert body["interval_seconds"] == 60
+
+
 class TestTriggerGitSync:
     async def test_returns_503_when_disabled(self, async_client):
         response = await async_client.post("/api/automation/v1/git-sync/sync")

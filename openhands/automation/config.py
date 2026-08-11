@@ -313,10 +313,6 @@ class GitSyncSettings(BaseSettings):
             (via the SDK's Fernet-based Cipher, same primitive as the KV
             store) before they're written to the synced repo. Empty disables
             encryption; existing plaintext files remain readable either way.
-        AUTOMATION_GIT_SYNC_INTERVAL_SECONDS: Background sync poll interval.
-            0 (the default) means sync runs only when explicitly triggered
-            via POST /v1/git-sync/sync -- no background loop is started. Set
-            a positive value to also sync periodically.
         AUTOMATION_GIT_SYNC_AUTHOR_NAME: Commit author name (default:
             "OpenHands Automation").
         AUTOMATION_GIT_SYNC_AUTHOR_EMAIL: Commit author email (default:
@@ -327,13 +323,16 @@ class GitSyncSettings(BaseSettings):
             subprocess invocations (default: 60).
     """
 
+    # NOTE: the sync interval is deliberately NOT here. It is runtime-only
+    # config, set from the UI via PUT /v1/git-sync/config and stored with the
+    # other overrides -- see DEFAULT_SYNC_INTERVAL_SECONDS in
+    # git_sync/config_override.py.
     git_sync_enabled: bool = False
     git_sync_repo_url: str = ""
     git_sync_branch: str = "main"
     git_sync_path: str = "automations"
     git_sync_token: str = ""
     git_sync_encryption_key: str = ""
-    git_sync_interval_seconds: int = 0
     git_sync_author_name: str = "OpenHands Automation"
     git_sync_author_email: str = "automation@openhands.dev"
     git_sync_local_workdir: str = ""

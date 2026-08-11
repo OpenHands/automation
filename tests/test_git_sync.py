@@ -93,10 +93,6 @@ def git_settings(tmp_path, origin, monkeypatch):
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_BRANCH", "main")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_PATH", "automations")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_LOCAL_WORKDIR", str(tmp_path / "workdir"))
-    # The shipped default is 0 (manual-only). The git_sync_loop tests below
-    # need an actual polling loop, so pin a short interval here; the
-    # manual-only default gets its own test.
-    monkeypatch.setenv("AUTOMATION_GIT_SYNC_INTERVAL_SECONDS", "1")
     monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
     monkeypatch.setenv("AUTOMATION_LOCAL_API_KEY", "x")
     clear_config_cache()
@@ -1155,6 +1151,11 @@ class TestGitSyncLoop:
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         await _create_internal_automation(sqlite_session_factory, file_store)
+        async with sqlite_session_factory() as session:
+            await apply_git_sync_config_override(
+                session, {"git_sync_interval_seconds": 1}
+            )
+            await session.commit()
         shutdown_event = asyncio.Event()
 
         async def stop_once_synced():
@@ -1185,22 +1186,24 @@ class TestGitSyncLoop:
             assert states[0].dirty is False
             assert states[0].content_hash is not None
 
-    async def test_manual_only_by_default_starts_no_polling_loop(
-        self, sqlite_session_factory, file_store, git_settings, monkeypatch
+    async def test_manual_only_by_default_never_syncs_automatically(
+        self, sqlite_session_factory, file_store, git_settings
     ):
-        """The shipped default is manual-only: sync happens when
-        POST /v1/git-sync/sync is called, not on a timer. git_sync_loop must
-        return immediately rather than polling (or busy-spinning on a zero
-        sleep) so nothing is pushed behind the user's back.
+        """The shipped default is manual-only (interval 0).
+
+        The loop still runs -- it is what notices an interval later set from
+        the UI, without a restart -- but it must idle rather than sync, so
+        nothing is pushed behind the user's back.
         """
-        from openhands.automation.config import clear_config_cache
-
-        monkeypatch.delenv("AUTOMATION_GIT_SYNC_INTERVAL_SECONDS", raising=False)
-        clear_config_cache()
         await _create_internal_automation(sqlite_session_factory, file_store)
+        shutdown_event = asyncio.Event()
 
-        # No shutdown_event: a loop that polls would hang here.
-        await asyncio.wait_for(git_sync_loop(sqlite_session_factory), timeout=5)
+        task = asyncio.create_task(
+            git_sync_loop(sqlite_session_factory, shutdown_event=shutdown_event)
+        )
+        await asyncio.sleep(0.5)  # long enough for a tick to have happened
+        shutdown_event.set()
+        await asyncio.wait_for(task, timeout=5)
 
         async with sqlite_session_factory() as session:
             states = (
@@ -1208,11 +1211,69 @@ class TestGitSyncLoop:
             )
             assert states[0].dirty is True, "manual-only must not have synced"
 
+    async def test_interval_set_at_runtime_starts_syncing_without_a_restart(
+        self, sqlite_session_factory, file_store, git_settings, monkeypatch
+    ):
+        """Setting the interval from the UI must take effect on a running
+        service. The loop re-reads it every tick precisely so a service that
+        booted manual-only starts syncing once an interval is configured."""
+        import openhands.automation.git_sync.loop as loop_module
+
+        # Production idles for _IDLE_POLL_SECONDS between config re-reads;
+        # shorten it so the test doesn't wait that long for the pickup.
+        monkeypatch.setattr(loop_module, "_IDLE_POLL_SECONDS", 0.1)
+
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        shutdown_event = asyncio.Event()
+
+        task = asyncio.create_task(
+            git_sync_loop(sqlite_session_factory, shutdown_event=shutdown_event)
+        )
+        try:
+            # Booted manual-only: it idles.
+            await asyncio.sleep(0.3)
+            async with sqlite_session_factory() as session:
+                states = (
+                    (await session.execute(select(AutomationGitSyncState)))
+                    .scalars()
+                    .all()
+                )
+                assert states[0].dirty is True
+
+                # Now configure an interval, as the UI would.
+                await apply_git_sync_config_override(
+                    session, {"git_sync_interval_seconds": 1}
+                )
+                await session.commit()
+
+            for _ in range(200):
+                async with sqlite_session_factory() as session:
+                    states = (
+                        (await session.execute(select(AutomationGitSyncState)))
+                        .scalars()
+                        .all()
+                    )
+                    if not states[0].dirty:
+                        break
+                await asyncio.sleep(0.05)
+        finally:
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=10)
+
+        async with sqlite_session_factory() as session:
+            states = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().all()
+            )
+            assert states[0].dirty is False, "never synced after the interval was set"
+
     async def test_paused_via_override_does_not_run_a_cycle(
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         async with sqlite_session_factory() as session:
-            await apply_git_sync_config_override(session, {"git_sync_enabled": False})
+            await apply_git_sync_config_override(
+                session,
+                {"git_sync_enabled": False, "git_sync_interval_seconds": 1},
+            )
             await session.commit()
 
         await _create_internal_automation(sqlite_session_factory, file_store)
