@@ -342,6 +342,9 @@ def _base_properties(
             {
                 "automation_id": str(automation.id),
                 "automation_enabled": automation.enabled,
+                "consecutive_failure_count": automation.consecutive_failure_count,
+                "disabled_reason": automation.disabled_reason,
+                "disabled_failure_kind": automation.disabled_failure_kind,
                 "trigger_type": _trigger_type(automation),
                 "timeout_seconds": automation.timeout,
             }
@@ -369,6 +372,8 @@ def _base_properties(
             {
                 "run_id": str(run.id),
                 "run_status": run.status.value if run.status is not None else None,
+                "failure_kind": run.failure_kind,
+                "blocking_reason": run.blocking_reason,
                 "has_conversation_id": bool(run.conversation_id),
             }
         )

@@ -406,6 +406,12 @@ async def mark_run_terminal(
                 threshold=threshold,
             )
             if db_run is not None:
+                run.status = db_run.status
+                run.completed_at = db_run.completed_at
+                run.error_detail = db_run.error_detail
+                run.failure_kind = db_run.failure_kind
+                run.blocking_reason = db_run.blocking_reason
+                run.automation = db_run.automation
                 await session.commit()
                 logger.info("Run marked as %s", status.value, extra=extra)
             else:

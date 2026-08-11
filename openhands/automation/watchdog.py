@@ -130,7 +130,6 @@ async def _verify_and_mark_run(
                 session=session,
                 properties={
                     "trigger_source": "watchdog",
-                    "failure_kind": "verification_failed",
                 },
             )
         return marked is not None
@@ -261,7 +260,6 @@ async def _verify_and_mark_run(
             session=session,
             properties={
                 "trigger_source": "watchdog",
-                "failure_kind": "timeout",
             },
         )
     return marked is not None

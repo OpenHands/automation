@@ -482,7 +482,7 @@ async def complete_run(
         else "automation_run_failed",
         request=request,
         user=user,
-        automation=automation,
+        automation=run.automation,
         run=run,
         properties={"trigger_source": "callback"},
     )

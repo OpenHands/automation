@@ -110,6 +110,111 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
     assert properties["consecutive_failure_count"] == 3
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "event",
+        "status",
+        "failure_kind",
+        "blocking_reason",
+        "enabled",
+        "disabled_reason",
+        "disabled_failure_kind",
+        "consecutive_failure_count",
+    ),
+    [
+        (
+            "automation_run_failed",
+            AutomationRunStatus.FAILED,
+            "auth",
+            None,
+            True,
+            None,
+            None,
+            1,
+        ),
+        (
+            "automation_run_completed",
+            AutomationRunStatus.COMPLETED,
+            "agent_action",
+            "MCP integration is not connected",
+            False,
+            "MCP integration is not connected",
+            "agent_action",
+            3,
+        ),
+        (
+            "automation_run_failed",
+            AutomationRunStatus.FAILED,
+            "transient",
+            None,
+            True,
+            None,
+            None,
+            0,
+        ),
+        (
+            "automation_run_failed",
+            AutomationRunStatus.FAILED,
+            "config",
+            None,
+            False,
+            "Invalid tarball URL",
+            "config",
+            3,
+        ),
+    ],
+)
+async def test_terminal_events_include_health_metadata(
+    monkeypatch,
+    event,
+    status,
+    failure_kind,
+    blocking_reason,
+    enabled,
+    disabled_reason,
+    disabled_failure_kind,
+    consecutive_failure_count,
+):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    automation = _automation()
+    automation.enabled = enabled
+    automation.disabled_reason = disabled_reason
+    automation.disabled_failure_kind = disabled_failure_kind
+    automation.consecutive_failure_count = consecutive_failure_count
+    run = _run(automation)
+    run.status = status
+    run.failure_kind = failure_kind
+    run.blocking_reason = blocking_reason
+
+    await telemetry.capture_automation_event(
+        event,
+        automation=automation,
+        run=run,
+        properties={
+            "trigger_source": "callback" if event.endswith("completed") else "watchdog"
+        },
+    )
+
+    _, payload = _MockAsyncClient.posts[0]
+    properties = payload["properties"]
+    assert payload["event"] == event
+    assert properties["failure_kind"] == failure_kind
+    assert properties["blocking_reason"] == blocking_reason
+    assert properties["automation_enabled"] is enabled
+    assert properties["disabled_reason"] == disabled_reason
+    assert properties["disabled_failure_kind"] == disabled_failure_kind
+    assert properties["consecutive_failure_count"] == consecutive_failure_count
+
+
 def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     monkeypatch.setattr(
         telemetry,

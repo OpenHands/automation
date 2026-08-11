@@ -215,7 +215,7 @@ async def _execute_run(
         )
         await capture_automation_event(
             "automation_run_failed",
-            automation=automation,
+            automation=run.automation,
             run=run,
             session_factory=session_factory,
             properties={
