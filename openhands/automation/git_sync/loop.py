@@ -646,23 +646,30 @@ async def _run_sync_cycle_locked(
                 result,
             )
 
-        exported = await _export_dirty_automations(
-            session, sync_root, encryption_key, result
-        )
+        # Return value intentionally unused: the export counters land on
+        # `result`, and the push below must run regardless of whether
+        # anything was exported this cycle (see comment there).
+        await _export_dirty_automations(session, sync_root, encryption_key, result)
         await session.commit()
 
-    pushed = None
-    if exported:
-        pushed = await commit_and_push(
-            workdir,
-            git_settings.git_sync_path,
-            "Sync automations from agent server",
-            git_settings.git_sync_author_name,
-            git_settings.git_sync_author_email,
-            branch,
-            token,
-            timeout,
-        )
+    # Called unconditionally, not gated on `exported`: commit_and_push is
+    # also what retries a commit that a previous cycle created but failed to
+    # push, and what pushes an existing local commit to a newly-repointed
+    # remote (git_sync_repo_url changed at runtime). Gating on `exported`
+    # made that recovery path unreachable whenever there was nothing new to
+    # export -- the cycle would report success while silently never pushing.
+    # It self-limits: with nothing staged and nothing pending it returns None
+    # without touching the network.
+    pushed = await commit_and_push(
+        workdir,
+        git_settings.git_sync_path,
+        "Sync automations from agent server",
+        git_settings.git_sync_author_name,
+        git_settings.git_sync_author_email,
+        branch,
+        token,
+        timeout,
+    )
     result.pushed_commit = pushed
 
     new_head = pushed or head

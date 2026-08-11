@@ -382,6 +382,66 @@ class TestRunSyncCycle:
         assert result.imported == 0
         assert result.pushed_commit is None
 
+    async def test_repointing_repo_url_pushes_without_newly_dirty_work(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        tmp_path,
+    ):
+        """Changing `git_sync_repo_url` must carry already-exported
+        automations over to the new remote.
+
+        By this point nothing is dirty, so a cycle that only pushes when it
+        exported something this round would report success while leaving the
+        new remote permanently empty -- the failure mode is silence, not an
+        error. Same shape as a push that failed once and was followed by no
+        further DB changes.
+        """
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        first = await run_sync_cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+        assert first.pushed_commit is not None
+
+        new_origin = tmp_path / "new_origin"
+        new_origin.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "-q", "-b", "main"], cwd=new_origin, check=True
+        )
+        repointed = git_settings.model_copy(
+            update={"git_sync_repo_url": f"file://{new_origin}"}
+        )
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, repointed, service_settings
+        )
+
+        assert result.exported == 0, "nothing should be newly dirty"
+        assert result.pushed_commit is not None, (
+            "the existing commit never reached the repointed remote"
+        )
+
+        new_origin_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=new_origin,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert new_origin_head == result.pushed_commit
+
+        verify_dir = tmp_path / "verify_new_origin"
+        subprocess.run(
+            ["git", "clone", f"file://{new_origin}", str(verify_dir)],
+            check=True,
+            capture_output=True,
+        )
+        slug_dir = verify_dir / "automations" / "my-first-automation"
+        assert (slug_dir / "automation.yaml").is_file()
+        assert (slug_dir / "tarball" / "main.py").read_text() == "print(1)"
+
     async def test_missing_tarball_storage_preserves_previously_synced_content(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
     ):

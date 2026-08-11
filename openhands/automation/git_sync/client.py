@@ -166,7 +166,17 @@ async def pull(workdir: Path, branch: str, token: str, timeout: float) -> str | 
     """
     # No refspec: naming `branch` explicitly would fail with "couldn't find
     # remote ref" on a brand-new repo that has no branches at all yet.
-    await _run_git(["fetch", "origin"], cwd=workdir, token=token, timeout=timeout)
+    #
+    # `--prune` is load-bearing, not hygiene: `ensure_repo` can repoint origin
+    # at a different repo (git_sync_repo_url changed at runtime), and without
+    # pruning, the previous remote's tracking refs survive the switch. A stale
+    # `origin/{branch}` makes `_remote_branch_exists` report True and
+    # `_local_branch_ahead_of_remote` compute 0 commits ahead, so the cycle
+    # concludes it is already in sync and silently never pushes to the new
+    # remote -- with no error to surface.
+    await _run_git(
+        ["fetch", "--prune", "origin"], cwd=workdir, token=token, timeout=timeout
+    )
 
     if not await _remote_branch_exists(workdir, branch, timeout):
         # Nothing pushed to this branch yet. If we're already on it (the

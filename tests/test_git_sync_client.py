@@ -129,6 +129,63 @@ class TestPull:
         assert head == pushed_sha
         assert (reader / "file.txt").read_text() == "hello"
 
+    async def test_repointing_to_an_empty_origin_prunes_stale_remote_refs(
+        self, tmp_path, origin
+    ):
+        """Switching `git_sync_repo_url` to a repo that has no commits yet
+        must drop the previous remote's tracking refs.
+
+        Without pruning, `origin/{branch}` survives the switch still pointing
+        at the *old* remote's commit. That makes `_remote_branch_exists`
+        report True and `_local_branch_ahead_of_remote` compute 0 commits
+        ahead, so the cycle concludes it is already in sync and silently
+        never pushes to the new remote -- with no error to surface.
+        """
+        workdir = tmp_path / "clone"
+        await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
+        (workdir / "file.txt").write_text("hi")
+        seeded_sha = await commit_and_push(
+            workdir, ".", "seed", "Bot", "bot@example.com", "main", "", 30
+        )
+        assert seeded_sha is not None
+
+        # A brand-new remote with zero refs -- the case a stale ref hides.
+        empty_origin = tmp_path / "empty_origin"
+        empty_origin.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "-q", "-b", "main"], cwd=empty_origin, check=True
+        )
+
+        await ensure_repo(
+            workdir, _repo_url(empty_origin), "main", token="", timeout=30
+        )
+        await pull(workdir, "main", token="", timeout=30)
+
+        stale_ref = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/main"],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+        )
+        assert stale_ref.returncode != 0, (
+            "origin/main from the previous remote survived the repoint"
+        )
+
+        # The commit that only exists locally must now reach the new remote,
+        # even though there is nothing new to stage.
+        pushed = await commit_and_push(
+            workdir, ".", "resync", "Bot", "bot@example.com", "main", "", 30
+        )
+        assert pushed == seeded_sha
+        new_origin_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=empty_origin,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert new_origin_head == seeded_sha
+
     async def test_ff_only_divergence_raises(self, tmp_path, origin):
         writer_a = tmp_path / "writer_a"
         await ensure_repo(writer_a, _repo_url(origin), "main", token="", timeout=30)
