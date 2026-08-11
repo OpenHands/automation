@@ -20,6 +20,8 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
+from openhands.automation.git_sync import git_sync_loop, is_git_sync_active
+from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
@@ -162,6 +164,33 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Git sync: mirrors automations to/from a git repo. Local mode only.
+    git_sync_task = None
+    config = get_config()
+    if config.git_sync.git_sync_enabled and not settings.is_local_mode:
+        logger.warning(
+            "AUTOMATION_GIT_SYNC_ENABLED is set but the service is not in "
+            "local mode (AUTOMATION_AGENT_SERVER_URL not configured); "
+            "git sync will remain disabled."
+        )
+    if config.git_sync.git_sync_enabled and not config.git_sync.git_sync_repo_url:
+        logger.warning(
+            "AUTOMATION_GIT_SYNC_ENABLED is set but AUTOMATION_GIT_SYNC_REPO_URL "
+            "is empty; git sync will remain disabled."
+        )
+    if is_git_sync_active():
+        logger.warning(
+            "Git sync is enabled — automation prompts and metadata will be "
+            "pushed to %s. Make sure that repo is private, since it may "
+            "contain sensitive automation content.",
+            config.git_sync.git_sync_repo_url,
+        )
+        git_sync_task = asyncio.create_task(
+            git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
+        )
+        app.state.git_sync_task = git_sync_task
+        logger.info("Background git sync started")
+
     yield
 
     # Shutdown
@@ -169,11 +198,15 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    for task_name, task in [
+    background_tasks = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-    ]:
+    ]
+    if git_sync_task is not None:
+        background_tasks.append(("git_sync", git_sync_task))
+
+    for task_name, task in background_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
@@ -243,6 +276,7 @@ app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
+app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)

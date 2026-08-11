@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
@@ -38,6 +39,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
+    build_upload_storage_path,
     parse_internal_upload_id,
 )
 from openhands.automation.utils.timeout import (
@@ -230,15 +232,8 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
     return tarball_buffer.read()
 
 
-def _build_storage_path(
-    org_id: uuid.UUID, user_id: uuid.UUID, upload_id: uuid.UUID
-) -> str:
-    """Build the storage path for an upload.
-
-    Path format: uploads/{org_id}/{user_id}/{upload_id}.tar
-    Note: The 'automation/' prefix is added by the FileStore implementation.
-    """
-    return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
+# Alias kept for existing call sites; canonical impl now in tarball_validation.
+_build_storage_path = build_upload_storage_path
 
 
 def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes | None:
@@ -482,6 +477,7 @@ async def create_automation_from_prompt(
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
+        await mark_git_sync_dirty(session, automation)
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:
@@ -878,6 +874,7 @@ async def create_automation_from_plugin(
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
+        await mark_git_sync_dirty(session, automation)
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:

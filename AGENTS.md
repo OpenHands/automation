@@ -22,6 +22,12 @@ automation/
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── git_sync/           # Bidirectional git sync (local mode only, see below)
+│       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
+│       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
+│       │   ├── router.py       # Git sync status/trigger API
+│       │   ├── schemas.py      # Git sync request/response schemas
+│       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
 │       │   └── google_cloud.py # GCS implementation
@@ -80,6 +86,7 @@ config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
 config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
 config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
 config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
+config.git_sync.git_sync_enabled  # GitSyncSettings (AUTOMATION_ prefix)
 config.log.log_level            # LogSettings (no prefix)
 ```
 
@@ -253,6 +260,39 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
 - Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
+
+## Git Sync
+
+Local/self-hosted deployments can mirror their automations to a git repo for
+visibility, versioning, and backup — see issue #300. **Only active in local
+mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
+agent server, which doesn't make sense for the multi-tenant SaaS deployment.
+
+- Enable with `AUTOMATION_GIT_SYNC_ENABLED=1` plus `AUTOMATION_GIT_SYNC_REPO_URL`
+  (see `GitSyncSettings` in `config.py` for the full list of env vars).
+- Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
+  (metadata) plus its tarball contents extracted under `tarball/**`.
+- `git_sync/router.py` exposes `GET /v1/git-sync/status`,
+  `PUT /v1/git-sync/config`, and `POST /v1/git-sync/sync` (manual trigger).
+- Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
+  on every create/update/delete via the API; the sync loop treats a dirty
+  automation as authoritative over a conflicting git-side change for the same
+  cycle — the VM always wins until its change has been pushed.
+- Automations created directly in git (e.g. via a PR) are imported and
+  stamped with the deterministic local-mode user/org IDs from `auth.py`'s
+  `_get_local_user()`.
+- **Encryption**: set `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY` to encrypt file
+  contents (via the SDK's Fernet-based `Cipher`, same primitive as the KV
+  store) before they're committed. Reading a repo written before encryption
+  was turned on still works — plaintext files pass through unchanged.
+- **Runtime config**: `PUT /v1/git-sync/config` reconfigures or pauses/resumes
+  an already-running sync (repo/branch/path/token/encryption key/author)
+  without a restart, via `git_sync/config_override.py` (overrides stored as
+  JSON in `automation_service_metadata`). It can't newly enable sync in a
+  deployment that booted with `AUTOMATION_GIT_SYNC_ENABLED` unset — that
+  still needs the env var plus a restart.
+- `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
+  the most recent failed cycle, cleared on the next successful one.
 
 ## Release Procedure
 

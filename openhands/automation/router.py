@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -101,6 +102,7 @@ async def create_automation(
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
         "automation_created",
         request=request,
@@ -198,6 +200,7 @@ async def update_automation(
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
         "automation_updated",
         request=request,
@@ -220,6 +223,7 @@ async def delete_automation(
     auto.enabled = False
     auto.deleted_at = utcnow()
     await session.flush()
+    await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
         "automation_deleted",
         request=request,

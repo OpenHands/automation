@@ -427,3 +427,53 @@ class AutomationKV(Base):
             unique=True,
         ),
     )
+
+
+class AutomationGitSyncState(Base):
+    """Per-automation git sync bookkeeping (one row per synced automation).
+
+    See ``openhands/automation/git_sync/``. Tracks the stable directory name
+    used in the repo and whether the DB-side content has changed since it
+    was last written to git.
+
+    ``dirty`` is a plain boolean column, not a JSON field, so the sync loop
+    can query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
+    """
+
+    __tablename__ = "automation_git_sync_state"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # Directory name for this automation within the sync path, e.g.
+    # "automations/{slug}/" in the repo. Stable once assigned.
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+
+    # SHA-256 of the last-synced serialized content (metadata + tarball
+    # files). Used to detect no-op sync cycles.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Git commit SHA this automation was last reconciled against.
+    last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Set on every create/update/delete via the API; cleared once exported.
+    # While dirty, the DB side wins over a conflicting git-side change.
+    dirty: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )

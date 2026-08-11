@@ -286,6 +286,72 @@ class KVSettings(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
+# GitSyncSettings - Git sync configuration
+# ---------------------------------------------------------------------------
+
+
+class GitSyncSettings(BaseSettings):
+    """Git sync configuration for backing up/versioning automations in git.
+
+    When enabled, automations are serialized to files and pushed to a git
+    repo, and changes pushed there (e.g. via a PR) are pulled back. Only
+    active in local/self-hosted mode -- a single repo maps to a single
+    agent server, which doesn't fit the multi-tenant SaaS deployment.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_GIT_SYNC_ENABLED: Enable git sync (default: False). Only
+            takes effect in local mode; ignored (with a warning) otherwise.
+        AUTOMATION_GIT_SYNC_REPO_URL: Git repo URL to sync to, e.g.
+            https://github.com/org/repo.git. Required when enabled.
+        AUTOMATION_GIT_SYNC_BRANCH: Branch to sync (default: "main").
+        AUTOMATION_GIT_SYNC_PATH: Directory within the repo automations are
+            stored under, no leading/trailing slash (default: "automations").
+        AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
+            authentication against the repo. Passed per git-invocation via
+            `-c http.extraHeader`, never written to disk or the remote URL.
+        AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
+            (via the SDK's Fernet-based Cipher, same primitive as the KV
+            store) before they're written to the synced repo. Empty disables
+            encryption; existing plaintext files remain readable either way.
+        AUTOMATION_GIT_SYNC_INTERVAL_SECONDS: Sync loop poll interval
+            (default: 60).
+        AUTOMATION_GIT_SYNC_AUTHOR_NAME: Commit author name (default:
+            "OpenHands Automation").
+        AUTOMATION_GIT_SYNC_AUTHOR_EMAIL: Commit author email (default:
+            "automation@openhands.dev").
+        AUTOMATION_GIT_SYNC_LOCAL_WORKDIR: Local working directory for the
+            clone. Defaults to "{workspace_base}/git-sync" when empty.
+        AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
+            subprocess invocations (default: 60).
+    """
+
+    git_sync_enabled: bool = False
+    git_sync_repo_url: str = ""
+    git_sync_branch: str = "main"
+    git_sync_path: str = "automations"
+    git_sync_token: str = ""
+    git_sync_encryption_key: str = ""
+    git_sync_interval_seconds: int = 60
+    git_sync_author_name: str = "OpenHands Automation"
+    git_sync_author_email: str = "automation@openhands.dev"
+    git_sync_local_workdir: str = ""
+    git_sync_git_timeout_seconds: float = 60.0
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Check if git sync is configured (enabled and a repo URL is set).
+
+        Deliberately doesn't raise when misconfigured -- this section is
+        constructed eagerly regardless of deployment mode, so raising here
+        would crash every deployment on a bad env var. app.py logs a
+        warning instead once it knows the deployment mode.
+        """
+        return bool(self.git_sync_enabled and self.git_sync_repo_url)
+
+
+# ---------------------------------------------------------------------------
 # ServiceSettings - Core service configuration (formerly "Settings")
 # ---------------------------------------------------------------------------
 
@@ -516,6 +582,7 @@ class AppConfig:
         http: HTTP client settings (timeouts, caching)
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
+        git_sync: Git sync settings (repo, branch, credentials)
 
     Example:
         config = get_config()
@@ -555,6 +622,11 @@ class AppConfig:
     def kv(self) -> KVSettings:
         """Key-value store configuration (AUTOMATION_ prefix)."""
         return KVSettings()
+
+    @cached_property
+    def git_sync(self) -> GitSyncSettings:
+        """Git sync configuration (AUTOMATION_ prefix)."""
+        return GitSyncSettings()
 
 
 @lru_cache
