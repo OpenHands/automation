@@ -747,11 +747,22 @@ async def git_sync_loop(
     caller (app.py) checks that before starting this task. Once running,
     each cycle re-resolves runtime config overrides (PUT /v1/git-sync/config)
     and no-ops if they've paused sync, without killing this task.
+
+    Returns immediately when the poll interval is 0 (the default), leaving
+    sync to run only when triggered via POST /v1/git-sync/sync.
     """
     config = get_config()
     git_settings = config.git_sync
     service_settings = config.service
     interval = git_settings.git_sync_interval_seconds
+
+    if interval <= 0:
+        logger.info(
+            "Git sync is manual-only (interval=%s); syncing only when "
+            "POST /v1/git-sync/sync is called",
+            interval,
+        )
+        return
 
     logger.info(
         "Git sync started, polling every %ds (repo=%s branch=%s path=%s)",

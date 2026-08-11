@@ -185,11 +185,20 @@ async def lifespan(app: FastAPI):
             "contain sensitive automation content.",
             config.git_sync.git_sync_repo_url,
         )
-        git_sync_task = asyncio.create_task(
-            git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
-        )
-        app.state.git_sync_task = git_sync_task
-        logger.info("Background git sync started")
+        # A non-positive interval means manual-only: sync runs when
+        # POST /v1/git-sync/sync is called, so there's no loop to start.
+        if config.git_sync.git_sync_interval_seconds > 0:
+            git_sync_task = asyncio.create_task(
+                git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
+            )
+            app.state.git_sync_task = git_sync_task
+            logger.info("Background git sync started")
+        else:
+            logger.info(
+                "Git sync is manual-only; trigger it with "
+                "POST /v1/git-sync/sync (set "
+                "AUTOMATION_GIT_SYNC_INTERVAL_SECONDS to sync periodically)"
+            )
 
     yield
 

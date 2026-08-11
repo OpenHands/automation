@@ -93,6 +93,10 @@ def git_settings(tmp_path, origin, monkeypatch):
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_BRANCH", "main")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_PATH", "automations")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_LOCAL_WORKDIR", str(tmp_path / "workdir"))
+    # The shipped default is 0 (manual-only). The git_sync_loop tests below
+    # need an actual polling loop, so pin a short interval here; the
+    # manual-only default gets its own test.
+    monkeypatch.setenv("AUTOMATION_GIT_SYNC_INTERVAL_SECONDS", "1")
     monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
     monkeypatch.setenv("AUTOMATION_LOCAL_API_KEY", "x")
     clear_config_cache()
@@ -1172,6 +1176,29 @@ class TestGitSyncLoop:
             )
             assert states[0].dirty is False
             assert states[0].content_hash is not None
+
+    async def test_manual_only_by_default_starts_no_polling_loop(
+        self, sqlite_session_factory, file_store, git_settings, monkeypatch
+    ):
+        """The shipped default is manual-only: sync happens when
+        POST /v1/git-sync/sync is called, not on a timer. git_sync_loop must
+        return immediately rather than polling (or busy-spinning on a zero
+        sleep) so nothing is pushed behind the user's back.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.delenv("AUTOMATION_GIT_SYNC_INTERVAL_SECONDS", raising=False)
+        clear_config_cache()
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        # No shutdown_event: a loop that polls would hang here.
+        await asyncio.wait_for(git_sync_loop(sqlite_session_factory), timeout=5)
+
+        async with sqlite_session_factory() as session:
+            states = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().all()
+            )
+            assert states[0].dirty is True, "manual-only must not have synced"
 
     async def test_paused_via_override_does_not_run_a_cycle(
         self, sqlite_session_factory, file_store, git_settings, service_settings
