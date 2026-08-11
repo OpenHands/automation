@@ -1,0 +1,28 @@
+---
+name: pr
+
+# Caller workflow: consumes the reusable PR-title workflow from
+# OpenHands/release-actions. It lints the PR title for Conventional Commits
+# format and applies a matching `type: <type>` label, which drives release-notes
+# grouping via .github/release.yml.
+#
+# Trigger is pull_request_target (NOT pull_request) so the lint/label also runs
+# on PRs from forks. It stays safe — and only stays safe — because:
+#   1. The reusable workflow NEVER checks out or runs any PR code; it only reads
+#      the PR title from the event payload. Do not add a checkout step.
+#   2. This caller does NOT pass `secrets: inherit`, so the release App
+#      credentials are out of scope — the title workflow runs on the default
+#      GITHUB_TOKEN alone. Do not add `secrets: inherit`.
+on:
+    pull_request_target:
+        # synchronize is needed alongside the title events: required checks
+        # attach to a head SHA, and release-please force-pushes commits to its
+        # release PR, so the lint must re-run on each update to stay green.
+        types: [opened, edited, reopened, synchronize]
+
+jobs:
+    pr-title:
+        # Do NOT add `secrets: inherit` here — keep the App token out of scope.
+        permissions:
+            pull-requests: write
+        uses: OpenHands/release-actions/.github/workflows/pr-title.yml@main

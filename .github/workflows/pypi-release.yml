@@ -1,0 +1,40 @@
+---
+# Publishes the openhands-automation PyPI package using trusted publishing (OIDC).
+# Triggered when a tag is pushed or manually via workflow_dispatch.
+# Requires trusted publishing to be configured in PyPI project settings.
+name: Publish PyPI Package
+
+on:
+    push:
+        tags:
+            - '*'
+    workflow_dispatch:
+        inputs:
+            reason:
+                description: Reason for manual trigger
+                required: true
+                default: ''
+
+jobs:
+    release:
+        runs-on: ubuntu-24.04
+        permissions:
+            id-token: write
+            contents: read
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v7
+              with:
+                  version: latest
+
+            - name: Set up Python
+              run: uv python install 3.12
+
+            - name: Build package
+              run: uv build
+
+            - name: Publish to PyPI
+              uses: pypa/gh-action-pypi-publish@release/v1

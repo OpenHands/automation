@@ -1,0 +1,24 @@
+# Version control
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Python
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+
+# Misc
+.pr
+.stakpak
+.pre-commit-config.yaml
