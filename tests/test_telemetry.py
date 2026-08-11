@@ -80,6 +80,36 @@ def _assert_server_version_properties(properties: dict) -> None:
     assert properties["sdk_version"] == expected["sdk_version"]
 
 
+def test_base_properties_includes_terminal_health_metadata(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    automation.enabled = False
+    automation.disabled_reason = "Invalid API key"
+    automation.disabled_failure_kind = "auth"
+    automation.consecutive_failure_count = 3
+    run = _run(automation)
+    run.status = AutomationRunStatus.FAILED
+    run.failure_kind = "auth"
+    run.blocking_reason = "The configured API key was rejected"
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=run,
+        backend_distinct_id="automation-backend:test",
+    )
+    assert properties["failure_kind"] == "auth"
+    assert properties["blocking_reason"] == "The configured API key was rejected"
+    assert properties["automation_enabled"] is False
+    assert properties["disabled_reason"] == "Invalid API key"
+    assert properties["disabled_failure_kind"] == "auth"
+    assert properties["consecutive_failure_count"] == 3
+
+
 def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     monkeypatch.setattr(
         telemetry,
