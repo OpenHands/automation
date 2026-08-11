@@ -91,8 +91,10 @@ async def lifespan(app: FastAPI):
         migrations_path = package_dir / "migrations"
 
         if not migrations_path.is_dir():
-            # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
+            # Fallback: running from a source checkout, where migrations live
+            # at the repo root -- two levels up from openhands/automation, not
+            # one (openhands/migrations never exists).
+            repo_root_migrations = package_dir.parent.parent / "migrations"
             if repo_root_migrations.is_dir():
                 migrations_path = repo_root_migrations
             else:
