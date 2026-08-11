@@ -10,6 +10,7 @@ to `.git/config`, so it's never persisted to disk or logged.
 import asyncio
 import base64
 import logging
+import os
 from pathlib import Path
 
 
@@ -18,6 +19,33 @@ logger = logging.getLogger("automation.git_sync")
 
 class GitSyncError(Exception):
     """Raised when a git subprocess invocation fails or times out."""
+
+
+def _non_interactive_env() -> dict[str, str]:
+    """Environment for git subprocesses, with every prompt disabled.
+
+    Nothing can answer a prompt here: this runs in a background service with
+    no terminal attached, so an interactive credential request just blocks
+    until the subprocess timeout expires and burns the whole cycle. With
+    these set, missing or rejected credentials fail immediately with a real
+    error message instead.
+
+    Credential *helpers* still work -- this only suppresses git asking a
+    human directly -- so a configured store/osxkeychain/manager helper keeps
+    supplying credentials as before. A helper that blocks on its own GUI
+    prompt is still only bounded by the subprocess timeout.
+    """
+    return {
+        **os.environ,
+        # Never prompt on the terminal ("Username for 'https://...'").
+        "GIT_TERMINAL_PROMPT": "0",
+        # Never shell out to a GUI askpass helper, including one inherited
+        # from the parent environment.
+        "GIT_ASKPASS": "",
+        "SSH_ASKPASS": "",
+        # Fail instead of asking for a host key or an SSH password.
+        "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
+    }
 
 
 def _auth_config_args(token: str) -> list[str]:
@@ -43,6 +71,7 @@ async def _run_git(
         proc = await asyncio.create_subprocess_exec(
             *full_args,
             cwd=str(cwd) if cwd else None,
+            env=_non_interactive_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

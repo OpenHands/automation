@@ -731,7 +731,10 @@ async def _run_sync_cycle_locked(
         await set_service_metadata(
             session, GIT_SYNC_LAST_RUN_AT_KEY, utcnow().isoformat()
         )
+        # Both halves of the error, or the status endpoint reports a
+        # `last_error_at` timestamp with no `last_error` to go with it.
         await set_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY, "")
+        await set_service_metadata(session, GIT_SYNC_LAST_ERROR_AT_KEY, "")
         await session.commit()
 
     return result

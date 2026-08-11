@@ -1127,6 +1127,9 @@ class TestLastError:
             await set_service_metadata(
                 session, GIT_SYNC_LAST_ERROR_KEY, "a stale error"
             )
+            await set_service_metadata(
+                session, GIT_SYNC_LAST_ERROR_AT_KEY, utcnow().isoformat()
+            )
             await session.commit()
 
         await _create_internal_automation(sqlite_session_factory, file_store)
@@ -1134,7 +1137,12 @@ class TestLastError:
 
         async with sqlite_session_factory() as session:
             last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
+            last_error_at = await get_service_metadata(
+                session, GIT_SYNC_LAST_ERROR_AT_KEY
+            )
             assert last_error == ""
+            # Both halves, or /status reports a timestamp with no message.
+            assert not last_error_at
 
 
 class TestGitSyncLoop:

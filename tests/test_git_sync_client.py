@@ -4,12 +4,14 @@ Uses real local git repos (a bare "origin" plus working clones) instead of
 mocking subprocess calls.
 """
 
+import asyncio
 import subprocess
 
 import pytest
 
 from openhands.automation.git_sync.client import (
     GitSyncError,
+    _non_interactive_env,
     commit_and_push,
     current_head,
     ensure_repo,
@@ -327,6 +329,43 @@ class TestCommitAndPush:
         ).stdout
         assert "?? untracked.txt" in status
         assert "tracked/file.txt" not in status
+
+
+class TestNonInteractive:
+    async def test_run_git_passes_the_non_interactive_env_to_the_subprocess(
+        self, tmp_path, origin, monkeypatch
+    ):
+        """Guards the wiring, not just the helper.
+
+        Nothing can answer a git prompt in a background service with no
+        terminal, so an interactive credential request blocks until the
+        subprocess timeout expires and burns the whole cycle. Dropping
+        `env=` from the subprocess call would silently allow that again.
+        """
+        captured: dict[str, str] = {}
+        real_exec = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            return await real_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+
+        workdir = tmp_path / "clone"
+        await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
+
+        assert captured.get("GIT_TERMINAL_PROMPT") == "0"
+        assert captured.get("GIT_ASKPASS") == ""
+        assert "BatchMode=yes" in captured.get("GIT_SSH_COMMAND", "")
+
+    def test_non_interactive_env_disables_every_prompt(self):
+        env = _non_interactive_env()
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_ASKPASS"] == ""
+        assert env["SSH_ASKPASS"] == ""
+        assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+        # Still inherits the ambient environment (PATH, HOME, ...).
+        assert "PATH" in env
 
 
 class TestCurrentHead:
