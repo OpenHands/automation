@@ -41,7 +41,11 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import apply_terminal_health, create_pending_run
+from openhands.automation.utils.run import (
+    apply_terminal_health,
+    create_pending_run,
+    record_first_run_outcome,
+)
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -486,6 +490,7 @@ async def complete_run(
         run=run,
         properties={"trigger_source": "callback"},
     )
+    await record_first_run_outcome(run, new_status, "execution", session=session)
 
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.

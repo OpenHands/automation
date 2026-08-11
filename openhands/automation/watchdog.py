@@ -28,7 +28,10 @@ from openhands.automation.models import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.run import mark_run_terminal_in_session
+from openhands.automation.utils.run import (
+    mark_run_terminal_in_session,
+    record_first_run_outcome,
+)
 from openhands.automation.utils.time import utcnow
 from openhands.sdk.event.error_classification import FailureKind
 
@@ -132,6 +135,9 @@ async def _verify_and_mark_run(
                     "trigger_source": "watchdog",
                 },
             )
+            await record_first_run_outcome(
+                run, AutomationRunStatus.FAILED, "watchdog", session=session
+            )
         return marked is not None
 
     if verification.verified:
@@ -206,6 +212,14 @@ async def _verify_and_mark_run(
                     "verification_exit_code": exit_code,
                 },
             )
+            await record_first_run_outcome(
+                run,
+                AutomationRunStatus.COMPLETED
+                if exit_code == 0
+                else AutomationRunStatus.FAILED,
+                "watchdog",
+                session=session,
+            )
         if marked is not None and _should_cleanup_sandbox_after_terminal(
             run, keep_alive
         ):
@@ -261,6 +275,10 @@ async def _verify_and_mark_run(
             properties={
                 "trigger_source": "watchdog",
             },
+        )
+    if marked is not None:
+        await record_first_run_outcome(
+            run, AutomationRunStatus.FAILED, "watchdog", session=session
         )
     return marked is not None
 
