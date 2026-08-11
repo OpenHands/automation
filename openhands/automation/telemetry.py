@@ -372,9 +372,9 @@ def _base_properties(
             {
                 "run_id": str(run.id),
                 "run_status": run.status.value if run.status is not None else None,
+                "has_conversation_id": bool(run.conversation_id),
                 "failure_kind": run.failure_kind,
                 "blocking_reason": run.blocking_reason,
-                "has_conversation_id": bool(run.conversation_id),
             }
         )
         properties.setdefault("automation_id", str(run.automation_id))

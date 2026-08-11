@@ -114,6 +114,7 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
 @pytest.mark.parametrize(
     (
         "event",
+        "trigger_source",
         "status",
         "failure_kind",
         "blocking_reason",
@@ -125,9 +126,10 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
     [
         (
             "automation_run_failed",
+            "callback",
             AutomationRunStatus.FAILED,
             "auth",
-            None,
+            "The configured API key was rejected",
             True,
             None,
             None,
@@ -135,6 +137,7 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
         ),
         (
             "automation_run_completed",
+            "callback",
             AutomationRunStatus.COMPLETED,
             "agent_action",
             "MCP integration is not connected",
@@ -145,6 +148,7 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
         ),
         (
             "automation_run_failed",
+            "watchdog",
             AutomationRunStatus.FAILED,
             "transient",
             None,
@@ -155,6 +159,7 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
         ),
         (
             "automation_run_failed",
+            "callback",
             AutomationRunStatus.FAILED,
             "config",
             None,
@@ -168,6 +173,7 @@ def test_base_properties_includes_terminal_health_metadata(monkeypatch):
 async def test_terminal_events_include_health_metadata(
     monkeypatch,
     event,
+    trigger_source,
     status,
     failure_kind,
     blocking_reason,
@@ -199,9 +205,7 @@ async def test_terminal_events_include_health_metadata(
         event,
         automation=automation,
         run=run,
-        properties={
-            "trigger_source": "callback" if event.endswith("completed") else "watchdog"
-        },
+        properties={"trigger_source": trigger_source},
     )
 
     _, payload = _MockAsyncClient.posts[0]
