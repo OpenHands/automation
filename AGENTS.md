@@ -268,10 +268,24 @@ visibility, versioning, and backup — see issue #300. **Only active in local
 mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
 agent server, which doesn't make sense for the multi-tenant SaaS deployment.
 
-- Enable with `AUTOMATION_GIT_SYNC_ENABLED=1` plus `AUTOMATION_GIT_SYNC_REPO_URL`
-  (see `GitSyncSettings` in `config.py` for the full list of env vars).
+- Enable with `AUTOMATION_GIT_SYNC_ENABLED=1`. That env var is the boot-time
+  opt-in and the only thing that can't be set at runtime (`is_git_sync_opted_in`);
+  the repo URL and everything else may come either from
+  `AUTOMATION_GIT_SYNC_REPO_URL` or from the Git Sync page. The background loop
+  and the `dirty` CRUD hook are started on the opt-in alone, so a repo
+  configured from the UI syncs without a restart. See `GitSyncSettings` in
+  `config.py` for the full list of env vars.
 - Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
-  (metadata) plus its tarball contents extracted under `tarball/**`.
+  (metadata) plus its tarball contents extracted under `tarball/**`. Those are
+  the only paths the exporter owns (`is_generated_path`): other files committed
+  in the same directory are left alone. `automation.yaml` carries a
+  `tarball_executables` list when any tarball member is executable, since the
+  extracted files are committed as plain content and the mode would otherwise
+  be lost on the way back in.
+- `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
+  `..`, no leading/trailing slashes, never empty. It is joined onto the local
+  checkout and passed to `git add -- <path>`, and each slug directory under it
+  is pruned during export, so a traversing value would delete host directories.
 - `git_sync/router.py` exposes `GET /v1/git-sync/status`,
   `PUT /v1/git-sync/config`, and `POST /v1/git-sync/sync` (manual trigger).
 - **Sync is manual by default**: the interval defaults to `0`, meaning a
@@ -287,7 +301,14 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
 - Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
   on every create/update/delete via the API; the sync loop treats a dirty
   automation as authoritative over a conflicting git-side change for the same
-  cycle — the VM always wins until its change has been pushed.
+  cycle — the VM always wins until its change has been pushed. The import skips
+  a dirty slug and the export then compares against what is actually on disk,
+  not against `state.content_hash`: a git-side edit leaves the DB row untouched,
+  so a hash comparison would skip the write and strand the two versions.
+- Automations that predate git sync being switched on have no state row, and the
+  export only reads dirty ones. `_backfill_missing_states` creates them (dirty)
+  at the start of every cycle, so the first sync exports everything rather than
+  reporting success against an empty repo.
 - Automations created directly in git (e.g. via a PR) are imported and
   stamped with the deterministic local-mode user/org IDs from `auth.py`'s
   `_get_local_user()`.
@@ -300,7 +321,13 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   without a restart, via `git_sync/config_override.py` (overrides stored as
   JSON in `automation_service_metadata`). It can't newly enable sync in a
   deployment that booted with `AUTOMATION_GIT_SYNC_ENABLED` unset — that
-  still needs the env var plus a restart.
+  still needs the env var plus a restart, and is enforced on both the config
+  endpoint (409) and the manual trigger (503).
+- The token and encryption key in that blob are encrypted at rest by
+  `git_sync/secret_store.py`, wrapped with `AUTOMATION_KV_SECRET` when the
+  deployment sets one and otherwise with a key generated into a 0600 file
+  under the workspace. If neither can be obtained, `PUT /config` fails with a
+  503 rather than storing the secret in the clear.
 - `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
   the most recent failed cycle, cleared on the next successful one.
 

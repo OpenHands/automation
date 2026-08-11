@@ -13,6 +13,7 @@ from openhands.automation.git_sync.loop import (
     SyncCycleResult,
     git_sync_loop,
     is_git_sync_active,
+    is_git_sync_opted_in,
     mark_git_sync_dirty,
     run_sync_cycle,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "git_sync_loop",
     "git_sync_router",
     "is_git_sync_active",
+    "is_git_sync_opted_in",
     "mark_git_sync_dirty",
     "run_sync_cycle",
 ]

@@ -21,6 +21,7 @@ from openhands.automation.git_sync.loop import (
     GIT_SYNC_LAST_ERROR_AT_KEY,
     GIT_SYNC_LAST_ERROR_KEY,
     GIT_SYNC_LAST_RUN_AT_KEY,
+    is_git_sync_opted_in,
     run_sync_cycle,
 )
 from openhands.automation.git_sync.schemas import (
@@ -28,6 +29,7 @@ from openhands.automation.git_sync.schemas import (
     GitSyncStatusResponse,
     GitSyncTriggerResponse,
 )
+from openhands.automation.git_sync.secret_store import GitSyncSecretStoreError
 from openhands.automation.models import AutomationGitSyncState
 from openhands.automation.utils.service_metadata import get_service_metadata
 
@@ -57,7 +59,16 @@ _CONFIG_OVERRIDE_FIELDS = {
 
 
 def _is_effectively_enabled(git_settings: GitSyncSettings) -> bool:
-    return get_config().service.is_local_mode and git_settings.enabled
+    """Whether sync is on right now: the boot-time opt-in plus live config.
+
+    `is_git_sync_opted_in()` is what keeps `PUT /config` from newly enabling
+    sync in a deployment that booted with it off. Without it, this gate read
+    only the override-merged `enabled`, so any caller with
+    `manage_automations` could turn sync on and point it at a repo of their
+    choosing -- `POST /sync` would then push every automation's prompt,
+    model config and tarball contents there.
+    """
+    return is_git_sync_opted_in() and git_settings.enabled
 
 
 async def _build_status_response(
@@ -111,9 +122,27 @@ async def update_git_sync_config(
     Can't newly enable sync in a deployment that booted with it disabled --
     that still requires AUTOMATION_GIT_SYNC_ENABLED plus a restart.
     """
+    if data.enabled and not is_git_sync_opted_in():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Git sync can only be enabled in a deployment that booted "
+                "with AUTOMATION_GIT_SYNC_ENABLED set and is running in "
+                "local mode. Set it and restart the service."
+            ),
+        )
+
     update = data.model_dump(exclude_unset=True)
     mapped = {_CONFIG_OVERRIDE_FIELDS[key]: value for key, value in update.items()}
-    await apply_git_sync_config_override(session, mapped)
+    try:
+        await apply_git_sync_config_override(session, mapped)
+    except GitSyncSecretStoreError as e:
+        # Refusing the write is the point: storing the token unencrypted
+        # instead would be a silent downgrade of exactly what this protects.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Cannot store the git sync secrets securely: {e}",
+        ) from e
     await session.commit()
 
     git_settings = await resolve_effective_git_sync_settings(

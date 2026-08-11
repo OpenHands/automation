@@ -4,21 +4,45 @@ Commands run via `asyncio.create_subprocess_exec` with an argument list
 (never a shell string), so repo URLs/branch names can't be interpreted as
 shell syntax. The auth token is passed per-invocation via
 `-c http.extraHeader=...` rather than embedded in the remote URL or written
-to `.git/config`, so it's never persisted to disk or logged.
+to `.git/config`, so it never reaches the checkout or a log line.
+
+Credentials an operator embeds in the repo URL itself are a separate matter:
+those are ordinary arguments, so `redact_url_credentials` strips them from
+every message this module raises or logs. The configured token is still
+persisted (encrypted) alongside the rest of the runtime config -- see
+secret_store.py.
 """
 
 import asyncio
 import base64
 import logging
 import os
+import re
 from pathlib import Path
 
 
 logger = logging.getLogger("automation.git_sync")
 
+# The userinfo component of a URL: everything between "://" and "@".
+_URL_CREDENTIALS_RE = re.compile(r"(?<=://)[^/@\s]+(?=@)")
+
 
 class GitSyncError(Exception):
     """Raised when a git subprocess invocation fails or times out."""
+
+
+def redact_url_credentials(text: str) -> str:
+    """Blank out credentials embedded in any URL inside `text`.
+
+    Passing a token via `-c http.extraHeader` keeps it out of argv, but
+    nothing stops an operator from putting one in the repo URL itself
+    ("https://x-access-token:ghp_xxx@github.com/org/repo.git"), which is a
+    common way to authenticate. That URL is an ordinary argument to `clone`,
+    and both the argv echoed in a GitSyncError and git's own stderr end up
+    persisted in `git_sync_last_error` and rendered verbatim in the Git Sync
+    page's error banner.
+    """
+    return _URL_CREDENTIALS_RE.sub("***", text)
 
 
 def _non_interactive_env() -> dict[str, str]:
@@ -64,7 +88,10 @@ async def _run_git(
 ) -> str:
     """Run a git command, returning stdout. Raises GitSyncError on failure."""
     full_args = ["git", *_auth_config_args(token), *args]
-    logged_args = ["git", *args]  # never includes the auth header
+    # Never includes the auth header, and any credentials embedded in a repo
+    # URL argument are blanked out -- this string reaches the user-visible
+    # error banner via `git_sync_last_error`.
+    logged_args = ["git", *(redact_url_credentials(arg) for arg in args)]
     logger.debug("Running: %s (cwd=%s)", " ".join(logged_args), cwd)
 
     try:
@@ -88,9 +115,12 @@ async def _run_git(
         ) from None
 
     if proc.returncode != 0:
+        # git echoes the remote URL back in plenty of its own failure
+        # messages, so stderr needs the same redaction as the argv.
+        details = redact_url_credentials(stderr.decode(errors="replace").strip())
         raise GitSyncError(
             f"git command failed ({proc.returncode}): {' '.join(logged_args)}\n"
-            f"{stderr.decode(errors='replace').strip()}"
+            f"{details}"
         )
     return stdout.decode(errors="replace")
 

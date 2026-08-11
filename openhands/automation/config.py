@@ -290,6 +290,44 @@ class KVSettings(BaseSettings):
 # ---------------------------------------------------------------------------
 
 
+def normalize_git_sync_path(path: str) -> str:
+    """Normalize a repo-relative sync path, rejecting anything that escapes it.
+
+    The sync path is joined onto the local checkout directory, and the result
+    is both `shutil.rmtree`'d per automation during export and handed to
+    `git add -- <path>` during the push, so it must stay inside the repo:
+
+    - `..` segments are rejected outright. Since the path is settable at
+      runtime (PUT /v1/git-sync/config), a traversing value would otherwise
+      point `sync_root` at an arbitrary host directory and delete any
+      subdirectory there whose name matches an automation slug.
+    - Leading slashes are stripped rather than rejected, so a mistyped
+      "/automations" is read as repo-relative instead of as an absolute host
+      path (`Path("/repo") / "/etc"` is `/etc` -- pathlib discards the left
+      side entirely when the right side is absolute).
+    - Trailing slashes are stripped because `_changed_slugs_since` matches
+      changed files against an `f"{sync_path}/"` prefix; "automations/" would
+      produce "automations//", match nothing, and silently mute every import.
+    - An empty result is rejected: `git add -A -- ""` fails with "empty
+      string is not a valid pathspec", wedging every subsequent cycle.
+    """
+    # Backslashes are not path separators on the platforms this service runs
+    # on, but a Windows-style value pasted into the UI should not smuggle a
+    # traversal segment past the "/"-based split below.
+    segments = [
+        segment
+        for segment in path.strip().replace("\\", "/").split("/")
+        if segment and segment != "."
+    ]
+    if any(segment == ".." for segment in segments):
+        raise ValueError(
+            f"git sync path {path!r} must stay inside the repository (no '..' segments)"
+        )
+    if not segments:
+        raise ValueError("git sync path must not be empty")
+    return "/".join(segments)
+
+
 class GitSyncSettings(BaseSettings):
     """Git sync configuration for backing up/versioning automations in git.
 

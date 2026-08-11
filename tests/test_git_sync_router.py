@@ -2,8 +2,24 @@
 
 import asyncio
 
+import pytest
+
 from openhands.automation.config import clear_config_cache
 from openhands.automation.git_sync.router import _background_sync_tasks
+
+
+@pytest.fixture(autouse=True)
+def writable_workspace(tmp_path, monkeypatch):
+    """Point `workspace_base` at a temp dir for every test in this module.
+
+    Storing a git-sync secret provisions a wrapping key under the workspace
+    (see secret_store.py), and the default "/workspace" is not writable
+    outside a container -- nor should a test write there.
+    """
+    monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", str(tmp_path))
+    clear_config_cache()
+    yield
+    clear_config_cache()
 
 
 class TestGitSyncStatus:
@@ -223,3 +239,128 @@ class TestTriggerGitSync:
             assert len(_background_sync_tasks) == 0
         finally:
             clear_config_cache()
+
+
+class TestGitSyncConfigCannotEnableSync:
+    """Regression: `POST /sync` gated on the override-merged `enabled`, so
+    `PUT /config` could newly enable sync in a deployment that booted with
+    AUTOMATION_GIT_SYNC_ENABLED unset -- contradicting its own docstring and
+    AGENTS.md, and letting any holder of `manage_automations` push every
+    automation's prompt, model config and tarball to a repo of their choice.
+    """
+
+    async def test_enabling_is_rejected_when_not_opted_in_at_boot(self, async_client):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"enabled": True, "repo_url": "https://example.com/evil.git"},
+        )
+        assert response.status_code == 409
+
+    async def test_manual_sync_stays_unavailable_after_such_an_attempt(
+        self, async_client
+    ):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/evil.git"},
+        )
+        response = await async_client.post("/api/automation/v1/git-sync/sync")
+        assert response.status_code == 503
+
+    async def test_pausing_is_always_allowed(self, async_client):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"enabled": False}
+        )
+        assert response.status_code == 200
+
+
+class TestGitSyncConfigValidation:
+    """Regression: `path` was an unvalidated `str`, so a traversing value
+    reached `sync_root` -- which the export rmtree's per automation -- and
+    the UI's `""` for a cleared field was stored as a literal empty override,
+    making `git add -A -- ""` fatal on every subsequent cycle.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_path", ["../../../../etc", "a/../../b", "..", "  ../x  "]
+    )
+    async def test_traversing_paths_are_rejected(self, async_client, bad_path):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"path": bad_path}
+        )
+        assert response.status_code == 422
+
+    async def test_absolute_path_is_read_as_repo_relative(self, async_client):
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"path": "/automations"}
+        )
+        assert response.status_code == 200
+        assert response.json()["path"] == "automations"
+
+    async def test_trailing_slash_is_stripped(self, async_client):
+        """A trailing slash silently muted every import: `_changed_slugs_since`
+        matches on an f"{sync_path}/" prefix, so "automations/" produced
+        "automations//" and matched nothing."""
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"path": "automations/"}
+        )
+        assert response.status_code == 200
+        assert response.json()["path"] == "automations"
+
+    async def test_blank_path_clears_the_override(self, async_client):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"path": "custom"}
+        )
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"path": "   "}
+        )
+        assert response.status_code == 200
+        assert response.json()["path"] == "automations"
+
+    async def test_blank_branch_clears_the_override(self, async_client):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"branch": "develop"}
+        )
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"branch": ""}
+        )
+        assert response.status_code == 200
+        assert response.json()["branch"] == "main"
+
+
+class TestGitSyncSecretsAtRest:
+    async def test_secrets_are_not_stored_in_cleartext(
+        self, async_client, async_session
+    ):
+        """Regression: the token and the encryption key were persisted as
+        cleartext JSON in `automation_service_metadata`, readable in any DB
+        dump or backup."""
+        from openhands.automation.git_sync.config_override import (
+            GIT_SYNC_CONFIG_OVERRIDE_KEY,
+        )
+        from openhands.automation.utils.service_metadata import get_service_metadata
+
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"token": "ghp_supersecrettoken", "encryption_key": "the-key"},
+        )
+        assert response.status_code == 200
+
+        raw = await get_service_metadata(async_session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
+        assert raw is not None
+        assert "ghp_supersecrettoken" not in raw
+        assert "the-key" not in raw
+
+    async def test_stored_secrets_are_readable_again(self, async_client, async_session):
+        from openhands.automation.config import get_config
+        from openhands.automation.git_sync.config_override import (
+            resolve_effective_git_sync_settings,
+        )
+
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"token": "ghp_supersecrettoken"},
+        )
+        effective = await resolve_effective_git_sync_settings(
+            async_session, get_config().git_sync
+        )
+        assert effective.git_sync_token == "ghp_supersecrettoken"

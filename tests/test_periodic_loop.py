@@ -134,3 +134,56 @@ class TestRunPeriodicLoop:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestUnresolvedIntervalDoesNotBusySpin:
+    """Regression: a callable interval that raises on the very first pass
+    left `interval` at its 0.0 seed, so the loop slept zero seconds and spun
+    at full speed -- pegging a core and logging a traceback per iteration --
+    for as long as the failure lasted."""
+
+    async def test_first_resolution_failure_still_sleeps(self, logger, monkeypatch):
+        monkeypatch.setattr(
+            "openhands.automation.utils.periodic_loop._UNRESOLVED_INTERVAL_SECONDS",
+            0.05,
+        )
+        slept: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def recording_wait_for(awaitable, timeout):
+            slept.append(timeout)
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(
+            "openhands.automation.utils.periodic_loop.asyncio.wait_for",
+            recording_wait_for,
+        )
+
+        shutdown_event = asyncio.Event()
+        cycles = 0
+
+        async def always_failing_interval() -> float:
+            nonlocal cycles
+            cycles += 1
+            if cycles >= 3:
+                shutdown_event.set()
+            raise RuntimeError("DB unavailable")
+
+        async def run_cycle() -> None:
+            raise AssertionError("the cycle must not run without an interval")
+
+        await asyncio.wait_for(
+            run_periodic_loop(
+                run_cycle,
+                interval_seconds=always_failing_interval,
+                shutdown_event=shutdown_event,
+                logger=logger,
+                name="Test",
+            ),
+            timeout=5,
+        )
+
+        assert slept, "the loop never slept"
+        assert all(timeout > 0 for timeout in slept), (
+            f"a zero-second sleep busy-spins the loop: {slept}"
+        )

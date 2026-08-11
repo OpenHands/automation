@@ -11,6 +11,10 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.config import GitSyncSettings
+from openhands.automation.git_sync.secret_store import (
+    decrypt_secret_fields,
+    encrypt_secret_fields,
+)
 from openhands.automation.utils.service_metadata import (
     get_service_metadata,
     set_service_metadata,
@@ -32,7 +36,15 @@ DEFAULT_SYNC_INTERVAL_SECONDS = 0
 
 async def _load_overrides(session: AsyncSession) -> dict[str, Any]:
     raw = await get_service_metadata(session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
-    return json.loads(raw) if raw else {}
+    return decrypt_secret_fields(json.loads(raw)) if raw else {}
+
+
+async def _store_overrides(session: AsyncSession, overrides: dict[str, Any]) -> None:
+    await set_service_metadata(
+        session,
+        GIT_SYNC_CONFIG_OVERRIDE_KEY,
+        json.dumps(encrypt_secret_fields(overrides)),
+    )
 
 
 async def resolve_effective_git_sync_settings(
@@ -69,14 +81,13 @@ async def apply_git_sync_config_override(
     A `None` value clears that field's override (reverts to the env-var
     default) rather than being stored literally -- the settings fields are
     plain `str`/`bool`/`int`, so a literal `None` would corrupt `model_copy`.
+
+    Secret fields are encrypted on the way to storage; see secret_store.py.
     """
-    raw = await get_service_metadata(session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
-    overrides = json.loads(raw) if raw else {}
+    overrides = await _load_overrides(session)
     for key, value in updates.items():
         if value is None:
             overrides.pop(key, None)
         else:
             overrides[key] = value
-    await set_service_metadata(
-        session, GIT_SYNC_CONFIG_OVERRIDE_KEY, json.dumps(overrides)
-    )
+    await _store_overrides(session, overrides)

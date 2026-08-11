@@ -9,6 +9,7 @@ import io
 import subprocess
 import tarfile
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -1298,3 +1299,503 @@ class TestGitSyncLoop:
             # Still dirty -- the loop resolved the paused override and
             # skipped the cycle instead of exporting.
             assert states[0].dirty is True
+
+
+class TestBackfillsPreExistingAutomations:
+    """Regression: nothing ever created state rows for automations that
+    already existed when git sync was switched on, and the export only reads
+    dirty state rows. The cycle reported success and pushed nothing, and the
+    UI showed a healthy sync against an empty repo."""
+
+    async def _create_automation_without_state(self, session_factory, file_store):
+        automation_id = await _create_internal_automation(session_factory, file_store)
+        async with session_factory() as session:
+            state = await session.get(AutomationGitSyncState, automation_id)
+            await session.delete(state)
+            await session.commit()
+        return automation_id
+
+    async def test_automation_with_no_state_row_is_exported(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        await self._create_automation_without_state(sqlite_session_factory, file_store)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.exported == 1
+        verify_dir = origin.parent / "verify-backfill"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(verify_dir)],
+            check=True,
+            capture_output=True,
+        )
+        assert (
+            verify_dir / "automations" / "my-first-automation" / "automation.yaml"
+        ).is_file()
+
+    async def test_soft_deleted_automations_are_not_backfilled(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        automation_id = await self._create_automation_without_state(
+            sqlite_session_factory, file_store
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            automation.deleted_at = utcnow()
+            await session.commit()
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+        assert result.exported == 0
+
+    async def test_backfill_is_idempotent_across_cycles(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        await self._create_automation_without_state(sqlite_session_factory, file_store)
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            states = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().all()
+            )
+            assert len(states) == 1
+
+
+class TestExportPreservesUserFiles:
+    """Regression: `_write_files` rmtree'd the whole slug directory before
+    every export, so a README or .gitignore the user committed alongside the
+    generated files was deleted -- and the deletion pushed to their repo."""
+
+    async def test_user_files_survive_a_re_export(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        workdir = Path(git_settings.git_sync_local_workdir)
+        slug_dir = workdir / "automations" / "my-first-automation"
+        (slug_dir / "README.md").write_text("hand-written notes")
+        subprocess.run(["git", "add", "-A"], cwd=workdir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "docs",
+            ],
+            cwd=workdir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=workdir, check=True)
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            automation.name = "My First Automation"
+            automation.timeout = 600
+            await mark_git_sync_dirty(session, automation)
+            await session.commit()
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        assert (slug_dir / "README.md").read_text() == "hand-written notes"
+        assert (slug_dir / "automation.yaml").is_file()
+
+
+class TestDirtyAutomationOverwritesGitEdit:
+    """Regression: the import skips a dirty slug so the export can overwrite
+    git, but the export compared the DB hash against `state.content_hash` --
+    unchanged for a content-neutral API write -- and skipped the write. The
+    git-side edit was neither imported nor overwritten, and `last_commit`
+    advanced past it, so the two versions never reconciled."""
+
+    async def test_git_side_edit_is_overwritten_not_silently_kept(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        # Someone edits automation.yaml in the repo...
+        editor_dir = origin.parent / "editor"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(editor_dir)],
+            check=True,
+            capture_output=True,
+        )
+        metadata_path = (
+            editor_dir / "automations" / "my-first-automation" / ("automation.yaml")
+        )
+        edited = metadata_path.read_text().replace(
+            "entrypoint: python main.py", "entrypoint: python edited.py"
+        )
+        metadata_path.write_text(edited)
+        subprocess.run(["git", "add", "-A"], cwd=editor_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "edit",
+            ],
+            cwd=editor_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
+        )
+
+        # ...while a content-neutral API write marks the same automation dirty.
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            await mark_git_sync_dirty(session, automation)
+            await session.commit()
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        verify_dir = origin.parent / "verify-conflict"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(verify_dir)],
+            check=True,
+            capture_output=True,
+        )
+        final = (
+            verify_dir / "automations" / "my-first-automation" / "automation.yaml"
+        ).read_text()
+        # The DB is the source of truth for a dirty automation, so the git
+        # edit must have been overwritten rather than left orphaned.
+        assert "python main.py" in final
+        assert "python edited.py" not in final
+
+
+class TestSymlinkedSlugDirectory:
+    """Regression: `_import_from_git` selected slug directories with
+    `is_dir()`, which follows symlinks, so a committed symlink was read
+    *through* -- the per-file symlink guard never fires for files reached that
+    way -- and later wedged the export, where rmtree raises on a symlink."""
+
+    async def test_symlinked_directory_is_skipped_and_does_not_wedge_the_cycle(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        # A complete, *valid* automation directory, so that without the
+        # symlink guard the import genuinely succeeds -- reading host files
+        # from outside the checkout -- rather than being skipped as invalid
+        # for some unrelated reason.
+        secret_dir = origin.parent / "outside"
+        (secret_dir / "tarball").mkdir(parents=True)
+        (secret_dir / "tarball" / "main.py").write_text("print('host file')")
+        (secret_dir / "automation.yaml").write_text(
+            "name: Exfiltrated\nentrypoint: python main.py\n"
+            "trigger: {type: cron, schedule: '0 9 * * 1'}\n"
+        )
+
+        seed_dir = origin.parent / "seed"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(seed_dir)],
+            check=True,
+            capture_output=True,
+        )
+        (seed_dir / "automations").mkdir(parents=True, exist_ok=True)
+        (seed_dir / "automations" / "evil").symlink_to(
+            secret_dir, target_is_directory=True
+        )
+        subprocess.run(["git", "add", "-A"], cwd=seed_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "link",
+            ],
+            cwd=seed_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=seed_dir, check=True)
+
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        # Must complete rather than raising, and must not import the target.
+        result = await run_sync_cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+        assert result.exported == 1
+
+        async with sqlite_session_factory() as session:
+            names = {
+                a.name for a in (await session.execute(select(Automation))).scalars()
+            }
+        assert "Exfiltrated" not in names
+
+
+class TestMalformedYamlDoesNotAbortTheCycle:
+    """Regression: yaml.YAMLError is not a ValueError, so a hand-edited
+    automation.yaml with a syntax error escaped the per-directory skip and
+    aborted the entire cycle -- every other automation stopped syncing, every
+    cycle, until that one file was fixed."""
+
+    async def test_one_bad_directory_does_not_stop_the_others(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        seed_dir = origin.parent / "seed-bad-yaml"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(seed_dir)],
+            check=True,
+            capture_output=True,
+        )
+        broken = seed_dir / "automations" / "broken"
+        broken.mkdir(parents=True)
+        (broken / "automation.yaml").write_text("name: [unclosed\n\tbad: indent\n")
+        subprocess.run(["git", "add", "-A"], cwd=seed_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "broken",
+            ],
+            cwd=seed_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=seed_dir, check=True)
+
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        # The healthy automation still exported and pushed.
+        assert result.exported == 1
+        async with sqlite_session_factory() as session:
+            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
+        assert not last_error
+
+
+class TestTarballUploadLifecycle:
+    """Regression: every git-side update wrote a brand-new TarballUpload row
+    plus a full tarball copy and left the superseded one live and referenced
+    by nothing -- with no reaper anywhere to collect it."""
+
+    async def _push_yaml_edit(self, origin, clone_name, replace, with_):
+        editor_dir = origin.parent / clone_name
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(editor_dir)],
+            check=True,
+            capture_output=True,
+        )
+        path = editor_dir / "automations" / "my-first-automation" / "automation.yaml"
+        path.write_text(path.read_text().replace(replace, with_))
+        subprocess.run(["git", "add", "-A"], cwd=editor_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "edit",
+            ],
+            cwd=editor_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
+        )
+
+    async def test_yaml_only_edit_does_not_create_a_new_upload(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            before = (await session.get(Automation, automation_id)).tarball_path
+            upload_count_before = len(
+                (await session.execute(select(TarballUpload))).scalars().all()
+            )
+
+        await self._push_yaml_edit(
+            origin, "editor-yaml", "enabled: true", "enabled: false"
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.enabled is False
+            # The tarball didn't change, so the upload must be reused.
+            assert automation.tarball_path == before
+            uploads = (await session.execute(select(TarballUpload))).scalars().all()
+            assert len(uploads) == upload_count_before
+
+    async def test_superseded_upload_is_soft_deleted_when_the_tarball_changes(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            old_path = (await session.get(Automation, automation_id)).tarball_path
+        old_upload_id = parse_internal_upload_id(old_path)
+
+        editor_dir = origin.parent / "editor-tarball"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(editor_dir)],
+            check=True,
+            capture_output=True,
+        )
+        main_py = (
+            editor_dir / "automations" / "my-first-automation" / "tarball" / ("main.py")
+        )
+        main_py.write_text("print(2)")
+        subprocess.run(["git", "add", "-A"], cwd=editor_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "code",
+            ],
+            cwd=editor_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
+        )
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.tarball_path != old_path
+            old_upload = await session.get(TarballUpload, old_upload_id)
+            assert old_upload.deleted_at is not None
+
+
+class TestEnabledKeyWithNullValue:
+    """Regression: `bool(fields.get("enabled", True))` relies on the `get`
+    default, which only applies when the key is absent. A hand edit leaving
+    "enabled:" with no value is valid YAML that parses to None, and
+    bool(None) silently disabled a live automation."""
+
+    async def test_null_enabled_leaves_the_automation_enabled(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        editor_dir = origin.parent / "editor-enabled"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(editor_dir)],
+            check=True,
+            capture_output=True,
+        )
+        path = editor_dir / "automations" / "my-first-automation" / "automation.yaml"
+        path.write_text(path.read_text().replace("enabled: true", "enabled:"))
+        subprocess.run(["git", "add", "-A"], cwd=editor_dir, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "blank",
+            ],
+            cwd=editor_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
+        )
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.enabled is True
+
+
+class TestSyncPathValidation:
+    async def test_a_traversing_path_raises_instead_of_deleting_host_dirs(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        """Regression: `sync_root = workdir / git_sync_path` with an
+        unvalidated path escaped the checkout, and the export's rmtree then
+        deleted any host directory matching an automation slug."""
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        traversing = git_settings.model_copy(
+            update={"git_sync_path": "../../../../victim"}
+        )
+
+        with pytest.raises(ValueError):
+            await run_sync_cycle(sqlite_session_factory, traversing, service_settings)
+
+
+class TestCredentialRedaction:
+    async def test_credentials_in_the_repo_url_are_not_persisted_in_the_error(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        """Regression: GitSyncError embedded the full argv, which for `clone`
+        includes the repo URL. That string is persisted to
+        `git_sync_last_error` and rendered verbatim in the UI error banner."""
+        bad = git_settings.model_copy(
+            update={
+                "git_sync_repo_url": (
+                    "https://x-access-token:ghp_SUPERSECRET@example.invalid/o/r.git"
+                ),
+                "git_sync_git_timeout_seconds": 15.0,
+            }
+        )
+
+        with pytest.raises(GitSyncError):
+            await run_sync_cycle(sqlite_session_factory, bad, service_settings)
+
+        async with sqlite_session_factory() as session:
+            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
+        assert last_error
+        assert "ghp_SUPERSECRET" not in last_error
+        assert "***" in last_error

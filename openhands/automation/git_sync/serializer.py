@@ -13,6 +13,7 @@ import logging
 import re
 import tarfile
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -76,10 +77,64 @@ def _safe_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
         return None
 
 
+def _normalize_member_name(name: str) -> str:
+    """Drop the redundant "./" segments `tar -czf archive.tgz .` produces.
+
+    `tarfile.data_filter` leaves them in place, so the same file would be
+    committed as `tarball/./main.py` on the way out and looked up as
+    `./main.py` on the way back -- never matching the plain `main.py` an
+    unprefixed tarball yields for identical content.
+    """
+    return "/".join(part for part in name.split("/") if part and part != ".")
+
+
+def _extract_tarball_files(tarball_bytes: bytes) -> tuple[dict[str, bytes], list[str]]:
+    """Extract a tarball into `{name: content}` plus the executable names.
+
+    The executable list is carried in automation.yaml because the extracted
+    files are committed as plain content: without it the mode is gone by the
+    time `rebuild_tarball` runs, and an executable entrypoint that isn't
+    named `*.sh` came back as 0644 and failed at runtime with "Permission
+    denied".
+    """
+    files: dict[str, bytes] = {}
+    executables: list[str] = []
+
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                if member.issym() or member.islnk():
+                    # Not representable as a committed file; the automation
+                    # would silently lose it, so say so rather than not.
+                    logger.warning(
+                        "Skipping link member %r in tarball: git sync stores "
+                        "regular files only",
+                        member.name,
+                    )
+                continue
+            safe_member = _safe_tar_member(member)
+            if safe_member is None:
+                continue
+            name = _normalize_member_name(safe_member.name)
+            if not name:
+                continue
+            extracted = tar.extractfile(safe_member)
+            if extracted is None:
+                continue
+            files[name] = extracted.read()
+            if safe_member.mode & 0o111:
+                executables.append(name)
+
+    return files, sorted(executables)
+
+
 def _automation_yaml_fields(
-    automation: Automation, *, tarball_is_internal: bool
+    automation: Automation,
+    *,
+    tarball_is_internal: bool,
+    tarball_executables: list[str],
 ) -> dict[str, Any]:
-    return {
+    fields: dict[str, Any] = {
         "name": automation.name,
         "model": automation.model,
         "trigger": automation.trigger,
@@ -95,6 +150,12 @@ def _automation_yaml_fields(
             "url": None if tarball_is_internal else automation.tarball_path,
         },
     }
+    # Omitted entirely when nothing is executable, so the common case keeps
+    # the metadata file free of an empty list -- and so upgrading doesn't
+    # rewrite every already-synced automation.yaml just to add one.
+    if tarball_executables:
+        fields["tarball_executables"] = tarball_executables
+    return fields
 
 
 def serialize_automation(
@@ -107,8 +168,16 @@ def serialize_automation(
     unavailable).
     """
     tarball_is_internal = is_internal_url(automation.tarball_path)
+
+    tarball_files: dict[str, bytes] = {}
+    executables: list[str] = []
+    if tarball_is_internal and tarball_bytes is not None:
+        tarball_files, executables = _extract_tarball_files(tarball_bytes)
+
     fields = _automation_yaml_fields(
-        automation, tarball_is_internal=tarball_is_internal
+        automation,
+        tarball_is_internal=tarball_is_internal,
+        tarball_executables=executables,
     )
 
     files: dict[str, bytes] = {
@@ -116,21 +185,21 @@ def serialize_automation(
             fields, sort_keys=True, default_flow_style=False
         ).encode("utf-8"),
     }
-
-    if tarball_is_internal and tarball_bytes is not None:
-        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                safe_member = _safe_tar_member(member)
-                if safe_member is None:
-                    continue
-                extracted = tar.extractfile(safe_member)
-                if extracted is None:
-                    continue
-                files[f"{_TARBALL_PREFIX}{safe_member.name}"] = extracted.read()
+    for name, content in tarball_files.items():
+        files[f"{_TARBALL_PREFIX}{name}"] = content
 
     return files
+
+
+def is_generated_path(rel_path: str) -> bool:
+    """Whether `rel_path` (relative to a slug directory) is one this module
+    writes, as opposed to a file the user committed alongside it.
+
+    The export prunes only these before rewriting, so a README, a .gitignore
+    or review notes living next to the generated files survive a re-export
+    instead of being deleted and having that deletion pushed back.
+    """
+    return rel_path == METADATA_FILENAME or rel_path.startswith(_TARBALL_PREFIX)
 
 
 def compute_content_hash(files: dict[str, bytes]) -> str:
@@ -147,22 +216,45 @@ def compute_content_hash(files: dict[str, bytes]) -> str:
     return hasher.hexdigest()
 
 
-def rebuild_tarball(tarball_files: dict[str, bytes]) -> bytes:
+def rebuild_tarball(
+    tarball_files: dict[str, bytes],
+    executable_names: Collection[str] | None = None,
+) -> bytes:
     """Rebuild a tar.gz from `{relative_path: content}` files.
+
+    `executable_names` is the `tarball_executables` list from automation.yaml
+    and is trusted exactly, including when empty. `None` means the metadata
+    predates that field (a repo synced by an older build), and the original
+    `*.sh` heuristic is used so those automations keep the modes they have
+    today rather than losing them on the next import.
 
     Member order and mtimes are fixed for determinism; `compute_content_hash`
     hashes the extracted files directly, not these compressed bytes.
     """
+    executables = None if executable_names is None else set(executable_names)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
         for name in sorted(tarball_files):
             content_bytes = tarball_files[name]
             info = tarfile.TarInfo(name=name)
             info.size = len(content_bytes)
-            info.mode = 0o755 if name.endswith(".sh") else 0o644
+            is_executable = (
+                name.endswith(".sh") if executables is None else name in executables
+            )
+            info.mode = 0o755 if is_executable else 0o644
             info.mtime = 0
             tar.addfile(info, io.BytesIO(content_bytes))
     return buffer.getvalue()
+
+
+def canonical_tarball_bytes(tarball_bytes: bytes) -> bytes:
+    """Re-pack a tarball into the deterministic form `rebuild_tarball` emits.
+
+    Lets a stored upload be compared against one rebuilt from git without the
+    original's gzip framing, mtimes and member order counting as a change.
+    """
+    files, executables = _extract_tarball_files(tarball_bytes)
+    return rebuild_tarball(files, executables)
 
 
 def deserialize_automation(
@@ -179,7 +271,16 @@ def deserialize_automation(
     if raw_metadata is None:
         return None
 
-    fields = yaml.safe_load(raw_metadata.decode("utf-8")) or {}
+    try:
+        fields = yaml.safe_load(raw_metadata.decode("utf-8")) or {}
+    except yaml.YAMLError as e:
+        # automation.yaml is meant to be hand-edited in a PR, so a syntax
+        # error in one is routine. yaml.YAMLError derives straight from
+        # Exception, not ValueError, so without this it escaped the import's
+        # "skip this directory" handling and aborted the whole cycle --
+        # every other automation stopped syncing until that file was fixed.
+        raise GitSyncMetadataError(f"{METADATA_FILENAME} is not valid YAML: {e}") from e
+
     if not isinstance(fields, dict):
         # Valid YAML but not a mapping -- e.g. leftover ciphertext read as
         # plaintext after encryption was turned off, or any other malformed
@@ -192,13 +293,33 @@ def deserialize_automation(
         return None
 
     tarball_files = {
-        path.removeprefix(_TARBALL_PREFIX): content
+        _normalize_member_name(path.removeprefix(_TARBALL_PREFIX)): content
         for path, content in dir_files.items()
         if path.startswith(_TARBALL_PREFIX)
     }
-    tarball_bytes = rebuild_tarball(tarball_files) if tarball_files else None
+    tarball_files.pop("", None)
+
+    # A malformed list (hand-edited to a string, or holding non-strings) is
+    # treated as absent rather than crashing the import.
+    raw_executables = fields.get("tarball_executables")
+    executables = (
+        [name for name in raw_executables if isinstance(name, str)]
+        if isinstance(raw_executables, list)
+        else None
+    )
+    tarball_bytes = (
+        rebuild_tarball(tarball_files, executables) if tarball_files else None
+    )
 
     return DeserializedAutomation(fields=fields, tarball_bytes=tarball_bytes)
+
+
+class GitSyncMetadataError(ValueError):
+    """A synced automation.yaml couldn't be parsed.
+
+    Subclasses ValueError so it's caught by the same "skip this invalid
+    automation directory" handling as any other malformed git content.
+    """
 
 
 class GitSyncDecryptionError(ValueError):

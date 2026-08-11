@@ -5,9 +5,12 @@ import tarfile
 import uuid
 
 import pytest
+import yaml
 
 from openhands.automation.git_sync.serializer import (
     GitSyncDecryptionError,
+    GitSyncMetadataError,
+    canonical_tarball_bytes,
     compute_content_hash,
     compute_slug,
     decrypt_file_tree,
@@ -25,6 +28,18 @@ def _make_tarball(files: dict[str, bytes]) -> bytes:
         for name, content in files.items():
             info = tarfile.TarInfo(name=name)
             info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+def _make_tarball_with_modes(files: dict[str, tuple[bytes, int]]) -> bytes:
+    """Like `_make_tarball`, but with an explicit mode per member."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, (content, mode) in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.mode = mode
             tar.addfile(info, io.BytesIO(content))
     return buffer.getvalue()
 
@@ -233,3 +248,118 @@ class TestRebuildTarball:
         tarball_bytes = rebuild_tarball({"setup.sh": b"echo hi"})
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes)) as tar:
             assert tar.getmember("setup.sh").mode == 0o755
+
+
+class TestExecutableModeRoundTrip:
+    """Regression: modes were dropped for anything not named `*.sh`.
+
+    The only mode source was `rebuild_tarball`'s filename heuristic, so an
+    executable helper without that suffix (`bin/run`, a `main.py` invoked as
+    `./main.py`) came back 0644 and every subsequent run failed with
+    "Permission denied", with nothing in the git diff to explain it.
+    """
+
+    def test_executable_members_are_recorded_in_metadata(self):
+        automation = _make_automation()
+        files = serialize_automation(
+            automation,
+            _make_tarball_with_modes(
+                {"bin/run": (b"#!/bin/sh\n", 0o755), "lib.py": (b"x = 1", 0o644)}
+            ),
+        )
+        fields = yaml.safe_load(files["automation.yaml"].decode())
+        assert fields["tarball_executables"] == ["bin/run"]
+
+    def test_executable_bit_survives_a_round_trip(self):
+        automation = _make_automation()
+        files = serialize_automation(
+            automation,
+            _make_tarball_with_modes(
+                {"bin/run": (b"#!/bin/sh\n", 0o755), "lib.py": (b"x = 1", 0o644)}
+            ),
+        )
+
+        deserialized = deserialize_automation(files)
+        assert deserialized is not None
+        assert deserialized.tarball_bytes is not None
+        with tarfile.open(fileobj=io.BytesIO(deserialized.tarball_bytes)) as tar:
+            assert tar.getmember("bin/run").mode == 0o755
+            assert tar.getmember("lib.py").mode == 0o644
+
+    def test_no_executables_key_when_nothing_is_executable(self):
+        automation = _make_automation()
+        files = serialize_automation(
+            automation, _make_tarball_with_modes({"lib.py": (b"x = 1", 0o644)})
+        )
+        fields = yaml.safe_load(files["automation.yaml"].decode())
+        assert "tarball_executables" not in fields
+
+    def test_missing_metadata_falls_back_to_the_sh_heuristic(self):
+        """A repo synced before `tarball_executables` existed keeps its modes."""
+        tarball_bytes = rebuild_tarball({"setup.sh": b"echo hi", "run": b"echo hi"})
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes)) as tar:
+            assert tar.getmember("setup.sh").mode == 0o755
+            assert tar.getmember("run").mode == 0o644
+
+    def test_empty_metadata_list_is_trusted_over_the_heuristic(self):
+        tarball_bytes = rebuild_tarball({"setup.sh": b"echo hi"}, [])
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes)) as tar:
+            assert tar.getmember("setup.sh").mode == 0o644
+
+    def test_malformed_metadata_list_is_ignored(self):
+        automation = _make_automation()
+        files = serialize_automation(automation, _make_tarball({"run": b"x"}))
+        files["automation.yaml"] = yaml.safe_dump(
+            {
+                **yaml.safe_load(files["automation.yaml"].decode()),
+                "tarball_executables": "not-a-list",
+            }
+        ).encode()
+
+        deserialized = deserialize_automation(files)
+        assert deserialized is not None
+        assert deserialized.tarball_bytes is not None
+
+
+class TestDotSlashMemberNames:
+    """Regression: `tar -czf archive.tgz .` produces "./main.py" members.
+
+    `tarfile.data_filter` leaves the prefix in place, so the same file was
+    committed as `tarball/./main.py` and never matched the plain `main.py`
+    an unprefixed tarball produces for identical content.
+    """
+
+    def test_leading_dot_slash_is_stripped_on_serialize(self):
+        automation = _make_automation()
+        files = serialize_automation(
+            automation, _make_tarball({"./main.py": b"print(1)", "./sub/a.txt": b"a"})
+        )
+        assert "tarball/main.py" in files
+        assert "tarball/sub/a.txt" in files
+        assert not any("/./" in name for name in files)
+
+    def test_dot_slash_and_plain_tarballs_hash_the_same(self):
+        automation = _make_automation()
+        dotted = serialize_automation(automation, _make_tarball({"./main.py": b"x"}))
+        plain = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
+        assert compute_content_hash(dotted) == compute_content_hash(plain)
+
+
+class TestMalformedMetadata:
+    def test_invalid_yaml_raises_a_valueerror(self):
+        """Regression: yaml.YAMLError is not a ValueError, so it escaped the
+        import's per-directory skip and aborted the whole sync cycle -- every
+        other automation stopped syncing until that one file was fixed."""
+        with pytest.raises(GitSyncMetadataError) as excinfo:
+            deserialize_automation({"automation.yaml": b"name: [unclosed\n"})
+        assert isinstance(excinfo.value, ValueError)
+
+
+class TestCanonicalTarballBytes:
+    def test_repacking_is_stable_across_framings(self):
+        """Identical content packed differently canonicalizes identically."""
+        first = _make_tarball_with_modes({"a.py": (b"x", 0o644), "b.py": (b"y", 0o755)})
+        second = _make_tarball_with_modes(
+            {"b.py": (b"y", 0o755), "a.py": (b"x", 0o644)}
+        )
+        assert canonical_tarball_bytes(first) == canonical_tarball_bytes(second)

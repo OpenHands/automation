@@ -8,6 +8,7 @@ cycle — the VM is the source of truth for anything not yet pushed.
 import asyncio
 import logging
 import shutil
+import tarfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +19,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.auth import _get_local_user
-from openhands.automation.config import GitSyncSettings, ServiceSettings, get_config
+from openhands.automation.config import (
+    GitSyncSettings,
+    ServiceSettings,
+    get_config,
+    normalize_git_sync_path,
+)
 from openhands.automation.git_sync.client import (
     GitSyncError,
     commit_and_push,
@@ -31,12 +37,16 @@ from openhands.automation.git_sync.config_override import (
     resolve_effective_sync_interval_seconds,
 )
 from openhands.automation.git_sync.serializer import (
+    METADATA_FILENAME,
+    TARBALL_DIRNAME,
     DeserializedAutomation,
+    canonical_tarball_bytes,
     compute_content_hash,
     compute_slug,
     decrypt_file_tree,
     deserialize_automation,
     encrypt_file_tree,
+    is_generated_path,
     serialize_automation,
 )
 from openhands.automation.models import (
@@ -78,14 +88,37 @@ GIT_SYNC_LAST_ERROR_AT_KEY = "git_sync_last_error_at"
 _TRIGGER_ADAPTER: TypeAdapter = TypeAdapter(Trigger)
 
 
-def is_git_sync_active() -> bool:
-    """Whether git sync should be active: enabled, with a repo, and local mode.
+def is_git_sync_opted_in() -> bool:
+    """Whether the deployment opted into git sync at boot: env flag + local mode.
+
+    This is the gate for everything that can't be turned on at runtime: the
+    background loop is only started when it holds, and `PUT /config` refuses
+    to flip `enabled` on when it doesn't.
+
+    Deliberately does NOT require a repo URL, unlike `is_git_sync_active`.
+    The repo is routine, non-privileged configuration that the Git Sync page
+    is meant to supply, so an operator can set `AUTOMATION_GIT_SYNC_ENABLED`
+    and fill the rest in from the UI. Requiring it here would leave the loop
+    unstarted and `mark_git_sync_dirty` a no-op for the whole process
+    lifetime, so a repo configured from the UI would report a healthy sync
+    while never exporting anything.
 
     Local mode is required because one repo maps to one agent server, which
     doesn't make sense for the multi-tenant SaaS.
     """
     config = get_config()
-    return config.git_sync.enabled and config.service.is_local_mode
+    return config.git_sync.git_sync_enabled and config.service.is_local_mode
+
+
+def is_git_sync_active() -> bool:
+    """Whether git sync is fully configured from env alone: opted in + a repo.
+
+    Reads only the boot-time env config, so it says nothing about a repo
+    configured at runtime. Callers that must honour the runtime overrides
+    (PUT /v1/git-sync/config) have to resolve the effective settings
+    themselves, as the router's `_is_effectively_enabled` does.
+    """
+    return is_git_sync_opted_in() and bool(get_config().git_sync.git_sync_repo_url)
 
 
 @dataclass
@@ -108,8 +141,15 @@ async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> 
     errors (inside a SAVEPOINT, so the caller's own pending changes
     survive) since some callers treat any exception here as a full
     automation-creation failure.
+
+    Gates on the boot-time opt-in, not on whether sync is fully configured
+    and running. Requiring a repo URL here left dirty-marking permanently
+    off when the repo was supplied from the Git Sync page instead of the
+    environment, and gating on the effective `enabled` would drop every edit
+    made while sync is paused -- both cases silently lose changes that a
+    later cycle should have exported.
     """
-    if not is_git_sync_active():
+    if not is_git_sync_opted_in():
         return
 
     try:
@@ -190,16 +230,52 @@ def _read_directory_files(directory: Path) -> dict[str, bytes]:
     return files
 
 
+def _prune_generated_files(directory: Path) -> None:
+    """Delete the files `serialize_automation` owns, leaving the rest alone.
+
+    Stale generated members (e.g. a tarball file dropped in a newer upload)
+    must not linger across an export, but the slug directory lives in the
+    user's repo: rmtree'ing all of it also deleted any README, .gitignore or
+    notes they had committed next to the generated files -- and pushed that
+    deletion back to them.
+
+    The tarball directory is generated in its entirety, so it goes as a unit.
+    """
+    if not directory.is_dir():
+        return
+
+    metadata = directory / METADATA_FILENAME
+    if metadata.is_symlink() or metadata.is_file():
+        metadata.unlink()
+
+    tarball_dir = directory / TARBALL_DIRNAME
+    # is_symlink first: rmtree refuses to act on a symlink to a directory,
+    # and unlink is what actually removes the link rather than its target.
+    if tarball_dir.is_symlink():
+        tarball_dir.unlink()
+    elif tarball_dir.is_dir():
+        shutil.rmtree(tarball_dir)
+
+
 def _write_files(directory: Path, files: dict[str, bytes]) -> None:
-    # Remove first so stale members (e.g. a tarball file dropped in a newer
-    # upload) don't linger from a previous export.
-    if directory.exists():
-        shutil.rmtree(directory)
+    _prune_generated_files(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for rel_path, content in files.items():
         target = directory / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+
+
+def _remove_exported_automation(directory: Path) -> None:
+    """Remove an automation's exported files after it's deleted in the DB.
+
+    Only the generated files go; the directory itself is removed just when
+    that leaves it empty, so user files committed alongside aren't collateral
+    damage of deleting the automation.
+    """
+    _prune_generated_files(directory)
+    if directory.is_dir() and not any(directory.iterdir()):
+        directory.rmdir()
 
 
 # --- Tarball storage helpers --------------------------------------------------
@@ -276,21 +352,91 @@ async def _write_tarball_upload(
     return build_internal_url(upload_id)
 
 
+async def _stored_tarball_matches(
+    session: AsyncSession, automation: Automation, tarball_bytes: bytes
+) -> bool:
+    """Whether `automation`'s stored tarball already holds this content.
+
+    Compares canonical rebuilds rather than raw bytes: the stored tarball
+    came from a user upload with its own gzip framing, mtimes and member
+    order, so byte equality would report "changed" for identical content.
+    Both sides go through `rebuild_tarball`, which is deterministic.
+    """
+    try:
+        current = await _read_tarball_bytes(automation, session)
+    except TarballUnavailableError:
+        return False
+    if current is None:
+        return False
+    try:
+        return canonical_tarball_bytes(current) == tarball_bytes
+    except tarfile.TarError:
+        return False
+
+
+async def _delete_superseded_upload(session: AsyncSession, tarball_path: str) -> None:
+    """Remove the upload an automation just stopped pointing at.
+
+    Without this, every git-side edit that touches an automation with a
+    tarball left its previous upload row and file live and referenced by
+    nothing -- routine PR-based edits accumulated a full tarball copy per
+    merge, with no reaper anywhere to collect them. Mirrors the cleanup
+    `regenerate_preset_prompt_tarball` already does for prompt edits.
+    """
+    upload_id = parse_internal_upload_id(tarball_path)
+    if upload_id is None:
+        return
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    upload = result.scalars().first()
+    if upload is None or upload.deleted_at is not None:
+        return
+
+    file_removed = False
+    try:
+        await asyncio.to_thread(get_file_store().delete, upload.storage_path)
+        file_removed = True
+    except FileNotFoundError:
+        file_removed = True
+    except Exception:
+        logger.exception(
+            "Failed to delete superseded tarball at %s", upload.storage_path
+        )
+    # Only soft-delete once the file is confirmed gone: a failed delete
+    # leaves the record live so the still-present file stays discoverable
+    # for a later retry, instead of becoming a hidden orphan.
+    if file_removed:
+        upload.deleted_at = utcnow()
+
+
 async def _resolve_tarball_path(
     session: AsyncSession,
     fields: dict,
     deserialized: DeserializedAutomation,
     slug: str,
+    existing: Automation | None,
 ) -> str:
     if deserialized.tarball_bytes is not None:
+        if existing is not None and await _stored_tarball_matches(
+            session, existing, deserialized.tarball_bytes
+        ):
+            # Nothing changed under tarball/ -- this import is a YAML-only
+            # edit (say, flipping `enabled`). Re-uploading here would write
+            # a second full copy of identical content on every such edit.
+            return existing.tarball_path
+
         local_user = _get_local_user()
-        return await _write_tarball_upload(
+        new_path = await _write_tarball_upload(
             session,
             local_user.user_id,
             local_user.org_id,
             deserialized.tarball_bytes,
             slug,
         )
+        if existing is not None:
+            await _delete_superseded_upload(session, existing.tarball_path)
+        return new_path
 
     tarball_source = fields.get("tarball_source") or {}
     url = tarball_source.get("url")
@@ -311,6 +457,7 @@ async def _validate_and_resolve_fields(
     fields: dict,
     deserialized: DeserializedAutomation,
     slug: str,
+    existing: Automation | None = None,
 ) -> dict:
     """Validate automation.yaml fields and resolve a tarball_path, mirroring
     the API request schemas' validation (schemas.py).
@@ -330,7 +477,9 @@ async def _validate_and_resolve_fields(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
-    tarball_path = await _resolve_tarball_path(session, fields, deserialized, slug)
+    tarball_path = await _resolve_tarball_path(
+        session, fields, deserialized, slug, existing
+    )
 
     return {
         "name": name,
@@ -340,7 +489,11 @@ async def _validate_and_resolve_fields(
         "setup_script_path": setup_script_path,
         "timeout": timeout,
         "keep_alive": fields.get("keep_alive"),
-        "enabled": bool(fields.get("enabled", True)),
+        # `dict.get`'s default only applies when the key is absent. A hand
+        # edit that leaves "enabled:" with nothing after it is valid YAML
+        # that parses to None, and bool(None) would silently disable a live
+        # automation on the next import.
+        "enabled": True if fields.get("enabled") is None else bool(fields["enabled"]),
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
@@ -398,7 +551,7 @@ async def _update_automation_from_git(
         )
 
     values = await _validate_and_resolve_fields(
-        session, deserialized.fields, deserialized, state.slug
+        session, deserialized.fields, deserialized, state.slug, existing=automation
     )
     for column, value in values.items():
         setattr(automation, column, value)
@@ -446,6 +599,32 @@ async def _changed_slugs_since(
     return slugs
 
 
+def _list_slug_directories(sync_root: Path) -> dict[str, Path]:
+    """Automation directories directly under `sync_root`, keyed by slug.
+
+    Symlinks are excluded. `is_dir()` follows them, so a committed symlink
+    (git stores those as mode 120000) pointing at a host directory would be
+    treated as an automation directory -- and `_read_directory_files`' own
+    symlink guard never fires for it, because every file rglob yields
+    *through* the link reports `is_symlink() == False`. It would also wedge
+    the export, where `shutil.rmtree` raises outright on a symlinked
+    directory, failing every subsequent cycle.
+    """
+    if not sync_root.is_dir():
+        return {}
+
+    directories: dict[str, Path] = {}
+    for path in sorted(sync_root.iterdir()):
+        if path.is_symlink():
+            logger.warning(
+                "Skipping symlinked automation directory in git checkout: %s", path
+            )
+            continue
+        if path.is_dir():
+            directories[path.name] = path
+    return directories
+
+
 async def _import_from_git(
     session: AsyncSession,
     workdir: Path,
@@ -457,11 +636,7 @@ async def _import_from_git(
     encryption_key: str,
     result: SyncCycleResult,
 ) -> None:
-    all_dirs = (
-        {p.name: p for p in sorted(sync_root.iterdir()) if p.is_dir()}
-        if sync_root.is_dir()
-        else {}
-    )
+    all_dirs = _list_slug_directories(sync_root)
 
     # Only re-read/hash slugs that actually changed in this commit range.
     changed_slugs = await _changed_slugs_since(
@@ -485,24 +660,41 @@ async def _import_from_git(
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
         try:
-            if encryption_key:
-                dir_files = decrypt_file_tree(dir_files, encryption_key)
-            deserialized = deserialize_automation(dir_files)
-            if deserialized is None:
-                continue
+            # Each directory gets its own SAVEPOINT: a failure partway
+            # through rolls back just its writes (a half-populated
+            # Automation, an already-flushed TarballUpload) and leaves the
+            # session usable for the remaining directories.
+            async with session.begin_nested():
+                if encryption_key:
+                    dir_files = decrypt_file_tree(dir_files, encryption_key)
+                deserialized = deserialize_automation(dir_files)
+                if deserialized is None:
+                    continue
 
-            if state is None:
-                await _create_automation_from_git(
-                    session, slug, deserialized, dir_files, head
-                )
-                result.imported += 1
-            else:
-                await _update_automation_from_git(
-                    session, state, deserialized, dir_files, head
-                )
+                if state is None:
+                    await _create_automation_from_git(
+                        session, slug, deserialized, dir_files, head
+                    )
+                    result.imported += 1
+                else:
+                    await _update_automation_from_git(
+                        session, state, deserialized, dir_files, head
+                    )
         except (ValidationError, ValueError) as e:
             logger.warning(
                 "Skipping invalid automation directory %r from git: %s", slug, e
+            )
+        except Exception:
+            # Deliberately broad. Anything escaping this loop aborts the
+            # whole cycle -- no export, no push -- and keeps doing so every
+            # cycle until someone fixes that one directory by hand, so a
+            # single unparseable automation must not take the other ones
+            # down with it. Logged with a traceback, since reaching here
+            # means an error shape we didn't anticipate.
+            logger.exception(
+                "Unexpected error importing automation directory %r from git; "
+                "skipping it and continuing the cycle",
+                slug,
             )
 
     # Known automations whose directory disappeared. Checked against
@@ -566,6 +758,90 @@ async def _handle_path_change(
 # --- Export (DB -> git) -------------------------------------------------------
 
 
+async def _backfill_missing_states(session: AsyncSession) -> int:
+    """Create state rows for live automations that have never had one.
+
+    `mark_git_sync_dirty` only fires on an API create/update/delete, so every
+    automation that already existed when git sync was switched on had no
+    state row at all -- and the export only looks at dirty state rows. The
+    cycle reported success, pushed nothing, and the UI showed a healthy sync
+    against an empty repo; an automation appeared only once someone happened
+    to edit it again. Anyone restoring from that repo silently lost the rest.
+
+    New rows start dirty so this cycle's export writes them out.
+
+    Runs every cycle, so the steady state (nothing missing) is one indexed
+    NOT EXISTS query returning no rows -- the slug set is only materialized
+    when there is actually something to backfill.
+    """
+    missing = (
+        (
+            await session.execute(
+                select(Automation).where(
+                    Automation.deleted_at.is_(None),
+                    ~select(AutomationGitSyncState.automation_id)
+                    .where(AutomationGitSyncState.automation_id == Automation.id)
+                    .exists(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not missing:
+        return 0
+
+    taken = set(
+        (await session.execute(select(AutomationGitSyncState.slug))).scalars().all()
+    )
+    for automation in missing:
+        slug = compute_slug(automation.name, automation.id, taken=taken)
+        taken.add(slug)
+        session.add(
+            AutomationGitSyncState(automation_id=automation.id, slug=slug, dirty=True)
+        )
+
+    await session.flush()
+    logger.info(
+        "Backfilled %d automation(s) with no git-sync state; they will be "
+        "exported in this cycle",
+        len(missing),
+    )
+    return len(missing)
+
+
+def _exported_content_is_current(
+    directory: Path, files: dict[str, bytes], encryption_key: str
+) -> bool:
+    """Whether the generated files already on disk match `files`.
+
+    Compares the decrypted plaintext, not the bytes on disk: Fernet uses a
+    fresh IV per encryption, so re-encrypting identical content yields
+    different ciphertext every time and every cycle would look changed.
+
+    Only the serializer-owned paths are compared -- user files committed in
+    the same directory are none of this comparison's business.
+    """
+    if not directory.is_dir():
+        return False
+    try:
+        on_disk = {
+            name: content
+            for name, content in _read_directory_files(directory).items()
+            if is_generated_path(name)
+        }
+        if encryption_key:
+            on_disk = decrypt_file_tree(on_disk, encryption_key)
+    except Exception:
+        # Unreadable or undecryptable (a rotated key, a corrupted commit):
+        # treat it as stale and rewrite rather than skipping the export.
+        logger.warning(
+            "Could not read the existing export at %s; rewriting it", directory
+        )
+        return False
+    return compute_content_hash(on_disk) == compute_content_hash(files)
+
+
 async def _export_dirty_automations(
     session: AsyncSession,
     sync_root: Path,
@@ -593,7 +869,7 @@ async def _export_dirty_automations(
 
         if automation is None or automation.deleted_at is not None:
             if directory.exists():
-                await asyncio.to_thread(shutil.rmtree, directory)
+                await asyncio.to_thread(_remove_exported_automation, directory)
                 changed = True
             await session.delete(state)
             result.deleted_in_git += 1
@@ -608,11 +884,18 @@ async def _export_dirty_automations(
             )
             continue
 
-        # Hash the plaintext, not what's written to disk -- Fernet's random
-        # per-encryption IV would otherwise make every cycle look "changed"
-        # even with no real content change, and trigger a needless commit.
+        # Compared against what's actually on disk, not against
+        # `state.content_hash`. The import step skips a dirty slug precisely
+        # so this export can overwrite git with the DB's version -- but a
+        # git-side edit to that slug leaves the DB row (and so its hash)
+        # untouched, so a hash comparison concluded there was nothing to
+        # write. The edit was then neither imported nor overwritten, and
+        # `last_commit` advanced past it: git kept the user's version, the DB
+        # kept its own, and the two never reconciled.
         new_hash = compute_content_hash(files)
-        if new_hash != state.content_hash or not directory.is_dir():
+        if not await asyncio.to_thread(
+            _exported_content_is_current, directory, files, encryption_key
+        ):
             on_disk_files = (
                 encrypt_file_tree(files, encryption_key) if encryption_key else files
             )
@@ -664,9 +947,23 @@ async def _run_sync_cycle_locked(
     workdir = _resolve_workdir(git_settings, service_settings)
     timeout = git_settings.git_sync_git_timeout_seconds
     token = git_settings.git_sync_token
-    branch = git_settings.git_sync_branch
+    branch = git_settings.git_sync_branch.strip()
     encryption_key = git_settings.git_sync_encryption_key
-    sync_root = workdir / git_settings.git_sync_path
+
+    # Re-validated here, not just at the API boundary: this also covers a
+    # misconfigured AUTOMATION_GIT_SYNC_PATH, and `sync_root` is what the
+    # export rmtree's per automation. Raising leaves the reason in
+    # `git_sync_last_error` for the status endpoint instead of deleting host
+    # directories that happen to share a name with an automation slug.
+    sync_path = normalize_git_sync_path(git_settings.git_sync_path)
+    sync_root = workdir / sync_path
+    if not sync_root.resolve().is_relative_to(workdir.resolve()):
+        raise GitSyncError(
+            f"git sync path {git_settings.git_sync_path!r} resolves outside the "
+            f"checkout at {workdir}"
+        )
+    if not branch:
+        raise GitSyncError("git sync branch must not be empty")
 
     await ensure_repo(workdir, git_settings.git_sync_repo_url, branch, token, timeout)
     head = await pull(workdir, branch, token, timeout)
@@ -683,26 +980,26 @@ async def _run_sync_cycle_locked(
         # and the import's "directory disappeared" branch would read that as
         # every automation having been deleted in git.
         last_path = await get_service_metadata(session, GIT_SYNC_LAST_PATH_KEY)
-        if last_path is not None and last_path != git_settings.git_sync_path:
-            await _handle_path_change(
-                session, workdir, last_path, git_settings.git_sync_path
-            )
-        await set_service_metadata(
-            session, GIT_SYNC_LAST_PATH_KEY, git_settings.git_sync_path
-        )
+        if last_path is not None and last_path != sync_path:
+            await _handle_path_change(session, workdir, last_path, sync_path)
+        await set_service_metadata(session, GIT_SYNC_LAST_PATH_KEY, sync_path)
 
         if head is not None and head != last_commit:
             await _import_from_git(
                 session,
                 workdir,
                 sync_root,
-                git_settings.git_sync_path,
+                sync_path,
                 last_commit,
                 head,
                 timeout,
                 encryption_key,
                 result,
             )
+
+        # After the import, so automations that arrived from git in this same
+        # cycle already have their state row and aren't re-created here.
+        await _backfill_missing_states(session)
 
         # Return value intentionally unused: the export counters land on
         # `result`, and the push below must run regardless of whether
@@ -720,7 +1017,7 @@ async def _run_sync_cycle_locked(
     # without touching the network.
     pushed = await commit_and_push(
         workdir,
-        git_settings.git_sync_path,
+        sync_path,
         "Sync automations from agent server",
         git_settings.git_sync_author_name,
         git_settings.git_sync_author_email,
@@ -752,10 +1049,11 @@ async def git_sync_loop(
 ) -> None:
     """Background loop: periodically syncs automations with the git repo.
 
-    Only meant to be started when `is_git_sync_active()` is true — the
+    Only meant to be started when `is_git_sync_opted_in()` is true — the
     caller (app.py) checks that before starting this task. Once running,
     each cycle re-resolves runtime config overrides (PUT /v1/git-sync/config)
-    and no-ops if they've paused sync, without killing this task.
+    and no-ops if they've paused sync or no repo is configured yet, without
+    killing this task.
 
     The sync interval is runtime-configurable, so this task runs even while
     sync is manual-only (interval 0): it idles, re-reading the interval every

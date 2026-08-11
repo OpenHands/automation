@@ -1,7 +1,8 @@
 """Pydantic schemas for the git sync status API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from openhands.automation.config import normalize_git_sync_path
 from openhands.automation.utils.time import UtcDatetime
 
 
@@ -35,6 +36,12 @@ class GitSyncConfigUpdateRequest(BaseModel):
 
     `interval_seconds` is how often to sync automatically; 0 means
     manual-only, i.e. sync just when POST /v1/git-sync/sync is called.
+
+    Every string field is stripped, and a blank one is treated the same as
+    `null` (clear the override). The UI sends `""` rather than `null` when a
+    text field is cleared, and storing that verbatim would wedge sync: an
+    empty branch makes `git checkout -B ""` fatal, and an empty path makes
+    `git add -A -- ""` fatal.
     """
 
     enabled: bool | None = None
@@ -46,3 +53,25 @@ class GitSyncConfigUpdateRequest(BaseModel):
     encryption_key: str | None = None
     author_name: str | None = None
     author_email: str | None = None
+
+    @field_validator(
+        "repo_url",
+        "branch",
+        "token",
+        "encryption_key",
+        "author_name",
+        "author_email",
+        mode="after",
+    )
+    @classmethod
+    def _blank_clears_the_override(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+    @field_validator("path", mode="after")
+    @classmethod
+    def _normalize_path(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        # Raises for a traversing path, which FastAPI reports as a 422 rather
+        # than letting it reach `sync_root` and the export's rmtree.
+        return normalize_git_sync_path(value)

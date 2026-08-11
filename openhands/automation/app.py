@@ -20,7 +20,7 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
-from openhands.automation.git_sync import git_sync_loop, is_git_sync_active
+from openhands.automation.git_sync import git_sync_loop, is_git_sync_opted_in
 from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
@@ -174,17 +174,24 @@ async def lifespan(app: FastAPI):
             "git sync will remain disabled."
         )
     if config.git_sync.git_sync_enabled and not config.git_sync.git_sync_repo_url:
-        logger.warning(
+        logger.info(
             "AUTOMATION_GIT_SYNC_ENABLED is set but AUTOMATION_GIT_SYNC_REPO_URL "
-            "is empty; git sync will remain disabled."
+            "is empty; nothing will sync until a repo is configured on the Git "
+            "Sync page."
         )
-    if is_git_sync_active():
+    if is_git_sync_opted_in():
         logger.warning(
             "Git sync is enabled — automation prompts and metadata will be "
             "pushed to %s. Make sure that repo is private, since it may "
             "contain sensitive automation content.",
-            config.git_sync.git_sync_repo_url,
+            config.git_sync.git_sync_repo_url or "the repo configured from the UI",
         )
+        # Started on the env opt-in alone, without requiring a repo URL: the
+        # repo can be filled in from the Git Sync page, and gating this on it
+        # left the loop unstarted for the whole process lifetime -- along with
+        # mark_git_sync_dirty, so that setup reported a healthy sync while
+        # never exporting anything.
+        #
         # Always started, even while sync is manual-only: the interval is
         # set from the UI at runtime, and this task is what notices a newly
         # configured one. It idles without syncing while the interval is 0.
