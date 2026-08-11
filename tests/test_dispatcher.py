@@ -22,7 +22,7 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.run import mark_run_status
+from openhands.automation.utils.run import mark_run_status, mark_run_terminal
 from openhands.automation.utils.tarball_validation import is_http_url
 
 
@@ -208,6 +208,67 @@ class TestMarkRunStatus:
             assert updated.status == AutomationRunStatus.FAILED
             assert updated.completed_at is not None
             assert before <= updated.completed_at <= after
+
+
+class TestMarkRunTerminalFirstRunOutcome:
+    """First-run outcome recording when the dispatcher terminates a run."""
+
+    async def _seed_template_run(self, async_session_factory):
+        """A RUNNING run on an automation created from an extension template."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Template Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                preset_metadata={
+                    "preset_type": "prompt",
+                    "prompt": "p",
+                    "template": {"id": "tpl", "version": "1.0.0"},
+                },
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(run)
+            await session.commit()
+            return automation.id, run
+
+    async def test_dispatch_failure_records_dispatch_stage(self, async_session_factory):
+        """A run failed at dispatch records the dispatch failure stage."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            first_run = automation.preset_metadata["first_run"]
+            assert first_run["status"] == "failure"
+            assert first_run["failure_stage"] == "dispatch"
+
+    async def test_skipped_run_does_not_consume_the_first_run_slot(
+        self, async_session_factory
+    ):
+        """A skipped run records nothing, so a later real run still can."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(async_session_factory, run, AutomationRunStatus.SKIPPED)
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert "first_run" not in automation.preset_metadata
 
 
 class TestDispatchPendingRuns:

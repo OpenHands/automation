@@ -1987,6 +1987,30 @@ class TestCompleteRun:
         await async_session.commit()
         return run
 
+    async def _seed_running_run(self, async_session, preset_metadata):
+        """A RUNNING run on an automation carrying the given preset metadata."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Template Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            preset_metadata=preset_metadata,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return automation, run
+
     async def test_complete_run_saves_cost(self, async_client, async_session):
         """Complete endpoint stores the accumulated LLM cost reported by the SDK."""
         run = await self._running_run(async_session)
@@ -2030,6 +2054,124 @@ class TestCompleteRun:
         assert response.json()["cost"] is None
         await async_session.refresh(run)
         assert run.cost is None
+
+    async def test_first_completed_run_records_success_outcome(
+        self, async_client, async_session
+    ):
+        """The first completed run stamps a one-time success outcome."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        first_run = metadata["first_run"]
+        assert first_run["status"] == "success"
+        assert first_run["failure_stage"] is None
+        assert first_run["template_version"] == "1.2.0"
+        assert first_run["recorded_at"]
+
+    async def test_first_failed_run_records_execution_failure_stage(
+        self, async_client, async_session
+    ):
+        """A first-run failure records the stage, and nothing sensitive."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "secret stack trace"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        first_run = metadata["first_run"]
+        assert first_run["status"] == "failure"
+        assert first_run["failure_stage"] == "execution"
+        # The record carries no error text or prompt by construction.
+        assert set(first_run) == {
+            "status",
+            "failure_stage",
+            "template_version",
+            "recorded_at",
+        }
+
+    async def test_first_run_outcome_is_not_overwritten_by_later_runs(
+        self, async_client, async_session
+    ):
+        """Only the first terminal run records; later outcomes leave it alone."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+        first = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "boom"},
+        )
+        assert first.status_code == 200
+        second_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(second_run)
+        await async_session.commit()
+
+        second = await async_client.post(
+            f"/api/automation/v1/runs/{second_run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert second.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        assert metadata["first_run"]["status"] == "failure"
+
+    async def test_run_completion_without_template_records_no_outcome(
+        self, async_client, async_session
+    ):
+        """Automations without template provenance never record a first run."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {"preset_type": "prompt", "prompt": "p"},
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        assert "first_run" not in metadata
 
 
 class TestDownloadTarball:
