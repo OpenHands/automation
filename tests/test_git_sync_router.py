@@ -1,6 +1,7 @@
 """Tests for the git sync status/trigger API endpoints."""
 
 import asyncio
+import subprocess
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -607,3 +608,38 @@ class TestGitSyncConfigCheck:
 
         assert response.status_code == 200
         assert response.json()["ok"] is True
+
+
+class TestGitSyncCheckAgainstARealRepo:
+    """One end-to-end pass with no stub between the endpoint and git, so the
+    two halves can't drift: the router calling `check_remote_access` with its
+    arguments in some other order would still satisfy every mocked test."""
+
+    @pytest.fixture
+    def origin(self, tmp_path):
+        origin_dir = tmp_path / "origin"
+        origin_dir.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "-q", "-b", "main"], cwd=origin_dir, check=True
+        )
+        return origin_dir
+
+    async def test_reaches_a_real_remote(self, async_client, origin):
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": f"file://{origin}", "branch": "main"},
+        )
+
+        assert response.status_code == 200
+        # A branch nothing has pushed to yet: reachable, not yet created.
+        assert response.json() == {"ok": True, "branch_exists": False, "detail": None}
+
+    async def test_reports_a_remote_that_is_not_there(self, async_client, tmp_path):
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": f"file://{tmp_path / 'missing'}", "branch": "main"},
+        )
+
+        body = response.json()
+        assert body["ok"] is False
+        assert "missing" in body["detail"]
