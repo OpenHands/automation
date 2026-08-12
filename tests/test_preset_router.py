@@ -172,10 +172,8 @@ class TestPresetFileSyntax:
             "from openhands.sdk import Conversation, RemoteConversation, Tool"
             in content
         )
-        assert "TaskOutcomeStatus = Literal[" in content
-        assert "class TaskOutcomeBlocker(BaseModel):" in content
-        assert "class TaskOutcome(BaseModel):" in content
-        assert 'alias="outcome_summary"' in content
+        assert "from task_outcome import TaskOutcome" in content
+        assert "class TaskOutcome" not in content
         assert (
             'Tool(name="FinishTool", params={"response_schema": TaskOutcome})'
             in content
@@ -358,6 +356,7 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "task_outcome.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -399,6 +398,18 @@ class TestGenerateTarball:
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
+
+    def test_generate_tarball_task_outcome_content_matches_shared_module(self):
+        """Generated prompt tarball reuses the shared TaskOutcome module."""
+        tarball_bytes = _generate_tarball("Test prompt")
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            outcome_file = tar.extractfile("task_outcome.py")
+            assert outcome_file is not None
+            assert (
+                outcome_file.read().decode("utf-8")
+                == (PRESETS_DIR.parent / "task_outcome.py").read_text()
+            )
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -451,7 +462,7 @@ class TestReplacePromptInTarball:
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
-        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
+        # Arrange — a plugin preset tarball carries generated code, prompt,
         # plugins_config.json and repos_config.json; all but the prompt must survive.
         original = _generate_plugin_tarball(
             [PluginSource(source="github:owner/repo")],
@@ -480,7 +491,13 @@ class TestReplacePromptInTarball:
         new_files, new_setup_mode = _read(updated)
 
         assert new_files["prompt.txt"].decode() == "New prompt"
-        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+        for name in (
+            "main.py",
+            "task_outcome.py",
+            "setup.sh",
+            "plugins_config.json",
+            "repos_config.json",
+        ):
             assert new_files[name] == old_files[name]
         assert new_setup_mode & 0o100  # setup.sh stays executable
 
@@ -1307,6 +1324,20 @@ class TestGeneratePluginTarball:
             assert "ref" not in config[0]
             assert "repo_path" not in config[0]
 
+    def test_generate_plugin_tarball_task_outcome_content_matches_shared_module(self):
+        """Generated plugin tarball reuses the shared TaskOutcome module."""
+        tarball_bytes = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/repo")], "Test prompt"
+        )
+
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            outcome_file = tar.extractfile("task_outcome.py")
+            assert outcome_file is not None
+            assert (
+                outcome_file.read().decode("utf-8")
+                == (PRESETS_DIR.parent / "task_outcome.py").read_text()
+            )
+
     def test_generate_plugin_tarball_without_repos(self):
         """Generated plugin tarball without repos does not include repos_config.json."""
         plugins = [PluginSource(source="github:owner/repo")]
@@ -1664,6 +1695,7 @@ class TestExperimentTarball:
             assert "experiment_config.json" in names
             assert "plugins_config.json" not in names
             assert "main.py" in names
+            assert "task_outcome.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 
