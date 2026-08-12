@@ -100,7 +100,13 @@ def _extract_tarball_files(tarball_bytes: bytes) -> tuple[dict[str, bytes], list
     files: dict[str, bytes] = {}
     executables: list[str] = []
 
-    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+    # `r:*` rather than `r:gz`: the upload endpoint validates the Content-Type
+    # header, not the bytes, so a plain (uncompressed) tar is stored happily
+    # and runs fine -- nothing else ever re-reads it through tarfile. Insisting
+    # on gzip here made such an automation raise on every cycle; the export
+    # logs and skips it without clearing `dirty`, so it stayed dirty forever
+    # and never reached the repo.
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:*") as tar:
         for member in tar.getmembers():
             if not member.isfile():
                 if member.issym() or member.islnk():

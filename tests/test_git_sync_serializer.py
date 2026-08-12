@@ -32,6 +32,17 @@ def _make_tarball(files: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+def _make_plain_tarball(files: dict[str, bytes]) -> bytes:
+    """An uncompressed tar -- what an upload sent without gzipping stores as."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
 def _make_tarball_with_modes(files: dict[str, tuple[bytes, int]]) -> bytes:
     """Like `_make_tarball`, but with an explicit mode per member."""
     buffer = io.BytesIO()
@@ -95,6 +106,23 @@ class TestSerializeAutomation:
         files = serialize_automation(automation, tarball_bytes)
 
         assert set(files) == {"automation.yaml", "tarball/main.py", "tarball/setup.sh"}
+        assert files["tarball/main.py"] == b"print(1)"
+
+    def test_uncompressed_tarball_is_extracted_too(self):
+        """Regression: the upload endpoint checks the Content-Type header, not
+        the bytes, so an uncompressed tar is a legitimate stored payload -- and
+        one on the OSS VM was. Insisting on gzip raised `not a gzip file` on
+        every cycle, and since the export logs and skips a failed automation
+        without clearing `dirty`, it stayed dirty forever and never reached the
+        repo.
+        """
+        automation = _make_automation()
+        tarball_bytes = _make_plain_tarball({"main.py": b"print(1)"})
+        assert tarball_bytes[:2] != b"\x1f\x8b", "must not be gzipped"
+
+        files = serialize_automation(automation, tarball_bytes)
+
+        assert set(files) == {"automation.yaml", "tarball/main.py"}
         assert files["tarball/main.py"] == b"print(1)"
 
     def test_automation_yaml_fields(self):
