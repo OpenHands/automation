@@ -162,6 +162,26 @@ class TestPresetFileSyntax:
             "— do not hardcode the version"
         )
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_finish_tool_uses_task_outcome_schema(self, preset_name):
+        """Preset agents attach TaskOutcome structured output to FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        assert (
+            "from openhands.sdk import Conversation, RemoteConversation, Tool"
+            in content
+        )
+        assert "TaskOutcomeStatus = Literal[" in content
+        assert "class TaskOutcomeBlocker(BaseModel):" in content
+        assert "class TaskOutcome(BaseModel):" in content
+        assert 'alias="outcome_summary"' in content
+        assert (
+            'Tool(name="FinishTool", params={"response_schema": TaskOutcome})'
+            in content
+        )
+        assert 'if name != "FinishTool"' in content
+
 
 class TestPresetEntrypoint:
     def test_get_preset_entrypoint_posix(self, monkeypatch):
