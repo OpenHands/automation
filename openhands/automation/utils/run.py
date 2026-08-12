@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -226,6 +226,34 @@ async def update_bash_command_id(
             await session.commit()
     except Exception:
         logger.exception("Failed to update bash_command_id for run %s", run_id)
+
+
+async def update_run_timeout_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    timeout_at: datetime,
+) -> None:
+    """Reset the watchdog deadline for a run that is still RUNNING.
+
+    Guarded by status == RUNNING so a run that already reached a terminal
+    state (callback, cancel, dispatch failure) never gets a deadline
+    resurrected. Failure is non-fatal: the run keeps its previous (longer)
+    provisioning-phase deadline, which errs toward a later watchdog check,
+    never an earlier one.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(timeout_at=timeout_at)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update timeout_at for run %s", run_id)
 
 
 async def _record_first_run_outcome_in_session(
