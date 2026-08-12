@@ -439,6 +439,23 @@ async def regenerate_preset_prompt_tarball(
     if file_removed:
         source_upload.deleted_at = utcnow()
 
+    logger.info(
+        "Regenerated preset tarball: automation_id=%s, old_upload_id=%s, "
+        "new_upload_id=%s, old_object_removed=%s",
+        automation.id,
+        source_upload.id,
+        new_upload_id,
+        file_removed,
+        extra={
+            "automation_id": str(automation.id),
+            "old_upload_id": str(source_upload.id),
+            "old_storage_path": source_upload.storage_path,
+            "new_upload_id": str(new_upload_id),
+            "new_storage_path": storage_path,
+            "old_object_removed": file_removed,
+        },
+    )
+
     await session.flush()
     return build_internal_url(new_upload_id)
 
