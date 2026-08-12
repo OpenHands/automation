@@ -91,7 +91,9 @@ class TestSdkVersionEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "version" in data
+        assert "install_spec" in data
         assert data["version"] == importlib.metadata.version("openhands-sdk")
+        assert data["install_spec"].startswith("openhands-sdk")
 
     async def test_no_auth_required(self, health_client):
         """GET /sdk-version is accessible without any authentication token."""

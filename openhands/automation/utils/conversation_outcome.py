@@ -13,8 +13,8 @@ from pydantic import ValidationError
 from openhands.automation.backends import get_backend
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
-from openhands.automation.task_outcome import TaskOutcome
 from openhands.automation.utils.sandbox import get_sandbox_agent_url
+from openhands.sdk import TaskOutcome
 
 
 logger = logging.getLogger(__name__)

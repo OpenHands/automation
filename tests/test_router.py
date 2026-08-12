@@ -1733,7 +1733,7 @@ class TestCompleteRun:
     ):
         """Complete endpoint stores parsed FinishTool task outcome metadata."""
         from openhands.automation.models import AutomationRun, AutomationRunStatus
-        from openhands.automation.task_outcome import TaskOutcome
+        from openhands.sdk import TaskOutcome
 
         automation = Automation(
             user_id=TEST_USER_ID,

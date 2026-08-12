@@ -26,11 +26,14 @@ if ! command -v python3 >/dev/null 2>&1; then
     fi
 fi
 set +e
-SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
+SDK_METADATA=$(curl -sf "${AUTOMATION_API_URL}/sdk-version")
+SDK_VERSION=$(printf '%s' "$SDK_METADATA" \
   | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+SDK_INSTALL_SPEC=$(printf '%s' "$SDK_METADATA" \
+  | ${PYTHON_JSON} -c "import sys, json; data=json.load(sys.stdin); print(data.get('install_spec') or ('openhands-sdk==' + data['version']))" 2>/dev/null)
 set -e
-if [ -z "$SDK_VERSION" ]; then
-    echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
+if [ -z "$SDK_VERSION" ] || [ -z "$SDK_INSTALL_SPEC" ]; then
+    echo "[setup] ERROR: Failed to fetch SDK install metadata from ${AUTOMATION_API_URL}/sdk-version" >&2
     exit 1
 fi
 
@@ -39,9 +42,9 @@ echo "[setup] Creating isolated virtual environment"
 # CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.
 uv venv .venv --python '>=3.12' --quiet
 
-echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+echo "[setup] Installing OpenHands SDK ($SDK_INSTALL_SPEC)"
 uv pip install --quiet \
-  "openhands-sdk==${SDK_VERSION}" \
+  "$SDK_INSTALL_SPEC" \
   "openhands-tools==${SDK_VERSION}" \
   "openhands-workspace==${SDK_VERSION}"
 

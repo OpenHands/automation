@@ -21,7 +21,7 @@ dependencies = [
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.42.1",
+  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@96705f910ee6ab8649aa5733abb5c97d5e0a4822#subdirectory=openhands-sdk",
   "openhands-workspace==1.42.1",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
