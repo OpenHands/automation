@@ -5,6 +5,8 @@ import pytest
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
     VerificationResult,
+    extract_conversation_id,
+    get_conversation_task_outcome,
     get_last_bash_command_result,
     verify_run_on_agent_server,
 )
@@ -51,6 +53,49 @@ class TestBashCommandResult:
         assert result.found is True
         assert result.exit_code == 1
         assert result.stderr == "Error: file not found"
+
+
+class TestTaskOutcomeRecoveryHelpers:
+    """Tests for recovering task outcomes from agent-server conversations."""
+
+    def test_extract_conversation_id_from_printed_id(self):
+        conversation_id = "12345678-1234-5678-1234-567812345678"
+        output = f"  conversation id: {conversation_id}\nALL_OK"
+
+        assert extract_conversation_id(output) == conversation_id
+
+    def test_extract_conversation_id_from_session_url(self):
+        conversation_id = "12345678-1234-5678-1234-567812345678"
+        output = (
+            f"session URL: https://app.all-hands.dev/conversations/{conversation_id}"
+        )
+
+        assert extract_conversation_id(output) == conversation_id
+
+    @pytest.mark.asyncio
+    async def test_get_conversation_task_outcome(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        outcome = {"status": "blocked", "summary": "Missing Slack MCP"}
+        mock_client = MagicMock(spec=httpx.AsyncClient)
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"task_outcome": outcome}
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        result = await get_conversation_task_outcome(
+            mock_client,
+            "http://localhost:3000",
+            "test-key",
+            "12345678-1234-5678-1234-567812345678",
+        )
+
+        assert result == outcome
+        mock_client.get.assert_awaited_once()
+        _, kwargs = mock_client.get.call_args
+        assert kwargs["headers"] == {"X-Session-API-Key": "test-key"}
 
 
 class TestVerificationResult:
@@ -302,6 +347,41 @@ class TestVerifyRunOnAgentServer:
         assert result.success is True
         assert result.exit_code == 0
         assert result.stdout == "Done"
+
+    @pytest.mark.asyncio
+    async def test_returns_recovered_task_outcome(self):
+        """Verified runs include task outcome fetched from conversation info."""
+        from unittest.mock import patch
+
+        conversation_id = "12345678-1234-5678-1234-567812345678"
+        outcome = {"status": "success", "summary": "Done"}
+        mock_result = BashCommandResult(
+            found=True,
+            exit_code=0,
+            stdout=f"conversation id: {conversation_id}\nDone",
+            stderr="",
+        )
+
+        with (
+            patch(
+                "openhands.automation.utils.agent_server.get_last_bash_command_result"
+            ) as mock_get,
+            patch(
+                "openhands.automation.utils.agent_server.get_conversation_task_outcome"
+            ) as mock_outcome,
+        ):
+            mock_get.return_value = mock_result
+            mock_outcome.return_value = outcome
+
+            result = await verify_run_on_agent_server(
+                agent_url="http://localhost:3000",
+                session_key="test-key",
+                run_id="run-123",
+            )
+
+        assert result.verified is True
+        assert result.conversation_id == conversation_id
+        assert result.task_outcome == outcome
 
     @pytest.mark.asyncio
     async def test_returns_verified_failure(self):

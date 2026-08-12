@@ -13,6 +13,7 @@ in the ExecutionBackend (see automation/backends/).
 
 import asyncio
 import logging
+from typing import Any
 
 from sqlalchemy import inspect, select, update
 from sqlalchemy.engine import CursorResult
@@ -117,6 +118,12 @@ async def _verify_and_mark_run(
         return result.rowcount > 0
 
     if verification.verified:
+        verification_values: dict[str, Any] = {}
+        if verification.conversation_id:
+            verification_values["conversation_id"] = verification.conversation_id
+        if verification.task_outcome is not None:
+            verification_values["task_outcome"] = verification.task_outcome
+
         exit_code = verification.exit_code
 
         # exit_code == 0: Command completed successfully, we just missed the callback
@@ -136,6 +143,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.COMPLETED,
                     completed_at=now,
+                    **verification_values,
                 )
             )
 
@@ -160,6 +168,7 @@ async def _verify_and_mark_run(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
                     error_detail=f"Timed out: {error_msg}",
+                    **verification_values,
                 )
             )
 
@@ -187,6 +196,7 @@ async def _verify_and_mark_run(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
                     error_detail=error_detail,
+                    **verification_values,
                 )
             )
 

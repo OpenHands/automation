@@ -653,6 +653,14 @@ class RunCompleteRequest(BaseModel):
     conversation_id: str | None = None
     error: str | None = None
     cost: float | None = None
+    agent_outcome: dict[str, Any] | None = Field(
+        default=None,
+        description="Latest SDK task outcome reported in the completion callback.",
+    )
+    task_outcome: dict[str, Any] | None = Field(
+        default=None,
+        description="Alias accepted for clients that send task_outcome directly.",
+    )
 
 
 class AutomationRunResponse(BaseModel):
@@ -664,6 +672,8 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     conversation_id: str | None
     cost: float | None = None
+    task_outcome: dict[str, Any] | None = None
+
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None

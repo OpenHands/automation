@@ -260,6 +260,8 @@ class TestSqliteMigrations:
             }
             assert "cost" in run_columns
 
+            assert "task_outcome" in run_columns
+
             engine.dispose()
         finally:
             # Clean up

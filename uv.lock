@@ -2157,7 +2157,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.24.0"
+version = "2.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2169,9 +2169,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/55/13/17e87641b89b74552ed408a92b231283786523edddc95f3545809fab673c/openai-2.24.0.tar.gz", hash = "sha256:1e5769f540dbd01cb33bc4716a23e67b9d695161a734aff9c5f925e2bf99a673", size = 658717, upload-time = "2026-02-24T20:02:07.958Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/9a/8c75e8c8a5b407a0586faeb2afac91674ff955c191ecc1d6d3b6669f6788/openai-2.54.0.tar.gz", hash = "sha256:e3e6f8bc1ba30ddf381ace1a14340eed381cb984a1a59bd0f34b5be3b5d49cfa", size = 1100285, upload-time = "2026-08-11T18:46:59.035Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c9/30/844dc675ee6902579b8eef01ed23917cc9319a1c9c0c14ec6e39340c96d0/openai-2.24.0-py3-none-any.whl", hash = "sha256:fed30480d7d6c884303287bde864980a4b137b60553ffbcf9ab4a233b7a73d94", size = 1120122, upload-time = "2026-02-24T20:02:05.669Z" },
+    { url = "https://files.pythonhosted.org/packages/64/a8/bb76c7356de8ad57f59d5ff993d434df0607f07f08bcc9c9a5c275e399c0/openai-2.54.0-py3-none-any.whl", hash = "sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b", size = 1660351, upload-time = "2026-08-11T18:46:56.684Z" },
 ]
 
 [[package]]
@@ -2188,23 +2188,20 @@ wheels = [
 
 [[package]]
 name = "openhands-agent-server"
-version = "1.19.1"
-source = { registry = "https://pypi.org/simple" }
+version = "1.41.0"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3#be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
     { name = "docker" },
     { name = "fastapi" },
+    { name = "openai" },
     { name = "openhands-sdk" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
     { name = "websockets" },
     { name = "wsproto" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/60/11/351784b7c6e92583f9832081e9fd7f82984cc9f3e51bb62511df3a138119/openhands_agent_server-1.19.1.tar.gz", hash = "sha256:0cb8d6a681b0645e1e2391e81466436b5573a56f8985e76620902dab2bcc5092", size = 88827, upload-time = "2026-04-30T17:06:46.015Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/5a/d5080844f3bd97c51ad1e24db78520aff6f97458035989a3f16a57503b7d/openhands_agent_server-1.19.1-py3-none-any.whl", hash = "sha256:4c685bcf7f941f087878f51dca2071a110fea360798da4020fc89b034bee7fda", size = 105530, upload-time = "2026-04-30T17:06:48.528Z" },
 ]
 
 [[package]]
@@ -2264,8 +2261,8 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", specifier = "==1.40.1" },
-    { name = "openhands-workspace", specifier = "==1.40.1" },
+    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3" },
+    { name = "openhands-workspace", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
     { name = "pydantic", specifier = ">=2" },
@@ -2294,8 +2291,8 @@ dev = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.40.1"
-source = { registry = "https://pypi.org/simple" }
+version = "1.41.0"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3#be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2304,6 +2301,7 @@ dependencies = [
     { name = "filelock" },
     { name = "httpx", extra = ["socks"] },
     { name = "joserfc" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "lmnr" },
     { name = "pillow" },
@@ -2315,23 +2313,15 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/97/9c/f3d9a7defbc8dd2d834904d46a706229f56dbc751e234343fca81ccc6bb8/openhands_sdk-1.40.1.tar.gz", hash = "sha256:14205c416f327d365826d9e1f14f7514624887269b0ebeec541555f29b63a2cd", size = 655351, upload-time = "2026-08-05T13:04:25.827Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/6f/827a7cb418b6d4e413aef58029f7ed0bb39939da5ef5f1b4103a3e4bf5f8/openhands_sdk-1.40.1-py3-none-any.whl", hash = "sha256:8d574a4104b01bb24d489a7fdf6ed7edf04c301500aae9cc6ae20290524ad9b0", size = 782746, upload-time = "2026-08-05T13:04:20.747Z" },
-]
 
 [[package]]
 name = "openhands-workspace"
-version = "1.40.1"
-source = { registry = "https://pypi.org/simple" }
+version = "1.41.0"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3#be17960b7846fdfc4bd66ce2fb6dd40bd890f6b3" }
 dependencies = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
     { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/ad/e4dac9640ef3a9d8be5c9beebdf4f01df32a803139346e3502533935dbbf/openhands_workspace-1.40.1.tar.gz", hash = "sha256:9eed0e039e36f1740918193d9f20713de686c54001018accc6575ca591d9bfc9", size = 23988, upload-time = "2026-08-05T13:04:27.778Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/05/fcc5303c65af3f1b89bc056a38698e08c091c568e6fa1124ed11b1975c98/openhands_workspace-1.40.1-py3-none-any.whl", hash = "sha256:a48e2018a5a9f0b9623be546d1a9f7954f2cc3cc92afac291951f117dcf80ed8", size = 28317, upload-time = "2026-08-05T13:04:23.473Z" },
 ]
 
 [[package]]

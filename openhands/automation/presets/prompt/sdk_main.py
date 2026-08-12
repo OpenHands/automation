@@ -89,9 +89,8 @@ sandbox_id = os.environ.get("SANDBOX_ID", "")
 # may be missing here even when the agent-server has a valid session key.
 # We still fall back to SESSION_API_KEY for compatibility with cloud-mode
 # deployments and older agent-server versions that only set the bare name.
-session_key = (
-    os.environ.get("OH_SESSION_API_KEYS_0")
-    or os.environ.get("SESSION_API_KEY", "")
+session_key = os.environ.get("OH_SESSION_API_KEYS_0") or os.environ.get(
+    "SESSION_API_KEY", ""
 )
 model_profile = os.environ.get("AUTOMATION_MODEL") or None
 automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
@@ -103,10 +102,7 @@ print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
     # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
-    print(
-        f"  OH_SESSION_API_KEYS_0: "
-        f"{'OK' if session_key else 'NONE (may fail auth)'}"
-    )
+    print(f"  OH_SESSION_API_KEYS_0: {'OK' if session_key else 'NONE (may fail auth)'}")
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
@@ -401,6 +397,7 @@ This automation was triggered by a webhook event:
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
+    print(f"  conversation id: {conversation.id}")
 
     # Set a descriptive title so automation runs are distinguishable in the
     # conversation panel — otherwise the agent-server's autotitle falls back

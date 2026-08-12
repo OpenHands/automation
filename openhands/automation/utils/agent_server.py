@@ -6,6 +6,8 @@ local agent servers.
 """
 
 import logging
+import re
+from typing import Any
 
 import httpx
 from pydantic.dataclasses import dataclass
@@ -14,6 +16,49 @@ from openhands.automation.utils.log_context import log_extra
 
 
 logger = logging.getLogger(__name__)
+
+_UUID_RE = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_CONVERSATION_URL_RE = re.compile(rf"/conversations/(?P<id>{_UUID_RE})")
+_CONVERSATION_ID_RE = re.compile(
+    rf"conversation(?:\s+id)?\s*:\s*(?P<id>{_UUID_RE})",
+    re.IGNORECASE,
+)
+
+
+def extract_conversation_id(output: str) -> str | None:
+    """Extract a conversation id printed by automation preset scripts."""
+    for pattern in (_CONVERSATION_ID_RE, _CONVERSATION_URL_RE):
+        match = pattern.search(output)
+        if match:
+            return match.group("id")
+    return None
+
+
+async def get_conversation_task_outcome(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    """Fetch the latest task_outcome from an agent-server conversation."""
+    try:
+        resp = await client.get(
+            f"{agent_url.rstrip('/')}/api/conversations/{conversation_id}",
+            headers={"X-Session-API-Key": session_key},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        outcome = resp.json().get("task_outcome")
+        return outcome if isinstance(outcome, dict) else None
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch task outcome for conversation %s: %s",
+            conversation_id,
+            e,
+        )
+        return None
 
 
 @dataclass(frozen=True)
@@ -112,6 +157,8 @@ class VerificationResult:
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    conversation_id: str | None = None
+    task_outcome: dict[str, Any] | None = None
 
 
 async def verify_run_on_agent_server(
@@ -168,6 +215,12 @@ async def verify_run_on_agent_server(
             )
 
         success = bash_result.exit_code == 0
+        conversation_id = extract_conversation_id(bash_result.stdout)
+        task_outcome = None
+        if conversation_id:
+            task_outcome = await get_conversation_task_outcome(
+                client, agent_url, session_key, conversation_id
+            )
         logger.info(
             "Verified run status: exit_code=%s, success=%s",
             bash_result.exit_code,
@@ -181,4 +234,6 @@ async def verify_run_on_agent_server(
             exit_code=bash_result.exit_code,
             stdout=bash_result.stdout,
             stderr=bash_result.stderr,
+            conversation_id=conversation_id,
+            task_outcome=task_outcome,
         )

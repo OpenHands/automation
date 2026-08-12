@@ -14,6 +14,8 @@ import httpx
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
     VerificationResult,
+    extract_conversation_id,
+    get_conversation_task_outcome,
     get_last_bash_command_result,
 )
 from openhands.automation.utils.log_context import log_extra
@@ -195,6 +197,12 @@ async def verify_run_status(
             )
 
         success = bash_result.exit_code == 0
+        conversation_id = extract_conversation_id(bash_result.stdout)
+        task_outcome = None
+        if conversation_id:
+            task_outcome = await get_conversation_task_outcome(
+                client, agent_url, session_key, conversation_id
+            )
         logger.info(
             "Verified run status: exit_code=%s, success=%s",
             bash_result.exit_code,
@@ -208,4 +216,6 @@ async def verify_run_status(
             exit_code=bash_result.exit_code,
             stdout=bash_result.stdout,
             stderr=bash_result.stderr,
+            conversation_id=conversation_id,
+            task_outcome=task_outcome,
         )

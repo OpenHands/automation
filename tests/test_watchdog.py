@@ -103,6 +103,47 @@ class TestVerifyAndMarkRunExitCodes:
             assert run.error_detail is None
 
     @pytest.mark.asyncio
+    async def test_exit_code_0_persists_recovered_task_outcome(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """Missed callbacks still persist task outcome recovered from agent-server."""
+        run_id = automation_with_run["run_id"]
+        outcome = {
+            "status": "success",
+            "summary": "Task completed.",
+            "blockers": [],
+            "confidence": 0.98,
+            "needs_user_action": False,
+            "source": "agent",
+        }
+        conversation_id = "12345678-1234-5678-1234-567812345678"
+
+        verification = VerificationResult(
+            verified=True,
+            success=True,
+            exit_code=0,
+            stdout="Success output",
+            stderr="",
+            conversation_id=conversation_id,
+            task_outcome=outcome,
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is True
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+            assert run.conversation_id == conversation_id
+            assert run.task_outcome == outcome
+
     async def test_exit_code_0_keep_alive_true_skips_cleanup(
         self, async_session_factory, automation_with_run, mock_settings
     ):

@@ -2055,6 +2055,31 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.cost is None
 
+    @pytest.mark.parametrize("field_name", ["agent_outcome", "task_outcome"])
+    async def test_complete_run_saves_task_outcome(
+        self, async_client, async_session, field_name
+    ):
+        """Complete endpoint stores the latest SDK task outcome."""
+        run = await self._running_run(async_session)
+        outcome = {
+            "status": "blocked",
+            "summary": "Slack MCP is not configured.",
+            "blockers": ["Missing Slack MCP configuration"],
+            "confidence": 0.94,
+            "needs_user_action": True,
+            "source": "agent",
+        }
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", field_name: outcome},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["task_outcome"] == outcome
+        await async_session.refresh(run)
+        assert run.task_outcome == outcome
+
     async def test_first_completed_run_records_success_outcome(
         self, async_client, async_session
     ):

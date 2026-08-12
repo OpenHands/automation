@@ -110,6 +110,12 @@ class TestAutomationRunResponseUtcSerialisation:
         assert data["completed_at"] is None
         assert data["timeout_at"] is None
 
+    def test_task_outcome_serialises_as_json_object(self):
+        outcome = {"status": "blocked", "summary": "Missing Slack credentials"}
+        run = self._make_run(task_outcome=outcome)
+        data = run.model_dump(mode="json")
+        assert data["task_outcome"] == outcome
+
     def test_already_utc_aware_datetime_serialises_correctly(self):
         run = self._make_run(created_at=_UTC_AWARE)
         data = run.model_dump(mode="json")

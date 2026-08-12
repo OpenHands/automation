@@ -164,6 +164,11 @@ class AutomationRun(Base):
     # force-terminated by the watchdog / cancelled so no callback ever fired.
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Latest structured task outcome reported by the SDK/agent or recovered
+    # from the agent-server when the completion callback is missed.
+    # Uses generic JSON type for cross-database compatibility.
+    task_outcome: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Pre-computed deadline: started_at + max_duration. Set when transitioning
     # to RUNNING, used by the staleness watchdog for efficient indexed queries.
     timeout_at: Mapped[datetime | None] = mapped_column(

@@ -424,6 +424,12 @@ async def complete_run(
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
         values["cost"] = body.cost
+    task_outcome = (
+        body.agent_outcome if body.agent_outcome is not None else body.task_outcome
+    )
+    if task_outcome is not None:
+        values["task_outcome"] = task_outcome
+
     if body.status == "FAILED" and body.error:
         values["error_detail"] = body.error
 

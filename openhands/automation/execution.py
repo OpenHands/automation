@@ -519,6 +519,9 @@ async def run_automation(
         env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     if run_id:
         env_vars["AUTOMATION_RUN_ID"] = run_id
+    if callback_url:
+        env_vars["AUTOMATION_CALLBACK_SUPPORTS_AGENT_OUTCOME"] = "true"
+
     api_url = api_url.rstrip("/")
     sandbox_id: str | None = None
 
