@@ -804,9 +804,7 @@ class TestEffectiveTimeout:
             assert updated.status == AutomationRunStatus.RUNNING
             # Re-anchored to bash start: provisioning padding dropped.
             remaining = (updated.timeout_at - utcnow()).total_seconds()
-            expected = (
-                sandbox_cfg.default_run_duration + sandbox_cfg.run_timeout_margin
-            )
+            expected = sandbox_cfg.default_run_duration + sandbox_cfg.run_timeout_margin
             assert expected - 30 < remaining <= expected
 
 
