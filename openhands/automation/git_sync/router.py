@@ -11,8 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import GitSyncSettings, ServiceSettings, get_config
 from openhands.automation.db import get_session
+from openhands.automation.git_sync.client import GitSyncError, check_remote_access
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
+    resolve_candidate_git_sync_settings,
     resolve_effective_git_sync_settings,
     resolve_effective_sync_interval_seconds,
 )
@@ -26,6 +28,7 @@ from openhands.automation.git_sync.loop import (
     run_sync_cycle,
 )
 from openhands.automation.git_sync.schemas import (
+    GitSyncCheckResponse,
     GitSyncConfigUpdateRequest,
     GitSyncStatusResponse,
     GitSyncTriggerResponse,
@@ -44,6 +47,11 @@ _require_manage_automations = require_permission("manage_automations")
 # Strong references to in-flight manual-trigger tasks -- asyncio only holds
 # weak references to tasks, so without this one could be GC'd mid-run.
 _background_sync_tasks: set[asyncio.Task] = set()
+
+# A reachability check runs while an operator waits on a form, so it gets a
+# tighter bound than the sync cycle's per-command timeout: an unroutable host
+# blocks for the full duration before git gives up.
+_CHECK_TIMEOUT_SECONDS = 20.0
 
 # Maps the config-update request's short field names to GitSyncSettings attrs.
 _CONFIG_OVERRIDE_FIELDS = {
@@ -154,6 +162,52 @@ async def update_git_sync_config(
         session, get_config().git_sync
     )
     return await _build_status_response(session, git_settings)
+
+
+@router.post("/check")
+async def check_git_sync_config(
+    data: GitSyncConfigUpdateRequest,
+    _user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> GitSyncCheckResponse:
+    """Test whether a configuration can reach its repo, without saving it.
+
+    Takes the same body as `PUT /config` and answers for the settings that
+    body *would* leave in place, so a form can be checked before it is
+    stored. Nothing is persisted and no sync runs -- see
+    `check_remote_access` for why this must not be a sync cycle.
+
+    Not gated on git sync being enabled: the point is to get a repo URL and
+    token right before turning it on. Reaching a URL of the caller's choosing
+    is no new capability either -- `PUT /config` already sets the URL the
+    sync loop connects to, behind the same `manage_automations` permission.
+    """
+    candidate = await resolve_candidate_git_sync_settings(
+        session,
+        get_config().git_sync,
+        {
+            _CONFIG_OVERRIDE_FIELDS[key]: value
+            for key, value in data.model_dump(exclude_unset=True).items()
+        },
+    )
+
+    if not candidate.git_sync_repo_url:
+        return GitSyncCheckResponse(ok=False, detail="No repository URL is configured.")
+
+    try:
+        branch_exists = await check_remote_access(
+            candidate.git_sync_repo_url,
+            candidate.git_sync_branch,
+            candidate.git_sync_token,
+            min(candidate.git_sync_git_timeout_seconds, _CHECK_TIMEOUT_SECONDS),
+        )
+    except GitSyncError as e:
+        # A failed check is a successful answer about the configuration, not
+        # a failure of this request -- 200 with `ok: false`.
+        logger.info("Git sync configuration check failed: %s", e)
+        return GitSyncCheckResponse(ok=False, detail=str(e))
+
+    return GitSyncCheckResponse(ok=True, branch_exists=branch_exists)
 
 
 async def _run_sync_cycle_background(

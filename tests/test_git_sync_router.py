@@ -441,3 +441,169 @@ class TestGitSyncSecretsAtRest:
             async_session, get_config().git_sync
         )
         assert effective.git_sync_token == "ghp_supersecrettoken"
+
+
+class TestGitSyncConfigCheck:
+    """`POST /check` answers "would this configuration reach its repo?".
+
+    It exists so an operator does not have to save a repo URL and wait for a
+    cycle to find out it was a typo -- and so that finding out never means
+    running a sync against a repo nobody has vetted yet.
+    """
+
+    @pytest.fixture
+    def captured_check(self, monkeypatch):
+        """Record what the endpoint asks git about, without touching a remote."""
+        import openhands.automation.git_sync.router as router_module
+
+        calls: list[tuple] = []
+
+        async def fake_check(repo_url, branch, token, timeout):
+            calls.append((repo_url, branch, token, timeout))
+            return True
+
+        monkeypatch.setattr(router_module, "check_remote_access", fake_check)
+        return calls
+
+    async def test_requires_manage_automations_permission(self, readonly_client):
+        response = await readonly_client.post(
+            "/api/automation/v1/git-sync/check", json={}
+        )
+        assert response.status_code == 403
+
+    async def test_reports_a_missing_repo_url_without_running_git(
+        self, async_client, captured_check
+    ):
+        response = await async_client.post("/api/automation/v1/git-sync/check", json={})
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is False
+        assert response.json()["detail"]
+        assert captured_check == []
+
+    async def test_checks_the_submitted_values_not_the_saved_ones(
+        self, async_client, captured_check
+    ):
+        """The whole point: test the form before it is saved."""
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/saved.git", "branch": "saved"},
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": "https://example.com/candidate.git", "branch": "new"},
+        )
+
+        assert response.status_code == 200
+        assert captured_check == [
+            ("https://example.com/candidate.git", "new", "", 20.0)
+        ]
+
+    async def test_saves_nothing(self, async_client, captured_check):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/saved.git", "branch": "saved"},
+        )
+
+        await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": "https://example.com/candidate.git", "branch": "new"},
+        )
+
+        body = (await async_client.get("/api/automation/v1/git-sync/status")).json()
+        assert body["repo_url"] == "https://example.com/saved.git"
+        assert body["branch"] == "saved"
+
+    async def test_omitted_fields_come_from_the_saved_config(
+        self, async_client, captured_check
+    ):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={
+                "repo_url": "https://example.com/saved.git",
+                "branch": "saved",
+                "token": "saved-token",
+            },
+        )
+
+        await async_client.post(
+            "/api/automation/v1/git-sync/check", json={"branch": "new"}
+        )
+
+        assert captured_check == [
+            ("https://example.com/saved.git", "new", "saved-token", 20.0)
+        ]
+
+    async def test_null_is_checked_as_the_env_default_not_as_blank(
+        self, async_client, captured_check, monkeypatch
+    ):
+        """Clearing a field reverts it to the env var, so that -- not an empty
+        string -- is the value the check has to report on."""
+        monkeypatch.setenv(
+            "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/from-env.git"
+        )
+        clear_config_cache()
+        try:
+            await async_client.put(
+                "/api/automation/v1/git-sync/config",
+                json={"repo_url": "https://example.com/override.git"},
+            )
+            await async_client.post(
+                "/api/automation/v1/git-sync/check", json={"repo_url": None}
+            )
+        finally:
+            clear_config_cache()
+
+        assert captured_check[0][0] == "https://example.com/from-env.git"
+
+    async def test_an_unreachable_remote_is_a_200_with_ok_false(
+        self, async_client, monkeypatch
+    ):
+        """A bad configuration is an answer, not a server error -- the caller
+        renders `detail`, so it must not have to parse an error response."""
+        import openhands.automation.git_sync.client as client_module
+        import openhands.automation.git_sync.router as router_module
+
+        async def fail(*args, **kwargs):
+            raise client_module.GitSyncError("fatal: repository not found")
+
+        monkeypatch.setattr(router_module, "check_remote_access", fail)
+
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": "https://example.com/gone.git"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is False
+        assert "repository not found" in response.json()["detail"]
+
+    async def test_a_branch_that_does_not_exist_yet_still_passes(
+        self, async_client, monkeypatch
+    ):
+        """The first sync creates it, so this must not read as misconfigured."""
+        import openhands.automation.git_sync.router as router_module
+
+        async def no_branch(*args, **kwargs):
+            return False
+
+        monkeypatch.setattr(router_module, "check_remote_access", no_branch)
+
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": "https://example.com/fresh.git"},
+        )
+
+        assert response.json() == {"ok": True, "branch_exists": False, "detail": None}
+
+    async def test_works_while_sync_is_disabled(self, async_client, captured_check):
+        """Getting the repo URL and token right is what you do *before*
+        enabling sync, so this cannot be gated on it being enabled."""
+        response = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"repo_url": "https://example.com/repo.git"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True

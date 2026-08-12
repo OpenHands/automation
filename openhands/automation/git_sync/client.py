@@ -125,6 +125,37 @@ async def _run_git(
     return stdout.decode(errors="replace")
 
 
+async def check_remote_access(
+    repo_url: str, branch: str, token: str, timeout: float
+) -> bool:
+    """Whether `branch` already exists on `repo_url`; raises if it can't ask.
+
+    Deliberately `ls-remote` and nothing else. This runs before a
+    configuration is trusted, so it must not be a sync: a cycle clones,
+    imports whatever it finds into the local automations, and pushes every
+    dirty automation back -- against a mistyped URL that is the damage, not
+    the diagnosis. `ls-remote` writes nothing anywhere, needs no checkout,
+    and still answers what a typo actually breaks: host unreachable,
+    credentials rejected, repo absent.
+
+    It proves read access only. A token with no write scope passes here and
+    still fails at push time.
+
+    A missing branch is not a failure -- `ensure_repo`/`pull` create it -- so
+    it comes back as False rather than an exception.
+    """
+    # `--` so a repo URL beginning with a dash can't be read as an option
+    # (`--upload-pack=...` would otherwise run a command of the caller's
+    # choosing).
+    out = await _run_git(
+        ["ls-remote", "--heads", "--", repo_url, branch],
+        cwd=None,
+        token=token,
+        timeout=timeout,
+    )
+    return bool(out.strip())
+
+
 async def current_head(workdir: Path) -> str | None:
     """Return the current HEAD commit sha, or `None` on an unborn branch
     (a freshly cloned/created repo with zero commits so far).

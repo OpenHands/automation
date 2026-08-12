@@ -287,7 +287,20 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   checkout and passed to `git add -- <path>`, and each slug directory under it
   is pruned during export, so a traversing value would delete host directories.
 - `git_sync/router.py` exposes `GET /v1/git-sync/status`,
-  `PUT /v1/git-sync/config`, and `POST /v1/git-sync/sync` (manual trigger).
+  `PUT /v1/git-sync/config`, `POST /v1/git-sync/sync` (manual trigger), and
+  `POST /v1/git-sync/check`.
+- `POST /v1/git-sync/check` takes the same body as `PUT /config` and reports
+  whether *that* configuration can reach its repo, without saving it or
+  syncing: `resolve_candidate_git_sync_settings` merges the update in memory,
+  and `check_remote_access` runs a single `git ls-remote`. Keep it that way —
+  validating by running a cycle would clone, import whatever the repo holds
+  into the local automations, and push every dirty automation to a URL nobody
+  has vetted yet, which for a mistyped URL is the damage rather than the
+  diagnosis. It proves read access only: a token with no write scope passes
+  and still fails at push time, and the encryption key is never exercised. A
+  branch that doesn't exist yet is reported as `branch_exists: false`, not a
+  failure — the first cycle creates it. A bad configuration comes back as
+  `200 {"ok": false, "detail": ...}`, since the request itself succeeded.
 - **Sync is manual by default**: the interval defaults to `0`, meaning a
   cycle runs only when `POST /v1/git-sync/sync` is called. Set a positive
   `interval_seconds` via `PUT /v1/git-sync/config` (the UI) to also sync

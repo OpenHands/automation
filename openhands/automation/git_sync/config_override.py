@@ -61,6 +61,35 @@ async def resolve_effective_git_sync_settings(
     return git_settings.model_copy(update=overrides)
 
 
+async def resolve_candidate_git_sync_settings(
+    session: AsyncSession, git_settings: GitSyncSettings, updates: dict[str, Any]
+) -> GitSyncSettings:
+    """The settings a `PUT /config` with `updates` would leave in place.
+
+    Same merge as `apply_git_sync_config_override` followed by
+    `resolve_effective_git_sync_settings`, but without persisting anything --
+    `POST /check` needs to test the configuration the operator is about to
+    save, including the `None`-clears-the-override case, where the value that
+    would actually take effect is the env-var default rather than a blank.
+    """
+    overrides = {
+        key: value
+        for key, value in (await _load_overrides(session)).items()
+        if key != SYNC_INTERVAL_OVERRIDE_KEY
+    }
+    for key, value in updates.items():
+        # The interval rides in the same blob but is not a settings field, so
+        # it is dropped here exactly as it is on the way out of storage --
+        # `model_copy` would otherwise graft it onto the model unvalidated.
+        if key == SYNC_INTERVAL_OVERRIDE_KEY:
+            continue
+        if value is None:
+            overrides.pop(key, None)
+        else:
+            overrides[key] = value
+    return git_settings.model_copy(update=overrides) if overrides else git_settings
+
+
 async def resolve_effective_sync_interval_seconds(session: AsyncSession) -> int:
     """Seconds between automatic syncs; 0 means manual-only.
 

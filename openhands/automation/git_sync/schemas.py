@@ -33,6 +33,23 @@ class GitSyncTriggerResponse(BaseModel):
     triggered: bool
 
 
+class GitSyncCheckResponse(BaseModel):
+    """Result of `POST /v1/git-sync/check`.
+
+    `ok` is about reachability, not correctness: it means git could list the
+    remote's branches with the configured credentials. A token without write
+    scope still passes, and the encryption key is not exercised at all.
+
+    `branch_exists` False alongside `ok` True is normal for a repo that has
+    never been synced -- the first cycle creates the branch.
+    """
+
+    ok: bool
+    branch_exists: bool = False
+    # git's own failure output, with any credentials in the URL redacted.
+    detail: str | None = None
+
+
 class GitSyncConfigUpdateRequest(BaseModel):
     """Partial update for runtime git-sync config overrides.
 

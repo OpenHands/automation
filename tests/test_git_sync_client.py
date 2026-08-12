@@ -12,6 +12,7 @@ import pytest
 from openhands.automation.git_sync.client import (
     GitSyncError,
     _non_interactive_env,
+    check_remote_access,
     commit_and_push,
     current_head,
     ensure_repo,
@@ -373,3 +374,57 @@ class TestCurrentHead:
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
         assert await current_head(workdir) is None
+
+
+class TestCheckRemoteAccess:
+    """`POST /v1/git-sync/check` runs before a configuration is trusted, so
+    this has to answer without cloning, writing, or pushing anything."""
+
+    async def test_reports_an_existing_branch(self, tmp_path, origin):
+        writer = tmp_path / "writer"
+        await ensure_repo(writer, _repo_url(origin), "main", token="", timeout=30)
+        (writer / "file.txt").write_text("content")
+        await commit_and_push(
+            writer, ".", "msg", "Name", "a@b.c", "main", token="", timeout=30
+        )
+
+        assert (
+            await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
+            is True
+        )
+
+    async def test_a_branch_that_does_not_exist_yet_is_not_a_failure(
+        self, tmp_path, origin
+    ):
+        """The first sync creates the branch, so an absent one is fine."""
+        assert (
+            await check_remote_access(
+                _repo_url(origin), "not-created-yet", token="", timeout=30
+            )
+            is False
+        )
+
+    async def test_raises_when_the_remote_cannot_be_reached(self, tmp_path):
+        with pytest.raises(GitSyncError):
+            await check_remote_access(
+                _repo_url(tmp_path / "nothing-here"), "main", token="", timeout=30
+            )
+
+    async def test_leaves_no_checkout_behind(self, tmp_path, origin, monkeypatch):
+        """`ls-remote` and nothing else: a check must not clone, and must not
+        run any command that could write to the remote."""
+        commands: list[list[str]] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            commands.append(list(args))
+            return await real_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+        monkeypatch.chdir(tmp_path)
+
+        await check_remote_access(_repo_url(origin), "main", token="", timeout=30)
+
+        assert len(commands) == 1
+        assert commands[0][1] == "ls-remote"
+        assert list(tmp_path.iterdir()) == [origin]
