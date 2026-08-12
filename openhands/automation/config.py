@@ -204,6 +204,10 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_DEFAULT_RUN_DURATION: Default run time in seconds (default: 600)
         AUTOMATION_MAX_RUN_DURATION: Max user-configurable run time in seconds
             (default: 1800)
+        AUTOMATION_RUN_TIMEOUT_MARGIN: Slack added to watchdog deadlines in
+            seconds (default: 120)
+        AUTOMATION_RUN_TIMEOUT_HARD_GRACE: Extra grace before a still-running
+            verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
@@ -215,6 +219,14 @@ class SandboxSettings(BaseSettings):
 
     default_run_duration: int = 10 * 60  # 10 minutes
     max_run_duration: int = 30 * 60  # 30 minutes
+    # Watchdog-deadline slack: covers the in-sandbox post-conversation tail
+    # (event settle + stats + close + callback POST) plus one watchdog scan
+    # of skew, so the bash service's own timeout always fires first.
+    run_timeout_margin: int = 120
+    # Bound on deferring "command still running" verification results past
+    # the theoretical worst case; only matters if the agent-server's own
+    # bash-timeout enforcement is broken.
+    run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120

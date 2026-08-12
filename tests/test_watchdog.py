@@ -441,3 +441,118 @@ class TestVerifyAndMarkRunVerificationFailed:
 
         assert result is True
         mock_backend.cleanup_after_verification.assert_called_once()
+
+
+class TestVerifyAndMarkRunStillRunning:
+    """Tests for the bounded deferral when the bash command may still be running."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "verification_error",
+        ["Command still running", "No bash output found"],
+    )
+    async def test_still_running_defers_instead_of_failing(
+        self,
+        async_session_factory,
+        automation_with_run,
+        mock_settings,
+        verification_error,
+    ):
+        """A still-running command defers timeout_at; no FAILED, no cleanup."""
+        run_id = automation_with_run["run_id"]
+
+        verification = VerificationResult(
+            verified=False,
+            error=verification_error,
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is False
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.RUNNING
+            assert run.completed_at is None
+            # Deadline pushed up to one watchdog interval into the future.
+            deferred_for = (run.timeout_at - utcnow()).total_seconds()
+            assert 0 < deferred_for <= mock_settings.watchdog_interval_seconds
+
+    @pytest.mark.asyncio
+    async def test_still_running_past_hard_cap_marks_timed_out(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """Exhausting the hard grace makes still-running a terminal timeout."""
+        run_id = automation_with_run["run_id"]
+
+        # Push the run's start far beyond ready-timeout + budget + hard grace.
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.started_at = utcnow() - timedelta(hours=2)
+            await session.commit()
+
+        verification = VerificationResult(
+            verified=False,
+            error="Command still running",
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is True
+        mock_backend.cleanup_after_verification.assert_called_once()
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+            assert run.completed_at is not None
+            assert "Timed out" in run.error_detail
+            assert "Command still running" in run.error_detail
+
+    @pytest.mark.asyncio
+    async def test_still_running_concurrent_callback_wins(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """A callback that lands mid-scan is preserved; the deferral is a no-op."""
+        run_id = automation_with_run["run_id"]
+
+        verification = VerificationResult(
+            verified=False,
+            error="Command still running",
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                stale_timeout_at = run.timeout_at
+                # Callback commits COMPLETED after the watchdog loaded the row.
+                async with async_session_factory() as other_session:
+                    other_run = await other_session.get(AutomationRun, run_id)
+                    other_run.status = AutomationRunStatus.COMPLETED
+                    await other_session.commit()
+                result = await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        assert result is False
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+            assert run.timeout_at == stale_timeout_at
