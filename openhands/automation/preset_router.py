@@ -424,40 +424,35 @@ async def regenerate_preset_prompt_tarball(
     # record stays live so the still-present file remains discoverable for a
     # later retry/cleanup instead of becoming a hidden orphan (file on disk,
     # record marked deleted).
-    old_object_delete_succeeded = False
-    old_object_already_missing = False
+    file_removed = False
     try:
         file_store.delete(source_upload.storage_path)
-        old_object_delete_succeeded = True
+        file_removed = True
     except FileNotFoundError:
-        old_object_already_missing = True
+        file_removed = True
     except Exception as e:
         logger.exception(
             "Failed to delete superseded tarball at %s: %s",
             source_upload.storage_path,
             e,
         )
-    file_removed = old_object_delete_succeeded or old_object_already_missing
     if file_removed:
         source_upload.deleted_at = utcnow()
 
     logger.info(
         "Regenerated preset tarball: automation_id=%s, old_upload_id=%s, "
-        "new_upload_id=%s, old_object_delete_succeeded=%s, "
-        "old_object_already_missing=%s",
+        "new_upload_id=%s, old_object_removed=%s",
         automation.id,
         source_upload.id,
         new_upload_id,
-        old_object_delete_succeeded,
-        old_object_already_missing,
+        file_removed,
         extra={
             "automation_id": str(automation.id),
             "old_upload_id": str(source_upload.id),
             "old_storage_path": source_upload.storage_path,
             "new_upload_id": str(new_upload_id),
             "new_storage_path": storage_path,
-            "old_object_delete_succeeded": old_object_delete_succeeded,
-            "old_object_already_missing": old_object_already_missing,
+            "old_object_removed": file_removed,
         },
     )
 
