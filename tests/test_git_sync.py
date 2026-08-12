@@ -9,6 +9,7 @@ import io
 import subprocess
 import tarfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1140,6 +1141,66 @@ class TestLastError:
             assert last_error == ""
             # Both halves, or /status reports a timestamp with no message.
             assert not last_error_at
+
+
+class TestSyncInProgress:
+    """A cycle reports its outcome only once it ends, so `GET /status` needs a
+    separate signal to tell "running" from "nothing happened" -- otherwise the
+    UI can only guess with a timer, and a cycle the periodic loop started is
+    invisible to it.
+    """
+
+    async def test_reports_the_running_cycle_and_clears_it_afterwards(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        assert loop_module.get_sync_started_at() is None
+
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        seen_while_running: list[datetime | None] = []
+
+        original = loop_module._run_sync_cycle_locked
+
+        async def paused_cycle(*args, **kwargs):
+            started.set()
+            await finish.wait()
+            return await original(*args, **kwargs)
+
+        loop_module._run_sync_cycle_locked = paused_cycle
+        try:
+            await _create_internal_automation(sqlite_session_factory, file_store)
+            cycle = asyncio.create_task(
+                run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+            )
+            await started.wait()
+            seen_while_running.append(loop_module.get_sync_started_at())
+            finish.set()
+            await cycle
+        finally:
+            loop_module._run_sync_cycle_locked = original
+
+        assert seen_while_running[0] is not None
+        assert loop_module.get_sync_started_at() is None
+
+    async def test_clears_the_flag_when_the_cycle_fails(
+        self, sqlite_session_factory, git_settings, service_settings, monkeypatch
+    ):
+        # A failed cycle that left the flag set would report a sync as running
+        # forever, and (with the trigger's no-op guard) lock out every later
+        # manual sync until a restart.
+        import openhands.automation.git_sync.loop as loop_module
+
+        async def failing_pull(*args, **kwargs):
+            raise GitSyncError("simulated pull failure")
+
+        monkeypatch.setattr(loop_module, "pull", failing_pull)
+
+        with pytest.raises(GitSyncError):
+            await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        assert loop_module.get_sync_started_at() is None
 
 
 class TestGitSyncLoop:

@@ -3,8 +3,13 @@
 import asyncio
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openhands.automation.config import clear_config_cache
+from openhands.automation.config import (
+    GitSyncSettings,
+    ServiceSettings,
+    clear_config_cache,
+)
 from openhands.automation.git_sync.router import _background_sync_tasks
 
 
@@ -239,6 +244,78 @@ class TestTriggerGitSync:
             assert len(_background_sync_tasks) == 0
         finally:
             clear_config_cache()
+
+
+class TestSyncInProgressReporting:
+    """`GET /status` has to say a cycle is running: it only reports the outcome
+    once the cycle ends, so a caller watching `last_synced_at` cannot tell a
+    sync in flight from one that never started.
+    """
+
+    @pytest.fixture
+    async def running_cycle(self, monkeypatch):
+        """Hold a cycle open for the duration of a test."""
+        import openhands.automation.git_sync.loop as loop_module
+
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def paused_cycle(*args, **kwargs):
+            started.set()
+            await finish.wait()
+
+        monkeypatch.setattr(loop_module, "_run_sync_cycle_locked", paused_cycle)
+        # The cycle body is replaced above, so these are only here to satisfy
+        # the signature -- nothing reads them.
+        cycle = asyncio.create_task(
+            loop_module.run_sync_cycle(
+                async_sessionmaker(class_=AsyncSession),
+                GitSyncSettings(),
+                ServiceSettings(agent_server_url="http://localhost:3000"),
+            )
+        )
+        yield started, finish, cycle
+        finish.set()
+        await cycle
+
+    async def test_reports_no_sync_when_idle(self, async_client):
+        body = (await async_client.get("/api/automation/v1/git-sync/status")).json()
+
+        assert body["sync_in_progress"] is False
+        assert body["sync_started_at"] is None
+
+    async def test_reports_a_cycle_started_by_the_periodic_loop(
+        self, async_client, running_cycle
+    ):
+        started, _, _ = running_cycle
+        await started.wait()
+
+        body = (await async_client.get("/api/automation/v1/git-sync/status")).json()
+
+        assert body["sync_in_progress"] is True
+        assert body["sync_started_at"] is not None
+
+    async def test_trigger_is_a_no_op_while_a_cycle_is_running(
+        self, async_client, monkeypatch, running_cycle
+    ):
+        # `run_sync_cycle` serializes on a lock, so a second cycle would only
+        # queue behind the running one and repeat what it already covers.
+        started, _, _ = running_cycle
+        await started.wait()
+        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
+        monkeypatch.setenv(
+            "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
+        )
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+        clear_config_cache()
+        try:
+            response = await async_client.post("/api/automation/v1/git-sync/sync")
+        finally:
+            clear_config_cache()
+
+        assert response.status_code == 202
+        assert response.json() == {"triggered": False}
+        assert len(_background_sync_tasks) == 0
 
 
 class TestGitSyncConfigCannotEnableSync:

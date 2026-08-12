@@ -21,6 +21,7 @@ from openhands.automation.git_sync.loop import (
     GIT_SYNC_LAST_ERROR_AT_KEY,
     GIT_SYNC_LAST_ERROR_KEY,
     GIT_SYNC_LAST_RUN_AT_KEY,
+    get_sync_started_at,
     is_git_sync_opted_in,
     run_sync_cycle,
 )
@@ -84,6 +85,8 @@ async def _build_status_response(
         .where(AutomationGitSyncState.dirty.is_(True))
     )
 
+    sync_started_at = get_sync_started_at()
+
     return GitSyncStatusResponse(
         enabled=_is_effectively_enabled(git_settings),
         repo_url=git_settings.git_sync_repo_url,
@@ -96,6 +99,8 @@ async def _build_status_response(
         last_error=last_error or None,
         last_error_at=datetime.fromisoformat(last_error_at) if last_error_at else None,
         dirty_count=dirty_count or 0,
+        sync_in_progress=sync_started_at is not None,
+        sync_started_at=sync_started_at,
     )
 
 
@@ -180,6 +185,12 @@ async def trigger_git_sync(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Git sync is not enabled",
         )
+
+    # A cycle already running picks up everything this one would have -- and
+    # `run_sync_cycle` serializes on a lock anyway, so scheduling another only
+    # queues a redundant round trip behind it.
+    if get_sync_started_at() is not None:
+        return GitSyncTriggerResponse(triggered=False)
 
     session_factory: async_sessionmaker[AsyncSession] = (
         request.app.state.session_factory

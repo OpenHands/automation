@@ -11,6 +11,7 @@ import shutil
 import tarfile
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
@@ -915,6 +916,18 @@ async def _export_dirty_automations(
 # (POST /v1/git-sync/sync) never race on the same git workdir.
 _sync_cycle_lock = asyncio.Lock()
 
+# When the cycle currently holding that lock started, so `GET /status` can
+# report a sync as running rather than leaving callers to infer it from
+# `last_synced_at` moving. Deliberately in-process state, the same scope as
+# the lock it shadows: a crash mid-cycle can't strand a "still running" flag
+# the way a persisted one would.
+_sync_started_at: datetime | None = None
+
+
+def get_sync_started_at() -> datetime | None:
+    """When the in-flight sync cycle started, or None if none is running."""
+    return _sync_started_at
+
 
 async def run_sync_cycle(
     session_factory: async_sessionmaker[AsyncSession],
@@ -922,7 +935,9 @@ async def run_sync_cycle(
     service_settings: ServiceSettings,
 ) -> SyncCycleResult:
     """Run one full pull -> import -> export -> push sync cycle."""
+    global _sync_started_at
     async with _sync_cycle_lock:
+        _sync_started_at = utcnow()
         try:
             return await _run_sync_cycle_locked(
                 session_factory, git_settings, service_settings
@@ -937,6 +952,8 @@ async def run_sync_cycle(
                 )
                 await session.commit()
             raise
+        finally:
+            _sync_started_at = None
 
 
 async def _run_sync_cycle_locked(

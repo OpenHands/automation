@@ -18,9 +18,18 @@ class GitSyncStatusResponse(BaseModel):
     last_error: str | None
     last_error_at: UtcDatetime | None
     dirty_count: int
+    # A cycle only reports its outcome (`last_synced_at`, `last_error_at`) once
+    # it finishes, so without these a caller can't tell "running" from
+    # "nothing happened" -- the UI had to guess with a fixed poll window, and
+    # a cycle the periodic loop started was invisible to it.
+    sync_in_progress: bool = False
+    sync_started_at: UtcDatetime | None = None
 
 
 class GitSyncTriggerResponse(BaseModel):
+    """`triggered` is False when a cycle was already running: the trigger is
+    a no-op then, since that cycle picks up everything this one would have."""
+
     triggered: bool
 
 

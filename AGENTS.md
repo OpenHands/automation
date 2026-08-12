@@ -330,6 +330,15 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   503 rather than storing the secret in the clear.
 - `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
   the most recent failed cycle, cleared on the next successful one.
+- **In-flight cycles**: a cycle writes its outcome only when it ends, so
+  `/status` also reports `sync_in_progress`/`sync_started_at` — otherwise a
+  caller can't tell a running sync from one that never started, and a cycle
+  the periodic loop began is invisible to the UI. The flag is in-process
+  state (`get_sync_started_at`), scoped like the `_sync_cycle_lock` it
+  shadows: a crash mid-cycle can't strand it the way a persisted flag would.
+  `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
+  when one is already running — that cycle covers everything the new one
+  would, and the lock would only queue it behind anyway.
 
 ## Release Procedure
 
