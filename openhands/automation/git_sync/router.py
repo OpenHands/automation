@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from typing import Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -46,15 +47,15 @@ _require_manage_automations = require_permission("manage_automations")
 
 # Strong references to in-flight manual-trigger tasks -- asyncio only holds
 # weak references to tasks, so without this one could be GC'd mid-run.
-_background_sync_tasks: set[asyncio.Task] = set()
+_background_sync_tasks: Final[set[asyncio.Task]] = set()
 
 # A reachability check runs while an operator waits on a form, so it gets a
 # tighter bound than the sync cycle's per-command timeout: an unroutable host
 # blocks for the full duration before git gives up.
-_CHECK_TIMEOUT_SECONDS = 20.0
+_CHECK_TIMEOUT_SECONDS: Final = 20.0
 
 # Maps the config-update request's short field names to GitSyncSettings attrs.
-_CONFIG_OVERRIDE_FIELDS = {
+_CONFIG_OVERRIDE_FIELDS: Final = {
     "enabled": "git_sync_enabled",
     "interval_seconds": "git_sync_interval_seconds",
     "repo_url": "git_sync_repo_url",

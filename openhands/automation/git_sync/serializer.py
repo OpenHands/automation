@@ -15,7 +15,7 @@ import tarfile
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import yaml
 from pydantic import SecretStr
@@ -28,15 +28,15 @@ from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 logger = logging.getLogger("automation.git_sync")
 
 # Filename for per-automation metadata within its slug directory.
-METADATA_FILENAME = "automation.yaml"
+METADATA_FILENAME: Final = "automation.yaml"
 
 # Subdirectory holding the extracted tarball contents.
-TARBALL_DIRNAME = "tarball"
+TARBALL_DIRNAME: Final = "tarball"
 
-_TARBALL_PREFIX = f"{TARBALL_DIRNAME}/"
+_TARBALL_PREFIX: Final = f"{TARBALL_DIRNAME}/"
 
-_SLUG_INVALID_RE = re.compile(r"[^a-z0-9]+")
-_MAX_SLUG_BASE_LEN = 80
+_SLUG_INVALID_RE: Final = re.compile(r"[^a-z0-9]+")
+_MAX_SLUG_BASE_LEN: Final = 80
 
 
 def compute_slug(name: str, automation_id: uuid.UUID, taken: set[str]) -> str:
