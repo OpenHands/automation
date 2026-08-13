@@ -130,6 +130,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from conversation_title import set_conversation_title
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
@@ -449,6 +450,11 @@ This automation was triggered by a webhook event:
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
+    conversation_title = set_conversation_title(
+        workspace, conversation.id, event_context
+    )
+    if conversation_title:
+        print(f"  title: {conversation_title}")
     print(f"  plugins loaded: {len(plugin_sources)}")
     if experiment_tags:
         print(f"  experiment tags: {experiment_tags}")

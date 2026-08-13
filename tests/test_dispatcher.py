@@ -846,6 +846,7 @@ class TestBuildEventPayload:
         assert payload["trigger"] == "cron"
         assert payload["trigger_payload"] == trigger
         assert payload["automation_name"] == "Test"
+        assert payload["run_id"] == str(run.id)
 
     def test_event_trigger_uses_type_string(self):
         """Event trigger preserves full dict in trigger_payload."""
