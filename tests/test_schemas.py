@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from openhands.automation.config import clear_config_cache
 from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
@@ -49,6 +50,9 @@ class TestEnsureUtc:
 
 
 class TestCronTriggerValidation:
+    def teardown_method(self):
+        clear_config_cache()
+
     def test_accepts_valid_cron_and_timezone(self):
         trigger = CronTrigger(schedule="0 9 * * *", timezone="America/New_York")
 
@@ -64,6 +68,26 @@ class TestCronTriggerValidation:
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValidationError, match="Invalid timezone"):
             CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
+
+    def test_default_allows_any_valid_interval(self):
+        trigger = CronTrigger(schedule="* * * * *")
+
+        assert trigger.schedule == "* * * * *"
+
+    def test_rejects_schedule_below_configured_interval(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", "300")
+        clear_config_cache()
+
+        with pytest.raises(ValidationError, match="at least 300 seconds"):
+            CronTrigger(schedule="* * * * *")
+
+    def test_accepts_schedule_at_configured_interval(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", "300")
+        clear_config_cache()
+
+        trigger = CronTrigger(schedule="*/5 * * * *")
+
+        assert trigger.schedule == "*/5 * * * *"
 
 
 class TestAutomationRunResponseUtcSerialisation:

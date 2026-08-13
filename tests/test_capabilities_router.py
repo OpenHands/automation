@@ -217,6 +217,17 @@ class TestGetCapabilities:
 
         assert response.json()["triggers"]["cron"]["minIntervalSeconds"] == 300
 
+    async def test_advertises_a_higher_configured_cron_floor(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """Clients see the same deployment floor enforced by trigger validation."""
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", "900")
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        assert response.json()["triggers"]["cron"]["minIntervalSeconds"] == 900
+
 
 class TestValidateDraft:
     """Tests for POST /v1/validate endpoint."""

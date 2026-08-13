@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -338,6 +338,8 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_WORKSPACE_BASE: Base workspace directory (local mode default)
 
         # Background workers
+        AUTOMATION_MIN_CRON_INTERVAL_SECONDS: Minimum allowed gap between cron
+            fire times (default: 0, disabled)
         AUTOMATION_SCHEDULER_INTERVAL_SECONDS: Scheduler poll interval (default: 60)
         AUTOMATION_SCHEDULER_BATCH_SIZE: Scheduler batch size (default: 50)
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
@@ -423,6 +425,7 @@ class ServiceSettings(BaseSettings):
     # Background workers
     scheduler_interval_seconds: int = 60
     scheduler_batch_size: int = 50
+    min_cron_interval_seconds: int = Field(default=0, ge=0)
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
