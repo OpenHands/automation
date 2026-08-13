@@ -25,7 +25,7 @@ from typing import Final
 logger = logging.getLogger("automation.git_sync")
 
 # The userinfo component of a URL: everything between "://" and "@".
-_URL_CREDENTIALS_RE: Final = re.compile(r"(?<=://)[^/@\s]+(?=@)")
+_URL_CREDENTIALS_RE: Final[re.Pattern[str]] = re.compile(r"(?<=://)[^/@\s]+(?=@)")
 
 
 class GitSyncError(Exception):

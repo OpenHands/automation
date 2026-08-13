@@ -28,10 +28,13 @@ from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 
 logger = logging.getLogger("automation.git_sync")
 
-SECRET_KEY_FILENAME: Final = ".git-sync-secret-key"
+SECRET_KEY_FILENAME: Final[str] = ".git-sync-secret-key"
 
 # GitSyncSettings fields whose values are secrets rather than configuration.
-SECRET_OVERRIDE_FIELDS: Final = ("git_sync_token", "git_sync_encryption_key")
+SECRET_OVERRIDE_FIELDS: Final[tuple[str, ...]] = (
+    "git_sync_token",
+    "git_sync_encryption_key",
+)
 
 
 class GitSyncSecretStoreError(Exception):

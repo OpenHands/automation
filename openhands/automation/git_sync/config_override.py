@@ -21,17 +21,17 @@ from openhands.automation.utils.service_metadata import (
 )
 
 
-GIT_SYNC_CONFIG_OVERRIDE_KEY: Final = "git_sync_config_override"
+GIT_SYNC_CONFIG_OVERRIDE_KEY: Final[str] = "git_sync_config_override"
 
 # The sync interval is runtime-only config: unlike the repo, branch, path,
 # credentials and author, it has no environment variable and is set solely
 # from the UI (PUT /v1/git-sync/config). It rides in the same override blob
 # but is not a GitSyncSettings field, so it is filtered out before the blob
 # is merged onto that model.
-SYNC_INTERVAL_OVERRIDE_KEY: Final = "git_sync_interval_seconds"
+SYNC_INTERVAL_OVERRIDE_KEY: Final[str] = "git_sync_interval_seconds"
 
 # 0 means manual-only: nothing syncs until POST /v1/git-sync/sync is called.
-DEFAULT_SYNC_INTERVAL_SECONDS: Final = 0
+DEFAULT_SYNC_INTERVAL_SECONDS: Final[int] = 0
 
 
 async def _load_overrides(session: AsyncSession) -> dict[str, Any]:

@@ -79,15 +79,15 @@ logger = logging.getLogger("automation.git_sync")
 # How often the loop re-reads config while sync is manual-only. This is the
 # worst-case delay before an interval set from the UI takes effect, so it is
 # kept short; the tick is a single indexed metadata read, not a sync.
-_IDLE_POLL_SECONDS: Final = 15
+_IDLE_POLL_SECONDS: Final[int] = 15
 
-GIT_SYNC_LAST_COMMIT_KEY: Final = "git_sync_last_commit"
-GIT_SYNC_LAST_PATH_KEY: Final = "git_sync_last_path"
-GIT_SYNC_LAST_RUN_AT_KEY: Final = "git_sync_last_run_at"
-GIT_SYNC_LAST_ERROR_KEY: Final = "git_sync_last_error"
-GIT_SYNC_LAST_ERROR_AT_KEY: Final = "git_sync_last_error_at"
+GIT_SYNC_LAST_COMMIT_KEY: Final[str] = "git_sync_last_commit"
+GIT_SYNC_LAST_PATH_KEY: Final[str] = "git_sync_last_path"
+GIT_SYNC_LAST_RUN_AT_KEY: Final[str] = "git_sync_last_run_at"
+GIT_SYNC_LAST_ERROR_KEY: Final[str] = "git_sync_last_error"
+GIT_SYNC_LAST_ERROR_AT_KEY: Final[str] = "git_sync_last_error_at"
 
-_TRIGGER_ADAPTER: Final[TypeAdapter] = TypeAdapter(Trigger)
+_TRIGGER_ADAPTER: Final[TypeAdapter[Trigger]] = TypeAdapter(Trigger)
 
 
 def is_git_sync_opted_in() -> bool:
@@ -915,7 +915,7 @@ async def _export_dirty_automations(
 
 # Serializes cycles so the periodic loop and a manual trigger
 # (POST /v1/git-sync/sync) never race on the same git workdir.
-_sync_cycle_lock: Final = asyncio.Lock()
+_sync_cycle_lock: Final[asyncio.Lock] = asyncio.Lock()
 
 # When the cycle currently holding that lock started, so `GET /status` can
 # report a sync as running rather than leaving callers to infer it from

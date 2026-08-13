@@ -12,7 +12,7 @@ from typing import Final
 # Sleep used when a callable `interval_seconds` fails before it has ever
 # resolved. Without it the first-pass seed would be 0.0 and the loop would
 # spin at full speed for as long as the failure lasts.
-_UNRESOLVED_INTERVAL_SECONDS: Final = 5.0
+_UNRESOLVED_INTERVAL_SECONDS: Final[float] = 5.0
 
 
 async def run_periodic_loop(

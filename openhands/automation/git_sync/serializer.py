@@ -28,15 +28,15 @@ from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 logger = logging.getLogger("automation.git_sync")
 
 # Filename for per-automation metadata within its slug directory.
-METADATA_FILENAME: Final = "automation.yaml"
+METADATA_FILENAME: Final[str] = "automation.yaml"
 
 # Subdirectory holding the extracted tarball contents.
-TARBALL_DIRNAME: Final = "tarball"
+TARBALL_DIRNAME: Final[str] = "tarball"
 
-_TARBALL_PREFIX: Final = f"{TARBALL_DIRNAME}/"
+_TARBALL_PREFIX: Final[str] = f"{TARBALL_DIRNAME}/"
 
-_SLUG_INVALID_RE: Final = re.compile(r"[^a-z0-9]+")
-_MAX_SLUG_BASE_LEN: Final = 80
+_SLUG_INVALID_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
+_MAX_SLUG_BASE_LEN: Final[int] = 80
 
 
 def compute_slug(name: str, automation_id: uuid.UUID, taken: set[str]) -> str:
