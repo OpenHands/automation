@@ -93,9 +93,8 @@ async def lifespan(app: FastAPI):
         migrations_path = package_dir / "migrations"
 
         if not migrations_path.is_dir():
-            # Fallback: running from a source checkout, where migrations live
-            # at the repo root -- two levels up from openhands/automation, not
-            # one (openhands/migrations never exists).
+            # Fallback: a source checkout keeps migrations at the repo root --
+            # two levels up from openhands/automation, not one.
             repo_root_migrations = package_dir.parent.parent / "migrations"
             if repo_root_migrations.is_dir():
                 migrations_path = repo_root_migrations
@@ -186,15 +185,12 @@ async def lifespan(app: FastAPI):
             "contain sensitive automation content.",
             config.git_sync.git_sync_repo_url or "the repo configured from the UI",
         )
-        # Started on the env opt-in alone, without requiring a repo URL: the
-        # repo can be filled in from the Git Sync page, and gating this on it
-        # left the loop unstarted for the whole process lifetime -- along with
-        # mark_git_sync_dirty, so that setup reported a healthy sync while
-        # never exporting anything.
+        # Started on the env opt-in alone: the repo can come from the UI, and
+        # gating on it left the loop (and mark_git_sync_dirty) off for the
+        # process lifetime, reporting a healthy sync while exporting nothing.
         #
-        # Always started, even while sync is manual-only: the interval is
-        # set from the UI at runtime, and this task is what notices a newly
-        # configured one. It idles without syncing while the interval is 0.
+        # Started even while manual-only, since this task is what notices a
+        # newly set interval. It idles without syncing while the interval is 0.
         git_sync_task = asyncio.create_task(
             git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
         )

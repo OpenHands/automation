@@ -1,7 +1,6 @@
 """Tests for the git sync CLI wrapper.
 
-Uses real local git repos (a bare "origin" plus working clones) instead of
-mocking subprocess calls.
+Uses real local repos (a bare "origin" plus clones), not mocked subprocesses.
 """
 
 import asyncio
@@ -50,8 +49,8 @@ class TestEnsureRepo:
         assert marker.exists()
 
     async def test_repoints_origin_when_repo_url_changes(self, tmp_path, origin):
-        """An existing checkout must repoint, not silently keep syncing
-        against a stale origin, when AUTOMATION_GIT_SYNC_REPO_URL changes."""
+        """A changed repo URL must repoint an existing checkout, not keep
+        syncing against the stale origin."""
         other_origin = tmp_path / "other_origin"
         other_origin.mkdir()
         subprocess.run(
@@ -102,8 +101,8 @@ class TestPull:
     async def test_pull_creates_local_branch_when_target_branch_is_new(
         self, tmp_path, origin
     ):
-        """Overriding `branch` to a name that exists nowhere yet must create
-        it locally, not silently stay on whatever branch was checked out."""
+        """Overriding `branch` to a name that exists nowhere must create it
+        locally, not stay on whatever was checked out."""
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
         head = await pull(workdir, "feature-x", token="", timeout=30)
@@ -135,14 +134,12 @@ class TestPull:
     async def test_repointing_to_an_empty_origin_prunes_stale_remote_refs(
         self, tmp_path, origin
     ):
-        """Switching `git_sync_repo_url` to a repo that has no commits yet
-        must drop the previous remote's tracking refs.
+        """Switching to a repo with no commits yet must drop the previous
+        remote's tracking refs.
 
-        Without pruning, `origin/{branch}` survives the switch still pointing
-        at the *old* remote's commit. That makes `_remote_branch_exists`
-        report True and `_local_branch_ahead_of_remote` compute 0 commits
-        ahead, so the cycle concludes it is already in sync and silently
-        never pushes to the new remote -- with no error to surface.
+        Without pruning, `origin/{branch}` survives pointing at the *old*
+        remote's commit, so the cycle concludes it is already in sync and
+        silently never pushes to the new remote -- with no error raised.
         """
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
@@ -242,15 +239,14 @@ class TestCommitAndPush:
     async def test_retries_push_when_local_commit_was_never_pushed(
         self, tmp_path, origin
     ):
-        """A commit that landed locally but failed to push (e.g. network
-        blip) must still get pushed on the next call, even with nothing new
-        to stage."""
+        """A commit that landed locally but failed to push must still go out
+        on the next call, even with nothing new to stage."""
         workdir = tmp_path / "clone"
         await ensure_repo(workdir, _repo_url(origin), "main", token="", timeout=30)
         (workdir / "file.txt").write_text("hi")
         subprocess.run(["git", "add", "."], cwd=workdir, check=True)
-        # Commit locally WITHOUT pushing -- simulates commit_and_push's
-        # commit step succeeding and the push step failing right after.
+        # Commit locally WITHOUT pushing: commit_and_push's commit step
+        # succeeding and its push step failing right after.
         subprocess.run(
             [
                 "git",
@@ -273,8 +269,7 @@ class TestCommitAndPush:
             text=True,
         ).stdout.strip()
 
-        # Nothing new to stage this time -- the working tree already
-        # matches the unpushed commit.
+        # Nothing new to stage: the working tree already matches the commit.
         sha = await commit_and_push(
             workdir, ".", "retry", "Bot", "bot@example.com", "main", "", 30
         )
@@ -338,9 +333,8 @@ class TestNonInteractive:
     ):
         """Guards the wiring, not just the helper.
 
-        Nothing can answer a git prompt in a background service with no
-        terminal, so an interactive credential request blocks until the
-        subprocess timeout expires and burns the whole cycle. Dropping
+        Nothing can answer a git prompt in a background service, so a
+        credential request blocks until the timeout burns the cycle. Dropping
         `env=` from the subprocess call would silently allow that again.
         """
         captured: dict[str, str] = {}
@@ -377,8 +371,8 @@ class TestCurrentHead:
 
 
 class TestCheckRemoteAccess:
-    """`POST /v1/git-sync/check` runs before a configuration is trusted, so
-    this has to answer without cloning, writing, or pushing anything."""
+    """`POST /v1/git-sync/check` runs before a configuration is trusted, so it
+    must answer without cloning, writing, or pushing anything."""
 
     async def test_reports_an_existing_branch(self, tmp_path, origin):
         writer = tmp_path / "writer"

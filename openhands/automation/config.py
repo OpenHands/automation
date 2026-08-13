@@ -293,27 +293,25 @@ class KVSettings(BaseSettings):
 def normalize_git_sync_path(path: str) -> str:
     """Normalize a repo-relative sync path, rejecting anything that escapes it.
 
-    The sync path is joined onto the local checkout directory, and the result
-    is both `shutil.rmtree`'d per automation during export and handed to
-    `git add -- <path>` during the push, so it must stay inside the repo:
+    The path is joined onto the checkout directory, then `shutil.rmtree`'d per
+    automation on export and passed to `git add -- <path>` on push, so it must
+    stay inside the repo:
 
-    - `..` segments are rejected outright. Since the path is settable at
-      runtime (PUT /v1/git-sync/config), a traversing value would otherwise
-      point `sync_root` at an arbitrary host directory and delete any
-      subdirectory there whose name matches an automation slug.
-    - Leading slashes are stripped rather than rejected, so a mistyped
-      "/automations" is read as repo-relative instead of as an absolute host
-      path (`Path("/repo") / "/etc"` is `/etc` -- pathlib discards the left
-      side entirely when the right side is absolute).
-    - Trailing slashes are stripped because `_changed_slugs_since` matches
-      changed files against an `f"{sync_path}/"` prefix; "automations/" would
-      produce "automations//", match nothing, and silently mute every import.
-    - An empty result is rejected: `git add -A -- ""` fails with "empty
-      string is not a valid pathspec", wedging every subsequent cycle.
+    - `..` is rejected: the path is settable at runtime, so a traversing value
+      would point `sync_root` at an arbitrary host directory and delete any
+      subdirectory there matching an automation slug.
+    - Leading slashes are stripped, not rejected, so a mistyped "/automations"
+      stays repo-relative (`Path("/repo") / "/etc"` is `/etc` -- pathlib drops
+      the left side when the right is absolute).
+    - Trailing slashes are stripped because `_changed_slugs_since` matches an
+      `f"{sync_path}/"` prefix; "automations/" would match nothing and
+      silently mute every import.
+    - An empty result is rejected: `git add -A -- ""` is not a valid pathspec
+      and would wedge every cycle.
     """
-    # Backslashes are not path separators on the platforms this service runs
-    # on, but a Windows-style value pasted into the UI should not smuggle a
-    # traversal segment past the "/"-based split below.
+    # Backslashes aren't separators on the platforms this runs on, but a
+    # Windows-style value pasted into the UI shouldn't smuggle a traversal
+    # segment past the "/"-based split below.
     segments = [
         segment
         for segment in path.strip().replace("\\", "/").split("/")
@@ -331,10 +329,9 @@ def normalize_git_sync_path(path: str) -> str:
 class GitSyncSettings(BaseSettings):
     """Git sync configuration for backing up/versioning automations in git.
 
-    When enabled, automations are serialized to files and pushed to a git
-    repo, and changes pushed there (e.g. via a PR) are pulled back. Only
-    active in local/self-hosted mode -- a single repo maps to a single
-    agent server, which doesn't fit the multi-tenant SaaS deployment.
+    When enabled, automations are serialized to files and pushed to a git repo,
+    and changes pushed there (e.g. via a PR) are pulled back. Local mode only:
+    one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
 
     Environment variables (AUTOMATION_ prefix):
         AUTOMATION_GIT_SYNC_ENABLED: Enable git sync (default: False). Only
@@ -361,10 +358,8 @@ class GitSyncSettings(BaseSettings):
             subprocess invocations (default: 60).
     """
 
-    # NOTE: the sync interval is deliberately NOT here. It is runtime-only
-    # config, set from the UI via PUT /v1/git-sync/config and stored with the
-    # other overrides -- see DEFAULT_SYNC_INTERVAL_SECONDS in
-    # git_sync/config_override.py.
+    # The sync interval is deliberately not here: it is runtime-only, set from
+    # the UI and stored with the other overrides. See config_override.py.
     git_sync_enabled: bool = False
     git_sync_repo_url: str = ""
     git_sync_branch: str = "main"
@@ -380,12 +375,11 @@ class GitSyncSettings(BaseSettings):
 
     @property
     def enabled(self) -> bool:
-        """Check if git sync is configured (enabled and a repo URL is set).
+        """Whether git sync is configured: enabled and a repo URL is set.
 
-        Deliberately doesn't raise when misconfigured -- this section is
-        constructed eagerly regardless of deployment mode, so raising here
-        would crash every deployment on a bad env var. app.py logs a
-        warning instead once it knows the deployment mode.
+        Doesn't raise when misconfigured -- this section is constructed
+        eagerly regardless of deployment mode, so raising would crash every
+        deployment on a bad env var. app.py warns once it knows the mode.
         """
         return bool(self.git_sync_enabled and self.git_sync_repo_url)
 

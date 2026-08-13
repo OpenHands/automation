@@ -40,12 +40,10 @@ _MAX_SLUG_BASE_LEN: Final[int] = 80
 
 
 def compute_slug(name: str, automation_id: uuid.UUID, taken: set[str]) -> str:
-    """Compute a stable, filesystem-safe directory name for an automation.
+    """A stable, filesystem-safe directory name for an automation.
 
-    Derived from the automation's name (lowercased, non-alphanumeric runs
-    collapsed to a single hyphen). Falls back to appending a short id suffix
-    when the base slug collides with another automation's slug (`taken`),
-    so directory names stay unique within the sync repo.
+    Derived from the name (lowercased, non-alphanumeric runs collapsed to a
+    hyphen), with a short id suffix appended when it collides with `taken`.
     """
     base = _SLUG_INVALID_RE.sub("-", name.strip().lower()).strip("-")
     base = base[:_MAX_SLUG_BASE_LEN].strip("-") or "automation"
@@ -63,12 +61,10 @@ class DeserializedAutomation:
 
 
 def _safe_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    """Sanitize a tar member against path traversal (e.g. "../../etc/passwd").
+    """Sanitize a tar member against path traversal ("../../etc/passwd").
 
-    Tarballs are user-provided content (uploaded via /v1/uploads with no
-    member-name validation). `tarfile.data_filter` rejects members that
-    would resolve outside the destination and rewrites absolute paths to
-    relative ones. Returns `None` if the member should be skipped entirely.
+    Tarballs are user-provided (uploaded via /v1/uploads, which does not
+    validate member names). `None` means skip the member entirely.
     """
     try:
         return tarfile.data_filter(member, "")
@@ -80,10 +76,9 @@ def _safe_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
 def _normalize_member_name(name: str) -> str:
     """Drop the redundant "./" segments `tar -czf archive.tgz .` produces.
 
-    `tarfile.data_filter` leaves them in place, so the same file would be
-    committed as `tarball/./main.py` on the way out and looked up as
-    `./main.py` on the way back -- never matching the plain `main.py` an
-    unprefixed tarball yields for identical content.
+    `data_filter` leaves them in place, so identical content would be committed
+    as `tarball/./main.py` and never match the plain `main.py` an unprefixed
+    tarball yields.
     """
     return "/".join(part for part in name.split("/") if part and part != ".")
 
@@ -91,27 +86,23 @@ def _normalize_member_name(name: str) -> str:
 def _extract_tarball_files(tarball_bytes: bytes) -> tuple[dict[str, bytes], list[str]]:
     """Extract a tarball into `{name: content}` plus the executable names.
 
-    The executable list is carried in automation.yaml because the extracted
-    files are committed as plain content: without it the mode is gone by the
-    time `rebuild_tarball` runs, and an executable entrypoint that isn't
-    named `*.sh` came back as 0644 and failed at runtime with "Permission
-    denied".
+    Files are committed as plain content, so the mode would be lost by the time
+    `rebuild_tarball` runs; automation.yaml carries the executable list instead.
+    Without it, an executable entrypoint not named `*.sh` came back 0644.
     """
     files: dict[str, bytes] = {}
     executables: list[str] = []
 
-    # `r:*` rather than `r:gz`: the upload endpoint validates the Content-Type
-    # header, not the bytes, so a plain (uncompressed) tar is stored happily
-    # and runs fine -- nothing else ever re-reads it through tarfile. Insisting
-    # on gzip here made such an automation raise on every cycle; the export
-    # logs and skips it without clearing `dirty`, so it stayed dirty forever
-    # and never reached the repo.
+    # `r:*`, not `r:gz`: the upload endpoint validates the Content-Type header
+    # rather than the bytes, so an uncompressed tar is stored and runs fine.
+    # Insisting on gzip made such an automation raise every cycle, and the
+    # export skips a failure without clearing `dirty` -- so it never synced.
     with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:*") as tar:
         for member in tar.getmembers():
             if not member.isfile():
                 if member.issym() or member.islnk():
-                    # Not representable as a committed file; the automation
-                    # would silently lose it, so say so rather than not.
+                    # Not representable as a committed file, so the automation
+                    # silently loses it -- say so.
                     logger.warning(
                         "Skipping link member %r in tarball: git sync stores "
                         "regular files only",
@@ -156,9 +147,8 @@ def _automation_yaml_fields(
             "url": None if tarball_is_internal else automation.tarball_path,
         },
     }
-    # Omitted entirely when nothing is executable, so the common case keeps
-    # the metadata file free of an empty list -- and so upgrading doesn't
-    # rewrite every already-synced automation.yaml just to add one.
+    # Omitted when nothing is executable, so upgrading doesn't rewrite every
+    # already-synced automation.yaml just to add an empty list.
     if tarball_executables:
         fields["tarball_executables"] = tarball_executables
     return fields
@@ -169,9 +159,8 @@ def serialize_automation(
 ) -> dict[str, bytes]:
     """Serialize an automation to a `{relative_path: content}` file tree.
 
-    `tarball_bytes` is already fetched by the caller (this does no I/O);
-    pass `None` when there's no tarball to extract (external URL, or
-    unavailable).
+    Does no I/O -- the caller fetches `tarball_bytes`, passing `None` when
+    there is nothing to extract (external URL, or unavailable).
     """
     tarball_is_internal = is_internal_url(automation.tarball_path)
 
@@ -199,21 +188,19 @@ def serialize_automation(
 
 def is_generated_path(rel_path: str) -> bool:
     """Whether `rel_path` (relative to a slug directory) is one this module
-    writes, as opposed to a file the user committed alongside it.
+    writes, rather than a file the user committed alongside it.
 
-    The export prunes only these before rewriting, so a README, a .gitignore
-    or review notes living next to the generated files survive a re-export
-    instead of being deleted and having that deletion pushed back.
+    The export prunes only these, so a README or .gitignore next to them
+    survives a re-export instead of being deleted and the deletion pushed back.
     """
     return rel_path == METADATA_FILENAME or rel_path.startswith(_TARBALL_PREFIX)
 
 
 def compute_content_hash(files: dict[str, bytes]) -> str:
-    """Stable SHA-256 hash over a serialized automation's file tree.
+    """Stable SHA-256 over a serialized automation's file tree.
 
-    Takes the same `{relative_path: content}` shape `serialize_automation`
-    returns. Used to detect no-op sync cycles without re-diffing the whole
-    tree on disk.
+    Takes `serialize_automation`'s `{relative_path: content}` shape. Detects
+    no-op sync cycles without re-diffing the tree on disk.
     """
     hasher = hashlib.sha256()
     for name in sorted(files):
@@ -228,14 +215,11 @@ def rebuild_tarball(
 ) -> bytes:
     """Rebuild a tar.gz from `{relative_path: content}` files.
 
-    `executable_names` is the `tarball_executables` list from automation.yaml
-    and is trusted exactly, including when empty. `None` means the metadata
-    predates that field (a repo synced by an older build), and the original
-    `*.sh` heuristic is used so those automations keep the modes they have
-    today rather than losing them on the next import.
+    `executable_names` is automation.yaml's `tarball_executables`, trusted
+    exactly, empty included. `None` means metadata predating that field, where
+    the old `*.sh` heuristic keeps those automations' current modes.
 
-    Member order and mtimes are fixed for determinism; `compute_content_hash`
-    hashes the extracted files directly, not these compressed bytes.
+    Member order and mtimes are fixed for determinism.
     """
     executables = None if executable_names is None else set(executable_names)
     buffer = io.BytesIO()
@@ -256,8 +240,8 @@ def rebuild_tarball(
 def canonical_tarball_bytes(tarball_bytes: bytes) -> bytes:
     """Re-pack a tarball into the deterministic form `rebuild_tarball` emits.
 
-    Lets a stored upload be compared against one rebuilt from git without the
-    original's gzip framing, mtimes and member order counting as a change.
+    Lets a stored upload be compared against one rebuilt from git without its
+    gzip framing, mtimes and member order counting as a change.
     """
     files, executables = _extract_tarball_files(tarball_bytes)
     return rebuild_tarball(files, executables)
@@ -268,10 +252,9 @@ def deserialize_automation(
 ) -> DeserializedAutomation | None:
     """Parse a git directory's files back into automation fields + tarball.
 
-    `dir_files` maps paths relative to the automation's slug directory (as
-    produced by `serialize_automation`) to their content. Returns `None` if
-    no `automation.yaml` is present — not a valid automation directory, e.g.
-    a stray file dropped next to the sync path.
+    `dir_files` maps slug-relative paths to content, as `serialize_automation`
+    produces. `None` when there is no `automation.yaml` -- not an automation
+    directory, e.g. a stray file dropped next to the sync path.
     """
     raw_metadata = dir_files.get(METADATA_FILENAME)
     if raw_metadata is None:
@@ -280,18 +263,16 @@ def deserialize_automation(
     try:
         fields = yaml.safe_load(raw_metadata.decode("utf-8")) or {}
     except yaml.YAMLError as e:
-        # automation.yaml is meant to be hand-edited in a PR, so a syntax
-        # error in one is routine. yaml.YAMLError derives straight from
-        # Exception, not ValueError, so without this it escaped the import's
-        # "skip this directory" handling and aborted the whole cycle --
-        # every other automation stopped syncing until that file was fixed.
+        # automation.yaml is hand-edited in PRs, so syntax errors are routine.
+        # yaml.YAMLError derives from Exception, not ValueError, so it escaped
+        # the import's "skip this directory" handling and aborted the whole
+        # cycle -- every other automation stopped syncing until someone fixed it.
         raise GitSyncMetadataError(f"{METADATA_FILENAME} is not valid YAML: {e}") from e
 
     if not isinstance(fields, dict):
         # Valid YAML but not a mapping -- e.g. leftover ciphertext read as
-        # plaintext after encryption was turned off, or any other malformed
-        # commit. Same "not a valid automation directory" bucket as a
-        # missing file, so callers skip it the same way.
+        # plaintext after encryption was turned off. Same "not an automation
+        # directory" bucket as a missing file, so callers skip it alike.
         logger.warning(
             "automation.yaml did not parse to a mapping (got %s); skipping",
             type(fields).__name__,
@@ -323,26 +304,25 @@ def deserialize_automation(
 class GitSyncMetadataError(ValueError):
     """A synced automation.yaml couldn't be parsed.
 
-    Subclasses ValueError so it's caught by the same "skip this invalid
-    automation directory" handling as any other malformed git content.
+    Subclasses ValueError to be caught by the same "skip this directory"
+    handling as any other malformed git content.
     """
 
 
 class GitSyncDecryptionError(ValueError):
     """A synced file couldn't be decrypted with the configured key.
 
-    Subclasses ValueError so it's caught by the same "skip this invalid
-    automation directory" handling as any other malformed git content.
+    Subclasses ValueError to be caught by the same "skip this directory"
+    handling as any other malformed git content.
     """
 
 
 def encrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     """Encrypt every file's bytes with `key` before they're committed.
 
-    Uses the SDK's Fernet-based Cipher (same primitive as the KV store's
-    at-rest encryption). Cipher operates on text, so raw bytes are
-    base64-wrapped first; the resulting token is itself ASCII-safe to write
-    to disk and commit as-is.
+    Uses the SDK's Fernet-based Cipher, as the KV store does. Cipher operates
+    on text, so bytes are base64-wrapped first; the resulting token is
+    ASCII-safe to commit as-is.
     """
     cipher = Cipher(key)
     encrypted: dict[str, bytes] = {}
@@ -356,10 +336,9 @@ def encrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
 def decrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     """Decrypt files previously written by `encrypt_file_tree`.
 
-    Files that don't start with the Fernet token prefix pass through
-    unchanged — a repo committed before encryption was turned on must stay
-    readable. Raises `GitSyncDecryptionError` if a file that IS a Fernet
-    token can't be decrypted with `key` (wrong/rotated key, corruption).
+    Files without the Fernet token prefix pass through unchanged, so a repo
+    committed before encryption was turned on stays readable. Raises
+    `GitSyncDecryptionError` for a token `key` can't decrypt.
     """
     cipher = Cipher(key)
     decrypted: dict[str, bytes] = {}

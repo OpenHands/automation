@@ -18,17 +18,15 @@ class GitSyncStatusResponse(BaseModel):
     last_error: str | None
     last_error_at: UtcDatetime | None
     dirty_count: int
-    # A cycle only reports its outcome (`last_synced_at`, `last_error_at`) once
-    # it finishes, so without these a caller can't tell "running" from
-    # "nothing happened" -- the UI had to guess with a fixed poll window, and
-    # a cycle the periodic loop started was invisible to it.
+    # A cycle reports its outcome only once it finishes, so without these a
+    # caller can't tell "running" from "nothing happened".
     sync_in_progress: bool = False
     sync_started_at: UtcDatetime | None = None
 
 
 class GitSyncTriggerResponse(BaseModel):
-    """`triggered` is False when a cycle was already running: the trigger is
-    a no-op then, since that cycle picks up everything this one would have."""
+    """`triggered` is False when a cycle was already running -- that cycle
+    picks up everything this one would have, so the trigger is a no-op."""
 
     triggered: bool
 
@@ -36,12 +34,12 @@ class GitSyncTriggerResponse(BaseModel):
 class GitSyncCheckResponse(BaseModel):
     """Result of `POST /v1/git-sync/check`.
 
-    `ok` is about reachability, not correctness: it means git could list the
-    remote's branches with the configured credentials. A token without write
-    scope still passes, and the encryption key is not exercised at all.
+    `ok` means reachability, not correctness: git could list the remote's
+    branches with these credentials. A token without write scope still passes,
+    and the encryption key is never exercised.
 
-    `branch_exists` False alongside `ok` True is normal for a repo that has
-    never been synced -- the first cycle creates the branch.
+    `branch_exists` False with `ok` True is normal for a never-synced repo --
+    the first cycle creates the branch.
     """
 
     ok: bool
@@ -53,21 +51,16 @@ class GitSyncCheckResponse(BaseModel):
 class GitSyncConfigUpdateRequest(BaseModel):
     """Partial update for runtime git-sync config overrides.
 
-    Omitted fields are left unchanged; a field explicitly set to `null`
-    clears its override and reverts it to the default (the env var for
-    every field except `interval_seconds`, which has no env var and
-    defaults to 0). Only reconfigures/pauses an already-running sync -- it
-    can't newly enable sync in a deployment that booted with it disabled
-    (that still needs AUTOMATION_GIT_SYNC_ENABLED + a restart).
+    Omitted fields are unchanged; an explicit `null` clears that field's
+    override, reverting to the env default (`interval_seconds` has no env var
+    and defaults to 0). Can only reconfigure or pause an already-running sync,
+    never enable one in a deployment that booted with it disabled.
 
-    `interval_seconds` is how often to sync automatically; 0 means
-    manual-only, i.e. sync just when POST /v1/git-sync/sync is called.
+    `interval_seconds` is how often to sync automatically; 0 is manual-only.
 
-    Every string field is stripped, and a blank one is treated the same as
-    `null` (clear the override). The UI sends `""` rather than `null` when a
-    text field is cleared, and storing that verbatim would wedge sync: an
-    empty branch makes `git checkout -B ""` fatal, and an empty path makes
-    `git add -A -- ""` fatal.
+    String fields are stripped, and a blank is treated as `null`. The UI sends
+    `""` for a cleared text field, and storing that would wedge sync: both
+    `git checkout -B ""` and `git add -A -- ""` are fatal.
     """
 
     enabled: bool | None = None
@@ -98,6 +91,6 @@ class GitSyncConfigUpdateRequest(BaseModel):
     def _normalize_path(cls, value: str | None) -> str | None:
         if value is None or not value.strip():
             return None
-        # Raises for a traversing path, which FastAPI reports as a 422 rather
+        # Raises for a traversing path, which FastAPI turns into a 422 rather
         # than letting it reach `sync_root` and the export's rmtree.
         return normalize_git_sync_path(value)

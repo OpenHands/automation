@@ -1,17 +1,13 @@
-"""At-rest encryption for the secrets held in the git-sync config override.
+"""At-rest encryption for the secrets in the git-sync config override.
 
-`PUT /v1/git-sync/config` accepts a git access token and a repo encryption
-key. Both used to be persisted verbatim in `automation_service_metadata`,
-so the token sat in cleartext in every DB dump and backup -- and in local
-mode, in a SQLite file on disk -- while client.py advertised that it is
-"never persisted to disk or logged". They are wrapped here before storage.
+`PUT /v1/git-sync/config` accepts a git token and a repo encryption key. Both
+are wrapped here before storage; unwrapped, they would sit in cleartext in
+every DB dump and backup.
 
-The wrapping key is `AUTOMATION_KV_SECRET` when the deployment sets one, so
-there's one service secret to manage rather than two. Otherwise one is
-generated on first use and kept in a 0600 file under the workspace: losing
-that file means re-entering the token in the UI, which is a much better
-failure mode than storing it in the clear. The file deliberately does not
-live in the git checkout, which would risk committing it to the synced repo.
+The wrapping key is `AUTOMATION_KV_SECRET` when set, so a deployment manages
+one service secret rather than two. Otherwise one is generated on first use in
+a 0600 file under the workspace -- losing it just means re-entering the token.
+That file stays out of the git checkout, which could commit it to the repo.
 """
 
 import logging
@@ -40,17 +36,14 @@ SECRET_OVERRIDE_FIELDS: Final[tuple[str, ...]] = (
 class GitSyncSecretStoreError(Exception):
     """No wrapping key is available, so a secret can't be stored safely.
 
-    Surfaced to the caller rather than silently degrading to plaintext --
-    the whole point of this module is that the token never lands in the DB
-    in the clear.
+    Surfaced rather than silently degrading to plaintext.
     """
 
 
 def _key_file_path() -> Path:
     config = get_config()
-    # Deliberately the workspace root, not `git_sync_local_workdir`: that one
-    # is a git checkout, and a key file there could be committed to the very
-    # repo it protects.
+    # The workspace root, not `git_sync_local_workdir`: that one is a git
+    # checkout, and a key file there could be committed to the repo it protects.
     return Path(config.service.workspace_base) / SECRET_KEY_FILENAME
 
 
@@ -74,8 +67,8 @@ def _load_or_create_key() -> str:
     key = secrets.token_urlsafe(32)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # O_EXCL so two workers racing to create it don't clobber each
-        # other's key and make the loser's stored secrets undecryptable.
+        # O_EXCL so two workers racing to create it don't clobber each other's
+        # key and make the loser's stored secrets undecryptable.
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return path.read_text().strip()
@@ -103,8 +96,8 @@ def encrypt_secret_fields(overrides: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value, str) or not value:
             continue
         if value.startswith(FERNET_TOKEN_PREFIX):
-            # Already wrapped -- re-wrapping on every partial update would
-            # nest tokens until nothing could read the value back out.
+            # Already wrapped; re-wrapping on each partial update would nest
+            # tokens until nothing could read the value back out.
             continue
         token = cipher.encrypt(SecretStr(value))
         assert token is not None  # SecretStr is never None, so neither is this
@@ -115,11 +108,9 @@ def encrypt_secret_fields(overrides: dict[str, Any]) -> dict[str, Any]:
 def decrypt_secret_fields(overrides: dict[str, Any]) -> dict[str, Any]:
     """Return `overrides` with the secret fields unwrapped for use.
 
-    Values that aren't Fernet tokens pass through unchanged: overrides
-    written before this wrapping existed are plaintext and must stay
-    readable. A value that is a token but won't decrypt (the key file was
-    lost or rotated) is dropped with a warning rather than handed on as
-    garbage -- that field then falls back to its environment default.
+    Non-token values pass through unchanged, so overrides written before this
+    wrapping existed stay readable. A token that won't decrypt (key lost or
+    rotated) is dropped with a warning, falling back to the env default.
     """
     if not any(field in overrides for field in SECRET_OVERRIDE_FIELDS):
         return overrides
@@ -134,9 +125,8 @@ def decrypt_secret_fields(overrides: dict[str, Any]) -> dict[str, Any]:
             try:
                 cipher = Cipher(_load_or_create_key())
             except GitSyncSecretStoreError:
-                # Reading config must not fail just because the key is
-                # unreachable; drop the secret fields and carry on with the
-                # environment defaults, same as an undecryptable value.
+                # Reading config must not fail because the key is unreachable;
+                # drop the secrets and use the env defaults, as above.
                 logger.exception(
                     "Could not load the git-sync secret key; ignoring the "
                     "stored secrets for now"

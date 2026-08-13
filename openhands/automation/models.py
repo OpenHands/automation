@@ -430,14 +430,13 @@ class AutomationKV(Base):
 
 
 class AutomationGitSyncState(Base):
-    """Per-automation git sync bookkeeping (one row per synced automation).
+    """Per-automation git sync bookkeeping, one row per synced automation.
 
-    See ``openhands/automation/git_sync/``. Tracks the stable directory name
-    used in the repo and whether the DB-side content has changed since it
-    was last written to git.
+    See ``openhands/automation/git_sync/``. Tracks the repo directory name and
+    whether the DB side has changed since it was last written to git.
 
-    ``dirty`` is a plain boolean column, not a JSON field, so the sync loop
-    can query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
+    ``dirty`` is a plain boolean column, not a JSON field, so the sync loop can
+    query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
     """
 
     __tablename__ = "automation_git_sync_state"
@@ -448,12 +447,12 @@ class AutomationGitSyncState(Base):
         primary_key=True,
     )
 
-    # Directory name for this automation within the sync path, e.g.
-    # "automations/{slug}/" in the repo. Stable once assigned.
+    # Directory name within the sync path, e.g. "automations/{slug}/" in the
+    # repo. Stable once assigned.
     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
 
-    # SHA-256 of the last-synced serialized content (metadata + tarball
-    # files). Used to detect no-op sync cycles.
+    # SHA-256 of the last-synced content (metadata + tarball files), used to
+    # detect no-op sync cycles.
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Git commit SHA this automation was last reconciled against.
@@ -462,8 +461,8 @@ class AutomationGitSyncState(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Set on every create/update/delete via the API; cleared once exported.
-    # While dirty, the DB side wins over a conflicting git-side change.
+    # Set on every API create/update/delete, cleared once exported. While
+    # dirty, the DB side wins over a conflicting git-side change.
     dirty: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(

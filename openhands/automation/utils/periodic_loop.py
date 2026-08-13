@@ -1,6 +1,6 @@
-"""Shared scaffolding for periodic background loops (poll on an interval,
-exit promptly on shutdown, survive a failed cycle). Used by git_sync/loop.py;
-scheduler.py/dispatcher.py/watchdog.py still hand-roll their own copy.
+"""Periodic background loop: poll on an interval, exit on shutdown, survive a
+failed cycle. Used by git_sync/loop.py; scheduler/dispatcher/watchdog still
+hand-roll their own.
 """
 
 import asyncio
@@ -9,9 +9,8 @@ from collections.abc import Awaitable, Callable
 from typing import Final
 
 
-# Sleep used when a callable `interval_seconds` fails before it has ever
-# resolved. Without it the first-pass seed would be 0.0 and the loop would
-# spin at full speed for as long as the failure lasts.
+# Sleep when a callable `interval_seconds` fails before ever resolving; a 0.0
+# seed would spin the loop at full speed until the failure clears.
 _UNRESOLVED_INTERVAL_SECONDS: Final[float] = 5.0
 
 
@@ -26,21 +25,16 @@ async def run_periodic_loop(
 ) -> None:
     """Run `run_cycle()` repeatedly, sleeping `interval_seconds` in between.
 
-    `interval_seconds` may be an async callable, re-resolved before every
-    sleep, for loops whose cadence is runtime-configurable. It is resolved
-    inside the same try/except as the cycle, so a failure to read it (e.g. a
-    transient DB error) is logged and retried rather than killing the loop;
-    the previous interval is reused for that sleep, or
-    `_UNRESOLVED_INTERVAL_SECONDS` when it has never resolved.
+    `interval_seconds` may be an async callable, re-resolved before every sleep
+    for runtime-configurable cadences. It resolves inside the cycle's
+    try/except, so a failed read reuses the previous interval (or
+    `_UNRESOLVED_INTERVAL_SECONDS`) instead of killing the loop.
 
     Exits promptly on `shutdown_event`. A cycle that raises is logged (via
-    `on_error`, or `logger.exception` if omitted) without stopping the loop.
+    `on_error`, else `logger.exception`) without stopping the loop.
     """
-    # `None` rather than 0.0 while a callable interval is still unresolved:
-    # the callable is what opens a DB session in git_sync_loop, and a DB that
-    # is briefly unavailable at startup made the very first resolution raise,
-    # leaving a 0.0 sleep that pegged a core and logged a traceback per
-    # iteration until the DB came back.
+    # `None`, not 0.0, while a callable interval is unresolved: if the first
+    # resolution raises (e.g. DB down at startup), 0.0 would busy-spin.
     interval = None if callable(interval_seconds) else interval_seconds
 
     while True:

@@ -18,9 +18,8 @@ from openhands.automation.git_sync.router import _background_sync_tasks
 def writable_workspace(tmp_path, monkeypatch):
     """Point `workspace_base` at a temp dir for every test in this module.
 
-    Storing a git-sync secret provisions a wrapping key under the workspace
-    (see secret_store.py), and the default "/workspace" is not writable
-    outside a container -- nor should a test write there.
+    Storing a git-sync secret provisions a wrapping key under the workspace,
+    and the default "/workspace" isn't writable outside a container.
     """
     monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", str(tmp_path))
     clear_config_cache()
@@ -187,8 +186,8 @@ class TestTriggerGitSync:
         assert response.status_code == 503
 
     async def test_requires_manage_automations_permission(self, readonly_client):
-        # Permission dependency resolves before the handler body runs, so
-        # this 403s even though git sync isn't enabled in this test.
+        # The permission dependency resolves before the handler body, so this
+        # 403s even though git sync isn't enabled here.
         response = await readonly_client.post("/api/automation/v1/git-sync/sync")
         assert response.status_code == 403
 
@@ -212,10 +211,9 @@ class TestTriggerGitSync:
     async def test_background_task_is_not_garbage_collected_mid_run(
         self, async_client, monkeypatch
     ):
-        """The triggered sync task must be strongly referenced, or asyncio
-        may garbage-collect it before the git I/O completes. Uses a slow
-        fake run_sync_cycle so the in-flight assertion below isn't racing
-        a real (fast-failing) network call.
+        """The triggered task must be strongly referenced, or asyncio may
+        garbage-collect it before the git I/O completes. The fake cycle is slow
+        so the in-flight assertion isn't racing a fast-failing network call.
         """
         import openhands.automation.git_sync.router as router_module
 
@@ -248,9 +246,9 @@ class TestTriggerGitSync:
 
 
 class TestSyncInProgressReporting:
-    """`GET /status` has to say a cycle is running: it only reports the outcome
-    once the cycle ends, so a caller watching `last_synced_at` cannot tell a
-    sync in flight from one that never started.
+    """`GET /status` must say a cycle is running: it reports the outcome only
+    once the cycle ends, so `last_synced_at` alone can't tell a sync in flight
+    from one that never started.
     """
 
     @pytest.fixture
@@ -266,8 +264,7 @@ class TestSyncInProgressReporting:
             await finish.wait()
 
         monkeypatch.setattr(loop_module, "_run_sync_cycle_locked", paused_cycle)
-        # The cycle body is replaced above, so these are only here to satisfy
-        # the signature -- nothing reads them.
+        # The cycle body is replaced above; these only satisfy the signature.
         cycle = asyncio.create_task(
             loop_module.run_sync_cycle(
                 async_sessionmaker(class_=AsyncSession),
@@ -299,8 +296,8 @@ class TestSyncInProgressReporting:
     async def test_trigger_is_a_no_op_while_a_cycle_is_running(
         self, async_client, monkeypatch, running_cycle
     ):
-        # `run_sync_cycle` serializes on a lock, so a second cycle would only
-        # queue behind the running one and repeat what it already covers.
+        # `run_sync_cycle` serializes on a lock, so a second cycle would just
+        # queue behind the running one and repeat its work.
         started, _, _ = running_cycle
         await started.wait()
         monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
@@ -321,10 +318,9 @@ class TestSyncInProgressReporting:
 
 class TestGitSyncConfigCannotEnableSync:
     """Regression: `POST /sync` gated on the override-merged `enabled`, so
-    `PUT /config` could newly enable sync in a deployment that booted with
-    AUTOMATION_GIT_SYNC_ENABLED unset -- contradicting its own docstring and
-    AGENTS.md, and letting any holder of `manage_automations` push every
-    automation's prompt, model config and tarball to a repo of their choice.
+    `PUT /config` could enable sync in a deployment that booted with it unset
+    -- letting any holder of `manage_automations` push every automation's
+    prompt, model config and tarball to a repo of their choice.
     """
 
     async def test_enabling_is_rejected_when_not_opted_in_at_boot(self, async_client):
@@ -353,9 +349,9 @@ class TestGitSyncConfigCannotEnableSync:
 
 class TestGitSyncConfigValidation:
     """Regression: `path` was an unvalidated `str`, so a traversing value
-    reached `sync_root` -- which the export rmtree's per automation -- and
-    the UI's `""` for a cleared field was stored as a literal empty override,
-    making `git add -A -- ""` fatal on every subsequent cycle.
+    reached `sync_root`, which the export rmtree's per automation; and the
+    UI's `""` for a cleared field stored a literal empty override, making
+    `git add -A -- ""` fatal on every cycle.
     """
 
     @pytest.mark.parametrize(
@@ -376,7 +372,7 @@ class TestGitSyncConfigValidation:
 
     async def test_trailing_slash_is_stripped(self, async_client):
         """A trailing slash silently muted every import: `_changed_slugs_since`
-        matches on an f"{sync_path}/" prefix, so "automations/" produced
+        matches an f"{sync_path}/" prefix, so "automations/" produced
         "automations//" and matched nothing."""
         response = await async_client.put(
             "/api/automation/v1/git-sync/config", json={"path": "automations/"}
@@ -409,9 +405,8 @@ class TestGitSyncSecretsAtRest:
     async def test_secrets_are_not_stored_in_cleartext(
         self, async_client, async_session
     ):
-        """Regression: the token and the encryption key were persisted as
-        cleartext JSON in `automation_service_metadata`, readable in any DB
-        dump or backup."""
+        """Regression: the token and encryption key were persisted as cleartext
+        JSON in `automation_service_metadata`, readable in any DB dump."""
         from openhands.automation.git_sync.config_override import (
             GIT_SYNC_CONFIG_OVERRIDE_KEY,
         )
@@ -447,9 +442,8 @@ class TestGitSyncSecretsAtRest:
 class TestGitSyncConfigCheck:
     """`POST /check` answers "would this configuration reach its repo?".
 
-    It exists so an operator does not have to save a repo URL and wait for a
-    cycle to find out it was a typo -- and so that finding out never means
-    running a sync against a repo nobody has vetted yet.
+    So an operator needn't save a URL and wait for a cycle to learn it was a
+    typo -- and so learning it never means syncing against an unvetted repo.
     """
 
     @pytest.fixture
@@ -539,8 +533,8 @@ class TestGitSyncConfigCheck:
     async def test_null_is_checked_as_the_env_default_not_as_blank(
         self, async_client, captured_check, monkeypatch
     ):
-        """Clearing a field reverts it to the env var, so that -- not an empty
-        string -- is the value the check has to report on."""
+        """Clearing a field reverts it to the env var, so that -- not a blank
+        -- is what the check must report on."""
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/from-env.git"
         )
@@ -561,8 +555,8 @@ class TestGitSyncConfigCheck:
     async def test_an_unreachable_remote_is_a_200_with_ok_false(
         self, async_client, monkeypatch
     ):
-        """A bad configuration is an answer, not a server error -- the caller
-        renders `detail`, so it must not have to parse an error response."""
+        """A bad configuration is an answer, not a server error: the caller
+        renders `detail` rather than parsing an error response."""
         import openhands.automation.git_sync.client as client_module
         import openhands.automation.git_sync.router as router_module
 
@@ -599,8 +593,8 @@ class TestGitSyncConfigCheck:
         assert response.json() == {"ok": True, "branch_exists": False, "detail": None}
 
     async def test_works_while_sync_is_disabled(self, async_client, captured_check):
-        """Getting the repo URL and token right is what you do *before*
-        enabling sync, so this cannot be gated on it being enabled."""
+        """Getting the URL and token right happens *before* enabling sync, so
+        this cannot be gated on sync being enabled."""
         response = await async_client.post(
             "/api/automation/v1/git-sync/check",
             json={"repo_url": "https://example.com/repo.git"},
@@ -612,8 +606,8 @@ class TestGitSyncConfigCheck:
 
 class TestGitSyncCheckAgainstARealRepo:
     """One end-to-end pass with no stub between the endpoint and git, so the
-    two halves can't drift: the router calling `check_remote_access` with its
-    arguments in some other order would still satisfy every mocked test."""
+    halves can't drift: the router passing `check_remote_access` its arguments
+    in the wrong order would still satisfy every mocked test."""
 
     @pytest.fixture
     def origin(self, tmp_path):

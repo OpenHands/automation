@@ -110,11 +110,9 @@ class TestSerializeAutomation:
 
     def test_uncompressed_tarball_is_extracted_too(self):
         """Regression: the upload endpoint checks the Content-Type header, not
-        the bytes, so an uncompressed tar is a legitimate stored payload -- and
-        one on the OSS VM was. Insisting on gzip raised `not a gzip file` on
-        every cycle, and since the export logs and skips a failed automation
-        without clearing `dirty`, it stayed dirty forever and never reached the
-        repo.
+        the bytes, so an uncompressed tar is a legitimate stored payload.
+        Insisting on gzip raised every cycle, and the export skips a failure
+        without clearing `dirty`, so it never reached the repo.
         """
         automation = _make_automation()
         tarball_bytes = _make_plain_tarball({"main.py": b"print(1)"})
@@ -195,8 +193,8 @@ class TestDeserializeAutomation:
 
     def test_non_mapping_yaml_returns_none_instead_of_crashing(self):
         # Valid YAML that isn't a dict -- e.g. leftover ciphertext read as
-        # plaintext after encryption was turned off. Must not hand callers
-        # a DeserializedAutomation whose .fields isn't a dict.
+        # plaintext. Must not yield a DeserializedAutomation with non-dict
+        # .fields.
         assert deserialize_automation({"automation.yaml": b"just a string"}) is None
         assert deserialize_automation({"automation.yaml": b"- a\n- list\n"}) is None
 
@@ -247,9 +245,8 @@ class TestEncryptDecryptFileTree:
             decrypt_file_tree(encrypted, "key-b")
 
     def test_round_trip_survives_arbitrary_binary_content(self):
-        # Tarball members can be non-UTF8 binaries (compiled artifacts,
-        # images, ...), not just text -- prove the base64 wrapping handles
-        # every byte value, not just printable ASCII.
+        # Tarball members can be non-UTF8 binaries, so prove the base64
+        # wrapping handles every byte value, not just printable ASCII.
         binary = bytes(range(256)) * 4
         files = {"tarball/blob.bin": binary}
         encrypted = encrypt_file_tree(files, "the-key")
@@ -282,9 +279,8 @@ class TestExecutableModeRoundTrip:
     """Regression: modes were dropped for anything not named `*.sh`.
 
     The only mode source was `rebuild_tarball`'s filename heuristic, so an
-    executable helper without that suffix (`bin/run`, a `main.py` invoked as
-    `./main.py`) came back 0644 and every subsequent run failed with
-    "Permission denied", with nothing in the git diff to explain it.
+    executable helper without that suffix came back 0644 and every run failed
+    with "Permission denied", with nothing in the git diff to explain it.
     """
 
     def test_executable_members_are_recorded_in_metadata(self):
@@ -352,9 +348,9 @@ class TestExecutableModeRoundTrip:
 class TestDotSlashMemberNames:
     """Regression: `tar -czf archive.tgz .` produces "./main.py" members.
 
-    `tarfile.data_filter` leaves the prefix in place, so the same file was
-    committed as `tarball/./main.py` and never matched the plain `main.py`
-    an unprefixed tarball produces for identical content.
+    `data_filter` leaves the prefix in place, so the file was committed as
+    `tarball/./main.py` and never matched the plain `main.py` an unprefixed
+    tarball produces for identical content.
     """
 
     def test_leading_dot_slash_is_stripped_on_serialize(self):
@@ -376,8 +372,8 @@ class TestDotSlashMemberNames:
 class TestMalformedMetadata:
     def test_invalid_yaml_raises_a_valueerror(self):
         """Regression: yaml.YAMLError is not a ValueError, so it escaped the
-        import's per-directory skip and aborted the whole sync cycle -- every
-        other automation stopped syncing until that one file was fixed."""
+        import's per-directory skip and aborted the whole cycle -- every other
+        automation stopped syncing until that file was fixed."""
         with pytest.raises(GitSyncMetadataError) as excinfo:
             deserialize_automation({"automation.yaml": b"name: [unclosed\n"})
         assert isinstance(excinfo.value, ValueError)

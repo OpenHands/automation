@@ -195,8 +195,8 @@ async def poll_and_schedule(
             if _is_automation_due_safely(automation, now):
                 due_automations.append(automation)
             if was_enabled and not automation.enabled:
-                # _is_automation_due_safely can disable an automation as a
-                # side effect; git sync needs to know about that DB change too.
+                # _is_automation_due_safely can disable an automation as a side
+                # effect, which git sync needs to hear about too.
                 await mark_git_sync_dirty(session, automation)
 
         for automation in due_automations:

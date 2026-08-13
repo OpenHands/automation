@@ -1,7 +1,6 @@
 """Integration tests for the git sync cycle (run_sync_cycle + mark_git_sync_dirty).
 
-Uses an in-memory SQLite engine plus a real local bare git repo under
-tmp_path, rather than mocking either.
+Uses an in-memory SQLite engine and a real bare repo under tmp_path, not mocks.
 """
 
 import asyncio
@@ -85,8 +84,8 @@ def file_store(tmp_path):
 
 @pytest.fixture
 def git_settings(tmp_path, origin, monkeypatch):
-    """Also sets matching env vars: mark_git_sync_dirty() reads the global
-    cached config, not the settings objects returned here.
+    """Also sets matching env vars: mark_git_sync_dirty() reads the cached
+    global config, not the settings returned here.
     """
     from openhands.automation.config import clear_config_cache
 
@@ -222,9 +221,9 @@ class TestMarkGitSyncDirty:
     async def test_unexpected_failure_is_swallowed_and_does_not_lose_the_automation(
         self, sqlite_session_factory, git_settings, monkeypatch
     ):
-        """An unexpected error inside mark_git_sync_dirty must not propagate:
-        some callers treat any exception here as a failed automation
-        creation. The automation row must survive and stay committable.
+        """An error inside mark_git_sync_dirty must not propagate -- some
+        callers treat any exception here as a failed automation creation, so
+        the row must survive and stay committable.
         """
         import openhands.automation.git_sync.loop as loop_module
 
@@ -344,8 +343,8 @@ class TestRunSyncCycle:
         service_settings,
         monkeypatch,
     ):
-        """DB changes must be committed before commit_and_push runs, not
-        held open across the (slow, network) push.
+        """DB changes must commit before commit_and_push runs, not stay open
+        across the slow network push.
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
 
@@ -359,10 +358,9 @@ class TestRunSyncCycle:
         with pytest.raises(GitSyncError):
             await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
 
-        # The push failed, but the DB-side export bookkeeping must already
-        # be durably committed (queryable from a fresh session) at this
-        # point -- proving the DB transaction wasn't held open across the
-        # (failing) push attempt.
+        # The push failed, but the export bookkeeping must already be committed
+        # and queryable from a fresh session -- proving the transaction wasn't
+        # held open across the push.
         async with sqlite_session_factory() as session:
             states = (
                 (await session.execute(select(AutomationGitSyncState))).scalars().all()
@@ -390,10 +388,10 @@ class TestRunSyncCycle:
     ):
         """Changing `git_sync_path` must relocate the automations.
 
-        Nothing about the automations changes, so none are dirty and the
-        export step would write nothing under the new path -- it would stay
-        empty while the old path silently kept the only copy. The old
-        directory is intentionally left behind, so both must be present.
+        Nothing about them changes, so none are dirty and the export would
+        write nothing under the new path, leaving it empty while the old path
+        kept the only copy. The old directory is left behind on purpose, so
+        both must be present.
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
         await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
@@ -424,11 +422,10 @@ class TestRunSyncCycle:
     ):
         """A path change must never be read as a deletion.
 
-        The import runs before the export and scans the new, still-empty
-        path. With an unreachable base commit it can't diff and falls back
-        to a full scan, which drops the "untouched by this range" guard --
-        leaving its "directory disappeared" branch free to soft-delete every
-        automation at once. Only the dirty flag stops it.
+        The import runs first and scans the new, still-empty path. With an
+        unreachable base commit it falls back to a full scan, dropping the
+        "untouched by this range" guard, so its "directory disappeared" branch
+        would soft-delete every automation at once. Only `dirty` stops it.
         """
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
@@ -458,14 +455,13 @@ class TestRunSyncCycle:
         service_settings,
         tmp_path,
     ):
-        """Changing `git_sync_repo_url` must carry already-exported
-        automations over to the new remote.
+        """Changing `git_sync_repo_url` must carry already-exported automations
+        over to the new remote.
 
-        By this point nothing is dirty, so a cycle that only pushes when it
-        exported something this round would report success while leaving the
-        new remote permanently empty -- the failure mode is silence, not an
-        error. Same shape as a push that failed once and was followed by no
-        further DB changes.
+        Nothing is dirty by this point, so a cycle that pushes only when it
+        exported something would report success while leaving the new remote
+        permanently empty -- silence, not an error. Same shape as a failed push
+        followed by no further DB changes.
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
         first = await run_sync_cycle(
@@ -513,9 +509,9 @@ class TestRunSyncCycle:
     async def test_missing_tarball_storage_preserves_previously_synced_content(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
     ):
-        """A missing tarball must not overwrite already-synced git content --
-        the export should be skipped (automation stays dirty), not silently
-        replaced with an empty/metadata-only export.
+        """A missing tarball must not overwrite already-synced git content: the
+        export is skipped (the automation stays dirty) rather than replaced
+        with a metadata-only one.
         """
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
@@ -531,8 +527,8 @@ class TestRunSyncCycle:
             upload = await session.get(TarballUpload, upload_id)
             file_store.delete(upload.storage_path)
 
-            # Mark dirty via an unrelated field edit, mirroring a normal API
-            # update -- the tarball itself was never touched by this edit.
+            # Mark dirty via an unrelated field edit, as a normal API update
+            # would; the tarball itself is untouched.
             automation.timeout = 999
             await mark_git_sync_dirty(session, automation)
             await session.commit()
@@ -606,7 +602,7 @@ class TestRunSyncCycle:
         monkeypatch,
     ):
         """A commit touching one automation must not re-read every other
-        tracked automation's tarball tree too.
+        tracked automation's tarball tree.
         """
         await _create_internal_automation(
             sqlite_session_factory, file_store, name="Automation A"
@@ -811,8 +807,8 @@ class TestRunSyncCycle:
     async def test_symlinked_tarball_member_does_not_leak_host_files(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
     ):
-        """A symlink in a synced commit must not be followed into the
-        resulting automation's tarball (could leak host files)."""
+        """A symlink in a synced commit must not be followed into the resulting
+        tarball, which would leak host files."""
         secret_path = origin.parent / "secret.txt"
         secret_path.write_text("TOP SECRET HOST FILE")
 
@@ -893,8 +889,8 @@ class TestRunSyncCycle:
     async def test_concurrent_cycles_are_serialized(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
-        """A manually triggered cycle must not run concurrently with the
-        periodic loop's cycle against the same workdir."""
+        """A manual cycle must not run concurrently with the periodic loop's
+        against the same workdir."""
         import openhands.automation.git_sync.loop as loop_module
 
         concurrency = {"active": 0, "max": 0}
@@ -948,9 +944,9 @@ class TestEncryption:
         assert b"entrypoint" not in yaml_bytes
         assert b"print(1)" not in tarball_bytes
 
-        # A second cycle with nothing new to export must not touch the repo
-        # again -- Fernet's random per-encryption IV must not make identical
-        # content look "changed" and trigger a needless commit.
+        # A second cycle with nothing new must not touch the repo: Fernet's
+        # random per-encryption IV must not make identical content look
+        # changed and trigger a needless commit.
         second = await run_sync_cycle(
             sqlite_session_factory, encrypted_settings, service_settings
         )
@@ -1017,11 +1013,9 @@ class TestEncryption:
         origin,
         tmp_path,
     ):
-        """A repo can have leftover ciphertext from when encryption was
-        previously on (e.g. a different deployment, or a key later turned
-        off). A fresh sync target's first cycle does a full-directory scan
-        (no last_commit recorded yet) and must skip that directory, not
-        crash the whole cycle."""
+        """A repo can hold leftover ciphertext from when encryption was on. A
+        fresh target's first cycle does a full scan (no last_commit yet) and
+        must skip that directory rather than crash the cycle."""
         encrypted_settings = git_settings.model_copy(
             update={"git_sync_encryption_key": "the-old-key"}
         )
@@ -1032,9 +1026,9 @@ class TestEncryption:
             sqlite_session_factory, encrypted_settings, service_settings
         )
 
-        # A fresh DB pointed at the same repo, no encryption key configured:
-        # its first cycle has no last_commit yet, so it full-scans every
-        # directory -- including the leftover ciphertext one.
+        # A fresh DB on the same repo with no encryption key: its first cycle
+        # has no last_commit, so it full-scans every directory, the leftover
+        # ciphertext one included.
         fresh_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/fresh.db")
         async with fresh_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -1145,9 +1139,7 @@ class TestLastError:
 
 class TestSyncInProgress:
     """A cycle reports its outcome only once it ends, so `GET /status` needs a
-    separate signal to tell "running" from "nothing happened" -- otherwise the
-    UI can only guess with a timer, and a cycle the periodic loop started is
-    invisible to it.
+    separate signal to tell "running" from "nothing happened".
     """
 
     async def test_reports_the_running_cycle_and_clears_it_afterwards(
@@ -1187,8 +1179,8 @@ class TestSyncInProgress:
     async def test_clears_the_flag_when_the_cycle_fails(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
-        # A failed cycle that left the flag set would report a sync as running
-        # forever, and (with the trigger's no-op guard) lock out every later
+        # A failed cycle leaving the flag set would report a sync as running
+        # forever and, via the trigger's no-op guard, lock out every later
         # manual sync until a restart.
         import openhands.automation.git_sync.loop as loop_module
 
@@ -1204,9 +1196,9 @@ class TestSyncInProgress:
 
 
 class TestGitSyncLoop:
-    """Covers git_sync_loop() itself, not just run_sync_cycle() -- the loop
-    is what actually re-resolves runtime config overrides every tick and
-    skips a cycle while paused, and had no coverage of its own before.
+    """Covers git_sync_loop() itself, not just run_sync_cycle(): the loop is
+    what re-resolves the runtime config overrides every tick and skips a cycle
+    while paused.
     """
 
     async def test_runs_a_cycle_and_exits_on_shutdown(
@@ -1253,9 +1245,9 @@ class TestGitSyncLoop:
     ):
         """The shipped default is manual-only (interval 0).
 
-        The loop still runs -- it is what notices an interval later set from
-        the UI, without a restart -- but it must idle rather than sync, so
-        nothing is pushed behind the user's back.
+        The loop still runs, since it is what notices an interval set later
+        from the UI, but it must idle rather than sync so nothing is pushed
+        behind the user's back.
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
         shutdown_event = asyncio.Event()
@@ -1277,12 +1269,12 @@ class TestGitSyncLoop:
         self, sqlite_session_factory, file_store, git_settings, monkeypatch
     ):
         """Setting the interval from the UI must take effect on a running
-        service. The loop re-reads it every tick precisely so a service that
-        booted manual-only starts syncing once an interval is configured."""
+        service: the loop re-reads it every tick so one that booted manual-only
+        starts syncing once an interval is configured."""
         import openhands.automation.git_sync.loop as loop_module
 
-        # Production idles for _IDLE_POLL_SECONDS between config re-reads;
-        # shorten it so the test doesn't wait that long for the pickup.
+        # Production idles _IDLE_POLL_SECONDS between config re-reads; shorten
+        # it so the test doesn't wait that long.
         monkeypatch.setattr(loop_module, "_IDLE_POLL_SECONDS", 0.1)
 
         await _create_internal_automation(sqlite_session_factory, file_store)
@@ -1357,16 +1349,15 @@ class TestGitSyncLoop:
             states = (
                 (await session.execute(select(AutomationGitSyncState))).scalars().all()
             )
-            # Still dirty -- the loop resolved the paused override and
-            # skipped the cycle instead of exporting.
+            # Still dirty: the loop resolved the paused override and skipped
+            # the cycle instead of exporting.
             assert states[0].dirty is True
 
 
 class TestBackfillsPreExistingAutomations:
-    """Regression: nothing ever created state rows for automations that
-    already existed when git sync was switched on, and the export only reads
-    dirty state rows. The cycle reported success and pushed nothing, and the
-    UI showed a healthy sync against an empty repo."""
+    """Regression: nothing created state rows for automations predating git
+    sync, and the export only reads dirty rows -- so the cycle reported success
+    and pushed nothing against an empty repo."""
 
     async def _create_automation_without_state(self, session_factory, file_store):
         automation_id = await _create_internal_automation(session_factory, file_store)
@@ -1428,9 +1419,9 @@ class TestBackfillsPreExistingAutomations:
 
 
 class TestExportPreservesUserFiles:
-    """Regression: `_write_files` rmtree'd the whole slug directory before
-    every export, so a README or .gitignore the user committed alongside the
-    generated files was deleted -- and the deletion pushed to their repo."""
+    """Regression: `_write_files` rmtree'd the whole slug directory before each
+    export, deleting any README or .gitignore committed alongside the generated
+    files -- and pushing that deletion back."""
 
     async def test_user_files_survive_a_re_export(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
@@ -1476,10 +1467,9 @@ class TestExportPreservesUserFiles:
 
 class TestDirtyAutomationOverwritesGitEdit:
     """Regression: the import skips a dirty slug so the export can overwrite
-    git, but the export compared the DB hash against `state.content_hash` --
-    unchanged for a content-neutral API write -- and skipped the write. The
-    git-side edit was neither imported nor overwritten, and `last_commit`
-    advanced past it, so the two versions never reconciled."""
+    git, but the export compared against `state.content_hash` -- unchanged for
+    a content-neutral API write -- and skipped it. The git-side edit was
+    neither imported nor overwritten, so the two sides never reconciled."""
 
     async def test_git_side_edit_is_overwritten_not_silently_kept(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
@@ -1540,25 +1530,24 @@ class TestDirtyAutomationOverwritesGitEdit:
         final = (
             verify_dir / "automations" / "my-first-automation" / "automation.yaml"
         ).read_text()
-        # The DB is the source of truth for a dirty automation, so the git
-        # edit must have been overwritten rather than left orphaned.
+        # The DB wins for a dirty automation, so the git edit must have been
+        # overwritten rather than left orphaned.
         assert "python main.py" in final
         assert "python edited.py" not in final
 
 
 class TestSymlinkedSlugDirectory:
-    """Regression: `_import_from_git` selected slug directories with
-    `is_dir()`, which follows symlinks, so a committed symlink was read
-    *through* -- the per-file symlink guard never fires for files reached that
-    way -- and later wedged the export, where rmtree raises on a symlink."""
+    """Regression: slug directories were selected with `is_dir()`, which
+    follows symlinks, so a committed symlink was read *through* -- the per-file
+    guard never fires that way -- and later wedged the export, where rmtree
+    raises on a symlink."""
 
     async def test_symlinked_directory_is_skipped_and_does_not_wedge_the_cycle(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
     ):
-        # A complete, *valid* automation directory, so that without the
-        # symlink guard the import genuinely succeeds -- reading host files
-        # from outside the checkout -- rather than being skipped as invalid
-        # for some unrelated reason.
+        # A complete, *valid* automation directory, so without the guard the
+        # import genuinely succeeds and reads host files, rather than being
+        # skipped as invalid for an unrelated reason.
         secret_dir = origin.parent / "outside"
         (secret_dir / "tarball").mkdir(parents=True)
         (secret_dir / "tarball" / "main.py").write_text("print('host file')")
@@ -1613,8 +1602,7 @@ class TestSymlinkedSlugDirectory:
 class TestMalformedYamlDoesNotAbortTheCycle:
     """Regression: yaml.YAMLError is not a ValueError, so a hand-edited
     automation.yaml with a syntax error escaped the per-directory skip and
-    aborted the entire cycle -- every other automation stopped syncing, every
-    cycle, until that one file was fixed."""
+    aborted the whole cycle until that file was fixed."""
 
     async def test_one_bad_directory_does_not_stop_the_others(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
@@ -1660,9 +1648,9 @@ class TestMalformedYamlDoesNotAbortTheCycle:
 
 
 class TestTarballUploadLifecycle:
-    """Regression: every git-side update wrote a brand-new TarballUpload row
-    plus a full tarball copy and left the superseded one live and referenced
-    by nothing -- with no reaper anywhere to collect it."""
+    """Regression: every git-side update wrote a new TarballUpload row plus a
+    full tarball copy, leaving the superseded one live and referenced by
+    nothing, with no reaper to collect it."""
 
     async def _push_yaml_edit(self, origin, clone_name, replace, with_):
         editor_dir = origin.parent / clone_name
@@ -1772,10 +1760,10 @@ class TestTarballUploadLifecycle:
 
 
 class TestEnabledKeyWithNullValue:
-    """Regression: `bool(fields.get("enabled", True))` relies on the `get`
-    default, which only applies when the key is absent. A hand edit leaving
-    "enabled:" with no value is valid YAML that parses to None, and
-    bool(None) silently disabled a live automation."""
+    """Regression: `bool(fields.get("enabled", True))` relies on a default that
+    only applies when the key is absent. A hand edit leaving "enabled:" empty
+    is valid YAML parsing to None, and bool(None) disabled a live
+    automation."""
 
     async def test_null_enabled_leaves_the_automation_enabled(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
@@ -1824,9 +1812,9 @@ class TestSyncPathValidation:
     async def test_a_traversing_path_raises_instead_of_deleting_host_dirs(
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
-        """Regression: `sync_root = workdir / git_sync_path` with an
-        unvalidated path escaped the checkout, and the export's rmtree then
-        deleted any host directory matching an automation slug."""
+        """Regression: an unvalidated `git_sync_path` let `sync_root` escape
+        the checkout, and the export's rmtree then deleted any host directory
+        matching an automation slug."""
         await _create_internal_automation(sqlite_session_factory, file_store)
         traversing = git_settings.model_copy(
             update={"git_sync_path": "../../../../victim"}
@@ -1841,8 +1829,8 @@ class TestCredentialRedaction:
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         """Regression: GitSyncError embedded the full argv, which for `clone`
-        includes the repo URL. That string is persisted to
-        `git_sync_last_error` and rendered verbatim in the UI error banner."""
+        includes the repo URL -- a string persisted to `git_sync_last_error`
+        and rendered verbatim in the UI error banner."""
         bad = git_settings.model_copy(
             update={
                 "git_sync_repo_url": (

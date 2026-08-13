@@ -45,13 +45,12 @@ router = APIRouter(prefix="/v1/git-sync", tags=["Git Sync"])
 
 _require_manage_automations = require_permission("manage_automations")
 
-# Strong references to in-flight manual-trigger tasks -- asyncio only holds
-# weak references to tasks, so without this one could be GC'd mid-run.
+# Strong references to in-flight manual-trigger tasks: asyncio holds only weak
+# ones, so a task could otherwise be GC'd mid-run.
 _background_sync_tasks: Final[set[asyncio.Task[None]]] = set()
 
-# A reachability check runs while an operator waits on a form, so it gets a
-# tighter bound than the sync cycle's per-command timeout: an unroutable host
-# blocks for the full duration before git gives up.
+# Tighter than the sync cycle's per-command timeout, because an operator waits
+# on a form for it and an unroutable host blocks the full duration.
 _CHECK_TIMEOUT_SECONDS: Final[float] = 20.0
 
 # Maps the config-update request's short field names to GitSyncSettings attrs.
@@ -71,12 +70,10 @@ _CONFIG_OVERRIDE_FIELDS: Final[dict[str, str]] = {
 def _is_effectively_enabled(git_settings: GitSyncSettings) -> bool:
     """Whether sync is on right now: the boot-time opt-in plus live config.
 
-    `is_git_sync_opted_in()` is what keeps `PUT /config` from newly enabling
-    sync in a deployment that booted with it off. Without it, this gate read
-    only the override-merged `enabled`, so any caller with
-    `manage_automations` could turn sync on and point it at a repo of their
-    choosing -- `POST /sync` would then push every automation's prompt,
-    model config and tarball contents there.
+    The opt-in check is what stops `PUT /config` enabling sync in a deployment
+    that booted with it off. Without it, any caller with `manage_automations`
+    could turn sync on, point it at a repo of their choosing, and `POST /sync`
+    every automation's prompt, model config and tarball there.
     """
     return is_git_sync_opted_in() and git_settings.enabled
 
@@ -133,8 +130,8 @@ async def update_git_sync_config(
 ) -> GitSyncStatusResponse:
     """Reconfigure or pause/resume an already-running sync without a restart.
 
-    Can't newly enable sync in a deployment that booted with it disabled --
-    that still requires AUTOMATION_GIT_SYNC_ENABLED plus a restart.
+    Can't enable sync in a deployment that booted with it disabled -- that
+    needs AUTOMATION_GIT_SYNC_ENABLED plus a restart.
     """
     if data.enabled and not is_git_sync_opted_in():
         raise HTTPException(
@@ -151,8 +148,8 @@ async def update_git_sync_config(
     try:
         await apply_git_sync_config_override(session, mapped)
     except GitSyncSecretStoreError as e:
-        # Refusing the write is the point: storing the token unencrypted
-        # instead would be a silent downgrade of exactly what this protects.
+        # Refusing the write is the point: storing the token unencrypted would
+        # silently downgrade exactly what this protects.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Cannot store the git sync secrets securely: {e}",
@@ -173,15 +170,12 @@ async def check_git_sync_config(
 ) -> GitSyncCheckResponse:
     """Test whether a configuration can reach its repo, without saving it.
 
-    Takes the same body as `PUT /config` and answers for the settings that
-    body *would* leave in place, so a form can be checked before it is
-    stored. Nothing is persisted and no sync runs -- see
-    `check_remote_access` for why this must not be a sync cycle.
+    Takes `PUT /config`'s body and answers for the settings it *would* leave in
+    place. Nothing is persisted and no sync runs -- see `check_remote_access`.
 
-    Not gated on git sync being enabled: the point is to get a repo URL and
-    token right before turning it on. Reaching a URL of the caller's choosing
-    is no new capability either -- `PUT /config` already sets the URL the
-    sync loop connects to, behind the same `manage_automations` permission.
+    Not gated on sync being enabled: the point is to get the repo URL and token
+    right before turning it on. Reaching a caller-chosen URL is no new
+    capability, since `PUT /config` already sets it under the same permission.
     """
     candidate = await resolve_candidate_git_sync_settings(
         session,
@@ -203,8 +197,8 @@ async def check_git_sync_config(
             min(candidate.git_sync_git_timeout_seconds, _CHECK_TIMEOUT_SECONDS),
         )
     except GitSyncError as e:
-        # A failed check is a successful answer about the configuration, not
-        # a failure of this request -- 200 with `ok: false`.
+        # A failed check is a successful answer about the configuration, not a
+        # failed request -- 200 with `ok: false`.
         logger.info("Git sync configuration check failed: %s", e)
         return GitSyncCheckResponse(ok=False, detail=str(e))
 
@@ -230,8 +224,8 @@ async def trigger_git_sync(
 ) -> GitSyncTriggerResponse:
     """Trigger a sync cycle immediately instead of waiting for the next poll.
 
-    Fire-and-forget: returns as soon as the cycle is scheduled, not once it
-    completes (the same pattern as sandbox cleanup in router.py).
+    Fire-and-forget: returns once the cycle is scheduled, not once it completes
+    (the same pattern as sandbox cleanup in router.py).
     """
     config = get_config()
     git_settings = await resolve_effective_git_sync_settings(session, config.git_sync)
@@ -241,8 +235,8 @@ async def trigger_git_sync(
             detail="Git sync is not enabled",
         )
 
-    # A cycle already running picks up everything this one would have -- and
-    # `run_sync_cycle` serializes on a lock anyway, so scheduling another only
+    # A running cycle picks up everything this one would have, and
+    # `run_sync_cycle` serializes on a lock anyway, so scheduling another just
     # queues a redundant round trip behind it.
     if get_sync_started_at() is not None:
         return GitSyncTriggerResponse(triggered=False)

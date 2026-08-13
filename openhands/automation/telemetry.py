@@ -44,7 +44,7 @@ async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
 
     generated = f"automation-backend:{uuid.uuid4()}"
     # DO NOTHING, not the DO UPDATE set_service_metadata does: a concurrent
-    # first-caller's id may already have been returned to other callers.
+    # first caller's id may already have been handed to other callers.
     await session.execute(
         text(
             "INSERT INTO automation_service_metadata (key, value) "

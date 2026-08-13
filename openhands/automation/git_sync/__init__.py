@@ -3,8 +3,9 @@
 Submodules:
     client.py           Async wrapper around the `git` CLI
     serializer.py       Automation <-> git file-tree (de)serializer, encryption
-    loop.py             Sync cycle, background loop, mark_git_sync_dirty CRUD hook
+    loop.py             Sync cycle, background loop, mark_git_sync_dirty hook
     config_override.py  Runtime config overrides (PUT /v1/git-sync/config)
+    secret_store.py     At-rest encryption for the stored token and key
     router.py           FastAPI status/config/trigger API (/v1/git-sync/*)
     schemas.py          Request/response schemas for router.py
 """
@@ -18,8 +19,8 @@ from openhands.automation.git_sync.loop import (
     run_sync_cycle,
 )
 
-# Named `git_sync_router`, not `router`: re-exporting it as `router` would
-# shadow the `router` submodule as a package attribute.
+# Named `git_sync_router`: re-exporting it as `router` would shadow the
+# `router` submodule as a package attribute.
 from openhands.automation.git_sync.router import router as git_sync_router
 
 

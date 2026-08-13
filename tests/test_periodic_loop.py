@@ -137,10 +137,9 @@ class TestRunPeriodicLoop:
 
 
 class TestUnresolvedIntervalDoesNotBusySpin:
-    """Regression: a callable interval that raises on the very first pass
-    left `interval` at its 0.0 seed, so the loop slept zero seconds and spun
-    at full speed -- pegging a core and logging a traceback per iteration --
-    for as long as the failure lasted."""
+    """Regression: a callable interval raising on the first pass left
+    `interval` at its 0.0 seed, so the loop slept zero seconds and spun at
+    full speed for as long as the failure lasted."""
 
     async def test_first_resolution_failure_still_sleeps(self, logger, monkeypatch):
         monkeypatch.setattr(

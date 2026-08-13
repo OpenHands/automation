@@ -1,8 +1,7 @@
 """Shared helpers for the `automation_service_metadata` key/value table.
 
-Used for small singleton values that don't warrant their own table/column:
-the PostHog backend distinct ID and frontend consent state (telemetry.py),
-and git sync's last-synced-commit bookkeeping (git_sync/loop.py).
+For singleton values too small to warrant their own column: PostHog's distinct
+ID and consent state (telemetry.py), git sync's bookkeeping (git_sync/loop.py).
 """
 
 from sqlalchemy import select, text
@@ -12,7 +11,7 @@ from openhands.automation.models import AutomationServiceMetadata
 
 
 async def get_service_metadata(session: AsyncSession, key: str) -> str | None:
-    """Read a single automation_service_metadata value, or None if unset."""
+    """Read one automation_service_metadata value, or None if unset."""
     return await session.scalar(
         select(AutomationServiceMetadata.value).where(
             AutomationServiceMetadata.key == key
@@ -21,7 +20,7 @@ async def get_service_metadata(session: AsyncSession, key: str) -> str | None:
 
 
 async def set_service_metadata(session: AsyncSession, key: str, value: str) -> None:
-    """Upsert a single automation_service_metadata value."""
+    """Upsert one automation_service_metadata value."""
     await session.execute(
         text(
             "INSERT INTO automation_service_metadata (key, value) "

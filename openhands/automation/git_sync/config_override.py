@@ -1,8 +1,7 @@
 """Runtime overrides for git sync config, on top of the env-var defaults.
 
-Lets `PUT /v1/git-sync/config` reconfigure or pause/resume an already-running
-sync without a restart. Overrides are stored as a single JSON blob in the
-existing `automation_service_metadata` table -- no new table needed.
+Lets `PUT /v1/git-sync/config` reconfigure or pause/resume a running sync
+without a restart. Stored as one JSON blob in `automation_service_metadata`.
 """
 
 import json
@@ -23,11 +22,8 @@ from openhands.automation.utils.service_metadata import (
 
 GIT_SYNC_CONFIG_OVERRIDE_KEY: Final[str] = "git_sync_config_override"
 
-# The sync interval is runtime-only config: unlike the repo, branch, path,
-# credentials and author, it has no environment variable and is set solely
-# from the UI (PUT /v1/git-sync/config). It rides in the same override blob
-# but is not a GitSyncSettings field, so it is filtered out before the blob
-# is merged onto that model.
+# Runtime-only config: no env var, set solely from the UI. It rides in the same
+# blob but is not a GitSyncSettings field, so it is filtered out before merging.
 SYNC_INTERVAL_OVERRIDE_KEY: Final[str] = "git_sync_interval_seconds"
 
 # 0 means manual-only: nothing syncs until POST /v1/git-sync/sync is called.
@@ -66,11 +62,9 @@ async def resolve_candidate_git_sync_settings(
 ) -> GitSyncSettings:
     """The settings a `PUT /config` with `updates` would leave in place.
 
-    Same merge as `apply_git_sync_config_override` followed by
-    `resolve_effective_git_sync_settings`, but without persisting anything --
-    `POST /check` needs to test the configuration the operator is about to
-    save, including the `None`-clears-the-override case, where the value that
-    would actually take effect is the env-var default rather than a blank.
+    The same merge as apply + resolve, but persisting nothing: `POST /check`
+    tests a configuration before it is saved. Handles the None-clears-the-
+    override case, where the effective value is the env default, not a blank.
     """
     overrides = {
         key: value
@@ -78,9 +72,8 @@ async def resolve_candidate_git_sync_settings(
         if key != SYNC_INTERVAL_OVERRIDE_KEY
     }
     for key, value in updates.items():
-        # The interval rides in the same blob but is not a settings field, so
-        # it is dropped here exactly as it is on the way out of storage --
-        # `model_copy` would otherwise graft it onto the model unvalidated.
+        # Dropped here as it is on the way out of storage: not a settings
+        # field, and `model_copy` would graft it onto the model unvalidated.
         if key == SYNC_INTERVAL_OVERRIDE_KEY:
             continue
         if value is None:
@@ -93,8 +86,8 @@ async def resolve_candidate_git_sync_settings(
 async def resolve_effective_sync_interval_seconds(session: AsyncSession) -> int:
     """Seconds between automatic syncs; 0 means manual-only.
 
-    A stored value that isn't a non-negative int is ignored rather than
-    allowed to crash or busy-spin the sync loop.
+    A stored value that isn't a non-negative int is ignored rather than left to
+    crash or busy-spin the sync loop.
     """
     value = (await _load_overrides(session)).get(SYNC_INTERVAL_OVERRIDE_KEY)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -107,11 +100,10 @@ async def apply_git_sync_config_override(
 ) -> None:
     """Persist partial overrides, keyed by `GitSyncSettings` field name.
 
-    A `None` value clears that field's override (reverts to the env-var
-    default) rather than being stored literally -- the settings fields are
-    plain `str`/`bool`/`int`, so a literal `None` would corrupt `model_copy`.
-
-    Secret fields are encrypted on the way to storage; see secret_store.py.
+    A `None` clears that field's override (reverting to the env default)
+    rather than being stored literally -- the settings fields are plain
+    str/bool/int, so a literal `None` would corrupt `model_copy`. Secret
+    fields are encrypted on the way to storage; see secret_store.py.
     """
     overrides = await _load_overrides(session)
     for key, value in updates.items():
