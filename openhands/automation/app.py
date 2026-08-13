@@ -20,7 +20,7 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
-from openhands.automation.git_sync import git_sync_loop, is_git_sync_opted_in
+from openhands.automation.git_sync import git_sync_loop, is_git_sync_supported
 from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
@@ -166,28 +166,27 @@ async def lifespan(app: FastAPI):
     # Git sync: mirrors automations to/from a git repo. Local mode only.
     git_sync_task = None
     config = get_config()
-    if config.git_sync.git_sync_enabled and not settings.is_local_mode:
+    if config.git_sync.git_sync_repo_url and not settings.is_local_mode:
         logger.warning(
-            "AUTOMATION_GIT_SYNC_ENABLED is set but the service is not in "
+            "AUTOMATION_GIT_SYNC_REPO_URL is set but the service is not in "
             "local mode (AUTOMATION_AGENT_SERVER_URL not configured); "
             "git sync will remain disabled."
         )
-    if config.git_sync.git_sync_enabled and not config.git_sync.git_sync_repo_url:
-        logger.info(
-            "AUTOMATION_GIT_SYNC_ENABLED is set but AUTOMATION_GIT_SYNC_REPO_URL "
-            "is empty; nothing will sync until a repo is configured on the Git "
-            "Sync page."
-        )
-    if is_git_sync_opted_in():
-        logger.warning(
-            "Git sync is enabled — automation prompts and metadata will be "
-            "pushed to %s. Make sure that repo is private, since it may "
-            "contain sensitive automation content.",
-            config.git_sync.git_sync_repo_url or "the repo configured from the UI",
-        )
-        # Started on the env opt-in alone: the repo can come from the UI, and
-        # gating on it left the loop (and mark_git_sync_dirty) off for the
-        # process lifetime, reporting a healthy sync while exporting nothing.
+    if is_git_sync_supported():
+        # Only once a repo exists: without one the loop is idle, and warning
+        # about pushing to a repo that isn't configured is noise on the start
+        # of every local deployment.
+        if config.git_sync.git_sync_repo_url:
+            logger.warning(
+                "Git sync is enabled — automation prompts and metadata will be "
+                "pushed to %s. Make sure that repo is private, since it may "
+                "contain sensitive automation content.",
+                config.git_sync.git_sync_repo_url,
+            )
+        # Started whenever the deployment could sync, not only when it is
+        # already configured: the repo comes from the UI, and gating on it left
+        # the loop (and mark_git_sync_dirty) off for the process lifetime,
+        # reporting a healthy sync while exporting nothing.
         #
         # Started even while manual-only, since this task is what notices a
         # newly set interval. It idles without syncing while the interval is 0.

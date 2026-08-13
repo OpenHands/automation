@@ -86,7 +86,7 @@ config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
 config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
 config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
 config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
-config.git_sync.git_sync_enabled  # GitSyncSettings (AUTOMATION_ prefix)
+config.git_sync.git_sync_repo_url # GitSyncSettings (AUTOMATION_ prefix)
 config.log.log_level            # LogSettings (no prefix)
 ```
 
@@ -268,12 +268,12 @@ visibility, versioning, and backup — see issue #300. **Only active in local
 mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
 agent server, which doesn't make sense for the multi-tenant SaaS deployment.
 
-- Enable with `AUTOMATION_GIT_SYNC_ENABLED=1`. That env var is the boot-time
-  opt-in and the only thing that can't be set at runtime (`is_git_sync_opted_in`);
-  the repo URL and everything else may come either from
-  `AUTOMATION_GIT_SYNC_REPO_URL` or from the Git Sync page. The background loop
-  and the `dirty` CRUD hook are started on the opt-in alone, so a repo
-  configured from the UI syncs without a restart. See `GitSyncSettings` in
+- Configuring a repo is what enables sync — there is no separate feature
+  flag. The repo URL may come either from `AUTOMATION_GIT_SYNC_REPO_URL` or
+  from the Git Sync page, and nothing syncs until one is set. The background
+  loop and the `dirty` CRUD hook start in every local-mode deployment
+  (`is_git_sync_supported`), idle, so a repo configured from the UI syncs
+  without a restart. See `GitSyncSettings` in
   `config.py` for the full list of env vars.
 - Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
   (metadata) plus its tarball contents extracted under `tarball/**`. Those are
@@ -332,10 +332,10 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
 - **Runtime config**: `PUT /v1/git-sync/config` reconfigures or pauses/resumes
   an already-running sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as
-  JSON in `automation_service_metadata`). It can't newly enable sync in a
-  deployment that booted with `AUTOMATION_GIT_SYNC_ENABLED` unset — that
-  still needs the env var plus a restart, and is enforced on both the config
-  endpoint (409) and the manual trigger (503).
+  JSON in `automation_service_metadata`). Setting a repo URL there enables
+  sync without a restart; only a deployment that can't sync at all (not local
+  mode) is refused, on both the config endpoint (409) and the manual trigger
+  (503).
 - The token and encryption key in that blob are encrypted at rest by
   `git_sync/secret_store.py`, wrapped with `AUTOMATION_KV_SECRET` when the
   deployment sets one and otherwise with a key generated into a 0600 file

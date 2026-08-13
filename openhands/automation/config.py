@@ -344,11 +344,13 @@ class GitSyncSettings(BaseSettings):
     and changes pushed there (e.g. via a PR) are pulled back. Local mode only:
     one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
 
+    Configuring a repo is what turns sync on: there is no separate enable
+    flag, so nothing syncs until a repo URL is set here or from the UI.
+
     Environment variables (AUTOMATION_ prefix):
-        AUTOMATION_GIT_SYNC_ENABLED: Enable git sync (default: False). Only
-            takes effect in local mode; ignored (with a warning) otherwise.
         AUTOMATION_GIT_SYNC_REPO_URL: Git repo URL to sync to, e.g.
-            https://github.com/org/repo.git. Required when enabled.
+            https://github.com/org/repo.git. Setting it enables sync; empty
+            (the default) leaves it off.
         AUTOMATION_GIT_SYNC_BRANCH: Branch to sync (default: "main").
         AUTOMATION_GIT_SYNC_PATH: Directory within the repo automations are
             stored under, no leading/trailing slash (default: "automations").
@@ -371,7 +373,12 @@ class GitSyncSettings(BaseSettings):
 
     # The sync interval is deliberately not here: it is runtime-only, set from
     # the UI and stored with the other overrides. See config_override.py.
-    git_sync_enabled: bool = False
+    #
+    # `git_sync_enabled` is the pause switch, not a feature flag: it defaults
+    # to on and only ever goes false through a runtime override, so a
+    # deployment enables sync by configuring a repo rather than by setting a
+    # second thing that has to agree with the first.
+    git_sync_enabled: bool = True
     git_sync_repo_url: str = ""
     git_sync_branch: str = "main"
     git_sync_path: str = "automations"
@@ -386,13 +393,13 @@ class GitSyncSettings(BaseSettings):
 
     @property
     def enabled(self) -> bool:
-        """Whether git sync is configured: enabled and a repo URL is set.
+        """Whether git sync is on: a repo is configured and it isn't paused.
 
         Doesn't raise when misconfigured -- this section is constructed
         eagerly regardless of deployment mode, so raising would crash every
         deployment on a bad env var. app.py warns once it knows the mode.
         """
-        return bool(self.git_sync_enabled and self.git_sync_repo_url)
+        return bool(self.git_sync_repo_url and self.git_sync_enabled)
 
 
 # ---------------------------------------------------------------------------

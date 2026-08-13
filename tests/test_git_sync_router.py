@@ -43,7 +43,6 @@ class TestGitSyncStatus:
         assert response.status_code == 403
 
     async def test_reflects_configured_repo(self, async_client, monkeypatch):
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -116,7 +115,6 @@ class TestGitSyncConfig:
     async def test_pause_via_override_503s_the_manual_trigger(
         self, async_client, monkeypatch
     ):
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -194,7 +192,6 @@ class TestTriggerGitSync:
     async def test_returns_202_and_schedules_when_enabled(
         self, async_client, monkeypatch
     ):
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -222,7 +219,6 @@ class TestTriggerGitSync:
 
         monkeypatch.setattr(router_module, "run_sync_cycle", slow_run_sync_cycle)
 
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -300,7 +296,6 @@ class TestSyncInProgressReporting:
         # queue behind the running one and repeat its work.
         started, _, _ = running_cycle
         await started.wait()
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -316,26 +311,26 @@ class TestSyncInProgressReporting:
         assert len(_background_sync_tasks) == 0
 
 
-class TestGitSyncConfigCannotEnableSync:
-    """Regression: `POST /sync` gated on the override-merged `enabled`, so
-    `PUT /config` could enable sync in a deployment that booted with it unset
-    -- letting any holder of `manage_automations` push every automation's
-    prompt, model config and tarball to a repo of their choice.
+class TestGitSyncConfigOutsideLocalMode:
+    """Configuring a repo is what enables sync, but only where sync can run:
+    one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
+    Config is still accepted there -- it just never starts anything.
     """
 
-    async def test_enabling_is_rejected_when_not_opted_in_at_boot(self, async_client):
+    async def test_configuring_is_accepted_outside_local_mode(self, async_client):
         response = await async_client.put(
             "/api/automation/v1/git-sync/config",
-            json={"enabled": True, "repo_url": "https://example.com/evil.git"},
+            json={"repo_url": "https://example.com/repo.git"},
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
 
     async def test_manual_sync_stays_unavailable_after_such_an_attempt(
         self, async_client
     ):
         await async_client.put(
             "/api/automation/v1/git-sync/config",
-            json={"repo_url": "https://example.com/evil.git"},
+            json={"repo_url": "https://example.com/repo.git"},
         )
         response = await async_client.post("/api/automation/v1/git-sync/sync")
         assert response.status_code == 503

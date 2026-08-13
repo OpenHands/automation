@@ -25,7 +25,7 @@ from openhands.automation.git_sync.loop import (
     GIT_SYNC_LAST_ERROR_KEY,
     GIT_SYNC_LAST_RUN_AT_KEY,
     get_sync_started_at,
-    is_git_sync_opted_in,
+    is_git_sync_supported,
     run_sync_cycle,
 )
 from openhands.automation.git_sync.schemas import (
@@ -68,14 +68,8 @@ _CONFIG_OVERRIDE_FIELDS: Final[dict[str, str]] = {
 
 
 def _is_effectively_enabled(git_settings: GitSyncSettings) -> bool:
-    """Whether sync is on right now: the boot-time opt-in plus live config.
-
-    The opt-in check is what stops `PUT /config` enabling sync in a deployment
-    that booted with it off. Without it, any caller with `manage_automations`
-    could turn sync on, point it at a repo of their choosing, and `POST /sync`
-    every automation's prompt, model config and tarball there.
-    """
-    return is_git_sync_opted_in() and git_settings.enabled
+    """Whether sync is on right now: supported here, configured, not paused."""
+    return is_git_sync_supported() and git_settings.enabled
 
 
 async def _build_status_response(
@@ -128,21 +122,13 @@ async def update_git_sync_config(
     _user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> GitSyncStatusResponse:
-    """Reconfigure or pause/resume an already-running sync without a restart.
+    """Reconfigure or pause/resume sync without a restart.
 
-    Can't enable sync in a deployment that booted with it disabled -- that
-    needs AUTOMATION_GIT_SYNC_ENABLED plus a restart.
+    Configuring a repo is what turns sync on, so everything here takes effect
+    immediately -- there is no boot-time flag left to disagree with. Storing
+    config in a deployment that can't sync (not local mode) is allowed and
+    simply does nothing: the loop never starts and the manual trigger 503s.
     """
-    if data.enabled and not is_git_sync_opted_in():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Git sync can only be enabled in a deployment that booted "
-                "with AUTOMATION_GIT_SYNC_ENABLED set and is running in "
-                "local mode. Set it and restart the service."
-            ),
-        )
-
     update = data.model_dump(exclude_unset=True)
     mapped = {_CONFIG_OVERRIDE_FIELDS[key]: value for key, value in update.items()}
     try:

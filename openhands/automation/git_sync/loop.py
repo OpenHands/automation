@@ -89,32 +89,29 @@ GIT_SYNC_LAST_ERROR_AT_KEY: Final[str] = "git_sync_last_error_at"
 _TRIGGER_ADAPTER: Final[TypeAdapter[Trigger]] = TypeAdapter(Trigger)
 
 
-def is_git_sync_opted_in() -> bool:
-    """Whether the deployment opted into git sync at boot: env flag + local mode.
+def is_git_sync_supported() -> bool:
+    """Whether this deployment can sync at all: local mode.
 
-    The gate for everything that can't be turned on at runtime: the background
-    loop starts only when it holds, and `PUT /config` won't flip `enabled` on
-    without it.
-
-    Unlike `is_git_sync_active`, does NOT require a repo URL -- that is routine
-    config the UI supplies. Requiring it here left the loop unstarted and
-    `mark_git_sync_dirty` a no-op for the process lifetime, so a UI-configured
-    repo reported a healthy sync while never exporting anything.
+    Deliberately independent of configuration. The background loop starts on
+    this alone and idles until a repo and interval exist, because both are
+    routine config the UI supplies at runtime: gating the loop on them left it
+    unstarted -- and `mark_git_sync_dirty` a no-op -- for the process lifetime,
+    so a UI-configured repo reported a healthy sync while never exporting
+    anything.
 
     Local mode is required because one repo maps to one agent server.
     """
-    config = get_config()
-    return config.git_sync.git_sync_enabled and config.service.is_local_mode
+    return get_config().service.is_local_mode
 
 
 def is_git_sync_active() -> bool:
-    """Whether git sync is fully configured from env alone: opted in + a repo.
+    """Whether git sync is on from env alone: supported, with a repo set.
 
     Reads only boot-time env config, so it says nothing about a runtime-
     configured repo. Callers needing the overrides must resolve the effective
     settings themselves, as the router's `_is_effectively_enabled` does.
     """
-    return is_git_sync_opted_in() and bool(get_config().git_sync.git_sync_repo_url)
+    return is_git_sync_supported() and get_config().git_sync.enabled
 
 
 @dataclass
@@ -137,12 +134,12 @@ async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> 
     SAVEPOINT so the caller's pending changes survive -- some callers treat any
     exception here as a failed automation creation.
 
-    Gates on the boot-time opt-in, not on sync being fully configured. Requiring
-    a repo URL disabled dirty-marking whenever the repo came from the UI, and
-    gating on the effective `enabled` would drop every edit made while sync is
-    paused; both silently lose changes a later cycle should have exported.
+    Gates on the deployment supporting sync, not on sync being configured.
+    Requiring a repo URL disabled dirty-marking whenever the repo came from the
+    UI, and gating on the effective `enabled` would drop every edit made while
+    sync is paused; both silently lose changes a later cycle should export.
     """
-    if not is_git_sync_opted_in():
+    if not is_git_sync_supported():
         return
 
     try:
@@ -1023,7 +1020,7 @@ async def git_sync_loop(
 ) -> None:
     """Background loop: periodically syncs automations with the git repo.
 
-    Started by app.py only when `is_git_sync_opted_in()`. Each cycle
+    Started by app.py only when `is_git_sync_supported()`. Each cycle
     re-resolves the runtime config overrides and no-ops -- without dying -- if
     they have paused sync or no repo is configured yet.
 

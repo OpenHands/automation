@@ -89,7 +89,6 @@ def git_settings(tmp_path, origin, monkeypatch):
     """
     from openhands.automation.config import clear_config_cache
 
-    monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_REPO_URL", f"file://{origin}")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_BRANCH", "main")
     monkeypatch.setenv("AUTOMATION_GIT_SYNC_PATH", "automations")
@@ -98,7 +97,6 @@ def git_settings(tmp_path, origin, monkeypatch):
     monkeypatch.setenv("AUTOMATION_LOCAL_API_KEY", "x")
     clear_config_cache()
     yield GitSyncSettings(
-        git_sync_enabled=True,
         git_sync_repo_url=f"file://{origin}",
         git_sync_branch="main",
         git_sync_path="automations",
@@ -178,7 +176,6 @@ async def _create_internal_automation(
 
 class TestIsGitSyncActive:
     def test_inactive_without_local_mode(self, monkeypatch):
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
@@ -191,7 +188,6 @@ class TestIsGitSyncActive:
             clear_config_cache()
 
     def test_active_with_local_mode_and_repo(self, monkeypatch):
-        monkeypatch.setenv("AUTOMATION_GIT_SYNC_ENABLED", "1")
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
         )
