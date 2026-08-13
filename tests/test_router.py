@@ -2055,6 +2055,125 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.cost is None
 
+    async def _terminal_run(self, async_session, status, error_detail=None):
+        """Create an automation with a run already in a terminal state."""
+        from openhands.automation.models import AutomationRun
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=status,
+            error_detail=error_detail,
+            completed_at=utcnow(),
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return run
+
+    async def test_complete_run_reconciles_watchdog_timeout_with_late_success(
+        self, async_client, async_session
+    ):
+        """A COMPLETED callback overrides a watchdog-authored timeout FAILED."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Timed out: Command still running",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "COMPLETED",
+                "conversation_id": "conv-late-999",
+                "cost": 0.25,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["error_detail"] is None
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.COMPLETED
+        assert run.error_detail is None
+        assert run.conversation_id == "conv-late-999"
+        assert run.cost == 0.25
+
+    async def test_complete_run_late_failure_does_not_reconcile(
+        self, async_client, async_session
+    ):
+        """Only proof of success reconciles; a late FAILED callback still 409s."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Timed out: Command still running",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "wrapper crashed"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.error_detail == "Timed out: Command still running"
+
+    async def test_complete_run_does_not_reconcile_dispatcher_failure(
+        self, async_client, async_session
+    ):
+        """FAILED states not authored by the watchdog keep their 409."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Internal error",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.error_detail == "Internal error"
+
+    async def test_complete_run_does_not_reconcile_cancelled_run(
+        self, async_client, async_session
+    ):
+        """A cancelled run stays cancelled even if a success callback arrives."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(async_session, AutomationRunStatus.CANCELLED)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 409
+        assert "CANCELLED" in response.json()["detail"]
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.CANCELLED
+
     async def test_first_completed_run_records_success_outcome(
         self, async_client, async_session
     ):

@@ -481,20 +481,34 @@ This automation was triggered by a webhook event:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    cost = None
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
         conversation.run()
 
-        # Wait for the stream to settle
-        while time.time() - last_event_time["ts"] < 2.0:
-            time.sleep(0.1)
+        # Post-run bookkeeping is best-effort: the conversation has already
+        # succeeded, and nothing below may raise out of the workspace context
+        # or the __exit__ callback would report FAILED for a successful run.
+        # The callback's cost comes from conversation.close() (cached stats),
+        # not from this live fetch.
+        try:
+            # Wait for the stream to settle
+            while time.time() - last_event_time["ts"] < 2.0:
+                time.sleep(0.1)
 
-        cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
+            cost = (
+                conversation.conversation_stats.get_combined_metrics().accumulated_cost
+            )
+        except Exception as e:
+            print(f"  WARNING: post-run stats fetch failed (non-fatal): {e}")
         print(f"  cost: {cost}")
         print(f"  events received: {len(received_events)}")
     finally:
-        conversation.close()
+        try:
+            conversation.close()
+        except Exception as e:
+            print(f"  WARNING: conversation.close() failed (non-fatal): {e}")
 
     print("  conversation completed successfully")
 
