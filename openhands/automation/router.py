@@ -42,7 +42,7 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -441,14 +441,45 @@ async def complete_run(
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
 
+    reconciled = False
     if db_result.rowcount == 0:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"Run is {run.status.value}, expected RUNNING",
-        )
+        # See the *current* terminal state, not the pre-UPDATE snapshot
+        # (the watchdog may have committed FAILED while we held a stale row).
+        await session.refresh(run)
+        if (
+            new_status == AutomationRunStatus.COMPLETED
+            and run.status == AutomationRunStatus.FAILED
+            and (run.error_detail or "").startswith("Timed out: ")
+        ):
+            # The watchdog guessed FAILED at its deadline; the callback is
+            # direct proof the entrypoint finished successfully. Flip it.
+            # The "Timed out: " prefix is written only by the watchdog, so
+            # dispatcher-authored failures and cancellations still 409.
+            values["error_detail"] = None
+            reconcile_stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status == AutomationRunStatus.FAILED,
+                    AutomationRun.error_detail.startswith("Timed out: "),
+                )
+                .values(**values)
+            )
+            reconcile_result: CursorResult = await session.execute(  # type: ignore[assignment]
+                reconcile_stmt
+            )
+            reconciled = reconcile_result.rowcount > 0
+        if not reconciled:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"Run is {run.status.value}, expected RUNNING",
+            )
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    telemetry_properties: dict = {"trigger_source": "callback"}
+    if reconciled:
+        telemetry_properties["reconciled_watchdog_timeout"] = True
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED
@@ -457,8 +488,9 @@ async def complete_run(
         user=user,
         automation=automation,
         run=run,
-        properties={"trigger_source": "callback"},
+        properties=telemetry_properties,
     )
+    await record_first_run_outcome(run, new_status, "execution", session=session)
 
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.

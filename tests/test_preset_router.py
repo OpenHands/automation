@@ -715,6 +715,114 @@ class TestCreateAutomationFromPrompt:
             ],
         }
 
+    async def test_create_from_prompt_stores_template_provenance(self, async_client):
+        """Template provenance is stored verbatim and returned to the client."""
+        payload = {
+            "name": "Provenance Test",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {
+                "id": "github-pr-reviewer",
+                "version": "1.0.0",
+                "config": {"reviewTone": "thorough"},
+            },
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"]["template"] == {
+            "id": "github-pr-reviewer",
+            "version": "1.0.0",
+            "config": {"reviewTone": "thorough"},
+        }
+
+    async def test_create_from_prompt_honors_explicit_enabled_state(self, async_client):
+        """An automation can be created disabled instead of PATCHed afterwards."""
+        payload = {
+            "name": "Starts Disabled",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "enabled": False,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["enabled"] is False
+
+    async def test_create_from_prompt_with_known_template_returns_existing(
+        self, async_client
+    ):
+        """Enabling an already-enabled template returns the first automation, 200."""
+        payload = {
+            "name": "Resolver",
+            "prompt": "Respond to mentions",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "openhands-resolver", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+        assert first.status_code == 201
+
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
+        listing = await async_client.get("/api/automation/v1")
+        assert listing.json()["total"] == 1
+
+    async def test_create_from_prompt_rejects_oversized_template_config(
+        self, async_client
+    ):
+        """A template config over the serialized-size cap is a validation error."""
+        payload = {
+            "name": "Oversized Config",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {
+                "id": "big-template",
+                "version": "1.0.0",
+                "config": {"blob": "x" * 20_000},
+            },
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+
+    async def test_deleted_template_automation_does_not_block_reenabling(
+        self, async_client
+    ):
+        """After deleting a template automation, the template can be enabled again."""
+        payload = {
+            "name": "Recreate Me",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "pr-reviewer", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+        deleted = await async_client.delete(f"/api/automation/v1/{first.json()['id']}")
+        assert deleted.status_code == 204
+
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
+
     async def test_create_from_prompt_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
     ):
@@ -1714,6 +1822,56 @@ class TestCreateAutomationFromPlugin:
             ],
             "repos": [{"url": "owner/repo", "ref": "main", "provider": "github"}],
         }
+
+    async def test_create_from_plugin_stores_template_provenance(self, async_client):
+        """Plugin presets honor template provenance and explicit enabled state."""
+        payload = {
+            "name": "Plugin Provenance",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run the plugin",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "enabled": False,
+            "template": {"id": "plugin-template", "version": "2.0.0"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["preset_metadata"]["template"] == {
+            "id": "plugin-template",
+            "version": "2.0.0",
+        }
+        assert data["enabled"] is False
+
+    async def test_create_from_plugin_dedupes_across_preset_kinds(self, async_client):
+        """A template automation is returned unchanged from either endpoint."""
+        prompt_payload = {
+            "name": "Shared Template",
+            "prompt": "Respond to mentions",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "shared-template", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=prompt_payload
+        )
+        assert first.status_code == 201
+
+        plugin_payload = {
+            "name": "Shared Template Again",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run the plugin",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "shared-template", "version": "1.0.0"},
+        }
+        second = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=plugin_payload
+        )
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
 
     async def test_create_from_plugin_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
