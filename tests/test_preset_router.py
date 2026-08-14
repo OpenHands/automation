@@ -133,6 +133,15 @@ class TestPresetFileSyntax:
         # compile() raises SyntaxError if the code is invalid
         compile(source, str(sdk_main_path), "exec")
 
+    def test_plugin_preset_resolves_plugins_before_starting_conversation(self):
+        """Plugin fetch failures must surface before event polling begins."""
+        sdk_main_path = PRESETS_DIR / "plugin" / "sdk_main.py"
+        source = sdk_main_path.read_text()
+
+        assert "Plugin.fetch(" in source
+        assert "Plugin.load(plugin_path)" in source
+        assert "PluginSource(source=str(plugin_path))" in source
+
     def test_plugin_preset_setup_sh_exists(self):
         """Verify plugin setup.sh exists and is not empty."""
         setup_sh_path = PRESETS_DIR / "plugin" / "setup.sh"
@@ -1242,7 +1251,9 @@ class TestGeneratePluginTarball:
 
             # Verify key SDK imports and patterns are present
             assert "from openhands.sdk import" in main_content
-            assert "from openhands.sdk.plugin import PluginSource" in main_content
+            assert (
+                "from openhands.sdk.plugin import Plugin, PluginSource" in main_content
+            )
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
             assert "keep_alive=True" in main_content
