@@ -2,10 +2,14 @@
 
 Periodically scans for runs stuck in RUNNING state past their pre-computed
 ``timeout_at`` deadline. Before marking as FAILED, attempts to verify the
-actual run status by querying the execution environment.
+actual run status by querying the execution environment. A verification
+result that means "the bash command may still be executing" defers the
+deadline (bounded by a hard cap) instead of terminalizing the run.
 
-The ``timeout_at`` column is set to ``started_at + max_duration`` when the
-dispatcher transitions a run to RUNNING (see ``mark_run_status``).
+The ``timeout_at`` column is set to a provisioning-phase deadline when the
+dispatcher transitions a run to RUNNING (see ``mark_run_status``), then
+reset to bash-start + run budget + margin once the bash command starts
+(see ``update_run_timeout_at``).
 
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
@@ -13,6 +17,7 @@ in the ExecutionBackend (see automation/backends/).
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 from sqlalchemy import inspect, select, update
 from sqlalchemy.engine import CursorResult
@@ -20,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
-from openhands.automation.config import Settings
+from openhands.automation.config import Settings, get_config
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -28,10 +33,20 @@ from openhands.automation.models import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.time import utcnow
+from openhands.automation.utils.run import record_first_run_outcome
+from openhands.automation.utils.time import ensure_utc, utcnow
+from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 logger = logging.getLogger("automation.watchdog")
+
+# Verification outcomes that mean "the bash command may still be executing".
+# "Command still running": the latest BashOutput event has exit_code=None.
+# "No bash output found": the agent-server only emits BashOutput events on
+# 1 MiB stream chunks or on command completion, so a still-running command
+# with modest output has no BashOutput row at all — this is the *common*
+# still-running signature, not just a startup race.
+STILL_RUNNING_VERIFICATION_ERRORS = ("Command still running", "No bash output found")
 
 
 async def _get_automation_keep_alive(
@@ -44,6 +59,74 @@ async def _get_automation_keep_alive(
     return await session.scalar(
         select(Automation.keep_alive).where(Automation.id == run.automation_id)
     )
+
+
+async def _get_automation_timeout(
+    session: AsyncSession, run: AutomationRun
+) -> int | None:
+    """Return parent automation timeout without extra SQL when preloaded."""
+    if "automation" not in inspect(run).unloaded and run.automation is not None:
+        return run.automation.timeout
+
+    return await session.scalar(
+        select(Automation.timeout).where(Automation.id == run.automation_id)
+    )
+
+
+async def _defer_still_running(
+    session: AsyncSession,
+    run: AutomationRun,
+    settings: Settings,
+    now: datetime,
+) -> bool:
+    """Push timeout_at forward while the bash command may still be running.
+
+    The bash command's own timeout (enforced by the agent-server from bash
+    start) governs how long the run may execute; a still-running verification
+    result at the watchdog deadline means only that the two clocks are
+    skewed, not that the run failed. Deferral is bounded by a hard cap so a
+    broken bash service cannot defer forever.
+
+    Returns True when the run should be left non-terminal this scan
+    (deferred, or already terminal via a racing callback/cancel). Returns
+    False when the hard cap is exhausted and the caller must proceed to the
+    terminal path.
+    """
+    extra = log_extra(run_id=str(run.id), sandbox_id=run.sandbox_id)
+    sandbox_cfg = get_config().sandbox
+    effective_timeout = resolve_automation_timeout_seconds(
+        await _get_automation_timeout(session, run)
+    )
+    anchor = ensure_utc(run.started_at or run.created_at)
+    hard_deadline = anchor + timedelta(
+        seconds=sandbox_cfg.sandbox_ready_timeout
+        + effective_timeout
+        + sandbox_cfg.run_timeout_hard_grace
+    )
+    if now >= hard_deadline:
+        return False
+
+    new_timeout_at = min(
+        now + timedelta(seconds=settings.watchdog_interval_seconds), hard_deadline
+    )
+    result: CursorResult = await session.execute(  # type: ignore[assignment]
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run.id,
+            AutomationRun.status == AutomationRunStatus.RUNNING,
+        )
+        .values(timeout_at=new_timeout_at)
+    )
+    if result.rowcount > 0:
+        logger.info(
+            "Run still executing; deferring timeout_at to %s (hard cap %s)",
+            new_timeout_at,
+            hard_deadline,
+            extra=extra,
+        )
+    # rowcount == 0 means a callback/cancel landed concurrently — also
+    # non-terminal for the watchdog.
+    return True
 
 
 def _loaded_automation(run: AutomationRun) -> Automation | None:
@@ -63,7 +146,7 @@ def _should_cleanup_sandbox_after_terminal(
 async def _verify_and_mark_run(
     session: AsyncSession,
     run: AutomationRun,
-    settings: Settings,  # noqa: ARG001 - kept for API compatibility
+    settings: Settings,
 ) -> bool:
     """Verify run status via backend and mark accordingly.
 
@@ -109,6 +192,9 @@ async def _verify_and_mark_run(
                     "trigger_source": "watchdog",
                     "failure_kind": "verification_failed",
                 },
+            )
+            await record_first_run_outcome(
+                run, AutomationRunStatus.FAILED, "watchdog", session=session
             )
         return result.rowcount > 0
 
@@ -200,6 +286,14 @@ async def _verify_and_mark_run(
                     "verification_exit_code": exit_code,
                 },
             )
+            await record_first_run_outcome(
+                run,
+                AutomationRunStatus.COMPLETED
+                if exit_code == 0
+                else AutomationRunStatus.FAILED,
+                "watchdog",
+                session=session,
+            )
         if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
             run, keep_alive
         ):
@@ -212,6 +306,17 @@ async def _verify_and_mark_run(
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
+    # A still-running bash command is not a failure: its own timeout
+    # (enforced by the agent-server) has not fired yet, so defer instead of
+    # destroying a live run. Must happen before any cleanup below.
+    if verification.error in STILL_RUNNING_VERIFICATION_ERRORS:
+        if await _defer_still_running(session, run, settings, now):
+            return False
+        logger.warning(
+            "Still-running grace exhausted, proceeding to terminal timeout",
+            extra=extra,
+        )
+
     # This likely means the sandbox crashed or was cleaned up
     logger.warning(
         "Could not verify run status: %s, marking as timed out",
@@ -262,6 +367,9 @@ async def _verify_and_mark_run(
                 "failure_kind": "timeout",
             },
         )
+        await record_first_run_outcome(
+            run, AutomationRunStatus.FAILED, "watchdog", session=session
+        )
     return result.rowcount > 0
 
 
@@ -271,9 +379,9 @@ async def mark_stale_runs(
 ) -> int:
     """Find and process stale RUNNING runs.
 
-    A run is stale if ``timeout_at < now()`` (pre-computed at dispatch time).
-    Before marking as FAILED, attempts to verify the actual status by querying
-    the sandbox. Uses optimistic locking so concurrent callbacks win.
+    A run is stale if ``timeout_at < now()``. Before marking as FAILED,
+    attempts to verify the actual status by querying the sandbox. Uses
+    optimistic locking so concurrent callbacks win.
 
     Each run is processed in its own session so that row locks are released
     immediately after commit rather than held for the duration of the batch.
@@ -318,11 +426,17 @@ async def mark_stale_runs(
             )
 
             try:
-                if await _verify_and_mark_run(session, run, settings):
-                    await session.commit()
+                # Commit unconditionally: a non-terminal outcome may still
+                # have deferred timeout_at, and that UPDATE must persist.
+                terminal = await _verify_and_mark_run(session, run, settings)
+                await session.commit()
+                if terminal:
                     marked += 1
                 else:
-                    logger.info("Run already completed, skipping", extra=extra)
+                    logger.info(
+                        "Run not terminal (completed concurrently or deferred)",
+                        extra=extra,
+                    )
             except Exception:
                 logger.exception("Error processing stale run", extra=extra)
 

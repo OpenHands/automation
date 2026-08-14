@@ -620,6 +620,7 @@ class AutomationResponse(BaseModel):
 
     name: str
     prompt: str | None
+    preset_metadata: dict | None = None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None
@@ -651,6 +652,7 @@ class RunCompleteRequest(BaseModel):
     run_id: str | None = None
     conversation_id: str | None = None
     error: str | None = None
+    cost: float | None = None
 
 
 class AutomationRunResponse(BaseModel):
@@ -661,6 +663,7 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     conversation_id: str | None
+    cost: float | None = None
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
@@ -722,6 +725,10 @@ class CapabilitiesResponse(_SetupContractModel):
     """What this deployment supports, discovered before a setup form renders."""
 
     ready: bool = Field(..., description="Whether the service can accept new work")
+    max_automation_timeout_seconds: int = Field(
+        ...,
+        description="Maximum timeout the service accepts for an automation run",
+    )
     trigger_kinds: list[str]
     event_sources: list[str]
     event_types: list[str] = Field(

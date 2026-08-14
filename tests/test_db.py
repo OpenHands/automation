@@ -255,6 +255,11 @@ class TestSqliteMigrations:
             assert "ix_automation_runs_status_created_at" in run_indexes
             assert "ix_automation_runs_status_timeout_at" in run_indexes
 
+            run_columns = {
+                column["name"] for column in inspector.get_columns("automation_runs")
+            }
+            assert "cost" in run_columns
+
             engine.dispose()
         finally:
             # Clean up

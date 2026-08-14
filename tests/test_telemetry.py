@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 import pytest
@@ -77,6 +78,49 @@ def _assert_server_version_properties(properties: dict) -> None:
     expected = get_server_version_info()
     assert properties["package_version"] == expected["package_version"]
     assert properties["sdk_version"] == expected["sdk_version"]
+
+
+def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
+    monkeypatch.setattr(
+        telemetry,
+        "get_server_version_info",
+        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
+    )
+    automation = _automation()
+    run = _run(automation)
+    run.started_at = datetime(2026, 8, 4, 12, 0)
+    run.completed_at = datetime(2026, 8, 4, 12, 0, tzinfo=UTC) + timedelta(seconds=2)
+
+    properties = telemetry._base_properties(
+        request_context=TelemetryRequestContext(),
+        user=None,
+        automation=automation,
+        run=run,
+        backend_distinct_id="automation-backend:test",
+    )
+
+    assert properties["duration_ms"] == 2000
+
+
+@pytest.mark.asyncio
+async def test_capture_contains_property_building_errors(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+
+    async def backend_id(**kwargs):
+        return "automation-backend:test"
+
+    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
+
+    def raise_property_error(**kwargs):
+        raise TypeError("invalid timestamp arithmetic")
+
+    monkeypatch.setattr(telemetry, "_base_properties", raise_property_error)
+
+    await telemetry.capture_automation_event(
+        "automation_run_failed",
+        automation=_automation(),
+    )
 
 
 @pytest.fixture(autouse=True)

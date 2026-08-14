@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     String,
@@ -59,6 +60,11 @@ class Automation(Base):
 
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Preset-specific metadata (populated by preset endpoints; NULL for custom
+    # SDK automations).
+    # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
+    preset_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Model profile name to use for automation runs.
     # None is only used for legacy/local fallback.
@@ -152,6 +158,11 @@ class AutomationRun(Base):
 
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Accumulated LLM cost in USD (set by completion callback).
+    # NULL means "unknown" — e.g. runs that predate cost tracking, or that were
+    # force-terminated by the watchdog / cancelled so no callback ever fired.
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Pre-computed deadline: started_at + max_duration. Set when transitioning
     # to RUNNING, used by the staleness watchdog for efficient indexed queries.

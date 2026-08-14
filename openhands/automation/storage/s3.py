@@ -168,6 +168,19 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "write", full_path)
 
+        logger.info(
+            "S3 write ok: bucket=%s, path=%s, size_bytes=%d",
+            self.bucket_name,
+            full_path,
+            len(as_bytes),
+            extra={
+                "s3_operation": "write",
+                "bucket": self.bucket_name,
+                "path": full_path,
+                "size_bytes": len(as_bytes),
+            },
+        )
+
     def read(self, path: str) -> bytes:
         """
         Read file contents from S3.
@@ -232,6 +245,17 @@ class S3FileStore(FileStore):
             self.client.delete_object(Bucket=self.bucket_name, Key=full_path)
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "delete", full_path)
+
+        logger.info(
+            "S3 delete ok: bucket=%s, path=%s",
+            self.bucket_name,
+            full_path,
+            extra={
+                "s3_operation": "delete",
+                "bucket": self.bucket_name,
+                "path": full_path,
+            },
+        )
 
     def _handle_client_error(
         self, e: botocore.exceptions.ClientError, operation: str, path: str
@@ -336,5 +360,18 @@ class S3FileStore(FileStore):
             )
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "write_stream", full_path)
+
+        logger.info(
+            "S3 write_stream ok: bucket=%s, path=%s, size_bytes=%d",
+            self.bucket_name,
+            full_path,
+            total_size,
+            extra={
+                "s3_operation": "write_stream",
+                "bucket": self.bucket_name,
+                "path": full_path,
+                "size_bytes": total_size,
+            },
+        )
 
         return total_size
