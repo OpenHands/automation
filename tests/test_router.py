@@ -1987,6 +1987,30 @@ class TestCompleteRun:
         await async_session.commit()
         return run
 
+    async def _seed_running_run(self, async_session, preset_metadata):
+        """A RUNNING run on an automation carrying the given preset metadata."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Template Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            preset_metadata=preset_metadata,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return automation, run
+
     async def test_complete_run_saves_cost(self, async_client, async_session):
         """Complete endpoint stores the accumulated LLM cost reported by the SDK."""
         run = await self._running_run(async_session)
@@ -2030,6 +2054,243 @@ class TestCompleteRun:
         assert response.json()["cost"] is None
         await async_session.refresh(run)
         assert run.cost is None
+
+    async def _terminal_run(self, async_session, status, error_detail=None):
+        """Create an automation with a run already in a terminal state."""
+        from openhands.automation.models import AutomationRun
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=status,
+            error_detail=error_detail,
+            completed_at=utcnow(),
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return run
+
+    async def test_complete_run_reconciles_watchdog_timeout_with_late_success(
+        self, async_client, async_session
+    ):
+        """A COMPLETED callback overrides a watchdog-authored timeout FAILED."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Timed out: Command still running",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "COMPLETED",
+                "conversation_id": "conv-late-999",
+                "cost": 0.25,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["error_detail"] is None
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.COMPLETED
+        assert run.error_detail is None
+        assert run.conversation_id == "conv-late-999"
+        assert run.cost == 0.25
+
+    async def test_complete_run_late_failure_does_not_reconcile(
+        self, async_client, async_session
+    ):
+        """Only proof of success reconciles; a late FAILED callback still 409s."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Timed out: Command still running",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "wrapper crashed"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.error_detail == "Timed out: Command still running"
+
+    async def test_complete_run_does_not_reconcile_dispatcher_failure(
+        self, async_client, async_session
+    ):
+        """FAILED states not authored by the watchdog keep their 409."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(
+            async_session,
+            AutomationRunStatus.FAILED,
+            error_detail="Internal error",
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.error_detail == "Internal error"
+
+    async def test_complete_run_does_not_reconcile_cancelled_run(
+        self, async_client, async_session
+    ):
+        """A cancelled run stays cancelled even if a success callback arrives."""
+        from openhands.automation.models import AutomationRunStatus
+
+        run = await self._terminal_run(async_session, AutomationRunStatus.CANCELLED)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 409
+        assert "CANCELLED" in response.json()["detail"]
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.CANCELLED
+
+    async def test_first_completed_run_records_success_outcome(
+        self, async_client, async_session
+    ):
+        """The first completed run stamps a one-time success outcome."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        first_run = metadata["first_run"]
+        assert first_run["status"] == "success"
+        assert first_run["failure_stage"] is None
+        assert first_run["template_version"] == "1.2.0"
+        assert first_run["recorded_at"]
+
+    async def test_first_failed_run_records_execution_failure_stage(
+        self, async_client, async_session
+    ):
+        """A first-run failure records the stage, and nothing sensitive."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "secret stack trace"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        first_run = metadata["first_run"]
+        assert first_run["status"] == "failure"
+        assert first_run["failure_stage"] == "execution"
+        # The record carries no error text or prompt by construction.
+        assert set(first_run) == {
+            "status",
+            "failure_stage",
+            "template_version",
+            "recorded_at",
+        }
+
+    async def test_first_run_outcome_is_not_overwritten_by_later_runs(
+        self, async_client, async_session
+    ):
+        """Only the first terminal run records; later outcomes leave it alone."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation, run = await self._seed_running_run(
+            async_session,
+            {
+                "preset_type": "prompt",
+                "prompt": "p",
+                "template": {"id": "tpl", "version": "1.2.0"},
+            },
+        )
+        first = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "FAILED", "error": "boom"},
+        )
+        assert first.status_code == 200
+        second_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(second_run)
+        await async_session.commit()
+
+        second = await async_client.post(
+            f"/api/automation/v1/runs/{second_run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert second.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        assert metadata["first_run"]["status"] == "failure"
+
+    async def test_run_completion_without_template_records_no_outcome(
+        self, async_client, async_session
+    ):
+        """Automations without template provenance never record a first run."""
+        automation, run = await self._seed_running_run(
+            async_session,
+            {"preset_type": "prompt", "prompt": "p"},
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(automation)
+        metadata = automation.preset_metadata
+        assert metadata is not None
+        assert "first_run" not in metadata
 
 
 class TestDownloadTarball:

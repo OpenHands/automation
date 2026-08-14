@@ -19,14 +19,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, authenticate_request
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.db import get_session
+from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.schemas import AutomationResponse, Trigger
 from openhands.automation.storage import FileStore, get_file_store
@@ -114,6 +114,51 @@ async def _bytes_to_async_iter(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
 
+# Cap on the serialized size of template provenance config, so an opaque
+# payload cannot bloat the preset_metadata JSON column.
+MAX_TEMPLATE_CONFIG_BYTES = 16_384
+
+
+class TemplateProvenance(BaseModel):
+    """Opaque provenance of the extension-owned template an automation came from.
+
+    The service stores this verbatim under ``preset_metadata["template"]`` and
+    never validates it against any catalog — template definitions are owned by
+    OpenHands/extensions. Must not contain secrets.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Identifier of the extension template (catalog entry id).",
+    )
+    version: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="Version of the template at creation time.",
+    )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Non-secret configuration the user submitted when enabling the "
+            "template (e.g. setup form values)."
+        ),
+    )
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_size(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(json.dumps(v)) > MAX_TEMPLATE_CONFIG_BYTES:
+            raise ValueError(
+                f"config must serialize to at most {MAX_TEMPLATE_CONFIG_BYTES} bytes"
+            )
+        return v
+
+
 class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
@@ -162,6 +207,19 @@ class CreatePromptAutomationRequest(BaseModel):
             "are automatically loaded from each cloned repository. "
             "Can be a single repo or a list of repos."
         ),
+    )
+    template: TemplateProvenance | None = Field(
+        default=None,
+        description=(
+            "Opaque provenance of the extension template this automation is "
+            "created from. Enables idempotent creation: when a live automation "
+            "for the same user and template id already exists, it is returned "
+            "unchanged with HTTP 200 instead of creating a duplicate."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description="Whether the automation starts enabled.",
     )
 
     @field_validator("timeout")
@@ -366,29 +424,103 @@ async def regenerate_preset_prompt_tarball(
     # record stays live so the still-present file remains discoverable for a
     # later retry/cleanup instead of becoming a hidden orphan (file on disk,
     # record marked deleted).
-    file_removed = False
+    old_object_delete_succeeded = False
+    old_object_already_missing = False
     try:
         file_store.delete(source_upload.storage_path)
-        file_removed = True
+        old_object_delete_succeeded = True
     except FileNotFoundError:
-        file_removed = True
+        old_object_already_missing = True
     except Exception as e:
         logger.exception(
             "Failed to delete superseded tarball at %s: %s",
             source_upload.storage_path,
             e,
         )
+    file_removed = old_object_delete_succeeded or old_object_already_missing
     if file_removed:
         source_upload.deleted_at = utcnow()
+
+    logger.info(
+        "Regenerated preset tarball: automation_id=%s, old_upload_id=%s, "
+        "new_upload_id=%s, old_object_delete_succeeded=%s, "
+        "old_object_already_missing=%s",
+        automation.id,
+        source_upload.id,
+        new_upload_id,
+        old_object_delete_succeeded,
+        old_object_already_missing,
+        extra={
+            "automation_id": str(automation.id),
+            "old_upload_id": str(source_upload.id),
+            "old_storage_path": source_upload.storage_path,
+            "new_upload_id": str(new_upload_id),
+            "new_storage_path": storage_path,
+            "old_object_delete_succeeded": old_object_delete_succeeded,
+            "old_object_already_missing": old_object_already_missing,
+        },
+    )
 
     await session.flush()
     return build_internal_url(new_upload_id)
 
 
-@router.post("/prompt", status_code=status.HTTP_201_CREATED)
+async def _find_existing_template_automation(
+    session: AsyncSession,
+    user: AuthenticatedUser,
+    template_id: str,
+) -> Automation | None:
+    """Find the caller's live automation created from the given template.
+
+    Cross-database JSON extraction mirrors ``get_event_automations``: SQLite
+    uses ``json_extract``, PostgreSQL uses the ``->`` / ``->>`` operators. Rows
+    without template provenance yield NULL and are excluded on both databases.
+
+    Two concurrent creates can both miss the existing row (there is no
+    cross-database unique index on a JSON path); the earliest-created row wins
+    subsequent lookups.
+    """
+    if using_sqlite():
+        template_filter = func.json_extract(
+            Automation.preset_metadata, "$.template.id"
+        ) == literal(template_id)
+    else:
+        template_filter = Automation.preset_metadata.op("->")("template").op("->>")(
+            "id"
+        ) == literal(template_id)
+
+    result = await session.execute(
+        select(Automation)
+        .where(
+            Automation.user_id == user.user_id,
+            Automation.org_id == user.org_id,
+            Automation.deleted_at.is_(None),
+            template_filter,
+        )
+        .order_by(Automation.created_at.asc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+_TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
+    200: {
+        "model": AutomationResponse,
+        "description": (
+            "An automation created from this template already exists for this "
+            "user; it is returned unchanged."
+        ),
+    },
+}
+
+
+@router.post(
+    "/prompt", status_code=status.HTTP_201_CREATED, responses=_TEMPLATE_EXISTS_RESPONSE
+)
 async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
+    response: Response,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
@@ -407,6 +539,16 @@ async def create_automation_from_prompt(
     5. Execute the provided prompt
     6. Report completion status back to the automation service
     """
+    # Idempotent creation: enabling the same extension template twice returns
+    # the existing automation unchanged instead of creating a duplicate.
+    if body.template is not None:
+        existing = await _find_existing_template_automation(
+            session, user, body.template.id
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return AutomationResponse.model_validate(existing)
+
     model = resolve_model_profile_for_user(body.model, user)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
@@ -460,6 +602,8 @@ async def create_automation_from_prompt(
     }
     if body.repos:
         preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+    if body.template is not None:
+        preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
         automation = Automation(
@@ -475,6 +619,7 @@ async def create_automation_from_prompt(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
+            enabled=body.enabled,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -501,12 +646,16 @@ async def create_automation_from_prompt(
             "prompt_length": len(body.prompt),
         },
     )
+    creation_properties: dict[str, Any] = {"creation_path": "prompt_preset"}
+    if body.template is not None:
+        creation_properties["template_id"] = body.template.id
+        creation_properties["template_version"] = body.template.version
     await capture_automation_event(
         "automation_created",
         request=request,
         user=user,
         automation=automation,
-        properties={"creation_path": "prompt_preset"},
+        properties=creation_properties,
     )
 
     return AutomationResponse.model_validate(automation)
@@ -610,6 +759,19 @@ class CreatePluginAutomationRequest(BaseModel):
             "are automatically loaded from each cloned repository. "
             "Can be a single repo or a list of repos."
         ),
+    )
+    template: TemplateProvenance | None = Field(
+        default=None,
+        description=(
+            "Opaque provenance of the extension template this automation is "
+            "created from. Enables idempotent creation: when a live automation "
+            "for the same user and template id already exists, it is returned "
+            "unchanged with HTTP 200 instead of creating a duplicate."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description="Whether the automation starts enabled.",
     )
 
     @field_validator("timeout")
@@ -751,10 +913,13 @@ def _format_plugin_sources_for_description(plugins: list[PluginSource]) -> str:
     return ", ".join(f"{p.source}@{p.ref}" if p.ref else p.source for p in plugins)
 
 
-@router.post("/plugin", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/plugin", status_code=status.HTTP_201_CREATED, responses=_TEMPLATE_EXISTS_RESPONSE
+)
 async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
+    response: Response,
     user: AuthenticatedUser = Depends(authenticate_request),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
@@ -780,6 +945,16 @@ async def create_automation_from_plugin(
     - With ref: branch, tag, or commit SHA
     - With repo_path: subdirectory for monorepos
     """
+    # Idempotent creation: enabling the same extension template twice returns
+    # the existing automation unchanged instead of creating a duplicate.
+    if body.template is not None:
+        existing = await _find_existing_template_automation(
+            session, user, body.template.id
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return AutomationResponse.model_validate(existing)
+
     model = resolve_model_profile_for_user(body.model, user)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
@@ -856,6 +1031,8 @@ async def create_automation_from_plugin(
         ]
     if body.repos:
         preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+    if body.template is not None:
+        preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     try:
         automation = Automation(
@@ -871,6 +1048,7 @@ async def create_automation_from_plugin(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
+            enabled=body.enabled,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -901,15 +1079,19 @@ async def create_automation_from_plugin(
         log_extra["plugin_count"] = len(body.plugins)
 
     logger.info("Created automation from plugin", extra=log_extra)
+    creation_properties: dict[str, Any] = {
+        "creation_path": "plugin_preset",
+        "plugin_count": len(body.plugins or []),
+    }
+    if body.template is not None:
+        creation_properties["template_id"] = body.template.id
+        creation_properties["template_version"] = body.template.version
     await capture_automation_event(
         "automation_created",
         request=request,
         user=user,
         automation=automation,
-        properties={
-            "creation_path": "plugin_preset",
-            "plugin_count": len(body.plugins or []),
-        },
+        properties=creation_properties,
     )
 
     return AutomationResponse.model_validate(automation)
