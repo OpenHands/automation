@@ -1,5 +1,6 @@
 """Tests for the capabilities and preflight validation endpoints."""
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -8,6 +9,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from openhands.automation import capabilities_router
 from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
@@ -518,6 +520,7 @@ class TestValidateDraft:
                 )
             if request.url.path == "/api/v1/settings/mcp/github/test":
                 seen_probe = True
+                assert request.extensions["timeout"]["read"] > 15
                 return httpx.Response(
                     200,
                     json={"ok": False, "error": sentinel, "error_kind": "connection"},
@@ -649,6 +652,153 @@ class TestValidateDraft:
         assert response.json()["errors"] == []
         assert "/api/v1/settings/mcp/github/test" in calls
         assert "/api/v1/git/branches/search" in calls
+
+    async def test_cloud_repository_and_ref_search_follow_pagination(
+        self, async_client
+    ):
+        """An exact repository or ref on a later page is still accessible."""
+        calls: list[tuple[str, str | None]] = []
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            page_id = request.url.params.get("page_id")
+            calls.append((request.url.path, page_id))
+            if request.url.path == "/api/v1/git/repositories/search":
+                assert request.url.params["limit"] == "99"
+                if page_id is None:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "items": [],
+                            "next_page_id": "repository-page-2",
+                        },
+                    )
+                assert page_id == "repository-page-2"
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "id": "1",
+                                "full_name": "OpenHands/agent-server-gui",
+                                "git_provider": "github",
+                                "is_public": False,
+                            }
+                        ],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/git/branches/search":
+                if page_id is None:
+                    return httpx.Response(
+                        200,
+                        json={"items": [], "next_page_id": "branch-page-2"},
+                    )
+                assert page_id == "branch-page-2"
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "name": "main",
+                                "commit_sha": "0123456789abcdef",
+                                "protected": True,
+                            }
+                        ],
+                        "next_page_id": None,
+                    },
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert calls == [
+            ("/api/v1/git/repositories/search", None),
+            ("/api/v1/git/repositories/search", "repository-page-2"),
+            ("/api/v1/git/branches/search", None),
+            ("/api/v1/git/branches/search", "branch-page-2"),
+        ]
+
+    async def test_repeated_repository_page_token_fails_closed(self, async_client):
+        """A broken dependency cannot make preflight loop or claim success."""
+        calls = 0
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            assert request.url.path == "/api/v1/git/repositories/search"
+            calls += 1
+            return httpx.Response(
+                200,
+                json={"items": [], "next_page_id": "repeated-page"},
+            )
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert calls == 2
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Preflight validation is temporarily unavailable."
+        }
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://attacker.example/OpenHands/agent-server-gui",
+            "git@attacker.example:OpenHands/agent-server-gui",
+        ],
+    )
+    async def test_repository_provider_must_match_the_selected_host(
+        self, async_client, url
+    ):
+        """A declared provider cannot validate a different host's same path."""
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/git/repositories/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "full_name": "OpenHands/agent-server-gui",
+                                "git_provider": "github",
+                            }
+                        ],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/git/branches/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": "main", "commit_sha": "abc123"}],
+                        "next_page_id": None,
+                    },
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        draft = {
+            **CRON_DRAFT,
+            "repos": [{"url": url, "provider": "github"}],
+        }
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 200
+        assert addressed_errors(response.json()) == [
+            ("repos[0].url", "repository_provider_unsupported")
+        ]
 
     @pytest.mark.parametrize(
         ("repository_items", "branch_items", "expected_error"),
@@ -806,6 +956,79 @@ class TestValidateDraft:
             "detail": "Preflight validation is temporarily unavailable."
         }
         assert sentinel not in response.text
+
+    async def test_preflight_total_timeout_fails_closed(
+        self, async_client, monkeypatch
+    ):
+        """A slow dependency cannot retain an unbounded validation request."""
+        monkeypatch.setattr(
+            capabilities_router,
+            "_PREFLIGHT_TOTAL_TIMEOUT_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        async def outbound(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.05)
+            if request.url.path == "/api/v1/git/repositories/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"full_name": "OpenHands/agent-server-gui"}],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/git/branches/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": "main", "commit_sha": "abc123"}],
+                        "next_page_id": None,
+                    },
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Preflight validation is temporarily unavailable."
+        }
+
+    async def test_preflight_total_timeout_covers_event_source_lookup(
+        self, async_client, monkeypatch
+    ):
+        """The request deadline also covers event checks before requirements."""
+        monkeypatch.setattr(
+            capabilities_router,
+            "_PREFLIGHT_TOTAL_TIMEOUT_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        async def slow_webhook_lookup(*_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            return None
+
+        monkeypatch.setattr(
+            capabilities_router,
+            "get_webhook_config",
+            slow_webhook_lookup,
+        )
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(EVENT_DRAFT),
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Preflight validation is temporarily unavailable."
+        }
 
     async def test_malformed_requirements_are_rejected_before_validation(
         self, async_client

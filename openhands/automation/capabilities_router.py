@@ -6,6 +6,7 @@ acceptable, so a bad configuration is caught before an automation exists.
 Neither endpoint writes.
 """
 
+import asyncio
 import fnmatch
 import logging
 import uuid
@@ -88,11 +89,22 @@ _STATIC_FEATURES = (
 _TRIGGER_TAGS = frozenset({"cron", "event"})
 
 _MCP_PROBE_TIMEOUT_SECONDS = 15.0
-_MAX_SECRET_SEARCH_PAGES = 10
+_MCP_PROBE_REQUEST_TIMEOUT_SECONDS = _MCP_PROBE_TIMEOUT_SECONDS + 5.0
+_PREFLIGHT_TOTAL_TIMEOUT_SECONDS = 60.0
+_MAX_PREFLIGHT_SEARCH_PAGES = 10
+# The Cloud git route requests one look-ahead item from providers to decide
+# whether to return ``next_page_id``. Keeping this below provider max 100 lets
+# that look-ahead survive instead of being clamped away.
+_CLOUD_REPOSITORY_SEARCH_PAGE_SIZE = 99
 _LOCAL_REPOSITORY_SECRET_NAMES = {
     "github": "github_token",
     "gitlab": "gitlab_token",
     "bitbucket": "bitbucket_token",
+}
+_REPOSITORY_PROVIDER_HOSTS = {
+    "github": "github.com",
+    "gitlab": "gitlab.com",
+    "bitbucket": "bitbucket.org",
 }
 
 
@@ -202,6 +214,33 @@ async def validate_draft(
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
 
+    try:
+        async with asyncio.timeout(_PREFLIGHT_TOTAL_TIMEOUT_SECONDS):
+            return await _validated_draft_response(
+                body=body,
+                draft=draft,
+                request=request,
+                user=user,
+                session=session,
+                client=client,
+            )
+    except (TimeoutError, _DependencyUnavailable):
+        logger.warning("A preflight validation dependency is unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Preflight validation is temporarily unavailable.",
+        )
+
+
+async def _validated_draft_response(
+    *,
+    body: ValidateDraftRequest,
+    draft: DraftModel,
+    request: Request,
+    user: AuthenticatedUser,
+    session: AsyncSession,
+    client: httpx.AsyncClient,
+) -> ValidateDraftResponse:
     errors: list[DraftValidationError] = []
     sample_event_matched: bool | None = None
 
@@ -255,22 +294,15 @@ async def validate_draft(
                     )
 
     if body.requirements is not None:
-        try:
-            errors.extend(
-                await _deployment_preflight_errors(
-                    body=body,
-                    draft=draft,
-                    user=user,
-                    request=request,
-                    client=client,
-                )
+        errors.extend(
+            await _deployment_preflight_errors(
+                body=body,
+                draft=draft,
+                user=user,
+                request=request,
+                client=client,
             )
-        except _DependencyUnavailable:
-            logger.warning("A preflight validation dependency is unavailable")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Preflight validation is temporarily unavailable.",
-            )
+        )
 
     return ValidateDraftResponse(
         valid=not errors,
@@ -433,7 +465,8 @@ async def _available_secret_names(
     found: set[str] = set()
     for name in sorted(requested_names):
         page_id: str | None = None
-        for _ in range(_MAX_SECRET_SEARCH_PAGES):
+        seen_page_ids: set[str] = set()
+        for _ in range(_MAX_PREFLIGHT_SEARCH_PAGES):
             params: dict[str, str | int] = {
                 "name__contains": name,
                 "limit": 100,
@@ -464,8 +497,13 @@ async def _available_secret_names(
             next_page_id = data.get("next_page_id")
             if next_page_id is None:
                 break
-            if not isinstance(next_page_id, str) or not next_page_id:
+            if (
+                not isinstance(next_page_id, str)
+                or not next_page_id
+                or next_page_id in seen_page_ids
+            ):
                 raise _DependencyUnavailable
+            seen_page_ids.add(next_page_id)
             page_id = next_page_id
         else:
             raise _DependencyUnavailable
@@ -686,6 +724,7 @@ async def _probe_mcp_server(
         f"{target.base_url}{path}",
         headers=target.headers,
         json=payload,
+        timeout=_MCP_PROBE_REQUEST_TIMEOUT_SECONDS,
     )
     if response.status_code != status.HTTP_200_OK:
         raise _DependencyUnavailable
@@ -703,11 +742,30 @@ def _repository_parts(repository: Any) -> tuple[str, str] | None:
 
     raw_url = repository.url
     if raw_url.startswith("git@"):
-        _, separator, identifier = raw_url.partition(":")
-        if not separator:
+        user_host, separator, identifier = raw_url.partition(":")
+        if not separator or "@" not in user_host:
+            return None
+        host = user_host.rsplit("@", 1)[1].lower()
+        if host != _REPOSITORY_PROVIDER_HOSTS[provider]:
             return None
     elif "://" in raw_url:
-        parsed = urlparse(raw_url)
+        try:
+            parsed = urlparse(raw_url)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return None
+        if (
+            parsed.scheme != "https"
+            or host is None
+            or host.lower() != _REPOSITORY_PROVIDER_HOSTS[provider]
+            or port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
         identifier = parsed.path
     else:
         identifier = raw_url
@@ -846,32 +904,61 @@ async def _cloud_repository_errors(
     target: _PreflightTarget,
     client: httpx.AsyncClient,
 ) -> list[DraftValidationError]:
-    response = await _send_preflight_request(
-        client,
-        "GET",
-        f"{target.base_url}/api/v1/git/repositories/search",
-        headers=target.headers,
-        params={"provider": provider, "query": identifier, "limit": 100},
-    )
-    if response.status_code == status.HTTP_403_FORBIDDEN:
-        return [
-            DraftValidationError(
-                field=f"repos[{index}].url",
-                code="repository_provider_not_connected",
-                message=f"Connect {provider} before choosing a repository.",
-            )
-        ]
-    if response.status_code != status.HTTP_200_OK:
-        raise _DependencyUnavailable
-    items = _json_object(response).get("items")
-    if not isinstance(items, list):
-        raise _DependencyUnavailable
-    names: list[str] = []
-    for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("full_name"), str):
+    repository_found = False
+    page_id: str | None = None
+    seen_page_ids: set[str] = set()
+    for _ in range(_MAX_PREFLIGHT_SEARCH_PAGES):
+        params: dict[str, str | int] = {
+            "provider": provider,
+            "query": identifier,
+            "limit": _CLOUD_REPOSITORY_SEARCH_PAGE_SIZE,
+        }
+        if page_id is not None:
+            params["page_id"] = page_id
+        response = await _send_preflight_request(
+            client,
+            "GET",
+            f"{target.base_url}/api/v1/git/repositories/search",
+            headers=target.headers,
+            params=params,
+        )
+        if response.status_code == status.HTTP_403_FORBIDDEN:
+            return [
+                DraftValidationError(
+                    field=f"repos[{index}].url",
+                    code="repository_provider_not_connected",
+                    message=f"Connect {provider} before choosing a repository.",
+                )
+            ]
+        if response.status_code != status.HTTP_200_OK:
             raise _DependencyUnavailable
-        names.append(item["full_name"])
-    if identifier.casefold() not in {name.casefold() for name in names}:
+        data = _json_object(response)
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise _DependencyUnavailable
+        names: list[str] = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("full_name"), str):
+                raise _DependencyUnavailable
+            names.append(item["full_name"])
+        if identifier.casefold() in {name.casefold() for name in names}:
+            repository_found = True
+            break
+        next_page_id = data.get("next_page_id")
+        if next_page_id is None:
+            break
+        if (
+            not isinstance(next_page_id, str)
+            or not next_page_id
+            or next_page_id in seen_page_ids
+        ):
+            raise _DependencyUnavailable
+        seen_page_ids.add(next_page_id)
+        page_id = next_page_id
+    else:
+        raise _DependencyUnavailable
+
+    if not repository_found:
         return [
             DraftValidationError(
                 field=f"repos[{index}].url",
@@ -882,42 +969,64 @@ async def _cloud_repository_errors(
     if ref is None:
         return []
 
-    response = await _send_preflight_request(
-        client,
-        "GET",
-        f"{target.base_url}/api/v1/git/branches/search",
-        headers=target.headers,
-        params={
+    ref_matches = False
+    page_id = None
+    seen_page_ids = set()
+    for _ in range(_MAX_PREFLIGHT_SEARCH_PAGES):
+        params = {
             "provider": provider,
             "repository": identifier,
             "query": ref,
             "limit": 100,
-        },
-    )
-    if response.status_code == status.HTTP_403_FORBIDDEN:
-        return [
-            DraftValidationError(
-                field=f"repos[{index}].url",
-                code="repository_provider_not_connected",
-                message=f"Reconnect {provider} to check this repository.",
-            )
-        ]
-    if response.status_code != status.HTTP_200_OK:
-        raise _DependencyUnavailable
-    branch_items = _json_object(response).get("items")
-    if not isinstance(branch_items, list):
-        raise _DependencyUnavailable
-    ref_matches = False
-    for item in branch_items:
-        if not isinstance(item, dict):
+        }
+        if page_id is not None:
+            params["page_id"] = page_id
+        response = await _send_preflight_request(
+            client,
+            "GET",
+            f"{target.base_url}/api/v1/git/branches/search",
+            headers=target.headers,
+            params=params,
+        )
+        if response.status_code == status.HTTP_403_FORBIDDEN:
+            return [
+                DraftValidationError(
+                    field=f"repos[{index}].url",
+                    code="repository_provider_not_connected",
+                    message=f"Reconnect {provider} to check this repository.",
+                )
+            ]
+        if response.status_code != status.HTTP_200_OK:
             raise _DependencyUnavailable
-        name = item.get("name")
-        commit_sha = item.get("commit_sha")
-        if not isinstance(name, str) or not isinstance(commit_sha, str):
+        data = _json_object(response)
+        branch_items = data.get("items")
+        if not isinstance(branch_items, list):
             raise _DependencyUnavailable
-        if name == ref or commit_sha.casefold().startswith(ref.casefold()):
-            ref_matches = True
+        for item in branch_items:
+            if not isinstance(item, dict):
+                raise _DependencyUnavailable
+            name = item.get("name")
+            commit_sha = item.get("commit_sha")
+            if not isinstance(name, str) or not isinstance(commit_sha, str):
+                raise _DependencyUnavailable
+            if name == ref or commit_sha.casefold().startswith(ref.casefold()):
+                ref_matches = True
+                break
+        if ref_matches:
             break
+        next_page_id = data.get("next_page_id")
+        if next_page_id is None:
+            break
+        if (
+            not isinstance(next_page_id, str)
+            or not next_page_id
+            or next_page_id in seen_page_ids
+        ):
+            raise _DependencyUnavailable
+        seen_page_ids.add(next_page_id)
+        page_id = next_page_id
+    else:
+        raise _DependencyUnavailable
     if ref_matches:
         return []
     return [
