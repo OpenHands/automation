@@ -1,14 +1,17 @@
 """Tests for the capabilities and preflight validation endpoints."""
 
 import dataclasses
+import json
 import uuid
 
+import httpx
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
-from openhands.automation.models import CustomWebhook
+from openhands.automation.models import Base, CustomWebhook
 
 
 # Test UUID matching mock_authenticated_user fixture
@@ -55,6 +58,33 @@ def preflight(draft: dict, **extra: object) -> dict:
     }
 
 
+def integration_requirement(
+    integration_id: str,
+    *,
+    transport: str,
+    locator: str,
+    auth_strategy: str = "none",
+    secret_names: list[str] | None = None,
+) -> dict:
+    """Build one integration requirement in the public setup contract."""
+    alternative: dict[str, object] = {
+        "transport": transport,
+        "locator": locator,
+        "authStrategy": auth_strategy,
+    }
+    if secret_names:
+        alternative["secretNames"] = secret_names
+    return {"id": integration_id, "alternatives": [alternative]}
+
+
+async def install_outbound_transport(handler) -> None:
+    """Replace the app's dependency client with a deterministic mock transport."""
+    await app.state.http_client.aclose()
+    app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    )
+
+
 def comment_event(body: str) -> dict:
     """A GitHub issue_comment payload carrying the given comment text."""
     return {
@@ -82,6 +112,16 @@ def reset_config_cache():
     clear_config_cache()
     yield
     clear_config_cache()
+
+
+@pytest.fixture
+async def async_engine():
+    """Capabilities tests need SQLAlchemy, not an external Postgres service."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -373,6 +413,425 @@ class TestValidateDraft:
         """Preflight only validates drafts for the endpoints it may name."""
         response = await async_client.post(
             VALIDATE_URL, json={"endpoint": "/v1/anything", "draft": CRON_DRAFT}
+        )
+
+        assert response.status_code == 422
+
+    async def test_required_secret_and_integration_failures_are_step_addressable(
+        self, async_client
+    ):
+        """Every unsatisfied prerequisite points back to the setup step."""
+        slack_url = "https://mcp.example.test/slack"
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/secrets/search":
+                return httpx.Response(200, json={"items": [], "next_page_id": None})
+            if request.url.path == "/api/v1/settings":
+                return httpx.Response(
+                    200,
+                    json={
+                        "agent_settings": {
+                            "mcp_config": {
+                                "slack": {
+                                    "transport": "http",
+                                    "url": slack_url,
+                                    "auth": {
+                                        "strategy": "api_key",
+                                        "value": "**********",
+                                    },
+                                }
+                            }
+                        }
+                    },
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        draft = {**CRON_DRAFT, "repos": None}
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                draft,
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "slack",
+                            transport="shttp",
+                            locator=slack_url,
+                            auth_strategy="api_key",
+                            secret_names=["SLACK_BOT_TOKEN"],
+                        ),
+                        integration_requirement(
+                            "postgres",
+                            transport="stdio",
+                            locator="postgres",
+                        ),
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["valid"] is False
+        assert [(error["code"], error["step"]) for error in body["errors"]] == [
+            ("credential_missing", "prerequisites"),
+            ("integration_not_configured", "prerequisites"),
+        ]
+        assert "SLACK_BOT_TOKEN" in body["errors"][0]["message"]
+
+    async def test_cloud_preflight_probes_matching_integration_without_secret_leakage(
+        self, async_client
+    ):
+        """Cloud probes the stored server while only returning a coarse verdict."""
+        mcp_url = "https://mcp.example.test/github"
+        sentinel = "provider-secret-should-never-leak"
+        seen_probe = False
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            nonlocal seen_probe
+            if request.url.path == "/api/v1/secrets/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": "GITHUB_TOKEN", "description": sentinel}],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/settings":
+                return httpx.Response(
+                    200,
+                    json={
+                        "agent_settings": {
+                            "mcp_config": {
+                                "github": {
+                                    "transport": "http",
+                                    "url": mcp_url,
+                                    "auth": {
+                                        "strategy": "api_key",
+                                        "value": "**********",
+                                    },
+                                }
+                            }
+                        }
+                    },
+                )
+            if request.url.path == "/api/v1/settings/mcp/github/test":
+                seen_probe = True
+                return httpx.Response(
+                    200,
+                    json={"ok": False, "error": sentinel, "error_kind": "connection"},
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "repos": None},
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "github",
+                            transport="shttp",
+                            locator=mcp_url,
+                            auth_strategy="api_key",
+                            secret_names=["GITHUB_TOKEN"],
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert seen_probe is True
+        assert response.status_code == 200
+        body = response.json()
+        assert [(error["code"], error["step"]) for error in body["errors"]] == [
+            ("integration_unavailable", "prerequisites")
+        ]
+        assert sentinel not in response.text
+
+    async def test_cloud_preflight_accepts_usable_integration_and_repository(
+        self, async_client
+    ):
+        """A usable credential, MCP server, repository, and ref pass together."""
+        mcp_url = "https://mcp.example.test/github"
+        calls: list[str] = []
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            if request.url.path == "/api/v1/secrets/search":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": "GITHUB_TOKEN", "description": None}],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/settings":
+                return httpx.Response(
+                    200,
+                    json={
+                        "agent_settings": {
+                            "mcp_config": {
+                                "github": {
+                                    "transport": "http",
+                                    "url": mcp_url,
+                                    "auth": {
+                                        "strategy": "api_key",
+                                        "value": "**********",
+                                    },
+                                }
+                            }
+                        }
+                    },
+                )
+            if request.url.path == "/api/v1/settings/mcp/github/test":
+                return httpx.Response(200, json={"ok": True})
+            if request.url.path == "/api/v1/git/repositories/search":
+                assert request.url.params["provider"] == "github"
+                assert request.url.params["query"] == "OpenHands/agent-server-gui"
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "id": "1",
+                                "full_name": "OpenHands/agent-server-gui",
+                                "git_provider": "github",
+                                "is_public": True,
+                            }
+                        ],
+                        "next_page_id": None,
+                    },
+                )
+            if request.url.path == "/api/v1/git/branches/search":
+                assert request.url.params["repository"] == (
+                    "OpenHands/agent-server-gui"
+                )
+                assert request.url.params["query"] == "main"
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {
+                                "name": "main",
+                                "commit_sha": "0123456789abcdef",
+                                "protected": True,
+                            }
+                        ],
+                        "next_page_id": None,
+                    },
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                CRON_DRAFT,
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "github",
+                            transport="shttp",
+                            locator=mcp_url,
+                            auth_strategy="api_key",
+                            secret_names=["GITHUB_TOKEN"],
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
+        assert "/api/v1/settings/mcp/github/test" in calls
+        assert "/api/v1/git/branches/search" in calls
+
+    @pytest.mark.parametrize(
+        ("repository_items", "branch_items", "expected_error"),
+        [
+            pytest.param(
+                [],
+                None,
+                ("repos[0].url", "repository_not_accessible"),
+                id="repository",
+            ),
+            pytest.param(
+                [
+                    {
+                        "id": "1",
+                        "full_name": "OpenHands/agent-server-gui",
+                        "git_provider": "github",
+                        "is_public": False,
+                    }
+                ],
+                [],
+                ("repos[0].ref", "repository_ref_not_accessible"),
+                id="ref",
+            ),
+        ],
+    )
+    async def test_cloud_repository_failures_are_field_addressable(
+        self,
+        async_client,
+        repository_items,
+        branch_items,
+        expected_error,
+    ):
+        """Repository and ref failures identify the exact form field to fix."""
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/git/repositories/search":
+                return httpx.Response(
+                    200,
+                    json={"items": repository_items, "next_page_id": None},
+                )
+            if request.url.path == "/api/v1/git/branches/search":
+                assert branch_items is not None
+                return httpx.Response(
+                    200,
+                    json={"items": branch_items, "next_page_id": None},
+                )
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 200
+        assert addressed_errors(response.json()) == [expected_error]
+
+    async def test_local_preflight_uses_names_and_encrypted_mcp_configuration(
+        self, async_client, monkeypatch
+    ):
+        """Local secrets stay in agent-server; automation forwards encrypted config."""
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://agent-server.test")
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_API_KEY", "session-key")
+        clear_config_cache()
+        mcp_url = "https://mcp.example.test/github"
+        encrypted = "enc:v1:not-a-plaintext-secret"
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            assert request.headers["x-session-api-key"] == "session-key"
+            if request.url.path == "/api/settings/secrets":
+                return httpx.Response(
+                    200,
+                    json={
+                        "secrets": [
+                            {"name": "GITHUB_TOKEN", "description": None},
+                            {"name": "github_token", "description": None},
+                        ]
+                    },
+                )
+            if request.url.path == "/api/settings":
+                assert request.headers["x-expose-secrets"] == "encrypted"
+                return httpx.Response(
+                    200,
+                    json={
+                        "agent_settings": {
+                            "mcp_config": {
+                                "github": {
+                                    "transport": "http",
+                                    "url": mcp_url,
+                                    "auth": {
+                                        "strategy": "api_key",
+                                        "value": encrypted,
+                                    },
+                                }
+                            }
+                        }
+                    },
+                )
+            if request.url.path == "/api/mcp/test":
+                payload = json.loads(request.content)
+                assert payload["server"]["auth"]["value"] == encrypted
+                return httpx.Response(200, json={"ok": True, "tools": []})
+            if request.url.path == "/api/git/validate-repository":
+                payload = json.loads(request.content)
+                assert payload["credential_names"] == [
+                    "GITHUB_TOKEN",
+                    "github_token",
+                ]
+                return httpx.Response(200, json={"status": "accessible"})
+            raise AssertionError(f"Unexpected outbound request: {request.url}")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                CRON_DRAFT,
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "github",
+                            transport="shttp",
+                            locator=mcp_url,
+                            auth_strategy="api_key",
+                            secret_names=["GITHUB_TOKEN"],
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert encrypted not in response.text
+
+    @pytest.mark.parametrize("failure_kind", ["status", "transport"])
+    async def test_dependency_failures_return_sanitized_503(
+        self, async_client, failure_kind
+    ):
+        """A dependency outage blocks creation and never surfaces its body."""
+        sentinel = "provider-internal-stack-and-secret"
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if failure_kind == "transport":
+                raise httpx.ConnectError(sentinel, request=request)
+            return httpx.Response(500, text=sentinel)
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Preflight validation is temporarily unavailable."
+        }
+        assert sentinel not in response.text
+
+    async def test_malformed_requirements_are_rejected_before_validation(
+        self, async_client
+    ):
+        """The public requirements envelope is bounded and rejects secret values."""
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                CRON_DRAFT,
+                requirements={
+                    "integrations": [
+                        {
+                            "id": "github",
+                            "alternatives": [
+                                {
+                                    "transport": "shttp",
+                                    "locator": "https://mcp.example.test/github",
+                                    "authStrategy": "api_key",
+                                    "secretNames": ["GITHUB_TOKEN"],
+                                    "secretValue": "must-not-be-accepted",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            ),
         )
 
         assert response.status_code == 422
