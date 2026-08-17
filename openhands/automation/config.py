@@ -297,6 +297,112 @@ class KVSettings(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
+# GitSyncSettings - Git sync configuration
+# ---------------------------------------------------------------------------
+
+
+def normalize_git_sync_path(path: str) -> str:
+    """Normalize a repo-relative sync path, rejecting anything that escapes it.
+
+    The path is joined onto the checkout directory, then `shutil.rmtree`'d per
+    automation on export and passed to `git add -- <path>` on push, so it must
+    stay inside the repo:
+
+    - `..` is rejected: the path is settable at runtime, so a traversing value
+      would point `sync_root` at an arbitrary host directory and delete any
+      subdirectory there matching an automation slug.
+    - Leading slashes are stripped, not rejected, so a mistyped "/automations"
+      stays repo-relative (`Path("/repo") / "/etc"` is `/etc` -- pathlib drops
+      the left side when the right is absolute).
+    - Trailing slashes are stripped because `_changed_slugs_since` matches an
+      `f"{sync_path}/"` prefix; "automations/" would match nothing and
+      silently mute every import.
+    - An empty result is rejected: `git add -A -- ""` is not a valid pathspec
+      and would wedge every cycle.
+    """
+    # Backslashes aren't separators on the platforms this runs on, but a
+    # Windows-style value pasted into the UI shouldn't smuggle a traversal
+    # segment past the "/"-based split below.
+    segments = [
+        segment
+        for segment in path.strip().replace("\\", "/").split("/")
+        if segment and segment != "."
+    ]
+    if any(segment == ".." for segment in segments):
+        raise ValueError(
+            f"git sync path {path!r} must stay inside the repository (no '..' segments)"
+        )
+    if not segments:
+        raise ValueError("git sync path must not be empty")
+    return "/".join(segments)
+
+
+class GitSyncSettings(BaseSettings):
+    """Git sync configuration for backing up/versioning automations in git.
+
+    When enabled, automations are serialized to files and pushed to a git repo,
+    and changes pushed there (e.g. via a PR) are pulled back. Local mode only:
+    one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
+
+    Configuring a repo is what turns sync on: there is no separate enable
+    flag, so nothing syncs until a repo URL is set here or from the UI.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_GIT_SYNC_REPO_URL: Git repo URL to sync to, e.g.
+            https://github.com/org/repo.git. Setting it enables sync; empty
+            (the default) leaves it off.
+        AUTOMATION_GIT_SYNC_BRANCH: Branch to sync (default: "main").
+        AUTOMATION_GIT_SYNC_PATH: Directory within the repo automations are
+            stored under, no leading/trailing slash (default: "automations").
+        AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
+            authentication against the repo. Passed per git-invocation via
+            `-c http.extraHeader`, never written to disk or the remote URL.
+        AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
+            (via the SDK's Fernet-based Cipher, same primitive as the KV
+            store) before they're written to the synced repo. Empty disables
+            encryption; existing plaintext files remain readable either way.
+        AUTOMATION_GIT_SYNC_AUTHOR_NAME: Commit author name (default:
+            "OpenHands Automation").
+        AUTOMATION_GIT_SYNC_AUTHOR_EMAIL: Commit author email (default:
+            "automation@openhands.dev").
+        AUTOMATION_GIT_SYNC_LOCAL_WORKDIR: Local working directory for the
+            clone. Defaults to "{workspace_base}/git-sync" when empty.
+        AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
+            subprocess invocations (default: 60).
+    """
+
+    # The sync interval is deliberately not here: it is runtime-only, set from
+    # the UI and stored with the other overrides. See config_override.py.
+    #
+    # `git_sync_enabled` is the pause switch, not a feature flag: it defaults
+    # to on and only ever goes false through a runtime override, so a
+    # deployment enables sync by configuring a repo rather than by setting a
+    # second thing that has to agree with the first.
+    git_sync_enabled: bool = True
+    git_sync_repo_url: str = ""
+    git_sync_branch: str = "main"
+    git_sync_path: str = "automations"
+    git_sync_token: str = ""
+    git_sync_encryption_key: str = ""
+    git_sync_author_name: str = "OpenHands Automation"
+    git_sync_author_email: str = "automation@openhands.dev"
+    git_sync_local_workdir: str = ""
+    git_sync_git_timeout_seconds: float = 60.0
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether git sync is on: a repo is configured and it isn't paused.
+
+        Doesn't raise when misconfigured -- this section is constructed
+        eagerly regardless of deployment mode, so raising would crash every
+        deployment on a bad env var. app.py warns once it knows the mode.
+        """
+        return bool(self.git_sync_repo_url and self.git_sync_enabled)
+
+
+# ---------------------------------------------------------------------------
 # ServiceSettings - Core service configuration (formerly "Settings")
 # ---------------------------------------------------------------------------
 
@@ -527,6 +633,7 @@ class AppConfig:
         http: HTTP client settings (timeouts, caching)
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
+        git_sync: Git sync settings (repo, branch, credentials)
 
     Example:
         config = get_config()
@@ -566,6 +673,11 @@ class AppConfig:
     def kv(self) -> KVSettings:
         """Key-value store configuration (AUTOMATION_ prefix)."""
         return KVSettings()
+
+    @cached_property
+    def git_sync(self) -> GitSyncSettings:
+        """Git sync configuration (AUTOMATION_ prefix)."""
+        return GitSyncSettings()
 
 
 @lru_cache
