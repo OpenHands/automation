@@ -8,8 +8,9 @@ import asyncio
 import logging
 import os
 import shutil
+import stat
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from uuid import UUID
@@ -18,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.models import AutomationRun, AutomationRunStatus
-from openhands.automation.utils import utcnow
+from openhands.automation.utils import ensure_utc, utcnow
 
 
 logger = logging.getLogger("automation.workspace_cleaner")
@@ -75,6 +76,56 @@ def _workspace_path(workspace_base: str | Path, run_id: UUID) -> Path:
     return _workspace_root(workspace_base) / str(run_id)
 
 
+def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
+    """Find direct, canonical UUID workspace directories under ``runs_root``.
+
+    The scan is intentionally filesystem-first: a workspace can outlive its
+    database row.  Only direct child directories with canonical UUID names are
+    returned, and links/reparse points are rejected before their metadata is
+    read.  Results are ordered oldest-first for deterministic cleanup.
+    """
+    if _is_link_or_junction(runs_root):
+        logger.warning("Refusing linked workspace root during scan: %s", runs_root)
+        return {}
+
+    try:
+        if not runs_root.is_dir():
+            return {}
+        resolved_root = runs_root.resolve(strict=True)
+        candidates: list[tuple[UUID, float]] = []
+        with os.scandir(runs_root) as entries:
+            for entry in entries:
+                candidate_path = Path(entry.path)
+                if entry.is_symlink() or _is_link_or_junction(candidate_path):
+                    continue
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    run_id = UUID(entry.name)
+                    if str(run_id) != entry.name:
+                        continue
+                    resolved_path = candidate_path.resolve(strict=True)
+                    if (
+                        resolved_path.parent != resolved_root
+                        or not resolved_path.is_dir()
+                    ):
+                        continue
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except (FileNotFoundError, OSError, ValueError):
+                    # A candidate can disappear or become inaccessible while the
+                    # directory is being scanned.  It will be reconsidered later.
+                    continue
+                candidates.append((run_id, mtime))
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning("Failed to scan workspace root %s: %s", runs_root, exc)
+        return {}
+
+    candidates.sort(key=lambda item: (item[1], str(item[0])))
+    return dict(candidates)
+
+
 def _dir_size(path: Path) -> int:
     total = 0
     try:
@@ -93,7 +144,32 @@ def _dir_size(path: Path) -> int:
 def _is_link_or_junction(path: Path) -> bool:
     """Return whether path is a symlink or Windows directory junction."""
     is_junction = getattr(path, "is_junction", None)
-    return path.is_symlink() or (is_junction is not None and is_junction())
+    if path.is_symlink() or (is_junction is not None and is_junction()):
+        return True
+    try:
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _is_expired(
+    completed_at: datetime | None,
+    mtime: float,
+    cutoff: datetime,
+) -> bool:
+    """Return whether a terminal row or orphan is older than ``cutoff``.
+
+    A terminal row without ``completed_at`` falls back to the workspace mtime;
+    this is also the age source for orphaned workspaces.  Invalid filesystem
+    timestamps fail closed.
+    """
+    try:
+        if completed_at is not None:
+            return ensure_utc(completed_at) < cutoff
+        return datetime.fromtimestamp(mtime, tz=UTC) < cutoff
+    except (OverflowError, OSError, ValueError):
+        return False
 
 
 def _delete_workspace(
@@ -150,16 +226,18 @@ async def purge_terminal_workspaces(
     Only removes filesystem directories; database rows are not touched.
 
     Never removes workspaces for pending or running runs. Only runs in a
-    terminal state (COMPLETED, FAILED, CANCELLED, SKIPPED) with a
-    ``completed_at`` older than the retention cutoff are eligible.
+    terminal state (COMPLETED, FAILED, CANCELLED, SKIPPED) older than the
+    retention cutoff are eligible. Terminal rows without ``completed_at`` use
+    workspace mtime as a safe fallback, as do orphaned workspaces.
 
     Args:
         session_factory: Factory for async database sessions.
         workspace_base: Expanded base directory for workspaces.
         retention_seconds: Minimum age in seconds before a workspace is purged.
-        batch_size: Maximum number of existing workspaces to delete or attempt per
-            call. Missing directories do not consume the limit, preventing old
-            retained database rows from starving later cleanup candidates.
+        batch_size: Maximum number of successful workspace deletions per call.
+            Missing, refused, and failed deletion attempts do not consume the
+            limit, preventing one permanent failure from starving later
+            cleanup candidates.
 
     Returns:
         PurgeResult with counts of candidates, deletions, errors, and bytes freed.
@@ -171,47 +249,60 @@ async def purge_terminal_workspaces(
 
     cutoff = utcnow() - timedelta(seconds=retention_seconds)
     result = PurgeResult()
+    candidates = await asyncio.to_thread(
+        _scan_candidates, _workspace_root(workspace_base)
+    )
+    result.candidates_found = len(candidates)
 
-    async with session_factory() as session:
-        stmt = (
-            select(AutomationRun.id)
-            .where(
-                AutomationRun.status.in_(TERMINAL_STATES),
-                AutomationRun.completed_at.isnot(None),
-                AutomationRun.completed_at < cutoff,
-            )
-            .order_by(AutomationRun.completed_at.asc(), AutomationRun.id.asc())
-            .execution_options(yield_per=batch_size)
-        )
-        candidate_ids = await session.stream_scalars(stmt)
+    if candidates:
+        async with session_factory() as session:
+            stmt = select(
+                AutomationRun.id,
+                AutomationRun.status,
+                AutomationRun.completed_at,
+            ).where(AutomationRun.id.in_(list(candidates)))
+            rows = (await session.execute(stmt)).all()
+        by_id = {
+            run_id: (status, completed_at) for run_id, status, completed_at in rows
+        }
+    else:
+        by_id = {}
 
-        async for run_id in candidate_ids:
-            result.candidates_found += 1
-            delete_result = await asyncio.to_thread(
-                _delete_workspace, workspace_base, run_id
-            )
-
-            if delete_result.outcome is DeleteOutcome.MISSING:
-                # Missing workspaces are expected after manual cleanup. Continue
-                # scanning so old missing rows cannot starve later real directories.
-                result.missing += 1
+    for run_id, mtime in candidates.items():
+        row = by_id.get(run_id)
+        if row is not None:
+            status, completed_at = row
+            if status not in TERMINAL_STATES:
                 continue
-            if delete_result.outcome is DeleteOutcome.REFUSED:
-                result.refused += 1
-            elif delete_result.outcome is DeleteOutcome.ERROR:
-                result.errors += 1
-            else:
-                result.deleted += 1
-                result.bytes_freed += delete_result.bytes_freed
-                logger.debug(
-                    "Purged workspace for run %s (%d bytes freed)",
-                    run_id,
-                    delete_result.bytes_freed,
-                )
+        else:
+            completed_at = None
 
-            attempted_existing = result.deleted + result.refused + result.errors
-            if attempted_existing >= batch_size:
-                break
+        if not _is_expired(completed_at, mtime, cutoff):
+            continue
+
+        delete_result = await asyncio.to_thread(
+            _delete_workspace, workspace_base, run_id
+        )
+
+        if delete_result.outcome is DeleteOutcome.MISSING:
+            result.missing += 1
+            continue
+        if delete_result.outcome is DeleteOutcome.REFUSED:
+            result.refused += 1
+            continue
+        if delete_result.outcome is DeleteOutcome.ERROR:
+            result.errors += 1
+            continue
+
+        result.deleted += 1
+        result.bytes_freed += delete_result.bytes_freed
+        logger.debug(
+            "Purged workspace for run %s (%d bytes freed)",
+            run_id,
+            delete_result.bytes_freed,
+        )
+        if result.deleted >= batch_size:
+            break
 
     logger.info(
         "Purge complete: %d deleted, %d missing, %d refused, %d errors, "
