@@ -177,8 +177,8 @@ class TestAppConfig:
 
     def test_config_sections_accessible(self, monkeypatch):
         """All config sections are accessible."""
-        # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
-        monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
+        # Storage requires LOCAL_STORAGE_PATH when FILE_STORE=local (default)
+        monkeypatch.setenv("LOCAL_STORAGE_PATH", "/tmp/test-storage")
         clear_config_cache()
 
         config = get_config()
@@ -367,8 +367,8 @@ class TestDeprecatedFunctionWarnings:
         """get_storage_settings() emits DeprecationWarning."""
         from openhands.automation import config
 
-        # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
-        monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
+        # Storage requires LOCAL_STORAGE_PATH when FILE_STORE=local (default)
+        monkeypatch.setenv("LOCAL_STORAGE_PATH", "/tmp/test-storage")
         clear_config_cache()
         config._warned_functions.clear()
 

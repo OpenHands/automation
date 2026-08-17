@@ -209,14 +209,15 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-def _validate_command_string(
+def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
     Rejects traversal patterns and shell metacharacters.
 
-    Used for both entrypoint and setup_script_path validation.
+    Used for both entrypoint and setup_script_path validation, including
+    by git_sync/loop.py when importing automations from git.
 
     Args:
         v: The value to validate
@@ -299,12 +300,12 @@ class CreateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str) -> str:
-        result = _validate_command_string(v, "entrypoint", allow_none=False)
+        result = validate_command_string(v, "entrypoint", allow_none=False)
         assert result is not None  # satisfy type checker
         return result
 
@@ -357,12 +358,12 @@ class UpdateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "entrypoint")
+        return validate_command_string(v, "entrypoint")
 
     @field_validator("timeout")
     @classmethod
@@ -620,6 +621,7 @@ class AutomationResponse(BaseModel):
 
     name: str
     prompt: str | None
+    preset_metadata: dict | None = None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None
@@ -651,6 +653,7 @@ class RunCompleteRequest(BaseModel):
     run_id: str | None = None
     conversation_id: str | None = None
     error: str | None = None
+    cost: float | None = None
 
 
 class AutomationRunResponse(BaseModel):
@@ -661,6 +664,7 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     conversation_id: str | None
+    cost: float | None = None
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
@@ -722,6 +726,10 @@ class CapabilitiesResponse(_SetupContractModel):
     """What this deployment supports, discovered before a setup form renders."""
 
     ready: bool = Field(..., description="Whether the service can accept new work")
+    max_automation_timeout_seconds: int = Field(
+        ...,
+        description="Maximum timeout the service accepts for an automation run",
+    )
     trigger_kinds: list[str]
     event_sources: list[str]
     event_types: list[str] = Field(

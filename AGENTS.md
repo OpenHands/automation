@@ -22,6 +22,12 @@ automation/
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── git_sync/           # Bidirectional git sync (local mode only, see below)
+│       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
+│       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
+│       │   ├── router.py       # Git sync status/trigger API
+│       │   ├── schemas.py      # Git sync request/response schemas
+│       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
 │       │   └── google_cloud.py # GCS implementation
@@ -80,6 +86,7 @@ config.storage.file_store       # StorageSettings (no prefix, SDK conventions)
 config.http.auth_cache_ttl      # HttpSettings (AUTOMATION_ prefix)
 config.sandbox.max_run_duration # SandboxSettings (AUTOMATION_ prefix)
 config.kv.kv_secret             # KVSettings (AUTOMATION_ prefix)
+config.git_sync.git_sync_repo_url # GitSyncSettings (AUTOMATION_ prefix)
 config.log.log_level            # LogSettings (no prefix)
 ```
 
@@ -134,15 +141,6 @@ Important notes:
 - For fork PRs, remove `.pr/` manually before merging.
 
 
-## Frontend Hosting
-
-The Docker image includes the built frontend SPA and serves it via FastAPI.
-
-- **Opt-in via `AUTOMATION_FRONTEND_DIR`** — set to the directory containing built assets. Empty = disabled (default locally). Dockerfile sets it to `/app/frontend-dist`.
-- **Mount path** derived from `base_url` via `Settings.frontend_path` (same pattern as `base_path`). Defaults to `/automations`.
-- **SPA fallback** via `_SPAStaticFiles.lookup_path` — unknown paths resolve to `index.html`.
-- **Cache**: `immutable` for hashed `assets/*`, `no-cache` for everything else.
-
 ## Dispatch Pipeline
 
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:
@@ -170,7 +168,7 @@ Completion is handled asynchronously:
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
-| `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script |
+| `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 
@@ -263,6 +261,98 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
 - Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
 
+## Git Sync
+
+Local/self-hosted deployments can mirror their automations to a git repo for
+visibility, versioning, and backup — see issue #300. **Only active in local
+mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
+agent server, which doesn't make sense for the multi-tenant SaaS deployment.
+
+- Configuring a repo is what enables sync — there is no separate feature
+  flag. The repo URL may come either from `AUTOMATION_GIT_SYNC_REPO_URL` or
+  from the Git Sync page, and nothing syncs until one is set. The background
+  loop and the `dirty` CRUD hook start in every local-mode deployment
+  (`is_git_sync_supported`), idle, so a repo configured from the UI syncs
+  without a restart. See `GitSyncSettings` in
+  `config.py` for the full list of env vars.
+- Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
+  (metadata) plus its tarball contents extracted under `tarball/**`. Those are
+  the only paths the exporter owns (`is_generated_path`): other files committed
+  in the same directory are left alone. `automation.yaml` carries a
+  `tarball_executables` list when any tarball member is executable, since the
+  extracted files are committed as plain content and the mode would otherwise
+  be lost on the way back in.
+- `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
+  `..`, no leading/trailing slashes, never empty. It is joined onto the local
+  checkout and passed to `git add -- <path>`, and each slug directory under it
+  is pruned during export, so a traversing value would delete host directories.
+- `git_sync/router.py` exposes `GET /v1/git-sync/status`,
+  `PUT /v1/git-sync/config`, `POST /v1/git-sync/sync` (manual trigger), and
+  `POST /v1/git-sync/check`.
+- `POST /v1/git-sync/check` takes the same body as `PUT /config` and reports
+  whether *that* configuration can reach its repo, without saving it or
+  syncing: `resolve_candidate_git_sync_settings` merges the update in memory,
+  and `check_remote_access` runs a single `git ls-remote`. Keep it that way —
+  validating by running a cycle would clone, import whatever the repo holds
+  into the local automations, and push every dirty automation to a URL nobody
+  has vetted yet, which for a mistyped URL is the damage rather than the
+  diagnosis. It proves read access only: a token with no write scope passes
+  and still fails at push time, and the encryption key is never exercised. A
+  branch that doesn't exist yet is reported as `branch_exists: false`, not a
+  failure — the first cycle creates it. A bad configuration comes back as
+  `200 {"ok": false, "detail": ...}`, since the request itself succeeded.
+- **Sync is manual by default**: the interval defaults to `0`, meaning a
+  cycle runs only when `POST /v1/git-sync/sync` is called. Set a positive
+  `interval_seconds` via `PUT /v1/git-sync/config` (the UI) to also sync
+  automatically. Unlike every other git-sync setting it has **no environment
+  variable** — it is runtime-only config, stored with the other overrides
+  (see `DEFAULT_SYNC_INTERVAL_SECONDS` in `git_sync/config_override.py`).
+  The background loop always runs so a newly-set interval takes effect
+  without a restart; while the interval is 0 it idles without syncing.
+  Either way one cycle is the same bidirectional pull → import → export →
+  push; there's no way to run a single direction.
+- Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
+  on every create/update/delete via the API; the sync loop treats a dirty
+  automation as authoritative over a conflicting git-side change for the same
+  cycle — the VM always wins until its change has been pushed. The import skips
+  a dirty slug and the export then compares against what is actually on disk,
+  not against `state.content_hash`: a git-side edit leaves the DB row untouched,
+  so a hash comparison would skip the write and strand the two versions.
+- Automations that predate git sync being switched on have no state row, and the
+  export only reads dirty ones. `_backfill_missing_states` creates them (dirty)
+  at the start of every cycle, so the first sync exports everything rather than
+  reporting success against an empty repo.
+- Automations created directly in git (e.g. via a PR) are imported and
+  stamped with the deterministic local-mode user/org IDs from `auth.py`'s
+  `_get_local_user()`.
+- **Encryption**: set `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY` to encrypt file
+  contents (via the SDK's Fernet-based `Cipher`, same primitive as the KV
+  store) before they're committed. Reading a repo written before encryption
+  was turned on still works — plaintext files pass through unchanged.
+- **Runtime config**: `PUT /v1/git-sync/config` reconfigures or pauses/resumes
+  an already-running sync (repo/branch/path/token/encryption key/author)
+  without a restart, via `git_sync/config_override.py` (overrides stored as
+  JSON in `automation_service_metadata`). Setting a repo URL there enables
+  sync without a restart; only a deployment that can't sync at all (not local
+  mode) is refused, on both the config endpoint (409) and the manual trigger
+  (503).
+- The token and encryption key in that blob are encrypted at rest by
+  `git_sync/secret_store.py`, wrapped with `AUTOMATION_KV_SECRET` when the
+  deployment sets one and otherwise with a key generated into a 0600 file
+  under the workspace. If neither can be obtained, `PUT /config` fails with a
+  503 rather than storing the secret in the clear.
+- `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
+  the most recent failed cycle, cleared on the next successful one.
+- **In-flight cycles**: a cycle writes its outcome only when it ends, so
+  `/status` also reports `sync_in_progress`/`sync_started_at` — otherwise a
+  caller can't tell a running sync from one that never started, and a cycle
+  the periodic loop began is invisible to the UI. The flag is in-process
+  state (`get_sync_started_at`), scoped like the `_sync_cycle_lock` it
+  shadows: a crash mid-cycle can't strand it the way a persisted flag would.
+  `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
+  when one is already running — that cycle covers everything the new one
+  would, and the lock would only queue it behind anyway.
+
 ## Release Procedure
 
 Releases are driven by [release-please](https://github.com/googleapis/release-please)
@@ -297,12 +387,10 @@ A single repo version is applied to every embedded location (configured in
 |------|-------------------|
 | `pyproject.toml` (`[project].version`) | native `python` release-type |
 | `uv.lock` (root package) | `toml` updater (`$.package[?(@.name.value=='openhands-automation')].version`) |
-| `frontend/package.json` | `json` updater (`$.version`) |
-| `frontend/package-lock.json` | `json` updater (`$.version` and `$.packages[''].version`) |
 | `openhands/automation/__init__.py` (`__version__`) | `generic` updater (`# x-release-please-version`) |
 | `openhands/automation/app.py` (FastAPI `version=`) | `generic` updater (`# x-release-please-version`) |
 
-The lock files are bumped so the release PR's own CI (`uv sync --frozen`, `npm ci`)
+The lock file is bumped so the release PR's own CI (`uv sync --frozen`)
 stays green. Keep the `# x-release-please-version` annotations on the `__init__.py`
 and `app.py` version lines.
 

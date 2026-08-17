@@ -1,12 +1,3 @@
-# ---- Stage 1: Build frontend ----
-FROM node:24-slim AS frontend-build
-WORKDIR /frontend
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend/ .
-RUN npm run build
-
-# ---- Stage 2: Python application ----
 FROM python:3.12-slim-bookworm
 
 WORKDIR /app
@@ -30,15 +21,9 @@ COPY alembic.ini .
 
 RUN uv pip install --system .
 
-# Copy built frontend assets from stage 1
-COPY --from=frontend-build /frontend/build /app/frontend-dist
-
 # Security: run as non-root (UID 42420 chosen arbitrarily)
 RUN groupadd -r automation && useradd -r -g automation -u 42420 automation
 USER automation
-
-# Enable frontend hosting — set to "" to serve API only
-ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
 
 EXPOSE 8000
 
