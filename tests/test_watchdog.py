@@ -443,9 +443,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         mock_backend.cleanup_after_verification.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_transient_verification_error_leaves_run_running(
-        self, mock_settings
-    ):
+    async def test_transient_verification_error_leaves_run_running(self, mock_settings):
         """Transient verification errors do not fail or clean up the run."""
         verification = VerificationResult(
             verified=False,

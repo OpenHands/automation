@@ -132,7 +132,6 @@ class TestAutomationRunResponseUtcSerialisation:
             "transient": True,
         }
 
-
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
         data = run.model_dump(mode="json")

@@ -97,7 +97,4 @@ async def test_verify_run_status_marks_rate_limit_as_transient(monkeypatch):
     assert result.transient is True
     assert result.error is not None and "HTTP 429" in result.error
     assert result.error_info is not None
-    assert (
-        result.error_info.fingerprint
-        == "sandbox_api:get_sandbox:rate_limited:429"
-    )
+    assert result.error_info.fingerprint == "sandbox_api:get_sandbox:rate_limited:429"

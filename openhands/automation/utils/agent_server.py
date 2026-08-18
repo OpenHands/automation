@@ -152,9 +152,14 @@ class VerificationResult:
         outcome = self.outcome or self._infer_outcome()
         detail = self.detail if self.detail is not None else self.error
         error = self.error
-        if error is None and detail is not None and outcome not in (
-            VerificationOutcome.COMPLETED,
-            VerificationOutcome.FAILED,
+        if (
+            error is None
+            and detail is not None
+            and outcome
+            not in (
+                VerificationOutcome.COMPLETED,
+                VerificationOutcome.FAILED,
+            )
         ):
             error = detail
 
@@ -191,8 +196,7 @@ class VerificationResult:
         if self.error in ("Command still running", "No bash output found"):
             return VerificationOutcome.STILL_RUNNING
         if self.error and (
-            self.error == "Sandbox not available"
-            or "No sandbox_id" in self.error
+            self.error == "Sandbox not available" or "No sandbox_id" in self.error
         ):
             return VerificationOutcome.ENVIRONMENT_UNAVAILABLE
         return VerificationOutcome.VERIFICATION_ERROR
