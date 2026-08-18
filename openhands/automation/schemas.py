@@ -209,14 +209,15 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-def _validate_command_string(
+def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
     Rejects traversal patterns and shell metacharacters.
 
-    Used for both entrypoint and setup_script_path validation.
+    Used for both entrypoint and setup_script_path validation, including
+    by git_sync/loop.py when importing automations from git.
 
     Args:
         v: The value to validate
@@ -299,12 +300,12 @@ class CreateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str) -> str:
-        result = _validate_command_string(v, "entrypoint", allow_none=False)
+        result = validate_command_string(v, "entrypoint", allow_none=False)
         assert result is not None  # satisfy type checker
         return result
 
@@ -357,12 +358,12 @@ class UpdateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "entrypoint")
+        return validate_command_string(v, "entrypoint")
 
     @field_validator("timeout")
     @classmethod
