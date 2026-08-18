@@ -719,6 +719,7 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    status_detail: dict[str, Any] | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None

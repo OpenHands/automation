@@ -116,6 +116,23 @@ class TestAutomationRunResponseUtcSerialisation:
         data = run.model_dump(mode="json")
         assert data["started_at"].endswith("+00:00") or data["started_at"].endswith("Z")
 
+    def test_status_detail_serialises_as_json_object(self):
+        run = self._make_run(
+            status_detail={
+                "phase": "verification",
+                "kind": "rate_limited",
+                "transient": True,
+            }
+        )
+        data = run.model_dump(mode="json")
+
+        assert data["status_detail"] == {
+            "phase": "verification",
+            "kind": "rate_limited",
+            "transient": True,
+        }
+
+
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
         data = run.model_dump(mode="json")

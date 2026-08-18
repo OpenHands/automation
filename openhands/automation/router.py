@@ -45,6 +45,9 @@ from openhands.automation.utils.api_key import (
 from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run_status_detail import (
+    run_status_detail_from_callback_error,
+)
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -460,8 +463,20 @@ async def complete_run(
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
         values["cost"] = body.cost
-    if body.status == "FAILED" and body.error:
-        values["error_detail"] = format_callback_error(body.error)
+    if body.status == "FAILED":
+        error_detail = (
+            format_callback_error(body.error)
+            if body.error
+            else "Completion callback reported failure"
+        )
+        values["error_detail"] = error_detail
+        values["status_detail"] = run_status_detail_from_callback_error(
+            body.error or error_detail,
+            formatted_detail=error_detail,
+            previous=run.status_detail,
+        )
+    elif body.status == "COMPLETED":
+        values["status_detail"] = None
 
     stmt = (
         update(AutomationRun)
@@ -610,6 +625,7 @@ async def cancel_run(
             status=AutomationRunStatus.CANCELLED,
             completed_at=now,
             error_detail="Cancelled by user",
+            status_detail=None,
         )
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]

@@ -35,6 +35,13 @@ from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.automation.utils.run import record_first_run_outcome
+from openhands.automation.utils.run_status_detail import (
+    RunStatusDetailKind,
+    RunStatusPhase,
+    make_run_status_detail,
+    run_status_detail_from_exception,
+    run_status_detail_from_transient_error,
+)
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
@@ -108,7 +115,7 @@ async def _defer_still_running(
             AutomationRun.id == run.id,
             AutomationRun.status == AutomationRunStatus.RUNNING,
         )
-        .values(timeout_at=new_timeout_at)
+        .values(timeout_at=new_timeout_at, status_detail=None)
     )
     if result.rowcount > 0:
         logger.info(
@@ -171,6 +178,13 @@ async def _verify_and_mark_run(
                 status=AutomationRunStatus.FAILED,
                 completed_at=now,
                 error_detail=f"Timed out: verification failed: {e}",
+                status_detail=run_status_detail_from_exception(
+                    e,
+                    phase=RunStatusPhase.VERIFICATION,
+                    source="automation_service",
+                    operation="verify_run",
+                    previous=run.status_detail,
+                ),
             )
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
@@ -213,6 +227,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.COMPLETED,
                     completed_at=now,
+                    status_detail=None,
                 )
             )
 
@@ -227,6 +242,7 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
+            error_detail = f"Timed out: {error_msg}"
             stmt = (
                 update(AutomationRun)
                 .where(
@@ -236,7 +252,18 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
-                    error_detail=f"Timed out: {error_msg}",
+                    error_detail=error_detail,
+                    status_detail=make_run_status_detail(
+                        phase=RunStatusPhase.EXECUTION,
+                        kind=RunStatusDetailKind.TIMEOUT,
+                        detail=error_msg,
+                        transient=False,
+                        source="agent_server",
+                        operation="verify_run",
+                        code=str(exit_code) if exit_code is not None else None,
+                        previous=run.status_detail,
+                        extra={"formatted_detail": error_detail},
+                    ),
                 )
             )
 
@@ -264,6 +291,16 @@ async def _verify_and_mark_run(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
                     error_detail=error_detail,
+                    status_detail=make_run_status_detail(
+                        phase=RunStatusPhase.EXECUTION,
+                        kind=RunStatusDetailKind.EXECUTION_ERROR,
+                        detail=error_detail,
+                        transient=False,
+                        source="agent_server",
+                        operation="verify_run",
+                        code=str(exit_code),
+                        previous=run.status_detail,
+                    ),
                 )
             )
 
@@ -308,6 +345,30 @@ async def _verify_and_mark_run(
             "Verification temporarily unavailable; leaving run RUNNING: %s",
             verification.detail,
             extra=extra,
+        )
+        if verification.error_info is not None:
+            status_detail = run_status_detail_from_transient_error(
+                verification.error_info,
+                phase=RunStatusPhase.VERIFICATION,
+                previous=run.status_detail,
+            )
+        else:
+            status_detail = make_run_status_detail(
+                phase=RunStatusPhase.VERIFICATION,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=verification.detail or "Verification temporarily unavailable",
+                transient=True,
+                source="automation_service",
+                operation="verify_run",
+                previous=run.status_detail,
+            )
+        await session.execute(
+            update(AutomationRun)
+            .where(
+                AutomationRun.id == run.id,
+                AutomationRun.status == AutomationRunStatus.RUNNING,
+            )
+            .values(status_detail=status_detail)
         )
         return False
 
@@ -360,6 +421,27 @@ async def _verify_and_mark_run(
             status=AutomationRunStatus.FAILED,
             completed_at=now,
             error_detail=f"Timed out: {error_msg}",
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.VERIFICATION,
+                kind=(
+                    RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE
+                    if verification.outcome
+                    == VerificationOutcome.ENVIRONMENT_UNAVAILABLE
+                    else RunStatusDetailKind.TIMEOUT
+                ),
+                detail=error_msg,
+                transient=False,
+                source="automation_service",
+                operation="verify_run",
+                previous=run.status_detail,
+                extra={
+                    "verification_outcome": (
+                        verification.outcome.value
+                        if verification.outcome
+                        else "unknown"
+                    )
+                },
+            ),
         )
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
