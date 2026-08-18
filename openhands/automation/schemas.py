@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 from pydantic.alias_generators import to_camel
@@ -247,21 +247,17 @@ def validate_command_string(
 
 # --- Template provenance ---
 
-# Cap on the serialized size of template provenance config, so an opaque
-# payload cannot bloat the preset_metadata JSON column.
-MAX_TEMPLATE_CONFIG_BYTES = 16_384
+# Keeps an opaque payload from bloating the preset_metadata JSON column.
+MAX_TEMPLATE_CONFIG_BYTES: Final[int] = 16_384
 
 
 class TemplateProvenance(BaseModel):
-    """Opaque provenance of the extension-owned template an automation came from.
+    """The extension-owned template an automation was created from.
 
-    The service stores this verbatim under ``preset_metadata["template"]`` and
-    never validates it against any catalog — template definitions are owned by
-    OpenHands/extensions. Must not contain secrets.
-
-    Lives here rather than in ``preset_router`` because every creation path
-    accepts it: the two preset endpoints and the raw ``POST /v1`` a catalog
-    entry shipping its own tarball uses.
+    Stored verbatim under ``preset_metadata["template"]`` and never validated
+    against any catalog, which OpenHands/extensions owns. Must not contain
+    secrets. Every creation path accepts it, which is why it lives here rather
+    than in ``preset_router``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -342,10 +338,9 @@ class CreateAutomationRequest(BaseModel):
     template: TemplateProvenance | None = Field(
         default=None,
         description=(
-            "Opaque provenance of the extension template this automation is "
-            "created from. Enables idempotent creation: when a live automation "
-            "for the same user and template id already exists, it is returned "
-            "unchanged with HTTP 200 instead of creating a duplicate."
+            "Provenance of the extension template this automation comes from. "
+            "Makes creation idempotent: a live automation for the same user and "
+            "template id is returned unchanged with HTTP 200."
         ),
     )
 
@@ -828,8 +823,8 @@ class ValidateDraftRequest(_SetupContractModel):
     endpoint: Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"] = Field(
         ...,
         description=(
-            "Creation endpoint the draft will be sent to. '/v1' is the raw "
-            "create path a catalog entry shipping its own tarball uses."
+            "Creation endpoint the draft will be sent to. '/v1' is the raw path, "
+            "which an entry shipping its own tarball uses."
         ),
     )
     draft: dict[str, Any] = Field(

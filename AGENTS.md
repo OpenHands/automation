@@ -263,31 +263,27 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 ## Catalog Bundles
 
-A catalog entry in `OpenHands/extensions` normally ships a prompt and is created
+A catalog entry in `OpenHands/extensions` normally ships a prompt, created
 through a preset endpoint. An entry whose automation is deterministic machinery
-— polling, dedupe, its own state and API calls — ships a **script tarball**
-instead, and the host creates it through the ordinary raw path: `POST /v1/uploads`
-for the packed bundle, then `POST /v1` with the returned `oh-internal://` path.
+— polling, dedupe, state, fixed API calls — ships a **script tarball** instead,
+which the host uploads (`POST /v1/uploads`) and creates from (`POST /v1`).
 
-Nothing about execution differs — a bundle run is an ordinary tarball run. What
-the raw path shares with the presets is the catalog contract:
+Execution is unchanged: a bundle run is an ordinary tarball run. What the raw
+path gained is the catalog contract the presets already had:
 
-- **`template` provenance** (`TemplateProvenance` in `schemas.py`) is accepted by
+- **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
   all three creation endpoints and stored under `preset_metadata["template"]`.
-  It makes creation idempotent: `find_existing_template_automation`
-  (`utils/templates.py`) is consulted first, and an entry already enabled for
-  this user comes back unchanged with a 200 instead of a second automation. The
-  same key is what `record_first_run_outcome` keys its one-time first-run
-  telemetry on, so bundles get that for free.
-- **Preflight** — `POST /v1/validate` accepts `"endpoint": "/v1"` and validates
-  the draft against `CreateAutomationRequest`. It checks the request body, not
-  the upload behind it: `tarball_path` ownership is verified at creation.
-- **`customTarball`** in `GET /v1/capabilities` `features` names the ability to
-  run a client-supplied tarball, so an entry can declare it in
-  `requires.features` and a client can tell whether a bundle card is runnable.
+  `find_existing_template_automation` (`utils/templates.py`) is consulted first,
+  so enabling an entry twice returns the existing automation with a 200.
+  `record_first_run_outcome` keys on the same value, so bundles get first-run
+  telemetry for free.
+- **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates
+  the body, not the upload — `tarball_path` ownership is checked at creation.
+- **`customTarball`** in `GET /v1/capabilities` `features`, so an entry can
+  require it and a client can tell whether a bundle card is runnable here.
 
-A bundle has no `repos` field on `CreateAutomationRequest`, so it cannot ask the
-service to clone — it fetches what it needs itself.
+`CreateAutomationRequest` has no `repos`, so a bundle cannot ask the service to
+clone; it fetches what it needs itself.
 
 ## Git Sync
 

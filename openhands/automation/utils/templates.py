@@ -1,9 +1,7 @@
 """Lookup for automations created from an extension catalog template.
 
-Template provenance is stored under ``preset_metadata["template"]`` by every
-creation path — both preset endpoints and the raw ``POST /v1`` a catalog entry
-shipping its own tarball uses — so the lookup that makes creation idempotent
-lives here rather than in any one router.
+Every creation path stores provenance under ``preset_metadata["template"]``, so
+the lookup that makes creation idempotent belongs to none of them in particular.
 """
 
 import uuid
@@ -17,8 +15,8 @@ from openhands.automation.models import Automation
 from openhands.automation.schemas import AutomationResponse
 
 
-# The 200 every creation path returns when the template is already enabled,
-# documented alongside its 201 in the OpenAPI schema.
+# Documents the 200 a creation path returns when the template is already
+# enabled, alongside its 201, in the OpenAPI schema.
 TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
     200: {
         "model": AutomationResponse,
@@ -38,13 +36,13 @@ async def find_existing_template_automation(
 ) -> Automation | None:
     """Find the caller's live automation created from the given template.
 
-    Cross-database JSON extraction mirrors ``get_event_automations``: SQLite
-    uses ``json_extract``, PostgreSQL uses the ``->`` / ``->>`` operators. Rows
-    without template provenance yield NULL and are excluded on both databases.
+    JSON extraction mirrors ``get_event_automations``: ``json_extract`` on
+    SQLite, ``->``/``->>`` on PostgreSQL. Rows without provenance yield NULL and
+    are excluded on both.
 
-    Two concurrent creates can both miss the existing row (there is no
-    cross-database unique index on a JSON path); the earliest-created row wins
-    subsequent lookups.
+    Two concurrent creates can both miss the existing row, since no
+    cross-database unique index on a JSON path is available; the earliest-created
+    row wins subsequent lookups.
     """
     if using_sqlite():
         template_filter = func.json_extract(

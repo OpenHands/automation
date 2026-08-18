@@ -61,11 +61,9 @@ DraftModel = (
 
 # Draft models keyed by the endpoint they would be posted to. Validating with
 # the model creation itself uses is what keeps preflight from drifting.
-# "/v1" is the raw create path, which a catalog entry shipping its own tarball
-# posts to: without it a mapping mistake between the setup form and the request
-# body surfaces as a 422 at creation time, which is what preflight prevents.
-# Preflight validates the body, not the upload behind it — a tarball_path is
-# checked for scheme here and for ownership when the automation is created.
+# "/v1" is the raw create path, used by an entry shipping its own tarball. Its
+# tarball_path is checked for scheme here and for ownership only at creation:
+# preflight validates the body, not the upload behind it.
 _DRAFT_MODELS: dict[str, type[DraftModel]] = {
     "/v1": CreateAutomationRequest,
     "/v1/preset/prompt": CreatePromptAutomationRequest,
@@ -76,8 +74,7 @@ _DRAFT_MODELS: dict[str, type[DraftModel]] = {
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
     "conversationDispatch",
-    # This deployment can run a tarball the client supplies, so a catalog entry
-    # may ship a script bundle instead of a prompt.
+    # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
     "mcpTools",
     "presetPlugin",

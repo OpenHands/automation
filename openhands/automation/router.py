@@ -83,14 +83,12 @@ async def create_automation(
     - Internal upload: oh-internal://uploads/{uuid} (from /v1/uploads)
     - External public URL: https://, s3://, or gs:// URLs
 
-    A catalog entry that ships its own tarball creates through this endpoint
-    rather than a preset, so it may carry the same ``template`` provenance the
-    preset endpoints accept — stored, and used to keep creation idempotent.
+    An entry shipping its own tarball creates here rather than through a
+    preset, so it may carry the same ``template`` provenance those accept.
     """
-    # Idempotent creation: enabling the same extension template twice returns
-    # the existing automation unchanged instead of creating a duplicate. This
-    # runs before tarball validation so a repeat enable costs one query and
-    # leaves the freshly uploaded tarball unreferenced rather than adopted.
+    # Enabling the same template twice returns the existing automation rather
+    # than a duplicate. Before tarball validation, so a repeat enable costs one
+    # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
             session, user.user_id, user.org_id, body.template.id
