@@ -6,11 +6,16 @@ local agent servers.
 """
 
 import logging
+from enum import StrEnum
 
 import httpx
 from pydantic.dataclasses import dataclass
 
 from openhands.automation.utils.log_context import log_extra
+from openhands.automation.utils.transient import (
+    TransientErrorInfo,
+    classify_httpx_transient_error,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +30,7 @@ class BashCommandResult:
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    error_info: TransientErrorInfo | None = None
 
 
 async def get_last_bash_command_result(
@@ -99,19 +105,97 @@ async def get_last_bash_command_result(
         )
     except Exception as e:
         logger.warning("Failed to get bash command result: %s", e)
-        return BashCommandResult(found=False, error=str(e))
+        error_info = classify_httpx_transient_error(
+            e,
+            source="agent_server",
+            operation="bash_events_search",
+        )
+        return BashCommandResult(
+            found=False,
+            error=error_info.detail if error_info else str(e),
+            error_info=error_info,
+        )
+
+
+class VerificationOutcome(StrEnum):
+    """Typed result of trying to verify an automation run."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STILL_RUNNING = "still_running"
+    ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
+    TRANSIENT_ERROR = "transient_error"
+    VERIFICATION_ERROR = "verification_error"
 
 
 @dataclass(frozen=True)
 class VerificationResult:
-    """Result of verifying an automation run's status."""
+    """Result of verifying an automation run's status.
 
-    verified: bool
-    success: bool | None = None  # None if not verified
+    The legacy fields (``verified``, ``success``, ``error``, and ``transient``)
+    remain for compatibility. New code should branch on ``outcome`` and use
+    ``detail`` / ``error_info`` for verification-system errors.
+    """
+
+    verified: bool | None = None
+    success: bool | None = None
     exit_code: int | None = None
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    transient: bool = False
+    outcome: VerificationOutcome | None = None
+    detail: str | None = None
+    error_info: TransientErrorInfo | None = None
+
+    def __post_init__(self) -> None:
+        outcome = self.outcome or self._infer_outcome()
+        detail = self.detail if self.detail is not None else self.error
+        error = self.error
+        if error is None and detail is not None and outcome not in (
+            VerificationOutcome.COMPLETED,
+            VerificationOutcome.FAILED,
+        ):
+            error = detail
+
+        verified = self.verified
+        if verified is None:
+            verified = outcome in (
+                VerificationOutcome.COMPLETED,
+                VerificationOutcome.FAILED,
+            )
+
+        success = self.success
+        if success is None:
+            if outcome == VerificationOutcome.COMPLETED:
+                success = True
+            elif outcome == VerificationOutcome.FAILED:
+                success = False
+
+        transient = self.transient or outcome == VerificationOutcome.TRANSIENT_ERROR
+
+        object.__setattr__(self, "outcome", outcome)
+        object.__setattr__(self, "detail", detail)
+        object.__setattr__(self, "error", error)
+        object.__setattr__(self, "verified", verified)
+        object.__setattr__(self, "success", success)
+        object.__setattr__(self, "transient", transient)
+
+    def _infer_outcome(self) -> VerificationOutcome:
+        if self.transient:
+            return VerificationOutcome.TRANSIENT_ERROR
+        if self.verified:
+            if self.success is True or self.exit_code == 0:
+                return VerificationOutcome.COMPLETED
+            return VerificationOutcome.FAILED
+        if self.error in ("Command still running", "No bash output found"):
+            return VerificationOutcome.STILL_RUNNING
+        if self.error and (
+            self.error == "Sandbox not available"
+            or "No sandbox_id" in self.error
+        ):
+            return VerificationOutcome.ENVIRONMENT_UNAVAILABLE
+        return VerificationOutcome.VERIFICATION_ERROR
 
 
 async def verify_run_on_agent_server(
@@ -155,16 +239,24 @@ async def verify_run_on_agent_server(
                 bash_result.error,
                 extra=extra,
             )
+            if bash_result.error_info is not None:
+                return VerificationResult(
+                    outcome=VerificationOutcome.TRANSIENT_ERROR,
+                    detail=bash_result.error,
+                    error_info=bash_result.error_info,
+                )
             return VerificationResult(
-                verified=False,
-                error=bash_result.error,
+                outcome=VerificationOutcome.STILL_RUNNING
+                if bash_result.error == "No bash output found"
+                else VerificationOutcome.VERIFICATION_ERROR,
+                detail=bash_result.error,
             )
 
         if bash_result.exit_code is None:
             logger.info("Bash command still running", extra=extra)
             return VerificationResult(
-                verified=False,
-                error="Command still running",
+                outcome=VerificationOutcome.STILL_RUNNING,
+                detail="Command still running",
             )
 
         success = bash_result.exit_code == 0
@@ -176,8 +268,9 @@ async def verify_run_on_agent_server(
         )
 
         return VerificationResult(
-            verified=True,
-            success=success,
+            outcome=VerificationOutcome.COMPLETED
+            if success
+            else VerificationOutcome.FAILED,
             exit_code=bash_result.exit_code,
             stdout=bash_result.stdout,
             stderr=bash_result.stderr,

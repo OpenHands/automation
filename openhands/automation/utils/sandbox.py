@@ -13,10 +13,15 @@ import httpx
 
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
+    VerificationOutcome,
     VerificationResult,
     get_last_bash_command_result,
 )
 from openhands.automation.utils.log_context import log_extra
+from openhands.automation.utils.transient import (
+    TransientErrorInfo,
+    classify_httpx_transient_error,
+)
 
 
 # Re-export for backward compatibility
@@ -24,6 +29,7 @@ __all__ = [
     "BashCommandResult",
     "VerificationResult",
     "get_last_bash_command_result",
+    "SandboxApiTransientError",
     "get_sandbox_agent_url",
     "delete_sandbox",
     "cleanup_sandbox",
@@ -31,6 +37,14 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class SandboxApiTransientError(RuntimeError):
+    """Raised when sandbox state could not be checked reliably."""
+
+    def __init__(self, error_info: TransientErrorInfo):
+        self.error_info = error_info
+        super().__init__(error_info.detail)
 
 
 async def get_sandbox_agent_url(
@@ -42,7 +56,11 @@ async def get_sandbox_agent_url(
     """Get the agent server URL and session key for a sandbox.
 
     Returns (agent_url, session_key) if the sandbox is running with an agent server,
-    or None if the sandbox is not available.
+    or None if a successful sandbox lookup says the sandbox is not available.
+
+    Raises:
+        SandboxApiTransientError: The sandbox API could not be checked reliably.
+        httpx.HTTPStatusError: Authentication failures, so callers may refresh auth.
 
     Cloud mode only — discovers agent server via sandbox API.
     """
@@ -64,6 +82,32 @@ async def get_sandbox_agent_url(
         for url_info in sandbox.get("exposed_urls") or []:
             if url_info.get("name") == "AGENT_SERVER":
                 return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
+        return None
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        if status_code in (401, 403):
+            logger.warning("Sandbox API auth failed for %s: %s", sandbox_id, e)
+            raise
+        error_info = classify_httpx_transient_error(
+            e,
+            source="sandbox_api",
+            operation="get_sandbox",
+        )
+        if error_info is not None:
+            logger.warning("%s", error_info.detail)
+            raise SandboxApiTransientError(error_info) from e
+        logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
+        return None
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        error_info = classify_httpx_transient_error(
+            e,
+            source="sandbox_api",
+            operation="get_sandbox",
+        )
+        if error_info is not None:
+            logger.warning("%s", error_info.detail)
+            raise SandboxApiTransientError(error_info) from e
+        logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
         return None
     except Exception as e:
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
@@ -160,12 +204,25 @@ async def verify_run_status(
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Get sandbox agent URL
-        result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+        try:
+            result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+        except SandboxApiTransientError as e:
+            logger.warning(
+                "Sandbox status temporarily unavailable for verification: %s",
+                e,
+                extra=extra,
+            )
+            return VerificationResult(
+                outcome=VerificationOutcome.TRANSIENT_ERROR,
+                detail=str(e),
+                error_info=e.error_info,
+            )
+
         if result is None:
             logger.info("Sandbox not available for verification", extra=extra)
             return VerificationResult(
-                verified=False,
-                error="Sandbox not available",
+                outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+                detail="Sandbox not available",
             )
 
         agent_url, session_key = result
@@ -182,16 +239,24 @@ async def verify_run_status(
                 bash_result.error,
                 extra=extra,
             )
+            if bash_result.error_info is not None:
+                return VerificationResult(
+                    outcome=VerificationOutcome.TRANSIENT_ERROR,
+                    detail=bash_result.error,
+                    error_info=bash_result.error_info,
+                )
             return VerificationResult(
-                verified=False,
-                error=bash_result.error,
+                outcome=VerificationOutcome.STILL_RUNNING
+                if bash_result.error == "No bash output found"
+                else VerificationOutcome.VERIFICATION_ERROR,
+                detail=bash_result.error,
             )
 
         if bash_result.exit_code is None:
             logger.info("Bash command still running", extra=extra)
             return VerificationResult(
-                verified=False,
-                error="Command still running",
+                outcome=VerificationOutcome.STILL_RUNNING,
+                detail="Command still running",
             )
 
         success = bash_result.exit_code == 0
@@ -203,8 +268,9 @@ async def verify_run_status(
         )
 
         return VerificationResult(
-            verified=True,
-            success=success,
+            outcome=VerificationOutcome.COMPLETED
+            if success
+            else VerificationOutcome.FAILED,
             exit_code=bash_result.exit_code,
             stdout=bash_result.stdout,
             stderr=bash_result.stderr,
