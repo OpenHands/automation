@@ -1,5 +1,6 @@
 """Pydantic request/response schemas for the API."""
 
+import json
 import re
 import uuid
 from enum import StrEnum
@@ -244,6 +245,57 @@ def validate_command_string(
     return v
 
 
+# --- Template provenance ---
+
+# Cap on the serialized size of template provenance config, so an opaque
+# payload cannot bloat the preset_metadata JSON column.
+MAX_TEMPLATE_CONFIG_BYTES = 16_384
+
+
+class TemplateProvenance(BaseModel):
+    """Opaque provenance of the extension-owned template an automation came from.
+
+    The service stores this verbatim under ``preset_metadata["template"]`` and
+    never validates it against any catalog — template definitions are owned by
+    OpenHands/extensions. Must not contain secrets.
+
+    Lives here rather than in ``preset_router`` because every creation path
+    accepts it: the two preset endpoints and the raw ``POST /v1`` a catalog
+    entry shipping its own tarball uses.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Identifier of the extension template (catalog entry id).",
+    )
+    version: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="Version of the template at creation time.",
+    )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Non-secret configuration the user submitted when enabling the "
+            "template (e.g. setup form values)."
+        ),
+    )
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_size(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(json.dumps(v)) > MAX_TEMPLATE_CONFIG_BYTES:
+            raise ValueError(
+                f"config must serialize to at most {MAX_TEMPLATE_CONFIG_BYTES} bytes"
+            )
+        return v
+
+
 # --- Requests ---
 
 
@@ -285,6 +337,15 @@ class CreateAutomationRequest(BaseModel):
             "If true, leave the sandbox for runtime TTL cleanup after the run "
             "finishes. If false or null, explicitly clean it up after "
             "completion (or after post-run callbacks, when configured)."
+        ),
+    )
+    template: TemplateProvenance | None = Field(
+        default=None,
+        description=(
+            "Opaque provenance of the extension template this automation is "
+            "created from. Enables idempotent creation: when a live automation "
+            "for the same user and template id already exists, it is returned "
+            "unchanged with HTTP 200 instead of creating a duplicate."
         ),
     )
 
@@ -764,8 +825,12 @@ class ValidateDraftRequest(_SetupContractModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    endpoint: Literal["/v1/preset/prompt", "/v1/preset/plugin"] = Field(
-        ..., description="Creation endpoint the draft will be sent to"
+    endpoint: Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"] = Field(
+        ...,
+        description=(
+            "Creation endpoint the draft will be sent to. '/v1' is the raw "
+            "create path a catalog entry shipping its own tarball uses."
+        ),
     )
     draft: dict[str, Any] = Field(
         ..., description="The request body that would be sent to that endpoint"
