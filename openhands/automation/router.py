@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -49,6 +50,10 @@ from openhands.automation.utils.tarball_validation import (
     parse_internal_upload_id,
     validate_tarball_path,
 )
+from openhands.automation.utils.templates import (
+    TEMPLATE_EXISTS_RESPONSE,
+    find_existing_template_automation,
+)
 from openhands.automation.utils.timeout import default_automation_timeout
 
 
@@ -62,10 +67,13 @@ _require_manage_automations = require_permission("manage_automations")
 # --- CRUD ---
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", status_code=status.HTTP_201_CREATED, responses=TEMPLATE_EXISTS_RESPONSE
+)
 async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
+    response: Response,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
@@ -74,7 +82,21 @@ async def create_automation(
     The tarball_path can be either:
     - Internal upload: oh-internal://uploads/{uuid} (from /v1/uploads)
     - External public URL: https://, s3://, or gs:// URLs
+
+    An entry shipping its own tarball creates here rather than through a
+    preset, so it may carry the same ``template`` provenance those accept.
     """
+    # Enabling the same template twice returns the existing automation rather
+    # than a duplicate. Before tarball validation, so a repeat enable costs one
+    # query and leaves the new upload unreferenced rather than adopting it.
+    if body.template is not None:
+        existing = await find_existing_template_automation(
+            session, user.user_id, user.org_id, body.template.id
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return AutomationResponse.model_validate(existing)
+
     # Validate tarball_path (checks ownership for internal uploads)
     await validate_tarball_path(
         tarball_path=body.tarball_path,
@@ -84,11 +106,16 @@ async def create_automation(
     )
     model = resolve_model_profile_for_user(body.model, user)
 
+    preset_metadata: dict[str, Any] | None = None
+    if body.template is not None:
+        preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
+
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         model=model,
+        preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
@@ -103,12 +130,16 @@ async def create_automation(
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
+    creation_properties: dict[str, Any] = {"creation_path": "raw"}
+    if body.template is not None:
+        creation_properties["template_id"] = body.template.id
+        creation_properties["template_version"] = body.template.version
     await capture_automation_event(
         "automation_created",
         request=request,
         user=user,
         automation=auto,
-        properties={"creation_path": "raw"},
+        properties=creation_properties,
     )
     return AutomationResponse.model_validate(auto)
 

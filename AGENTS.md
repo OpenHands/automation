@@ -261,6 +261,30 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
 - Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
 
+## Catalog Bundles
+
+A catalog entry in `OpenHands/extensions` normally ships a prompt, created
+through a preset endpoint. An entry whose automation is deterministic machinery
+— polling, dedupe, state, fixed API calls — ships a **script tarball** instead,
+which the host uploads (`POST /v1/uploads`) and creates from (`POST /v1`).
+
+Execution is unchanged: a bundle run is an ordinary tarball run. What the raw
+path gained is the catalog contract the presets already had:
+
+- **`template` provenance** (`TemplateProvenance` in `schemas.py`), accepted by
+  all three creation endpoints and stored under `preset_metadata["template"]`.
+  `find_existing_template_automation` (`utils/templates.py`) is consulted first,
+  so enabling an entry twice returns the existing automation with a 200.
+  `record_first_run_outcome` keys on the same value, so bundles get first-run
+  telemetry for free.
+- **Preflight**: `POST /v1/validate` accepts `"endpoint": "/v1"`. It validates
+  the body, not the upload — `tarball_path` ownership is checked at creation.
+- **`customTarball`** in `GET /v1/capabilities` `features`, so an entry can
+  require it and a client can tell whether a bundle card is runnable here.
+
+`CreateAutomationRequest` has no `repos`, so a bundle cannot ask the service to
+clone; it fetches what it needs itself.
+
 ## Git Sync
 
 Local/self-hosted deployments can mirror their automations to a git repo for

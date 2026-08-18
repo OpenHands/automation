@@ -33,6 +33,7 @@ from openhands.automation.preset_router import (
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
+    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
@@ -52,11 +53,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
-DraftModel = CreatePromptAutomationRequest | CreatePluginAutomationRequest
+DraftModel = (
+    CreateAutomationRequest
+    | CreatePromptAutomationRequest
+    | CreatePluginAutomationRequest
+)
 
 # Draft models keyed by the endpoint they would be posted to. Validating with
 # the model creation itself uses is what keeps preflight from drifting.
+# "/v1" is the raw create path, used by an entry shipping its own tarball. Its
+# tarball_path is checked for scheme here and for ownership only at creation:
+# preflight validates the body, not the upload behind it.
 _DRAFT_MODELS: dict[str, type[DraftModel]] = {
+    "/v1": CreateAutomationRequest,
     "/v1/preset/prompt": CreatePromptAutomationRequest,
     "/v1/preset/plugin": CreatePluginAutomationRequest,
 }
@@ -65,6 +74,8 @@ _DRAFT_MODELS: dict[str, type[DraftModel]] = {
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
     "conversationDispatch",
+    # Can run a client-supplied tarball, so an entry may ship a script bundle.
+    "customTarball",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",
