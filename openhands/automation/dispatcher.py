@@ -50,12 +50,14 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_timeout_at,
     update_sandbox_id,
 )
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
 )
+from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
@@ -353,6 +355,19 @@ async def _execute_run(
             await update_bash_command_id(
                 session_factory, run.id, result.bash_command_id
             )
+        # Phase-2 deadline: the bash command has started, so its own timeout
+        # (enforced by the agent-server from bash start) now governs the run.
+        # Align the watchdog deadline with it, plus margin so the bash
+        # service's kill always fires first and verification finds a
+        # concrete exit code instead of a still-running command.
+        await update_run_timeout_at(
+            session_factory,
+            run.id,
+            utcnow()
+            + timedelta(
+                seconds=effective_timeout + get_config().sandbox.run_timeout_margin
+            ),
+        )
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
@@ -401,11 +416,22 @@ async def dispatch_pending_runs(
                 run_timeout_seconds = resolve_automation_timeout_seconds(
                     run.automation.timeout if run.automation else None
                 )
+                # Phase-1 provisioning deadline: pads the run budget with the
+                # sandbox-ready budget and margin so the watchdog only reaps
+                # runs that die during provisioning. Once the bash command
+                # actually starts, _execute_run resets timeout_at to
+                # bash-start + run budget + margin (phase 2).
+                sandbox_cfg = get_config().sandbox
+                provisioning_deadline = (
+                    sandbox_cfg.sandbox_ready_timeout
+                    + run_timeout_seconds
+                    + sandbox_cfg.run_timeout_margin
+                )
                 await mark_run_status(
                     session,
                     run,
                     AutomationRunStatus.RUNNING,
-                    max_duration=timedelta(seconds=run_timeout_seconds),
+                    max_duration=timedelta(seconds=provisioning_deadline),
                 )
                 dispatched_runs.append(run)
             except Exception:

@@ -30,7 +30,7 @@ The script:
   7. Gets MCP config via workspace.get_mcp_config()
   8. Gets default agent with tools and condenser
   9. Loads plugins from plugins_config.json
-  10. Creates a RemoteConversation with all plugins
+  10. Creates a RemoteConversation with all plugins and sets a descriptive title
   11. Sends the prompt (with event context if available) and runs
   12. On context manager exit, the workspace sends a completion callback
 
@@ -70,6 +70,7 @@ import os
 import random
 import sys
 import time
+from datetime import datetime, timezone
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -157,6 +158,44 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
+
+def _build_conversation_title(event_context) -> str | None:
+    """Build a descriptive conversation title from the automation event context.
+
+    Returns "{automation_name} — {repo}#{number}" for PR/issue events,
+    "{automation_name} — {timestamp}" otherwise, or None when no automation
+    name is available (keeps the agent-server's default autotitle behavior).
+    """
+    if not isinstance(event_context, dict):
+        return None
+    name = event_context.get("automation_name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    name = " ".join(name.split())
+
+    context = None
+    event = event_context.get("event")
+    if isinstance(event, dict):
+        repo = event.get("repository")
+        repo_name = repo.get("full_name") if isinstance(repo, dict) else None
+        number = None
+        for key in ("pull_request", "issue"):
+            obj = event.get(key)
+            if isinstance(obj, dict):
+                candidate = obj.get("number")
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    number = candidate
+                    break
+        if number is None:
+            candidate = event.get("number")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                number = candidate
+        if isinstance(repo_name, str) and repo_name and number is not None:
+            context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
+    if context is None:
+        context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f"{name} — {context}"[:200]
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -397,13 +436,27 @@ This automation was triggered by a webhook event:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
+    # Cloud workspaces supply richer automation tags (for example, whether the
+    # trigger was cron or webhook). Only add fallback tags in local mode.
+    default_tags = workspace.default_conversation_tags or {}
+    conversation_tags = dict(experiment_tags)
+    if not any(
+        default_tags.get(key)
+        for key in ("automationtrigger", "automationid", "automationrunid")
+    ):
+        conversation_tags["automationtrigger"] = "automation"
+
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
+    if automation_run_id and not default_tags.get("automationrunid"):
+        conversation_tags["automationrunid"] = automation_run_id
+
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
         "callbacks": [event_callback],
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": experiment_tags or None,
+        "tags": conversation_tags,
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
@@ -413,6 +466,22 @@ This automation was triggered by a webhook event:
     print(f"  plugins loaded: {len(plugin_sources)}")
     if experiment_tags:
         print(f"  experiment tags: {experiment_tags}")
+
+    # Set a descriptive title so automation runs are distinguishable in the
+    # conversation panel — otherwise the agent-server's autotitle falls back
+    # to a truncated prompt prefix. Failure is non-fatal; the run continues.
+    conversation_title = _build_conversation_title(event_context)
+    if conversation_title:
+        try:
+            resp = workspace.client.patch(
+                f"/api/conversations/{conversation.id}",
+                json={"title": conversation_title},
+            )
+            resp.raise_for_status()
+            print(f"  title: {conversation_title}")
+        except Exception as e:
+            # Not a hard failure — autotitle fallback still applies
+            print(f"  set title failed (non-fatal): {e}")
 
     # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
@@ -426,20 +495,34 @@ This automation was triggered by a webhook event:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    cost = None
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
         conversation.run()
 
-        # Wait for the stream to settle
-        while time.time() - last_event_time["ts"] < 2.0:
-            time.sleep(0.1)
+        # Post-run bookkeeping is best-effort: the conversation has already
+        # succeeded, and nothing below may raise out of the workspace context
+        # or the __exit__ callback would report FAILED for a successful run.
+        # The callback's cost comes from conversation.close() (cached stats),
+        # not from this live fetch.
+        try:
+            # Wait for the stream to settle
+            while time.time() - last_event_time["ts"] < 2.0:
+                time.sleep(0.1)
 
-        cost = conversation.conversation_stats.get_combined_metrics().accumulated_cost
+            cost = (
+                conversation.conversation_stats.get_combined_metrics().accumulated_cost
+            )
+        except Exception as e:
+            print(f"  WARNING: post-run stats fetch failed (non-fatal): {e}")
         print(f"  cost: {cost}")
         print(f"  events received: {len(received_events)}")
     finally:
-        conversation.close()
+        try:
+            conversation.close()
+        except Exception as e:
+            print(f"  WARNING: conversation.close() failed (non-fatal): {e}")
 
     print("  conversation completed successfully")
 

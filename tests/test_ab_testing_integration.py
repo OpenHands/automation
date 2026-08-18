@@ -226,6 +226,21 @@ class TestABTestAutomationCreation:
         assert data["tarball_path"].startswith("oh-internal://uploads/")
         assert data["enabled"] is True
 
+    async def test_ab_automation_preset_metadata_omits_plugins(
+        self, client, mock_file_store
+    ):
+        """Variant-based automations record preset metadata without a plugins list."""
+        resp = await client.post(
+            "/api/automation/v1/preset/plugin",
+            json=self.AB_PAYLOAD,
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["preset_metadata"] == {
+            "preset_type": "plugin",
+            "prompt": self.AB_PAYLOAD["prompt"],
+        }
+
     async def test_tarball_contains_experiment_config(self, client, mock_file_store):
         """Generated tarball has experiment_config.json, not plugins_config.json."""
         resp = await client.post(
