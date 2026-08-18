@@ -3,9 +3,18 @@
 import re
 import uuid
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
@@ -745,6 +754,109 @@ class CapabilitiesResponse(_SetupContractModel):
     features: list[str]
 
 
+PreflightIntegrationTransport = Literal["stdio", "shttp", "sse"]
+PreflightIntegrationAuthStrategy = Literal[
+    "none", "api_key", "bearer", "basic", "oauth2"
+]
+
+_PREFLIGHT_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PREFLIGHT_SECRET_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_MAX_PREFLIGHT_SECRET_REFERENCES = 32
+
+
+class PreflightIntegrationAlternative(_SetupContractModel):
+    """One deployment-checkable way to satisfy an integration requirement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: PreflightIntegrationTransport
+    locator: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description="Stored MCP server name or remote URL; never a secret value",
+    )
+    auth_strategy: PreflightIntegrationAuthStrategy | None = None
+    secret_names: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("secret_names")
+    @classmethod
+    def validate_secret_names(cls, names: list[str]) -> list[str]:
+        if len(names) != len(set(names)):
+            raise ValueError("secretNames must not contain duplicates")
+        if not all(_PREFLIGHT_SECRET_NAME_PATTERN.fullmatch(name) for name in names):
+            raise ValueError("secretNames must contain valid secret reference names")
+        return names
+
+    @model_validator(mode="after")
+    def validate_locator(self) -> Self:
+        if self.transport == "stdio":
+            if len(self.locator) > 128 or not _PREFLIGHT_IDENTIFIER_PATTERN.fullmatch(
+                self.locator
+            ):
+                raise ValueError("stdio locator must be a valid MCP server name")
+            return self
+
+        parsed = urlparse(self.locator)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError(
+                "remote locator must be an HTTP(S) URL without credentials"
+            )
+        return self
+
+
+class PreflightIntegrationRequirement(_SetupContractModel):
+    """A required integration and the catalog alternatives that can provide it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1, max_length=128)
+    alternatives: list[PreflightIntegrationAlternative] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, integration_id: str) -> str:
+        if not _PREFLIGHT_IDENTIFIER_PATTERN.fullmatch(integration_id):
+            raise ValueError("integration id must be a bounded identifier")
+        return integration_id
+
+
+class PreflightRequirements(_SetupContractModel):
+    """Concrete selected-automation requirements sent by the setup client."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    integrations: list[PreflightIntegrationRequirement] = Field(
+        default_factory=list,
+        max_length=16,
+    )
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        ids = [requirement.id for requirement in self.integrations]
+        if len(ids) != len(set(ids)):
+            raise ValueError("integration requirements must not contain duplicates")
+        names = {
+            name
+            for requirement in self.integrations
+            for alternative in requirement.alternatives
+            for name in alternative.secret_names
+        }
+        if len(names) > _MAX_PREFLIGHT_SECRET_REFERENCES:
+            raise ValueError(
+                "requirements reference too many distinct credential names"
+            )
+        return self
+
+
 class DraftValidationError(_SetupContractModel):
     """A single problem with a draft, addressed to the field that caused it."""
 
@@ -757,6 +869,7 @@ class DraftValidationError(_SetupContractModel):
     )
     code: str
     message: str
+    step: Literal["prerequisites", "form"] = "form"
 
 
 class ValidateDraftRequest(_SetupContractModel):
@@ -780,6 +893,13 @@ class ValidateDraftRequest(_SetupContractModel):
         description=(
             "Raw provider payload to test an event trigger against, as the "
             "webhook endpoint would receive it."
+        ),
+    )
+    requirements: PreflightRequirements | None = Field(
+        default=None,
+        description=(
+            "Selected automation requirements. Omitted by legacy clients; "
+            "contains public locators and secret names only, never values."
         ),
     )
 
