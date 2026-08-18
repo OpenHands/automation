@@ -42,6 +42,7 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
+from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
 from openhands.automation.utils.sandbox import cleanup_sandbox
@@ -460,7 +461,7 @@ async def complete_run(
     if body.cost is not None:
         values["cost"] = body.cost
     if body.status == "FAILED" and body.error:
-        values["error_detail"] = body.error
+        values["error_detail"] = format_callback_error(body.error)
 
     stmt = (
         update(AutomationRun)

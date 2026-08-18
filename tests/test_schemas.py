@@ -18,6 +18,7 @@ from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
     CronTrigger,
+    RunCompleteRequest,
     RunStatus,
 )
 from openhands.automation.utils.time import ensure_utc
@@ -64,6 +65,25 @@ class TestCronTriggerValidation:
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValidationError, match="Invalid timezone"):
             CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
+
+
+class TestRunCompleteRequest:
+    def test_accepts_legacy_string_error(self):
+        request = RunCompleteRequest(status="FAILED", error="script crashed")
+
+        assert request.error == "script crashed"
+
+    def test_accepts_structured_sdk_error(self):
+        error = {
+            "source": "environment",
+            "code": "RuntimeError",
+            "detail": "script crashed",
+            "classification": {"kind": "unknown"},
+        }
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+
+        assert request.error == error
 
 
 class TestAutomationRunResponseUtcSerialisation:

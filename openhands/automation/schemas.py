@@ -708,7 +708,7 @@ class RunCompleteRequest(BaseModel):
     status: Literal["COMPLETED", "FAILED"]
     run_id: str | None = None
     conversation_id: str | None = None
-    error: str | None = None
+    error: str | dict[str, Any] | None = None
     cost: float | None = None
 
 
