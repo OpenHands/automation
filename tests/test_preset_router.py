@@ -3,6 +3,7 @@
 import ast
 import io
 import json
+import os
 import re
 import socket
 import tarfile
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -23,6 +25,7 @@ from openhands.automation.preset_router import (
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.automation.schemas import RunPhaseRequest
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -74,6 +77,38 @@ def _load_preset_mcp_normalizer(
         namespace,
     )
     return cast(Callable[[Any], Any], namespace["_normalize_mcp_config"])
+
+
+def _load_preset_phase_emitter(
+    preset_name: str, *, urlopen_fn: Callable[..., Any] | None = None
+) -> Callable[[str, str], None]:
+    """Extract ``_emit_phase`` from a preset's sdk_main.py for isolated testing.
+
+    ``urlopen_fn`` stands in for the real network call — the only external
+    boundary the function has — so tests can observe or fail it without
+    touching a socket.
+    """
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_emit_phase"
+    )
+    namespace: dict[str, Any] = {
+        "os": os,
+        "json": json,
+        "Request": Request,
+        "urlopen": urlopen_fn if urlopen_fn is not None else urlopen,
+    }
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[str, str], None], namespace["_emit_phase"])
 
 
 def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
@@ -2172,3 +2207,281 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+# --- Run Phase Reporting ---
+
+
+class TestPresetPhaseReporting:
+    """Once the entrypoint hands control to the preset's own code, the phase
+    it reports must be the template's own code, not the service's last
+    written phase (``entrypoint_start``).
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_emit_phase_posts_code_and_label_with_bearer_auth(
+        self, preset_name, monkeypatch
+    ):
+        """A configured AUTOMATION_PHASE_URL gets a POST with the (code, label)
+        pair and a Bearer credential built from the sandbox's own API key."""
+        monkeypatch.setenv(
+            "AUTOMATION_PHASE_URL", "https://automation.example/v1/runs/abc/phase"
+        )
+        monkeypatch.setenv("OPENHANDS_API_KEY", "test-api-key")
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["method"] = request.get_method()
+            captured["body"] = json.loads(request.data.decode())
+            captured["auth"] = request.get_header("Authorization")
+            captured["timeout"] = timeout
+
+        emit_phase = _load_preset_phase_emitter(preset_name, urlopen_fn=fake_urlopen)
+
+        emit_phase("running_agent", "Running agent")
+
+        assert captured["url"] == "https://automation.example/v1/runs/abc/phase"
+        assert captured["method"] == "POST"
+        assert captured["body"] == {"code": "running_agent", "label": "Running agent"}
+        assert captured["auth"] == "Bearer test-api-key"
+        assert captured["timeout"] == 5
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_emit_phase_uses_callback_api_key_in_local_mode(
+        self, preset_name, monkeypatch
+    ):
+        """Local mode (backends/local.py) injects AUTOMATION_CALLBACK_API_KEY —
+        the automation service's own key for this exact purpose — not
+        SESSION_API_KEY, which is the *agent server's* key for a different
+        service and must never be sent here (a trust-boundary crossing)."""
+        monkeypatch.setenv(
+            "AUTOMATION_PHASE_URL", "https://automation.example/v1/runs/abc/phase"
+        )
+        monkeypatch.delenv("OPENHANDS_API_KEY", raising=False)
+        monkeypatch.setenv("SESSION_API_KEY", "agent-server-key")
+        monkeypatch.setenv("AUTOMATION_CALLBACK_API_KEY", "callback-key-value")
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["auth"] = request.get_header("Authorization")
+
+        emit_phase = _load_preset_phase_emitter(preset_name, urlopen_fn=fake_urlopen)
+
+        emit_phase("running_agent", "Running agent")
+
+        assert captured["auth"] == "Bearer callback-key-value"
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_emit_phase_uses_openhands_api_key_in_cloud_mode(
+        self, preset_name, monkeypatch
+    ):
+        """Cloud mode (backends/cloud.py) injects only OPENHANDS_API_KEY."""
+        monkeypatch.setenv(
+            "AUTOMATION_PHASE_URL", "https://automation.example/v1/runs/abc/phase"
+        )
+        monkeypatch.setenv("OPENHANDS_API_KEY", "cloud-api-key")
+        monkeypatch.delenv("AUTOMATION_CALLBACK_API_KEY", raising=False)
+        captured: dict[str, Any] = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["auth"] = request.get_header("Authorization")
+
+        emit_phase = _load_preset_phase_emitter(preset_name, urlopen_fn=fake_urlopen)
+
+        emit_phase("running_agent", "Running agent")
+
+        assert captured["auth"] == "Bearer cloud-api-key"
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_emit_phase_is_noop_without_phase_url(self, preset_name, monkeypatch):
+        """Missing AUTOMATION_PHASE_URL must not attempt a network call."""
+        monkeypatch.delenv("AUTOMATION_PHASE_URL", raising=False)
+
+        def fake_urlopen(request, timeout=None):
+            raise AssertionError("urlopen must not be called without a phase URL")
+
+        emit_phase = _load_preset_phase_emitter(preset_name, urlopen_fn=fake_urlopen)
+
+        emit_phase("running_agent", "Running agent")  # must not raise
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_emit_phase_swallows_network_failure(
+        self, preset_name, monkeypatch, capsys
+    ):
+        """A failing or timing-out phase endpoint must never break the
+        automation — the exception is swallowed, not propagated."""
+        monkeypatch.setenv(
+            "AUTOMATION_PHASE_URL", "https://automation.example/v1/runs/abc/phase"
+        )
+
+        def fake_urlopen(request, timeout=None):
+            raise TimeoutError("simulated network timeout")
+
+        emit_phase = _load_preset_phase_emitter(preset_name, urlopen_fn=fake_urlopen)
+
+        emit_phase("running_agent", "Running agent")  # must not raise
+
+        assert "non-fatal" in capsys.readouterr().out
+
+    def test_prompt_preset_reports_agent_phase_before_running(self):
+        """By the time the prompt preset reaches the agent's work
+        (conversation.send_message/run), the phase it has emitted is its own
+        'running_agent' code — never the service's 'entrypoint_start'."""
+        tarball_bytes = _generate_tarball("Test prompt")
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            main_file = tar.extractfile("main.py")
+            assert main_file is not None
+            main_content = main_file.read().decode("utf-8")
+
+        preparing_idx = main_content.find('_emit_phase("preparing"')
+        running_idx = main_content.find('_emit_phase("running_agent"')
+        send_message_idx = main_content.find("conversation.send_message(USER_PROMPT)")
+
+        assert preparing_idx != -1, "preset must emit a phase on entering the workspace"
+        assert running_idx != -1, "preset must emit a phase before the agent runs"
+        assert send_message_idx != -1
+        assert preparing_idx < running_idx < send_message_idx
+        assert '_emit_phase("entrypoint_start"' not in main_content
+
+    def test_plugin_preset_reports_agent_phase_before_running(self):
+        """Same guarantee for the plugin preset template."""
+        plugins = [PluginSource(source="github:owner/repo")]
+        tarball_bytes = _generate_plugin_tarball(plugins, "Test prompt")
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            main_file = tar.extractfile("main.py")
+            assert main_file is not None
+            main_content = main_file.read().decode("utf-8")
+
+        preparing_idx = main_content.find('_emit_phase("preparing"')
+        running_idx = main_content.find('_emit_phase("running_agent"')
+        send_message_idx = main_content.find("conversation.send_message(USER_PROMPT)")
+
+        assert preparing_idx != -1, "preset must emit a phase on entering the workspace"
+        assert running_idx != -1, "preset must emit a phase before the agent runs"
+        assert send_message_idx != -1
+        assert preparing_idx < running_idx < send_message_idx
+        assert '_emit_phase("entrypoint_start"' not in main_content
+
+
+class TestPresetPhaseCallSiteEvidence:
+    """Stronger evidence than a text search on the same file.
+
+    ``_generate_tarball``/``_generate_plugin_tarball`` embed sdk_main.py
+    verbatim (preset_router.py reads it with ``.read_text()``), so a
+    substring check on the generated main.py is a text test on the source
+    file itself — it cannot tell a real call site from a look-alike comment,
+    a call gated behind an unreachable branch, or a value that would fail
+    S01's own validation. These tests walk the AST instead: they extract the
+    literal (code, label) actually passed to ``_emit_phase`` at each call
+    site, confirm each one is unconditionally reachable, and validate the
+    literals against the real ``RunPhaseRequest`` from S01.
+    """
+
+    @staticmethod
+    def _parse(preset_name: str) -> ast.Module:
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        return ast.parse(source_path.read_text(), filename=str(source_path))
+
+    @staticmethod
+    def _parent_map(tree: ast.Module) -> dict[int, ast.AST]:
+        parents: dict[int, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+        return parents
+
+    @staticmethod
+    def _emit_phase_calls(tree: ast.Module) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_emit_phase"
+        ]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_call_site_literals_are_accepted_by_run_phase_request(self, preset_name):
+        """Every (code, label) literal at a real _emit_phase call site must
+        validate against S01's actual RunPhaseRequest — not just look
+        plausible in source. Catches an oversized label (S01 would 422 it)
+        and an 'entrypoint_start' code regardless of quote style or string
+        concatenation, because the AST literal is compared, not source text.
+        A negative control proves the check is not vacuous: an over-length
+        label is rejected by the same validator used above.
+        """
+        tree = self._parse(preset_name)
+        calls = self._emit_phase_calls(tree)
+        assert len(calls) >= 2, "expected at least 'preparing' and 'running_agent'"
+
+        codes = []
+        for call in calls:
+            assert len(call.args) == 2 and not call.keywords, (
+                "_emit_phase call must pass (code, label) as two positional args"
+            )
+            code_node, label_node = call.args
+            try:
+                code_val = ast.literal_eval(code_node)
+                label_val = ast.literal_eval(label_node)
+            except (ValueError, TypeError):
+                pytest.fail(
+                    "_emit_phase call site must use plain string literals, not "
+                    "a computed expression, so the emitted phase is verifiable"
+                )
+            # The real S01 validator — proves the body S01 would actually
+            # receive is accepted, not merely a string that looks like one.
+            RunPhaseRequest(code=code_val, label=label_val)
+            codes.append(code_val)
+
+        assert "running_agent" in codes
+        assert "entrypoint_start" not in codes
+
+        # Negative control: the same validator must reject what it should.
+        with pytest.raises(Exception):
+            RunPhaseRequest(code="x", label="y" * 201)
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_call_sites_are_unconditionally_reachable(self, preset_name):
+        """Neither call site may be nested under an `if` — an unreachable
+        guard leaves the source text (and any substring check on it) intact
+        while silently suppressing the phase report at runtime."""
+        tree = self._parse(preset_name)
+        parents = self._parent_map(tree)
+        calls = self._emit_phase_calls(tree)
+        assert calls
+
+        for call in calls:
+            node: ast.AST = call
+            while True:
+                parent = parents.get(id(node))
+                assert parent is not None, (
+                    "call site must be reachable from module body"
+                )
+                # A call the module never reaches is the same silent no-op as
+                # a missing call. `try` is allowed: the running_agent call
+                # legitimately lives in one.
+                assert not isinstance(
+                    parent,
+                    (ast.If, ast.For, ast.While, ast.FunctionDef, ast.AsyncFunctionDef),
+                ), (
+                    "_emit_phase call must not be nested inside a branch, a loop "
+                    f"or a function body (found {type(parent).__name__})"
+                )
+                if isinstance(parent, ast.Module):
+                    break
+                node = parent
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_imports_urllib_request(self, preset_name):
+        """A deleted urllib import turns _emit_phase into a silent no-op: the
+        NameError inside its own try block is swallowed by its
+        `except Exception`. Assert the import actually exists."""
+        tree = self._parse(preset_name)
+        imported_names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "urllib.request"
+            for alias in node.names
+        }
+        assert {"Request", "urlopen"} <= imported_names
