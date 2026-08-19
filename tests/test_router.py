@@ -2643,6 +2643,309 @@ class TestCompleteRun:
         assert "first_run" not in metadata
 
 
+class TestRunPhase:
+    """Tests for POST /runs/{run_id}/phase endpoint."""
+
+    async def _seed_running_run(
+        self, async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+    ):
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=user_id,
+            org_id=org_id,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return automation, run
+
+    async def test_run_without_phase_write_reports_null_phase(
+        self, async_client, async_session
+    ):
+        """A RUNNING run nobody wrote a phase for reports an all-null phase."""
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
+
+        assert response.status_code == 200
+        data = response.json()["runs"][0]
+        assert data["phase_code"] is None
+        assert data["phase_label"] is None
+        assert data["phase_updated_at"] is None
+
+    async def test_phase_write_visible_in_run_list(self, async_client, async_session):
+        """A phase write by the owner is reflected in the runs list."""
+        automation, run = await self._seed_running_run(async_session)
+
+        before_request = utcnow()
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "checking_out", "label": "Checking out PR #123"},
+        )
+
+        assert response.status_code == 200
+
+        list_response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs"
+        )
+        assert list_response.status_code == 200
+        data = list_response.json()["runs"][0]
+        assert data["phase_code"] == "checking_out"
+        assert data["phase_label"] == "Checking out PR #123"
+        assert data["phase_updated_at"] is not None
+
+        from datetime import datetime
+
+        from openhands.automation.utils.time import ensure_utc
+
+        phase_updated_at = ensure_utc(datetime.fromisoformat(data["phase_updated_at"]))
+        assert phase_updated_at >= before_request
+
+    async def test_second_phase_write_overwrites_first(
+        self, async_client, async_session
+    ):
+        """Two sequential writes to the same run — the read returns the second."""
+        automation, run = await self._seed_running_run(async_session)
+
+        resp1 = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "checking_out", "label": "Checking out PR #123"},
+        )
+        assert resp1.status_code == 200
+
+        resp2 = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "running_tests", "label": "Running test suite"},
+        )
+        assert resp2.status_code == 200
+
+        list_response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs"
+        )
+        data = list_response.json()["runs"][0]
+        assert data["phase_code"] == "running_tests"
+        assert data["phase_label"] == "Running test suite"
+
+    async def test_second_write_omitting_a_field_clears_it(
+        self, async_client, async_session
+    ):
+        """A phase is a pair — a partial second write replaces the
+        whole pair, it does not merge with the first. The field the second
+        request omits must come back None, never the first write's stale
+        value (a "frankenstein" pair nobody ever wrote)."""
+        automation, run = await self._seed_running_run(async_session)
+
+        resp1 = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "checking_out", "label": "Checking out PR #123"},
+        )
+        assert resp1.status_code == 200
+
+        resp2 = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"label": "Running test suite"},
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["phase_code"] is None
+        assert resp2.json()["phase_label"] == "Running test suite"
+
+        list_response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs"
+        )
+        data = list_response.json()["runs"][0]
+        assert data["phase_code"] is None
+        assert data["phase_label"] == "Running test suite"
+
+    async def test_label_exactly_200_chars_is_accepted_and_stored_whole(
+        self, async_client, async_session
+    ):
+        """A 200-character label passes and is stored in full."""
+        automation, run = await self._seed_running_run(async_session)
+        label = "x" * 200
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "c", "label": label},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["phase_label"] == label
+        assert len(response.json()["phase_label"]) == 200
+
+    async def test_label_201_chars_is_rejected_and_phase_unchanged(
+        self, async_client, async_session
+    ):
+        """A 201-character label is rejected with 422, phase/status untouched."""
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(async_session)
+        label = "x" * 201
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "c", "label": label},
+        )
+
+        assert response.status_code == 422
+
+        await async_session.refresh(run)
+        assert run.phase_code is None
+        assert run.phase_label is None
+        assert run.phase_updated_at is None
+        assert run.status == AutomationRunStatus.RUNNING
+
+    async def test_label_with_control_character_is_rejected_and_phase_unchanged(
+        self, async_client, async_session
+    ):
+        """A label with \\n (or another control char) → 422, phase unchanged."""
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "c", "label": "line one\nline two"},
+        )
+
+        assert response.status_code == 422
+
+        await async_session.refresh(run)
+        assert run.phase_code is None
+        assert run.phase_label is None
+        assert run.phase_updated_at is None
+        assert run.status == AutomationRunStatus.RUNNING
+
+    async def test_code_with_control_character_is_rejected_and_phase_unchanged(
+        self, async_client, async_session
+    ):
+        """code carries the same log/UI-injection exposure as label — control
+        characters must be rejected there too, symmetric with the label
+        check above."""
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "a\nb\x07c"},
+        )
+
+        assert response.status_code == 422
+
+        await async_session.refresh(run)
+        assert run.phase_code is None
+        assert run.phase_label is None
+        assert run.phase_updated_at is None
+        assert run.status == AutomationRunStatus.RUNNING
+
+    async def test_label_with_unicode_line_separator_is_rejected(
+        self, async_client, async_session
+    ):
+        """The control/separator check must cover non-ASCII separators like
+        U+2028 LINE SEPARATOR, not just the ASCII 0x00-0x1f/0x7f range."""
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "c", "label": "line one line two"},
+        )
+
+        assert response.status_code == 422
+
+    async def test_label_with_emoji_and_cyrillic_is_accepted(
+        self, async_client, async_session
+    ):
+        """Phase labels come from automations that are not English-only, so the
+        separator check must not reject ordinary international text. Pinned
+        because the obvious way to catch U+2028 — rejecting the Cf category —
+        also rejects the zero-width joiners that hold an emoji sequence
+        together, and the bidi marks Arabic and Hebrew labels carry."""
+        automation, run = await self._seed_running_run(async_session)
+        # A ZWJ-joined family emoji, then Cyrillic. The joiners stay escaped
+        # because they are invisible in source.
+        label = "\U0001f468\u200d\U0001f469\u200d\U0001f467 Сборка проекта"
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "building", "label": label},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["phase_label"] == label
+
+    async def test_request_without_code_or_label_is_rejected(
+        self, async_client, async_session
+    ):
+        """A request with neither code nor label → 422."""
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={},
+        )
+
+        assert response.status_code == 422
+
+    async def test_whitespace_only_label_alone_is_treated_as_absent(
+        self, async_client, async_session
+    ):
+        """An empty/whitespace-only label with no code must not satisfy the
+        at-least-one-field check — it is indistinguishable from no phase."""
+        automation, run = await self._seed_running_run(async_session)
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"label": "   "},
+        )
+
+        assert response.status_code == 422
+
+    async def test_non_owner_gets_403_and_phase_unchanged(
+        self, async_client, async_session
+    ):
+        """A caller who does not own the automation → 403, phase unchanged."""
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "checking_out", "label": "Checking out PR #123"},
+        )
+
+        assert response.status_code == 403
+
+        await async_session.refresh(run)
+        assert run.phase_code is None
+        assert run.phase_label is None
+        assert run.status == AutomationRunStatus.RUNNING
+
+    async def test_nonexistent_run_id_returns_404(self, async_client):
+        """An unknown run_id → 404."""
+        fake_id = uuid.uuid4()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{fake_id}/phase",
+            json={"code": "checking_out"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
+
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
 

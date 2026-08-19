@@ -39,6 +39,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunPhaseRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -597,6 +598,62 @@ async def complete_run(
                 )
             )
 
+    return AutomationRunResponse.model_validate(run)
+
+
+# --- Run phase callback ---
+
+
+@router.post("/runs/{run_id}/phase")
+async def update_run_phase(
+    run_id: uuid.UUID,
+    body: RunPhaseRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Receive a phase update from code running inside the sandbox.
+
+    Called by automation code (via the SDK) to report human-readable
+    progress within a run, e.g. {"code": "checking_out", "label": "Checking
+    out PR #123"}. Authenticated via the same credentials that were passed
+    into the sandbox. The credentials are validated against
+    ``/api/v1/users/me`` (by ``authenticate_request``) and the resulting user
+    must own the run's parent automation.
+
+    Last write wins at the pair level: a phase is the (code, label) pair as
+    a whole, so every call replaces the entire pair, not just the fields it
+    carries. A request with only ``label`` stores that label with
+    ``phase_code`` cleared to NULL, and vice versa — never merging with the
+    previous write. There is no history — only the current phase is stored.
+    No run status transition happens here.
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    # A phase is one value — the (code, label) pair — so a write replaces
+    # both. An omitted field is stored as NULL rather than left behind, so a
+    # pair nobody ever wrote together can never be observed.
+    values: dict = {
+        "phase_code": body.code,
+        "phase_label": body.label,
+        "phase_updated_at": utcnow(),
+    }
+
+    stmt = update(AutomationRun).where(AutomationRun.id == run_id).values(**values)
+    await session.execute(stmt)
+
+    await session.refresh(run)
     return AutomationRunResponse.model_validate(run)
 
 

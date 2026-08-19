@@ -2,11 +2,20 @@
 
 import json
 import re
+import unicodedata
 import uuid
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
@@ -36,6 +45,16 @@ _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
 
 # Path traversal pattern
 _PATH_TRAVERSAL_RE = re.compile(r"(^|/)\.\.(/|$)")
+
+# Categories disallowed in a phase code/label: control (Cc) plus the line and
+# paragraph separators (Zl, Zp), which catch non-ASCII cases like U+2028 that
+# an ASCII 0x00-0x1f/0x7f range would miss.
+#
+# Format (Cf) is deliberately absent: U+2028/U+2029 are already covered above,
+# while banning Cf would reject legitimate labels — the zero-width joiners
+# inside emoji sequences, the bidi marks Arabic and Hebrew carry, and the ZWNJ
+# Persian and Indic scripts require. Phase labels are not English-only.
+_FORBIDDEN_PHASE_TEXT_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 
 class CronTrigger(BaseModel):
@@ -773,6 +792,51 @@ class RunCompleteRequest(BaseModel):
             return value
 
 
+class RunPhaseRequest(BaseModel):
+    """Payload for POST /runs/{run_id}/phase.
+
+    Sent by code running inside the sandbox to report human-readable
+    progress within a run (e.g. "Checking out PR #123"). At least one of
+    ``code``/``label`` must be provided. Each write overwrites the run's
+    current phase in place (last write wins) — there is no history.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Machine-readable phase code, e.g. 'checking_out'",
+    )
+    label: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Free-form human-readable phase label",
+    )
+
+    @field_validator("code", "label")
+    @classmethod
+    def validate_no_control_or_separator_chars(cls, v: str | None) -> str | None:
+        if v is not None and any(
+            unicodedata.category(ch) in _FORBIDDEN_PHASE_TEXT_CATEGORIES for ch in v
+        ):
+            raise ValueError(
+                "must not contain control or line/paragraph separator characters"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def validate_at_least_one_field(self) -> "RunPhaseRequest":
+        # Blank/whitespace-only is treated as absent here so it can't satisfy
+        # this check — otherwise it would be indistinguishable downstream
+        # from "no phase reported".
+        code_present = self.code is not None and self.code.strip() != ""
+        label_present = self.label is not None and self.label.strip() != ""
+        if not code_present and not label_present:
+            raise ValueError("at least one of code or label must be provided")
+        return self
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 
@@ -787,6 +851,9 @@ class AutomationRunResponse(BaseModel):
     sandbox_id: str | None
     bash_command_id: str | None = None
     run_metadata: dict[str, Any] | None = None
+    phase_code: str | None = None
+    phase_label: str | None = None
+    phase_updated_at: UtcDatetime | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
