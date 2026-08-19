@@ -3,8 +3,8 @@
 Stores additional execution metadata captured after a run completes, such as
 structured semantic task outcomes parsed from preset conversation finish actions.
 
-Revision ID: 015
-Revises: 014
+Revision ID: 016
+Revises: 015
 Create Date: 2026-08-12
 """
 
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "015"
-down_revision: str = "014"
+revision: str = "016"
+down_revision: str = "015"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
