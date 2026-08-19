@@ -139,8 +139,8 @@ class LocalAgentServerBackend(ExecutionBackend):
         The workspace is isolated per-run to avoid conflicts between concurrent
         automations. Each run gets its own directory under the base workspace.
 
-        Note: AUTOMATION_CALLBACK_URL and AUTOMATION_RUN_ID are added by the
-        dispatcher after calling this method.
+        Note: AUTOMATION_CALLBACK_URL, AUTOMATION_PHASE_URL, and AUTOMATION_RUN_ID
+        are added by the dispatcher after calling this method.
         """
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))

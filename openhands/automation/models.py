@@ -200,9 +200,9 @@ class AutomationRun(Base):
     # from the final conversation action.
     run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    # Written by POST /v1/runs/{run_id}/phase. Last write wins — no source
-    # flag, no priority logic — and only the current phase is kept, so there
-    # is no history/timeline table to retain or prune.
+    # Written by the dispatcher for its preparation milestones and by code
+    # inside the sandbox via POST /v1/runs/{run_id}/phase. Last write wins,
+    # and only the current phase is kept — there is no history to prune.
     phase_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     phase_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     phase_updated_at: Mapped[datetime | None] = mapped_column(
