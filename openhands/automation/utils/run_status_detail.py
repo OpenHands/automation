@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
+from openhands.automation.utils.callback_error import (
+    CallbackError,
+    format_callback_error,
+    parse_callback_error_event,
+)
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.transient import TransientErrorInfo
 
@@ -112,12 +117,38 @@ def run_status_detail_from_transient_error(
 
 
 def run_status_detail_from_callback_error(
-    error: str | Mapping[str, Any],
+    error: CallbackError,
     *,
-    formatted_detail: str,
+    formatted_detail: str | None = None,
     previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Convert SDK completion callback errors into run status metadata."""
+    typed_error = parse_callback_error_event(error)
+    if typed_error is not None:
+        classification = typed_error.classification
+        extra: dict[str, Any] = {
+            "formatted_detail": formatted_detail or format_callback_error(typed_error)
+        }
+        if classification is not None:
+            extra["user_action"] = classification.user_action
+            if classification.error_id:
+                extra["error_id"] = classification.error_id
+
+        return make_run_status_detail(
+            phase=RunStatusPhase.CALLBACK,
+            kind=(
+                classification.kind.value
+                if classification is not None
+                else RunStatusDetailKind.EXECUTION_ERROR
+            ),
+            detail=typed_error.detail,
+            transient=classification.retryable if classification is not None else False,
+            source=typed_error.source or "sdk_callback",
+            code=typed_error.code,
+            previous=previous,
+            extra=extra,
+        )
+
     if isinstance(error, str):
         return make_run_status_detail(
             phase=RunStatusPhase.CALLBACK,
@@ -127,23 +158,25 @@ def run_status_detail_from_callback_error(
             source="sdk_callback",
             previous=previous,
         )
+    assert isinstance(error, Mapping)
 
     classification = error.get("classification")
     classification_kind = None
     if isinstance(classification, Mapping):
         classification_kind = _string_value(classification.get("kind"))
 
+    fallback_detail = formatted_detail or format_callback_error(error)
     return make_run_status_detail(
         phase=RunStatusPhase.CALLBACK,
         kind=classification_kind or RunStatusDetailKind.EXECUTION_ERROR,
         detail=_string_value(error.get("detail"))
         or _string_value(error.get("message"))
-        or formatted_detail,
+        or fallback_detail,
         transient=False,
         source=_string_value(error.get("source")) or "sdk_callback",
         code=_string_value(error.get("code")),
         previous=previous,
-        extra={"formatted_detail": formatted_detail},
+        extra={"formatted_detail": fallback_detail},
     )
 
 

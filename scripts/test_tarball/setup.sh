@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the OpenHands SDK from PyPI into an isolated virtual environment.
+# Install OpenHands SDK packages into an isolated virtual environment.
 set -e
 
 if [ -z "${AUTOMATION_API_URL:-}" ]; then
@@ -7,7 +7,7 @@ if [ -z "${AUTOMATION_API_URL:-}" ]; then
     exit 1
 fi
 
-echo "[setup] Fetching SDK version from automation service"
+echo "[setup] Fetching SDK install specs from automation service"
 PYTHON_JSON=python3
 if ! command -v python3 >/dev/null 2>&1; then
     if command -v python >/dev/null 2>&1; then
@@ -19,22 +19,22 @@ if ! command -v python3 >/dev/null 2>&1; then
         exit 1
     fi
 fi
+SDK_REQUIREMENTS=.openhands-sdk-requirements.txt
 set +e
-SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
-  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+curl -sf "${AUTOMATION_API_URL}/sdk-version" \
+  | ${PYTHON_JSON} -c "import sys, json; data=json.load(sys.stdin); specs=data.get('install_specs') or [f'openhands-sdk=={data[\"version\"]}', f'openhands-tools=={data[\"version\"]}', f'openhands-workspace=={data[\"version\"]}']; print('\\n'.join(specs))" \
+  > "$SDK_REQUIREMENTS"
+SETUP_STATUS=$?
 set -e
-if [ -z "$SDK_VERSION" ]; then
-    echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
+if [ $SETUP_STATUS -ne 0 ] || [ ! -s "$SDK_REQUIREMENTS" ]; then
+    echo "[setup] ERROR: Failed to fetch SDK install specs from ${AUTOMATION_API_URL}/sdk-version" >&2
     exit 1
 fi
 
 echo "[setup] Creating isolated virtual environment"
 uv venv .venv --python '>=3.12' --quiet
 
-echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
-uv pip install --quiet \
-  "openhands-sdk==${SDK_VERSION}" \
-  "openhands-tools==${SDK_VERSION}" \
-  "openhands-workspace==${SDK_VERSION}"
+echo "[setup] Installing OpenHands SDK packages"
+uv pip install --quiet -r "$SDK_REQUIREMENTS"
 
 echo "[setup] Done"

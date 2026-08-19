@@ -22,6 +22,7 @@ from openhands.automation.schemas import (
     RunStatus,
 )
 from openhands.automation.utils.time import ensure_utc
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
 
 _NAIVE = datetime(2026, 3, 23, 9, 0, 0)  # no tzinfo — simulates SQLite output
@@ -73,13 +74,25 @@ class TestRunCompleteRequest:
 
         assert request.error == "script crashed"
 
-    def test_accepts_structured_sdk_error(self):
+    def test_parses_structured_sdk_error(self):
         error = {
             "source": "environment",
             "code": "RuntimeError",
             "detail": "script crashed",
-            "classification": {"kind": "unknown"},
+            "classification": {"kind": "unknown", "retryable": False},
         }
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+        assert isinstance(request.error, ConversationErrorEvent)
+
+        assert request.error.code == "RuntimeError"
+        assert request.error.detail == "script crashed"
+        assert request.error.classification is not None
+
+        assert request.error.classification.kind.value == "unknown"
+
+    def test_preserves_legacy_structured_error(self):
+        error = {"detail": "bad config"}
 
         request = RunCompleteRequest(status="FAILED", error=error)
 

@@ -1959,7 +1959,7 @@ class TestCompleteRun:
                     "source": "environment",
                     "code": "RuntimeError",
                     "detail": "script crashed",
-                    "classification": {"kind": "unknown"},
+                    "classification": {"kind": "unknown", "retryable": False},
                 },
             },
         )

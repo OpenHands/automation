@@ -44,19 +44,22 @@ def test_run_status_detail_from_callback_error_preserves_sdk_fields():
             "source": "environment",
             "code": "RuntimeError",
             "detail": "script crashed",
-            "classification": {"kind": "unknown"},
+            "classification": {
+                "kind": "auth",
+                "retryable": False,
+                "user_action": "settings",
+            },
         },
-        formatted_detail=(
-            "RuntimeError: script crashed [kind=unknown, source=environment]"
-        ),
+        formatted_detail="RuntimeError: script crashed [kind=auth, source=environment]",
     )
 
     assert detail["phase"] == "callback"
-    assert detail["kind"] == "unknown"
+    assert detail["kind"] == "auth"
     assert detail["source"] == "environment"
     assert detail["code"] == "RuntimeError"
     assert detail["detail"] == "script crashed"
     assert detail["transient"] is False
+    assert detail["user_action"] == "settings"
 
 
 def test_run_status_detail_from_exception_classifies_http_429():
