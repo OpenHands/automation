@@ -168,17 +168,11 @@ class TestPresetFileSyntax:
         sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
         content = sdk_main_path.read_text()
 
-        assert (
-            "from openhands.sdk import Conversation, RemoteConversation, Tool"
-            in content
-        )
+        assert "from openhands.sdk import Conversation, RemoteConversation" in content
         assert "from openhands.tools.preset import TaskOutcome" in content
         assert "class TaskOutcome" not in content
-        assert (
-            'Tool(name="FinishTool", params={"response_schema": TaskOutcome})'
-            in content
-        )
-        assert 'if name != "FinishTool"' in content
+        assert 'finish_tool_params={"response_schema": TaskOutcome}' in content
+        assert 'Tool(name="FinishTool"' not in content
 
 
 class TestPresetEntrypoint:

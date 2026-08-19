@@ -129,7 +129,7 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, RemoteConversation, Tool
+from openhands.sdk import Conversation, RemoteConversation
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -140,20 +140,6 @@ from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
-
-
-def _with_task_outcome_finish_tool(agent):
-    return agent.model_copy(
-        update={
-            "tools": [
-                *agent.tools,
-                Tool(name="FinishTool", params={"response_schema": TaskOutcome}),
-            ],
-            "include_default_tools": [
-                name for name in agent.include_default_tools if name != "FinishTool"
-            ],
-        }
-    )
 
 
 def _conversation_supports_user_id() -> bool:
@@ -410,7 +396,11 @@ This automation was triggered by a webhook event:
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
-    agent = _with_task_outcome_finish_tool(get_default_agent(llm=llm, cli_mode=True))
+    agent = get_default_agent(
+        llm=llm,
+        cli_mode=True,
+        finish_tool_params={"response_schema": TaskOutcome},
+    )
 
     # Add MCP config and agent_context using model_copy if configured
     # (Plugin MCP configs will be merged when plugins are loaded)
