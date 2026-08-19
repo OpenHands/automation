@@ -167,6 +167,7 @@ Completion is handled asynchronously:
 | `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
+| `AUTOMATION_PHASE_URL` | Constructed by dispatcher | `POST /v1/runs/{id}/phase` — code inside the sandbox reports its own phase here once the entrypoint owns it |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 

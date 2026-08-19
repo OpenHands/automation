@@ -9,6 +9,7 @@ import io
 import logging
 import re
 import tarfile
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -341,6 +342,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    phase_callback: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -364,6 +366,10 @@ async def execute_in_context(
             path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
+        phase_callback: Called with ``(code, label)`` as each service phase
+            (``bundle_upload``, ``entrypoint_start``) is entered. The caller
+            (dispatcher) owns persistence and is responsible for making this
+            never raise — a failure to record a phase must never fail the run.
 
     Returns:
         DispatchResult with success status
@@ -386,6 +392,9 @@ async def execute_in_context(
     env_path: str | None = None
 
     try:
+        if phase_callback is not None:
+            await phase_callback("bundle_upload", "Uploading bundle")
+
         # Get tarball into environment: upload bytes or download from URL
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
@@ -416,6 +425,9 @@ async def execute_in_context(
             f" && ([ ! -f setup.sh ] || bash setup.sh)"
             f" && {entrypoint}"
         )
+
+        if phase_callback is not None:
+            await phase_callback("entrypoint_start", "Starting entrypoint")
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(
