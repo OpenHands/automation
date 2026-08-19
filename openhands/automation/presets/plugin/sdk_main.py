@@ -399,7 +399,7 @@ This automation was triggered by a webhook event:
     agent = get_default_agent(
         llm=llm,
         cli_mode=True,
-        finish_tool_params={"response_schema": TaskOutcome},
+        finish_tool_response_schema=TaskOutcome,
     )
 
     # Add MCP config and agent_context using model_copy if configured

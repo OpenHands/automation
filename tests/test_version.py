@@ -23,7 +23,7 @@ def test_sdk_direct_url_install_spec_uses_git_commit_and_subdirectory():
           "vcs_info": {
             "vcs": "git",
             "requested_revision": "main",
-            "commit_id": "6391898690cd59268e38e7df90247c67a0d15450"
+            "commit_id": "6c8380d72aaa3a943e6f8b972bd2488660274c5b"
           },
           "subdirectory": "openhands-sdk"
         }
@@ -34,7 +34,7 @@ def test_sdk_direct_url_install_spec_uses_git_commit_and_subdirectory():
         cast(importlib.metadata.Distribution, distribution)
     ) == (
         "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git"
-        "@6391898690cd59268e38e7df90247c67a0d15450"
+        "@6c8380d72aaa3a943e6f8b972bd2488660274c5b"
         "#subdirectory=openhands-sdk"
     )
 
@@ -55,7 +55,7 @@ def test_tools_install_spec_uses_matching_git_subdirectory(monkeypatch):
         "openhands.automation.utils.version.get_sdk_install_spec",
         lambda: (
             "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git"
-            "@6391898690cd59268e38e7df90247c67a0d15450"
+            "@6c8380d72aaa3a943e6f8b972bd2488660274c5b"
             "#subdirectory=openhands-sdk"
         ),
     )
@@ -64,7 +64,7 @@ def test_tools_install_spec_uses_matching_git_subdirectory(monkeypatch):
 
     assert get_tools_install_spec() == (
         "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git"
-        "@6391898690cd59268e38e7df90247c67a0d15450"
+        "@6c8380d72aaa3a943e6f8b972bd2488660274c5b"
         "#subdirectory=openhands-tools"
     )
 
