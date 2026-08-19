@@ -35,6 +35,13 @@ if [ -z "$SDK_VERSION" ]; then
 fi
 
 echo "[setup] Creating isolated virtual environment"
+# Clear any inherited active venv so the uv commands below target the .venv we
+# create here, not a venv from the parent process. This matters in local
+# agent-server mode: when the agent-server is launched via `uv run`, its child
+# bash shells inherit VIRTUAL_ENV, and `uv pip install` would otherwise install
+# into that inherited venv, leaving this .venv empty (main.py then fails with
+# ModuleNotFoundError: No module named 'openhands').
+unset VIRTUAL_ENV
 # Pin >=3.12 so uv doesn't default to an older system Python (e.g. macOS
 # CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.
 uv venv .venv --python '>=3.12' --quiet
