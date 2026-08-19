@@ -193,6 +193,15 @@ class AutomationRun(Base):
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Written by POST /v1/runs/{run_id}/phase. Last write wins — no source
+    # flag, no priority logic — and only the current phase is kept, so there
+    # is no history/timeline table to retain or prune.
+    phase_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    phase_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    phase_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
