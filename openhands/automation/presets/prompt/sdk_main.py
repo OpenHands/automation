@@ -133,7 +133,8 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, RemoteConversation, TaskOutcome, Tool
+from openhands.sdk import Conversation, RemoteConversation, Tool
+from openhands.tools.preset import TaskOutcome
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config

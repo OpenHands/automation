@@ -5,22 +5,47 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.sandbox import get_sandbox_agent_url
-from openhands.sdk import TaskOutcome
 
 
 logger = logging.getLogger(__name__)
 
 ACTION_EVENT_KIND = "openhands.sdk.event.llm_convertible.action.ActionEvent"
 FINISH_TOOL_NAME = "finish"
+
+TaskOutcomeStatus = Literal[
+    "success",
+    "partial_success",
+    "blocked",
+    "failed",
+    "unknown",
+]
+
+
+class TaskOutcomeBlocker(BaseModel):
+    type: str
+    message: str
+    recoverable: bool | None = None
+
+
+class TaskOutcome(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: TaskOutcomeStatus
+    summary: str = Field(alias="outcome_summary")
+    blockers: list[TaskOutcomeBlocker] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    needs_user_action: bool = False
+    reported_at: datetime | None = None
+    terminal_reason: str | None = None
 
 
 def _event_timestamp(event: dict[str, Any]) -> datetime | None:

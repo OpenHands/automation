@@ -169,9 +169,10 @@ class TestPresetFileSyntax:
         content = sdk_main_path.read_text()
 
         assert (
-            "from openhands.sdk import Conversation, RemoteConversation, "
-            "TaskOutcome, Tool" in content
+            "from openhands.sdk import Conversation, RemoteConversation, Tool"
+            in content
         )
+        assert "from openhands.tools.preset import TaskOutcome" in content
         assert "class TaskOutcome" not in content
         assert (
             'Tool(name="FinishTool", params={"response_schema": TaskOutcome})'

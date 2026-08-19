@@ -23,16 +23,18 @@ def test_sdk_direct_url_install_spec_uses_git_commit_and_subdirectory():
           "vcs_info": {
             "vcs": "git",
             "requested_revision": "main",
-            "commit_id": "96705f910ee6ab8649aa5733abb5c97d5e0a4822"
+            "commit_id": "455e8d6ce15f3356a00694f5f47cad32450b46bc"
           },
           "subdirectory": "openhands-sdk"
         }
         """
     )
 
-    assert _sdk_direct_url_install_spec(cast(importlib.metadata.Distribution, distribution)) == (
+    assert _sdk_direct_url_install_spec(
+        cast(importlib.metadata.Distribution, distribution)
+    ) == (
         "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git"
-        "@96705f910ee6ab8649aa5733abb5c97d5e0a4822"
+        "@455e8d6ce15f3356a00694f5f47cad32450b46bc"
         "#subdirectory=openhands-sdk"
     )
 
@@ -40,4 +42,43 @@ def test_sdk_direct_url_install_spec_uses_git_commit_and_subdirectory():
 def test_sdk_direct_url_install_spec_ignores_non_git_distribution():
     distribution = FakeDistribution('{"url": "https://files.pythonhosted.org/pkg.whl"}')
 
-    assert _sdk_direct_url_install_spec(cast(importlib.metadata.Distribution, distribution)) is None
+    assert (
+        _sdk_direct_url_install_spec(
+            cast(importlib.metadata.Distribution, distribution)
+        )
+        is None
+    )
+
+
+def test_tools_install_spec_uses_matching_git_subdirectory(monkeypatch):
+    monkeypatch.setattr(
+        "openhands.automation.utils.version.get_sdk_install_spec",
+        lambda: (
+            "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git"
+            "@455e8d6ce15f3356a00694f5f47cad32450b46bc"
+            "#subdirectory=openhands-sdk"
+        ),
+    )
+
+    from openhands.automation.utils.version import get_tools_install_spec
+
+    assert get_tools_install_spec() == (
+        "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git"
+        "@455e8d6ce15f3356a00694f5f47cad32450b46bc"
+        "#subdirectory=openhands-tools"
+    )
+
+
+def test_tools_install_spec_falls_back_to_matching_sdk_version(monkeypatch):
+    monkeypatch.setattr(
+        "openhands.automation.utils.version.get_sdk_install_spec",
+        lambda: "openhands-sdk==1.42.1",
+    )
+    monkeypatch.setattr(
+        "openhands.automation.utils.version.get_sdk_version",
+        lambda: "1.42.1",
+    )
+
+    from openhands.automation.utils.version import get_tools_install_spec
+
+    assert get_tools_install_spec() == "openhands-tools==1.42.1"

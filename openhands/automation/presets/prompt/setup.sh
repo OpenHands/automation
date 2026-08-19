@@ -31,8 +31,10 @@ SDK_VERSION=$(printf '%s' "$SDK_METADATA" \
   | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
 SDK_INSTALL_SPEC=$(printf '%s' "$SDK_METADATA" \
   | ${PYTHON_JSON} -c "import sys, json; data=json.load(sys.stdin); print(data.get('install_spec') or ('openhands-sdk==' + data['version']))" 2>/dev/null)
+TOOLS_INSTALL_SPEC=$(printf '%s' "$SDK_METADATA" \
+  | ${PYTHON_JSON} -c "import sys, json; data=json.load(sys.stdin); print(data.get('tools_install_spec') or ('openhands-tools==' + data['version']))" 2>/dev/null)
 set -e
-if [ -z "$SDK_VERSION" ] || [ -z "$SDK_INSTALL_SPEC" ]; then
+if [ -z "$SDK_VERSION" ] || [ -z "$SDK_INSTALL_SPEC" ] || [ -z "$TOOLS_INSTALL_SPEC" ]; then
     echo "[setup] ERROR: Failed to fetch SDK install metadata from ${AUTOMATION_API_URL}/sdk-version" >&2
     exit 1
 fi
@@ -45,7 +47,7 @@ uv venv .venv --python '>=3.12' --quiet
 echo "[setup] Installing OpenHands SDK ($SDK_INSTALL_SPEC)"
 uv pip install --quiet \
   "$SDK_INSTALL_SPEC" \
-  "openhands-tools==${SDK_VERSION}" \
+  "$TOOLS_INSTALL_SPEC" \
   "openhands-workspace==${SDK_VERSION}"
 
 echo "[setup] Done"
