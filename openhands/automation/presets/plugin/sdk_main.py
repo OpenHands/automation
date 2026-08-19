@@ -52,6 +52,7 @@ Env vars (Local mode):
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
+  AUTOMATION_PHASE_URL       - phase-reporting endpoint; see _emit_phase() (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_USER_ID         - owner user ID for observability attribution (optional)
   AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
@@ -71,6 +72,7 @@ import random
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.request import Request, urlopen
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -119,6 +121,7 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
+print(f"  AUTOMATION_PHASE_URL: {os.environ.get('AUTOMATION_PHASE_URL') or 'NONE'}")
 print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_USER_ID: {'OK' if automation_user_id else 'NONE'}")
 print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else 'NONE'}")
@@ -136,6 +139,40 @@ from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
+
+
+def _emit_phase(code: str, label: str) -> None:
+    """Best-effort report of the current phase to the automation service.
+
+    A phase is telemetry, not a control signal: once the service hands
+    control to this script (after ``entrypoint_start``), reporting is up to
+    us, but a missing AUTOMATION_PHASE_URL, a network error, a timeout, or a
+    non-2xx response must never interrupt the run — every failure here is
+    swallowed.
+
+    Credential: AUTOMATION_CALLBACK_API_KEY (local mode — the automation
+    service's own key, injected by backends/local.py) or OPENHANDS_API_KEY
+    (Cloud mode, injected by backends/cloud.py). Deliberately NOT
+    SESSION_API_KEY / OH_SESSION_API_KEYS_0 — those authenticate to the
+    *agent server*, a different service; the local automation service only
+    accepts its own local_api_key (see auth.py's local-mode fast path) and
+    would 401 on anything else.
+    """
+    phase_url = os.environ.get("AUTOMATION_PHASE_URL")
+    if not phase_url:
+        return
+    credential = os.environ.get("AUTOMATION_CALLBACK_API_KEY") or os.environ.get(
+        "OPENHANDS_API_KEY"
+    )
+    headers = {"Content-Type": "application/json"}
+    if credential:
+        headers["Authorization"] = f"Bearer {credential}"
+    try:
+        body = json.dumps({"code": code, "label": label}).encode("utf-8")
+        request = Request(phase_url, data=body, headers=headers, method="POST")
+        urlopen(request, timeout=5)
+    except Exception as e:
+        print(f"  phase report failed (non-fatal): {e}")
 
 
 def _conversation_supports_user_id() -> bool:
@@ -239,6 +276,10 @@ else:
 with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
+
+    # From here on, the service's last-written phase (entrypoint_start) is
+    # stale — this script owns phase reporting for the rest of the run.
+    _emit_phase("preparing", "Preparing agent workspace")
 
     # Parse event payload if present (for event-triggered automations)
     event_context = None
@@ -499,6 +540,7 @@ This automation was triggered by a webhook event:
 
     cost = None
     try:
+        _emit_phase("running_agent", "Running agent")
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
         conversation.run()
