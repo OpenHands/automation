@@ -405,11 +405,26 @@ This automation was triggered by a webhook event:
         received_events.append(event)
         last_event_time["ts"] = time.time()
 
+    # Cloud workspaces supply richer automation tags (for example, whether the
+    # trigger was cron or webhook). Only add fallback tags in local mode.
+    default_tags = workspace.default_conversation_tags or {}
+    conversation_tags: dict[str, str] = {}
+    if not any(
+        default_tags.get(key)
+        for key in ("automationtrigger", "automationid", "automationrunid")
+    ):
+        conversation_tags["automationtrigger"] = "automation"
+
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
+    if automation_run_id and not default_tags.get("automationrunid"):
+        conversation_tags["automationrunid"] = automation_run_id
+
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "callbacks": [event_callback],
         "delete_on_close": False,  # Keep conversation history after completion
+        "tags": conversation_tags or None,
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id

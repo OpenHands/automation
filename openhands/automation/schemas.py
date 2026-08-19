@@ -1,9 +1,10 @@
 """Pydantic request/response schemas for the API."""
 
+import json
 import re
 import uuid
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 from pydantic.alias_generators import to_camel
@@ -209,14 +210,15 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-def _validate_command_string(
+def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
     Rejects traversal patterns and shell metacharacters.
 
-    Used for both entrypoint and setup_script_path validation.
+    Used for both entrypoint and setup_script_path validation, including
+    by git_sync/loop.py when importing automations from git.
 
     Args:
         v: The value to validate
@@ -241,6 +243,53 @@ def _validate_command_string(
             f"{field_name} must not contain shell metacharacters (;&|`$(){{}}<>!\\\\)"
         )
     return v
+
+
+# --- Template provenance ---
+
+# Keeps an opaque payload from bloating the preset_metadata JSON column.
+MAX_TEMPLATE_CONFIG_BYTES: Final[int] = 16_384
+
+
+class TemplateProvenance(BaseModel):
+    """The extension-owned template an automation was created from.
+
+    Stored verbatim under ``preset_metadata["template"]`` and never validated
+    against any catalog, which OpenHands/extensions owns. Must not contain
+    secrets. Every creation path accepts it, which is why it lives here rather
+    than in ``preset_router``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Identifier of the extension template (catalog entry id).",
+    )
+    version: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="Version of the template at creation time.",
+    )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Non-secret configuration the user submitted when enabling the "
+            "template (e.g. setup form values)."
+        ),
+    )
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_size(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(json.dumps(v)) > MAX_TEMPLATE_CONFIG_BYTES:
+            raise ValueError(
+                f"config must serialize to at most {MAX_TEMPLATE_CONFIG_BYTES} bytes"
+            )
+        return v
 
 
 # --- Requests ---
@@ -286,6 +335,14 @@ class CreateAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    template: TemplateProvenance | None = Field(
+        default=None,
+        description=(
+            "Provenance of the extension template this automation comes from. "
+            "Makes creation idempotent: a live automation for the same user and "
+            "template id is returned unchanged with HTTP 200."
+        ),
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -299,12 +356,12 @@ class CreateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str) -> str:
-        result = _validate_command_string(v, "entrypoint", allow_none=False)
+        result = validate_command_string(v, "entrypoint", allow_none=False)
         assert result is not None  # satisfy type checker
         return result
 
@@ -357,12 +414,12 @@ class UpdateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "entrypoint")
+        return validate_command_string(v, "entrypoint")
 
     @field_validator("timeout")
     @classmethod
@@ -764,8 +821,12 @@ class ValidateDraftRequest(_SetupContractModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    endpoint: Literal["/v1/preset/prompt", "/v1/preset/plugin"] = Field(
-        ..., description="Creation endpoint the draft will be sent to"
+    endpoint: Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"] = Field(
+        ...,
+        description=(
+            "Creation endpoint the draft will be sent to. '/v1' is the raw path, "
+            "which an entry shipping its own tarball uses."
+        ),
     )
     draft: dict[str, Any] = Field(
         ..., description="The request body that would be sent to that endpoint"
