@@ -442,6 +442,39 @@ class TestVerifyAndMarkRunVerificationFailed:
         assert result is True
         mock_backend.cleanup_after_verification.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_transient_verification_error_leaves_run_running(self, mock_settings):
+        """Transient verification errors do not fail or clean up the run."""
+        verification = VerificationResult(
+            verified=False,
+            error=(
+                "Sandbox API temporarily unavailable while checking "
+                "sandbox-123: HTTP 429"
+            ),
+            transient=True,
+        )
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        session.execute.assert_awaited_once()
+        stmt = session.execute.await_args.args[0]
+        params = stmt.compile().params
+        assert params["status_detail"]["phase"] == "verification"
+        assert params["status_detail"]["transient"] is True
+        assert params["status_detail"]["detail"] == verification.detail
+        mock_backend.cleanup_after_verification.assert_not_called()
+
 
 class TestVerifyAndMarkRunStillRunning:
     """Tests for the bounded deferral when the bash command may still be running."""

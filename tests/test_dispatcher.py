@@ -1000,6 +1000,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
             side_effect=ConcurrencyLimitReachedError(
                 "You have reached your limit of 3 concurrent conversations."
@@ -1022,6 +1023,10 @@ class TestExecuteRunConcurrencyLimit:
             )
             assert updated.status == AutomationRunStatus.SKIPPED
             assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["transient"] is True
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
@@ -1046,6 +1051,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, _ = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
         backend.release_context = AsyncMock()
 
@@ -1063,3 +1069,10 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert updated.status == AutomationRunStatus.FAILED
+            assert updated.error_detail == "Failed to get execution context"
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["transient"] is False

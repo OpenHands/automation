@@ -13,18 +13,23 @@ import httpx
 
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
+    VerificationOutcome,
     VerificationResult,
     get_last_bash_command_result,
 )
 from openhands.automation.utils.log_context import log_extra
+from openhands.automation.utils.transient import (
+    TransientErrorInfo,
+    classify_httpx_transient_error,
+)
 
 
 # Re-export for backward compatibility
 __all__ = [
     "BashCommandResult",
     "VerificationResult",
-    "SandboxLookupTransientError",
     "get_last_bash_command_result",
+    "SandboxApiTransientError",
     "get_sandbox_agent_url",
     "delete_sandbox",
     "cleanup_sandbox",
@@ -34,17 +39,12 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-class SandboxLookupTransientError(Exception):
-    """Sandbox API could not be checked due to a transient fault.
+class SandboxApiTransientError(RuntimeError):
+    """Raised when sandbox state could not be checked reliably."""
 
-    Distinct from "sandbox absent": rate limits, timeouts, and 5xx responses
-    carry no information about whether the sandbox still exists.
-    """
-
-
-def _is_transient_http_status(status_code: int) -> bool:
-    """Return True for HTTP statuses that do not prove sandbox absence."""
-    return status_code == 429 or status_code >= 500
+    def __init__(self, error_info: TransientErrorInfo):
+        self.error_info = error_info
+        super().__init__(error_info.detail)
 
 
 async def get_sandbox_agent_url(
@@ -55,14 +55,12 @@ async def get_sandbox_agent_url(
 ) -> tuple[str, str] | None:
     """Get the agent server URL and session key for a sandbox.
 
-    Returns (agent_url, session_key) if the sandbox is running with an agent
-    server, or None if the sandbox is confirmed unavailable (empty result, not
-    RUNNING, or no AGENT_SERVER URL).
+    Returns (agent_url, session_key) if the sandbox is running with an agent server,
+    or None if a successful sandbox lookup says the sandbox is not available.
 
     Raises:
-        SandboxLookupTransientError: When the sandbox API cannot be checked
-            due to rate limiting, server errors, or transport failures. Callers
-            must not treat this as proof the sandbox is gone.
+        SandboxApiTransientError: The sandbox API could not be checked reliably.
+        httpx.HTTPStatusError: Authentication failures, so callers may refresh auth.
 
     Cloud mode only — discovers agent server via sandbox API.
     """
@@ -86,35 +84,34 @@ async def get_sandbox_agent_url(
                 return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
         return None
     except httpx.HTTPStatusError as e:
-        status = e.response.status_code
-        if status == 404:
-            # Explicit not-found from the API — same as an empty list.
-            return None
-        if _is_transient_http_status(status):
-            logger.warning(
-                "Transient sandbox API error for %s: HTTP %s",
-                sandbox_id,
-                status,
-            )
-            raise SandboxLookupTransientError(
-                f"Sandbox API temporarily unavailable (HTTP {status})"
-            ) from e
-        # Other 4xx (e.g. 401/403) are not proof the sandbox is gone; retry.
-        logger.warning(
-            "Sandbox API HTTP error for %s: HTTP %s",
-            sandbox_id,
-            status,
+        status_code = e.response.status_code
+        if status_code in (401, 403):
+            logger.warning("Sandbox API auth failed for %s: %s", sandbox_id, e)
+            raise
+        error_info = classify_httpx_transient_error(
+            e,
+            source="sandbox_api",
+            operation="get_sandbox",
         )
-        raise SandboxLookupTransientError(f"Sandbox API error (HTTP {status})") from e
-    except (httpx.TimeoutException, httpx.TransportError) as e:
-        logger.warning("Sandbox API transport error for %s: %s", sandbox_id, e)
-        raise SandboxLookupTransientError(f"Sandbox API transport error: {e}") from e
-    except SandboxLookupTransientError:
-        raise
-    except Exception as e:
-        # Unknown failures must not collapse into "absent" (None).
+        if error_info is not None:
+            logger.warning("%s", error_info.detail)
+            raise SandboxApiTransientError(error_info) from e
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
-        raise SandboxLookupTransientError(f"Sandbox API lookup failed: {e}") from e
+        return None
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        error_info = classify_httpx_transient_error(
+            e,
+            source="sandbox_api",
+            operation="get_sandbox",
+        )
+        if error_info is not None:
+            logger.warning("%s", error_info.detail)
+            raise SandboxApiTransientError(error_info) from e
+        logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
+        return None
+    except Exception as e:
+        logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
+        return None
 
 
 async def delete_sandbox(
@@ -200,9 +197,7 @@ async def verify_run_status(
             the sandbox runs other bash commands during the run.
 
     Returns:
-        VerificationResult with the verification outcome. When the sandbox
-        API cannot be checked due to a transient fault, ``retryable=True``
-        so callers leave the run RUNNING for a later tick.
+        VerificationResult with the verification outcome
     """
     api_url = api_url.rstrip("/")
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
@@ -211,23 +206,23 @@ async def verify_run_status(
         # Get sandbox agent URL
         try:
             result = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
-        except SandboxLookupTransientError as e:
+        except SandboxApiTransientError as e:
             logger.warning(
-                "Transient sandbox lookup failure during verification: %s",
+                "Sandbox status temporarily unavailable for verification: %s",
                 e,
                 extra=extra,
             )
             return VerificationResult(
-                verified=False,
-                error=str(e),
-                retryable=True,
+                outcome=VerificationOutcome.TRANSIENT_ERROR,
+                detail=str(e),
+                error_info=e.error_info,
             )
 
         if result is None:
             logger.info("Sandbox not available for verification", extra=extra)
             return VerificationResult(
-                verified=False,
-                error="Sandbox not available",
+                outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+                detail="Sandbox not available",
             )
 
         agent_url, session_key = result
@@ -244,16 +239,24 @@ async def verify_run_status(
                 bash_result.error,
                 extra=extra,
             )
+            if bash_result.error_info is not None:
+                return VerificationResult(
+                    outcome=VerificationOutcome.TRANSIENT_ERROR,
+                    detail=bash_result.error,
+                    error_info=bash_result.error_info,
+                )
             return VerificationResult(
-                verified=False,
-                error=bash_result.error,
+                outcome=VerificationOutcome.STILL_RUNNING
+                if bash_result.error == "No bash output found"
+                else VerificationOutcome.VERIFICATION_ERROR,
+                detail=bash_result.error,
             )
 
         if bash_result.exit_code is None:
             logger.info("Bash command still running", extra=extra)
             return VerificationResult(
-                verified=False,
-                error="Command still running",
+                outcome=VerificationOutcome.STILL_RUNNING,
+                detail="Command still running",
             )
 
         success = bash_result.exit_code == 0
@@ -265,8 +268,9 @@ async def verify_run_status(
         )
 
         return VerificationResult(
-            verified=True,
-            success=success,
+            outcome=VerificationOutcome.COMPLETED
+            if success
+            else VerificationOutcome.FAILED,
             exit_code=bash_result.exit_code,
             stdout=bash_result.stdout,
             stderr=bash_result.stderr,

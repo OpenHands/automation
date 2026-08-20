@@ -3,6 +3,7 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -155,6 +156,11 @@ class AutomationRun(Base):
 
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Structured current/last run lifecycle detail. Unlike error_detail, this
+    # can describe non-terminal transient infrastructure issues while the run
+    # remains PENDING/RUNNING.
+    status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

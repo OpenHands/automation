@@ -1926,6 +1926,66 @@ class TestCompleteRun:
         assert data["status"] == "COMPLETED"
         assert data["conversation_id"] is None
 
+    async def test_complete_run_failed_with_structured_sdk_error(
+        self, async_client, async_session
+    ):
+        """Complete endpoint accepts SDK ConversationErrorEvent callback errors."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "conversation_id": "conv-structured-789",
+                "error": {
+                    "source": "environment",
+                    "code": "RuntimeError",
+                    "detail": "script crashed",
+                    "classification": {"kind": "unknown", "retryable": False},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["conversation_id"] == "conv-structured-789"
+        assert (
+            data["error_detail"]
+            == "RuntimeError: script crashed [kind=unknown, source=environment]"
+        )
+        assert data["status_detail"]["phase"] == "callback"
+        assert data["status_detail"]["kind"] == "unknown"
+        assert data["status_detail"]["source"] == "environment"
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert (
+            run.error_detail
+            == "RuntimeError: script crashed [kind=unknown, source=environment]"
+        )
+        assert run.status_detail is not None
+        assert run.status_detail["phase"] == "callback"
+        assert run.status_detail["kind"] == "unknown"
+
     async def test_complete_run_default_keep_alive_null_cleans_up_sandbox(
         self, async_client, async_session
     ):
