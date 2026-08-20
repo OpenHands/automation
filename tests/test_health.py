@@ -92,8 +92,11 @@ class TestSdkVersionEndpoint:
         data = response.json()
         assert "version" in data
         assert data["version"] == importlib.metadata.version("openhands-sdk")
-        assert data["install_specs"]
-        assert all("software-agent-sdk.git" in spec for spec in data["install_specs"])
+        assert data["install_specs"] == [
+            f"openhands-sdk=={data['version']}",
+            f"openhands-tools=={data['version']}",
+            f"openhands-workspace=={data['version']}",
+        ]
 
     async def test_no_auth_required(self, health_client):
         """GET /sdk-version is accessible without any authentication token."""

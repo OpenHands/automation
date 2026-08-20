@@ -336,7 +336,7 @@ async def sdk_version():
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return {"version": version, "install_specs": get_sdk_install_specs()}
+    return {"version": version, "install_specs": get_sdk_install_specs(version)}
 
 
 @app.get("/server_info")

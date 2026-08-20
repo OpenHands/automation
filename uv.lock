@@ -2189,7 +2189,7 @@ wheels = [
 [[package]]
 name = "openhands-agent-server"
 version = "1.42.1"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-agent-server&rev=73fabfd76491940fcb1a042289a18ad618ec89d7#73fabfd76491940fcb1a042289a18ad618ec89d7" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -2202,6 +2202,10 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
     { name = "wsproto" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/0a/2bf9e3c9a217819fff09c19d4307b722e3f7575fab52c4fe22fb00af8574/openhands_agent_server-1.42.1.tar.gz", hash = "sha256:449a62da7a16ec4cd90c611812b763d6e02ee331b412e09316fa6ab5c289afcc", size = 245494, upload-time = "2026-08-12T14:04:40.216Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/72/8c/e3e28a7051191f9dc319efc205c257646896a62c249cb165f74bddf151be/openhands_agent_server-1.42.1-py3-none-any.whl", hash = "sha256:772a73b19684acab5f9f61b1c244f156052625ade51a5e48a424b3c13039f7a7", size = 281622, upload-time = "2026-08-12T14:04:35.031Z" },
 ]
 
 [[package]]
@@ -2262,8 +2266,8 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=73fabfd76491940fcb1a042289a18ad618ec89d7" },
-    { name = "openhands-workspace", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=73fabfd76491940fcb1a042289a18ad618ec89d7" },
+    { name = "openhands-sdk", specifier = "==1.42.1" },
+    { name = "openhands-workspace", specifier = "==1.42.1" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
     { name = "pydantic", specifier = ">=2" },
@@ -2294,7 +2298,7 @@ dev = [
 [[package]]
 name = "openhands-sdk"
 version = "1.42.1"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=73fabfd76491940fcb1a042289a18ad618ec89d7#73fabfd76491940fcb1a042289a18ad618ec89d7" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2315,15 +2319,23 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/e5/4f120814c913e0806c9243eec93d5dd3980261204acef816df884107ae24/openhands_sdk-1.42.1.tar.gz", hash = "sha256:4293dd09ea6a1f681b5094595122c3a0d5998f16f356c9ffb6cea8b10a7b4b0d", size = 666779, upload-time = "2026-08-12T14:04:41.291Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/40/cad4dc348017c3c292804acca04e8c75da726c7631bf8de48d9e7c6dc130/openhands_sdk-1.42.1-py3-none-any.whl", hash = "sha256:10af3d6caf1075ecbb8520db1150c0ec0179ee352b19f0395d2273afda6004d2", size = 796708, upload-time = "2026-08-12T14:04:36.732Z" },
+]
 
 [[package]]
 name = "openhands-workspace"
 version = "1.42.1"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-workspace&rev=73fabfd76491940fcb1a042289a18ad618ec89d7#73fabfd76491940fcb1a042289a18ad618ec89d7" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
     { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/21/a0/c0e0db97d09fcbda9057296c14f9fb6bb423e07ec0c00440d2c2c64398c1/openhands_workspace-1.42.1.tar.gz", hash = "sha256:3f8a13dc31a7b278b752df61749883c427ce2cb621ee08ca4a4a8e6e517043e2", size = 23636, upload-time = "2026-08-12T14:04:43.247Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/1f/2ef9b56751b64a65a798c46a77e66ce3f8506fbd061bdb07c5bef6e4440b/openhands_workspace-1.42.1-py3-none-any.whl", hash = "sha256:7f632cab1b0005c7a623eae1a3ffd2e1b9156ffc95d87e3bcf7098f82eae1e5d", size = 27991, upload-time = "2026-08-12T14:04:39.179Z" },
 ]
 
 [[package]]
