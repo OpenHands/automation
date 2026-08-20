@@ -2770,6 +2770,84 @@ class TestRunPhase:
         assert response.status_code == 404
         assert response.json()["detail"] == "Run not found"
 
+    async def test_pending_run_accepts_a_phase(self, async_client, async_session):
+        """A PENDING run is still in flight, so it takes a phase.
+
+        Boundary for the terminal-status guard below: it must reject finished
+        runs without also rejecting the queued ones, which are exactly the
+        runs whose phase the user has nothing else to go on for.
+        """
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(async_session)
+        run.status = AutomationRunStatus.PENDING
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "queued", "label": "Waiting for a sandbox"},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(run)
+        assert run.phase_code == "queued"
+
+    async def test_failed_run_keeps_the_phase_it_stopped_at(
+        self, async_client, async_session
+    ):
+        """A late write cannot overwrite where a failed run stopped.
+
+        The failure surfaces show that phase as the place the run died, and a
+        sandbox that outlives the run — or any other process holding the same
+        credential — must not be able to move it afterwards.
+        """
+        from openhands.automation.models import AutomationRunStatus
+
+        automation, run = await self._seed_running_run(async_session)
+        await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "sandbox_provisioning", "label": "Setting up sandbox"},
+        )
+        run.status = AutomationRunStatus.FAILED
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"code": "running_agent", "label": "Running the agent"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.phase_code == "sandbox_provisioning"
+        assert run.phase_label == "Setting up sandbox"
+
+    async def test_terminal_run_rejects_a_phase(self, async_client, async_session):
+        """Every terminal status refuses a phase, as ``cancel_run`` does."""
+        from openhands.automation.models import AutomationRunStatus
+
+        for terminal in (
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.CANCELLED,
+            AutomationRunStatus.SKIPPED,
+        ):
+            automation, run = await self._seed_running_run(async_session)
+            run.status = terminal
+            await async_session.commit()
+
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/phase",
+                json={"code": "running_agent", "label": "Running the agent"},
+            )
+
+            assert response.status_code == 409, terminal
+            assert terminal.value in response.json()["detail"]
+
+            await async_session.refresh(run)
+            assert run.phase_code is None, terminal
+            assert run.phase_label is None, terminal
+            assert run.phase_updated_at is None, terminal
+            assert run.status == terminal
+
 
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
