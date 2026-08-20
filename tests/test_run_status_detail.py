@@ -5,7 +5,9 @@ import httpx
 from openhands.automation.utils.run_status_detail import (
     RunStatusDetailKind,
     RunStatusPhase,
+    blocking_factor_from_task_outcome,
     make_run_status_detail,
+    run_status_detail_from_blocking_factor,
     run_status_detail_from_callback_error,
     run_status_detail_from_exception,
 )
@@ -60,6 +62,34 @@ def test_run_status_detail_from_callback_error_preserves_sdk_fields():
     assert detail["detail"] == "script crashed"
     assert detail["transient"] is False
     assert detail["user_action"] == "settings"
+
+
+def test_run_status_detail_from_blocking_factor_defaults_to_settings_action():
+    detail = run_status_detail_from_blocking_factor(
+        {"kind": "config", "reason": "Missing GitHub token", "source": "mcp"}
+    )
+
+    assert detail["phase"] == "callback"
+    assert detail["kind"] == "config"
+    assert detail["source"] == "mcp"
+    assert detail["detail"] == "Missing GitHub token"
+    assert detail["transient"] is False
+    assert detail["user_action"] == "settings"
+    assert detail["blocking_factor"] == {
+        "kind": "config",
+        "reason": "Missing GitHub token",
+        "source": "mcp",
+    }
+
+
+def test_blocking_factor_from_failed_task_outcome():
+    blocking_factor = blocking_factor_from_task_outcome(
+        {"success": False, "message": "Agent could not access Slack"}
+    )
+
+    assert blocking_factor is not None
+    assert blocking_factor["kind"] == RunStatusDetailKind.BLOCKED
+    assert blocking_factor["detail"] == "Agent could not access Slack"
 
 
 def test_run_status_detail_from_exception_classifies_http_429():

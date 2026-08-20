@@ -8,7 +8,12 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationDisableEvent,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
@@ -28,6 +33,10 @@ async def disable_automation(
     session_factory: async_sessionmaker[AsyncSession],
     automation_id: uuid.UUID,
     reason: str,
+    *,
+    disabled_detail: dict | None = None,
+    run_id: uuid.UUID | None = None,
+    source: str = "permanent_dispatch_failure",
 ) -> bool:
     """Disable an automation due to a permanent configuration error.
 
@@ -57,7 +66,12 @@ async def disable_automation(
                     Automation.id == automation_id,
                     Automation.enabled == True,  # noqa: E712
                 )
-                .values(enabled=False)
+                .values(
+                    enabled=False,
+                    disabled_reason=reason,
+                    disabled_detail=disabled_detail,
+                    disabled_at=utcnow(),
+                )
             )
 
             if result.rowcount == 0:
@@ -71,6 +85,15 @@ async def disable_automation(
                     logger.info("Automation already disabled", extra=extra)
                 return False
 
+            session.add(
+                AutomationDisableEvent(
+                    automation_id=automation_id,
+                    run_id=run_id,
+                    reason=reason,
+                    detail=disabled_detail,
+                    source=source,
+                )
+            )
             await session.commit()
 
             logger.warning(

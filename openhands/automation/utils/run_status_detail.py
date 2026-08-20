@@ -31,6 +31,7 @@ class RunStatusDetailKind(StrEnum):
     ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
     EXECUTION_ERROR = "execution_error"
     CONCURRENCY_LIMIT = "concurrency_limit"
+    BLOCKED = "blocked"
     UNKNOWN = "unknown"
 
 
@@ -177,6 +178,95 @@ def run_status_detail_from_callback_error(
         code=_string_value(error.get("code")),
         previous=previous,
         extra={"formatted_detail": fallback_detail},
+    )
+
+
+def blocking_factor_from_task_outcome(
+    task_outcome: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Derive blocking-factor metadata from a structured task outcome."""
+    if not task_outcome:
+        return None
+
+    blocking_factor = task_outcome.get("blocking_factor")
+    if isinstance(blocking_factor, Mapping):
+        return blocking_factor
+
+    success = task_outcome.get("success")
+    status = (
+        _string_value(task_outcome.get("status"))
+        or _string_value(task_outcome.get("outcome"))
+        or _string_value(task_outcome.get("result"))
+    )
+    is_blocked = success is False or (
+        status is not None
+        and status.casefold() in {"blocked", "failed", "failure", "incomplete"}
+    )
+    if not is_blocked:
+        return None
+
+    return {
+        "kind": _string_value(task_outcome.get("kind")) or RunStatusDetailKind.BLOCKED,
+        "detail": _string_value(task_outcome.get("detail"))
+        or _string_value(task_outcome.get("message"))
+        or _string_value(task_outcome.get("reason"))
+        or "Run completed but reported a blocking task outcome",
+        "source": _string_value(task_outcome.get("source")) or "task_outcome",
+        "task_outcome": dict(task_outcome),
+    }
+
+
+def run_status_detail_from_blocking_factor(
+    blocking_factor: Mapping[str, Any],
+    *,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Convert agent-attached blocking-factor metadata into run status detail."""
+    classification = blocking_factor.get("classification")
+    classification_kind = None
+    classification_retryable = None
+    user_action = None
+    if isinstance(classification, Mapping):
+        classification_kind = _string_value(classification.get("kind"))
+        classification_retryable = classification.get("retryable")
+        user_action = _string_value(classification.get("user_action"))
+
+    kind = (
+        classification_kind
+        or _string_value(blocking_factor.get("kind"))
+        or RunStatusDetailKind.BLOCKED
+    )
+    detail = (
+        _string_value(blocking_factor.get("detail"))
+        or _string_value(blocking_factor.get("message"))
+        or _string_value(blocking_factor.get("reason"))
+        or "Run completed but reported a blocking factor"
+    )
+    transient = (
+        classification_retryable
+        if isinstance(classification_retryable, bool)
+        else blocking_factor.get("transient") is True
+    )
+    extra: dict[str, Any] = {
+        "blocking_factor": dict(blocking_factor),
+        "formatted_detail": detail,
+    }
+    if user_action:
+        extra["user_action"] = user_action
+    else:
+        kind_value = kind.value if isinstance(kind, RunStatusDetailKind) else str(kind)
+        if not transient and kind_value in {"auth", "config", "quota", "blocked"}:
+            extra["user_action"] = "settings"
+
+    return make_run_status_detail(
+        phase=RunStatusPhase.CALLBACK,
+        kind=kind,
+        detail=detail,
+        transient=transient,
+        source=_string_value(blocking_factor.get("source")) or "sdk_callback",
+        code=_string_value(blocking_factor.get("code")),
+        previous=previous,
+        extra=extra,
     )
 
 
