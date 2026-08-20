@@ -1919,6 +1919,7 @@ class TestCompleteRun:
 
         await async_session.refresh(run)
         assert run.status == AutomationRunStatus.COMPLETED
+        assert run.status_detail is not None
         assert run.status_detail["detail"] == "Missing Slack token"
 
     async def test_complete_run_saves_conversation_id_for_failed_runs(
