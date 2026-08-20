@@ -44,6 +44,32 @@ def _create_mock_backend() -> MagicMock:
     return mock_backend
 
 
+def _storage_path(upload_id: uuid.UUID) -> str:
+    """Storage path for a test upload, mirroring the production layout."""
+    return f"automation/uploads/{TEST_ORG_ID}/{TEST_USER_ID}/{upload_id}.tar"
+
+
+async def _create_completed_upload(async_session_factory) -> uuid.UUID:
+    """Persist a live, COMPLETED upload row whose object is not in the store."""
+    from openhands.automation.models import TarballUpload, UploadStatus
+
+    upload_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        session.add(
+            TarballUpload(
+                id=upload_id,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="test-upload",
+                status=UploadStatus.COMPLETED,
+                storage_path=_storage_path(upload_id),
+                size_bytes=1024,
+            )
+        )
+        await session.commit()
+    return upload_id
+
+
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
     try:
@@ -227,6 +253,34 @@ class TestDownloadInternalTarball:
         assert "not found" in str(exc_info.value).lower()
         assert str(fake_upload_id) in str(exc_info.value)
 
+    async def test_raises_tarball_not_found_for_missing_object(
+        self, async_session_factory
+    ):
+        """TarballNotFoundError is raised when the row is live but the object is gone.
+
+        This is the C24 failure mode (OSS-9505): the object vanished from MinIO
+        while its Postgres row survived, so ``store.read`` raises
+        ``FileNotFoundError``. It must be reclassified as permanent, otherwise
+        the automation retries the same missing object forever.
+        """
+        from openhands.automation.dispatcher import _download_internal_tarball
+
+        upload_id = await _create_completed_upload(async_session_factory)
+        store = MagicMock()
+        store.read.side_effect = FileNotFoundError(
+            f"File not found: {_storage_path(upload_id)}"
+        )
+
+        with patch("openhands.automation.storage.get_file_store", return_value=store):
+            async with async_session_factory() as session:
+                with pytest.raises(TarballNotFoundError) as exc_info:
+                    await _download_internal_tarball(upload_id, session)
+
+        message = str(exc_info.value)
+        assert "missing from storage" in message
+        assert _storage_path(upload_id) in message
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
 
 @requires_docker
 class TestExecuteRunDisablesAutomation:
@@ -306,6 +360,98 @@ class TestExecuteRunDisablesAutomation:
             run = result.scalars().first()
             assert run.status == AutomationRunStatus.FAILED
             assert "not found" in run.error_detail.lower()
+
+    @patch("openhands.automation.dispatcher.execute_in_context")
+    @patch("openhands.automation.dispatcher.get_backend")
+    async def test_disables_automation_on_missing_tarball_object(
+        self,
+        mock_get_backend,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        """A live upload row with no object disables the automation (OSS-9505).
+
+        Previously the ``FileNotFoundError`` escaped as a plain ``Exception``:
+        the run was marked FAILED with a bare "Internal error" and the
+        automation stayed enabled, re-failing on every schedule tick.
+        """
+        from openhands.automation.dispatcher import _execute_run
+        from openhands.automation.models import (
+            Automation,
+            AutomationRun,
+            AutomationRunStatus,
+        )
+
+        mock_get_backend.return_value = _create_mock_backend()
+
+        upload_id = await _create_completed_upload(async_session_factory)
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path=f"oh-internal://uploads/{upload_id}",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(run)
+            await session.commit()
+            automation_id = automation.id
+
+        store = MagicMock()
+        store.read.side_effect = FileNotFoundError(
+            f"File not found: {_storage_path(upload_id)}"
+        )
+
+        async with async_session_factory() as session:
+            from sqlalchemy.orm import selectinload
+
+            result = await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.automation_id == automation_id)
+            )
+            run = result.scalars().first()
+
+            with patch(
+                "openhands.automation.storage.get_file_store", return_value=store
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+        # The automation is disabled instead of retrying a permanently
+        # unreadable object on every tick.
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Automation).where(Automation.id == automation_id)
+            )
+            assert result.scalars().first().enabled is False
+
+        # The customer sees the real cause, not "Internal error".
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(AutomationRun).where(
+                    AutomationRun.automation_id == automation_id
+                )
+            )
+            run = result.scalars().first()
+            assert run.status == AutomationRunStatus.FAILED
+            assert "missing from storage" in run.error_detail
+            assert "Internal error" not in run.error_detail
+
+        # Execution never started: we failed before entering the sandbox.
+        mock_execute.assert_not_called()
 
     @patch("openhands.automation.dispatcher.execute_in_context")
     @patch("openhands.automation.dispatcher.get_backend")
