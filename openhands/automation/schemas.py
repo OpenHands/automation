@@ -19,6 +19,7 @@ from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
     validate_automation_timeout,
 )
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -708,8 +709,19 @@ class RunCompleteRequest(BaseModel):
     status: Literal["COMPLETED", "FAILED"]
     run_id: str | None = None
     conversation_id: str | None = None
-    error: str | None = None
+    error: str | ConversationErrorEvent | dict[str, Any] | None = None
     cost: float | None = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def parse_sdk_conversation_error(cls, value: Any) -> Any:
+        """Coerce typed SDK callback errors while preserving legacy payloads."""
+        if not isinstance(value, dict):
+            return value
+        try:
+            return ConversationErrorEvent.model_validate(value)
+        except ValueError:
+            return value
 
 
 class AutomationRunResponse(BaseModel):
@@ -719,6 +731,7 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    status_detail: dict[str, Any] | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None
