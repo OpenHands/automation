@@ -2265,7 +2265,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=be2c3c201c3109f4bdbc7215a5523f873faaa8e5" },
+    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=d99c1efd796d1188bbed7f4fec1f495d17505a85" },
     { name = "openhands-workspace", specifier = "==1.42.1" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
@@ -2297,7 +2297,7 @@ dev = [
 [[package]]
 name = "openhands-sdk"
 version = "1.42.1"
-source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=be2c3c201c3109f4bdbc7215a5523f873faaa8e5#be2c3c201c3109f4bdbc7215a5523f873faaa8e5" }
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=d99c1efd796d1188bbed7f4fec1f495d17505a85#d99c1efd796d1188bbed7f4fec1f495d17505a85" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
