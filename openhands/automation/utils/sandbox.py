@@ -109,9 +109,6 @@ async def get_sandbox_agent_url(
             raise SandboxApiTransientError(error_info) from e
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
         return None
-    except Exception as e:
-        logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
-        return None
 
 
 async def delete_sandbox(

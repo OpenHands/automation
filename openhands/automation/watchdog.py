@@ -339,16 +339,6 @@ async def _verify_and_mark_run(
                     )
         return result.rowcount > 0
 
-    # Transient infrastructure fault — leave RUNNING for the next watchdog tick.
-    # Do not conflate "couldn't check" with "sandbox gone".
-    if verification.retryable:
-        logger.warning(
-            "Transient verification failure, leaving run RUNNING: %s",
-            verification.error,
-            extra=extra,
-        )
-        return False
-
     # Verification failed - execution environment not available or command still running
     if verification.outcome == VerificationOutcome.TRANSIENT_ERROR:
         logger.warning(
