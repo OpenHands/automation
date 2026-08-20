@@ -626,6 +626,12 @@ async def update_run_phase(
     ``phase_code`` cleared to NULL, and vice versa — never merging with the
     previous write. There is no history — only the current phase is stored.
     No run status transition happens here.
+
+    Only a PENDING or RUNNING run accepts a phase; anything else is 409,
+    matching ``cancel_run``. A finished run's phase is a record of where it
+    got to — for a failed run it is the place it stopped, which the UI shows
+    next to the failure — so a late write from a sandbox that outlived the
+    run must not be able to overwrite it.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -641,6 +647,16 @@ async def update_run_phase(
     if automation.user_id != user.user_id or automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
 
+    # Only an in-flight run has a current phase to report.
+    if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run is {run.status.value}, only PENDING or"
+                " RUNNING runs accept a phase"
+            ),
+        )
+
     # A phase is one value — the (code, label) pair — so a write replaces
     # both. An omitted field is stored as NULL rather than left behind, so a
     # pair nobody ever wrote together can never be observed.
@@ -650,8 +666,26 @@ async def update_run_phase(
         "phase_updated_at": utcnow(),
     }
 
-    stmt = update(AutomationRun).where(AutomationRun.id == run_id).values(**values)
-    await session.execute(stmt)
+    # Re-check the status in the UPDATE itself: the completion callback may
+    # land between the check above and this write, and the phase of a run
+    # that has just finished must stay the one it finished in.
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+            ),
+        )
+        .values(**values)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+
+    if db_result.rowcount == 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Run finished concurrently, phase not recorded",
+        )
 
     await session.refresh(run)
     return AutomationRunResponse.model_validate(run)

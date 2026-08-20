@@ -94,10 +94,18 @@ you want phases in local mode.
 | 401 | The credential was missing or not the one this service accepts |
 | 403 | The caller does not own the automation this run belongs to |
 | 404 | No run with that `run_id` |
+| 409 | The run has already finished — see below |
 | 422 | The body broke one of the rules above |
 
 None of the error responses change the run's status or its stored phase —
 validation happens before anything is written.
+
+Only a `PENDING` or `RUNNING` run accepts a phase; any other status answers
+409 and keeps the phase it already had. A finished run's phase is a record of
+how far it got — for a failed run it is the place it stopped, which is what
+the UI shows beside the failure — so a straggling write from a sandbox that
+outlived its run cannot move it. A 409 late in a run is normal and needs no
+handling beyond the rule in the next section.
 
 ## Failure handling
 
