@@ -34,11 +34,7 @@ from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
-from openhands.automation.utils.version import (
-    get_sdk_install_specs,
-    get_sdk_version,
-    get_server_version_info,
-)
+from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
 
@@ -322,12 +318,12 @@ async def readiness():
 @app.get("/sdk-version")
 @app.get(f"{_base_path}/sdk-version")
 async def sdk_version():
-    """Return SDK metadata used by automation sandbox setup.
+    """Return the SDK version this service is running.
 
-    Called by setup.sh inside every automation sandbox to determine which SDK
-    packages to install. No authentication required — package coordinates are
-    not sensitive and must be readable before credentials are available in the
-    sandbox.
+    Called by setup.sh inside every automation sandbox to determine which
+    openhands-sdk version to install.  No authentication required — the
+    version string is not sensitive and must be readable before credentials
+    are available in the sandbox.
     """
     try:
         version = get_sdk_version()
@@ -336,7 +332,7 @@ async def sdk_version():
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return {"version": version, "install_specs": get_sdk_install_specs(version)}
+    return {"version": version}
 
 
 @app.get("/server_info")
