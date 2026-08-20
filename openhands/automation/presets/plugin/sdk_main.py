@@ -160,6 +160,20 @@ def _normalize_mcp_config(raw_mcp_config):
     return raw_mcp_config
 
 
+def _get_workspace_mcp_config(workspace):
+    raw_mcp_config = workspace.get_mcp_config()
+    if raw_mcp_config:
+        return _normalize_mcp_config(raw_mcp_config)
+
+    # openhands-sdk 1.42.1 returns {} for ACPAgentSettings even though those
+    # settings contain mcp_config. Recover it until the SDK accepts ACP settings.
+    fetch_agent_settings = getattr(workspace, "_fetch_agent_settings", None)
+    if not callable(fetch_agent_settings):
+        return {}
+    settings = fetch_agent_settings()
+    return _normalize_mcp_config(getattr(settings, "mcp_config", {}))
+
+
 def _build_conversation_title(event_context) -> str | None:
     """Build a descriptive conversation title from the automation event context.
 
@@ -384,7 +398,7 @@ This automation was triggered by a webhook event:
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = {}
     try:
-        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+        mcp_config = _get_workspace_mcp_config(workspace)
         if mcp_config:
             print(f"  servers: {list(mcp_config.keys())}")
         else:
