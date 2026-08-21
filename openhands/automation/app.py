@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
@@ -34,12 +33,7 @@ from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
-from openhands.automation.utils.version import (
-    get_sdk_install_spec,
-    get_sdk_version,
-    get_server_version_info,
-    get_tools_install_spec,
-)
+from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
 
@@ -309,9 +303,8 @@ async def readiness():
     Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
     """
     try:
-        async with app.state.engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        async with app.state.engine.connect():
+            return {"status": "ready"}
     except Exception as e:
         logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
@@ -332,18 +325,12 @@ async def sdk_version():
     """
     try:
         version = get_sdk_version()
-        install_spec = get_sdk_install_spec()
-        tools_install_spec = get_tools_install_spec()
     except PackageNotFoundError:
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return {
-        "version": version,
-        "install_spec": install_spec,
-        "tools_install_spec": tools_install_spec,
-    }
+    return {"version": version}
 
 
 @app.get("/server_info")

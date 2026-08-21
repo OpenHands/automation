@@ -134,6 +134,7 @@ async def mark_run_status(
     status: AutomationRunStatus,
     error_detail: str | None = None,
     max_duration: timedelta | None = None,
+    status_detail: dict | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -147,6 +148,7 @@ async def mark_run_status(
         status: The new status to set
         error_detail: Optional error message (only used for FAILED status)
         max_duration: Maximum run duration for computing timeout_at
+        status_detail: Optional structured lifecycle detail to persist
     """
     if max_duration is None:
         max_duration = timedelta(seconds=resolve_automation_timeout_seconds(None))
@@ -171,6 +173,13 @@ async def mark_run_status(
     if error_detail and status == AutomationRunStatus.FAILED:
         values["error_detail"] = error_detail
         run.error_detail = error_detail
+
+    if status_detail is not None:
+        values["status_detail"] = status_detail
+        run.status_detail = status_detail
+    elif status in (AutomationRunStatus.RUNNING, AutomationRunStatus.COMPLETED):
+        values["status_detail"] = None
+        run.status_detail = None
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
@@ -358,6 +367,7 @@ async def mark_run_terminal(
     run: AutomationRun,
     status: AutomationRunStatus,
     error: str | None = None,
+    status_detail: dict | None = None,
 ) -> None:
     """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING.
 
@@ -372,6 +382,7 @@ async def mark_run_terminal(
         run: The run to update (used to get the ID)
         status: The terminal status to set (COMPLETED or FAILED)
         error: Optional error message (only used for FAILED status)
+        status_detail: Optional structured lifecycle detail to persist
     """
     from sqlalchemy import select
 
@@ -393,6 +404,7 @@ async def mark_run_terminal(
                     db_run,
                     status,
                     error_detail=error,
+                    status_detail=status_detail,
                 )
                 await session.commit()
                 logger.info("Run marked as %s", status.value, extra=extra)

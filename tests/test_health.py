@@ -27,9 +27,6 @@ class _ReadyConnection:
     async def __aexit__(self, exc_type, exc, tb):
         pass
 
-    async def execute(self, statement):
-        pass
-
 
 class _ReadyEngine:
     def connect(self):
@@ -91,11 +88,7 @@ class TestSdkVersionEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "version" in data
-        assert "install_spec" in data
-        assert "tools_install_spec" in data
         assert data["version"] == importlib.metadata.version("openhands-sdk")
-        assert data["install_spec"].startswith("openhands-sdk")
-        assert data["tools_install_spec"].startswith("openhands-tools")
 
     async def test_no_auth_required(self, health_client):
         """GET /sdk-version is accessible without any authentication token."""

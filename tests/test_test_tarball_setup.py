@@ -11,8 +11,7 @@ def test_test_tarball_setup_fetches_service_sdk_version():
 
     assert 'SDK_VERSION="1.22.0"' not in content
     assert "${AUTOMATION_API_URL}/sdk-version" in content
-    assert "SDK_INSTALL_SPEC" in content
-    assert '"$SDK_INSTALL_SPEC"' in content
+    assert "openhands-sdk==${SDK_VERSION}" in content
 
 
 def test_test_automation_runner_provides_automation_api_url():

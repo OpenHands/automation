@@ -6,7 +6,16 @@ import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
@@ -42,11 +51,15 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
+from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run_status_detail import (
+    run_status_detail_from_callback_error,
+)
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
@@ -193,8 +206,14 @@ async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    # Function scope commits the session when the handler returns, BEFORE the
+    # response is sent and its background tasks run. With the default request
+    # scope the deferred tarball delete would run before the commit, and a
+    # commit failure would strand a live upload record pointing at an
+    # already-deleted object.
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -222,7 +241,7 @@ async def update_automation(
         and auto.prompt != original_prompt
     ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session
+            auto, auto.prompt, session, background_tasks
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path
@@ -462,8 +481,20 @@ async def complete_run(
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
         values["cost"] = body.cost
-    if body.status == "FAILED" and body.error:
-        values["error_detail"] = body.error
+    if body.status == "FAILED":
+        error_detail = (
+            format_callback_error(body.error)
+            if body.error
+            else "Completion callback reported failure"
+        )
+        values["error_detail"] = error_detail
+        values["status_detail"] = run_status_detail_from_callback_error(
+            body.error or error_detail,
+            formatted_detail=error_detail,
+            previous=run.status_detail,
+        )
+    elif body.status == "COMPLETED":
+        values["status_detail"] = None
     if body.conversation_id:
         finish_tool_response = await fetch_latest_finish_tool_response_for_run(
             run, body.conversation_id
@@ -621,6 +652,7 @@ async def cancel_run(
             status=AutomationRunStatus.CANCELLED,
             completed_at=now,
             error_detail="Cancelled by user",
+            status_detail=None,
         )
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
