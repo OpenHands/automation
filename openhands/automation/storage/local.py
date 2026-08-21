@@ -5,7 +5,7 @@ import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from openhands.automation.storage.file_store import FileStore
+from openhands.automation.storage.file_store import FileStore, ObjectNotFoundError
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
@@ -61,7 +61,7 @@ class LocalFileStore(FileStore):
         """Read and return the contents of the file at the given path."""
         full_path = self._full_path(path)
         if not full_path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+            raise ObjectNotFoundError(f"File not found: {path}")
         return full_path.read_bytes()
 
     def list(self, path: str) -> list[str]:
