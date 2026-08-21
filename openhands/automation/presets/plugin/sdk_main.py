@@ -396,6 +396,7 @@ This automation was triggered by a webhook event:
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
+    # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
     agent = get_default_agent(
         llm=llm,
         cli_mode=True,

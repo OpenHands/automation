@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from openhands.automation.utils import conversation_outcome as outcome_module
 from openhands.automation.utils.conversation_outcome import (
     ACTION_EVENT_KIND,
     fetch_latest_finish_tool_response,
@@ -127,3 +129,86 @@ async def test_fetch_latest_finish_tool_response_queries_conversation_events():
         "status": "success",
         "outcome_summary": "Everything completed.",
     }
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_finish_tool_response_for_run_uses_local_context(monkeypatch):
+    calls = {}
+
+    class FakeBackend:
+        is_local_mode = True
+
+        async def get_execution_context(self, client):
+            calls["context_client"] = client
+            return SimpleNamespace(
+                agent_url="https://local-agent.example.com",
+                session_key="local-session-key",
+            )
+
+    async def fake_fetch(client, agent_url, session_key, conversation_id):
+        calls["fetch"] = (client, agent_url, session_key, conversation_id)
+        return {"status": "success"}
+
+    monkeypatch.setattr(outcome_module, "get_backend", lambda run: FakeBackend())
+    monkeypatch.setattr(
+        outcome_module, "fetch_latest_finish_tool_response", fake_fetch
+    )
+
+    run = SimpleNamespace(id="run-1", sandbox_id=None)
+
+    assert await outcome_module.fetch_latest_finish_tool_response_for_run(
+        run, "conv-1"
+    ) == {"status": "success"}
+    assert calls["fetch"] == (
+        calls["context_client"],
+        "https://local-agent.example.com",
+        "local-session-key",
+        "conv-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_finish_tool_response_for_run_uses_remote_sandbox(
+    monkeypatch,
+):
+    calls = {}
+
+    class FakeBackend:
+        is_local_mode = False
+
+        async def get_api_key(self):
+            calls["api_key_requested"] = True
+            return "sandbox-api-key"
+
+    async def fake_get_sandbox_agent_url(client, api_url, api_key, sandbox_id):
+        calls["sandbox_lookup"] = (client, api_url, api_key, sandbox_id)
+        return "https://sandbox-agent.example.com", "sandbox-session-key"
+
+    async def fake_fetch(client, agent_url, session_key, conversation_id):
+        calls["fetch"] = (client, agent_url, session_key, conversation_id)
+        return {"status": "partial_success"}
+
+    monkeypatch.setattr(outcome_module, "get_backend", lambda run: FakeBackend())
+    monkeypatch.setattr(
+        outcome_module, "get_sandbox_agent_url", fake_get_sandbox_agent_url
+    )
+    monkeypatch.setattr(
+        outcome_module, "fetch_latest_finish_tool_response", fake_fetch
+    )
+
+    run = SimpleNamespace(id="run-2", sandbox_id="sandbox-123")
+
+    assert await outcome_module.fetch_latest_finish_tool_response_for_run(
+        run, "conv-2"
+    ) == {"status": "partial_success"}
+    assert calls["api_key_requested"] is True
+    lookup_client, api_url, api_key, sandbox_id = calls["sandbox_lookup"]
+    assert api_url
+    assert api_key == "sandbox-api-key"
+    assert sandbox_id == "sandbox-123"
+    assert calls["fetch"] == (
+        lookup_client,
+        "https://sandbox-agent.example.com",
+        "sandbox-session-key",
+        "conv-2",
+    )
