@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -449,6 +449,13 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_PURGER_INTERVAL_SECONDS: Workspace purger interval
+            (local mode only, default: 3600 — 1 hour)
+        AUTOMATION_PURGER_BATCH_SIZE: Max workspaces to purge per cycle (default: 50)
+
+        # Workspace retention (local mode only)
+        AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
+            for terminal runs older than this (default: 604800 — 7 days).
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
@@ -532,6 +539,11 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+    purger_interval_seconds: int = Field(default=3600, gt=0)  # 1 hour
+    purger_batch_size: int = Field(default=50, gt=0)
+
+    # Workspace retention for local mode
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
 
     # API pagination
     api_default_page_size: int = 50
