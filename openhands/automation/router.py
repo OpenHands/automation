@@ -55,6 +55,8 @@ from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
 from openhands.automation.utils.run_status_detail import (
+    blocking_factor_from_task_outcome,
+    run_status_detail_from_blocking_factor,
     run_status_detail_from_callback_error,
 )
 from openhands.automation.utils.sandbox import cleanup_sandbox
@@ -68,6 +70,7 @@ from openhands.automation.utils.templates import (
     find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 
 
 logger = logging.getLogger(__name__)
@@ -220,6 +223,11 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    if update_data.get("enabled") is True:
+        update_data["disabled_reason"] = None
+        update_data["disabled_detail"] = None
+        update_data["disabled_at"] = None
+
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
@@ -365,6 +373,16 @@ async def dispatch_automation(
     picked up by the dispatcher and executed.
     """
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    if not auto.enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Automation is disabled",
+                "disabled_reason": auto.disabled_reason,
+                "disabled_detail": auto.disabled_detail,
+            },
+        )
+
     run = await create_pending_run(
         session,
         auto,
@@ -478,6 +496,9 @@ async def complete_run(
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
         values["cost"] = body.cost
+    blocking_factor = body.blocking_factor or blocking_factor_from_task_outcome(
+        body.task_outcome
+    )
     if body.status == "FAILED":
         error_detail = (
             format_callback_error(body.error)
@@ -488,6 +509,11 @@ async def complete_run(
         values["status_detail"] = run_status_detail_from_callback_error(
             body.error or error_detail,
             formatted_detail=error_detail,
+            previous=run.status_detail,
+        )
+    elif blocking_factor is not None:
+        values["status_detail"] = run_status_detail_from_blocking_factor(
+            blocking_factor,
             previous=run.status_detail,
         )
     elif body.status == "COMPLETED":
@@ -536,12 +562,19 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
+    automation_disabled = await maybe_disable_unhealthy_automation(
+        session,
+        automation.id,
+    )
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
+    if automation_disabled:
+        telemetry_properties["automation_disabled"] = True
+
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED

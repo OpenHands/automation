@@ -1498,6 +1498,34 @@ class TestDispatchAutomation:
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
 
+    async def test_dispatch_disabled_automation_returns_reason(
+        self, async_client, async_session
+    ):
+        """Dispatching a disabled automation returns its blocking reason."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Disabled Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=False,
+            disabled_reason="auth: Invalid API key",
+            disabled_detail={"kind": "auth", "threshold": 3},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["message"] == "Automation is disabled"
+        assert detail["disabled_reason"] == "auth: Invalid API key"
+        assert detail["disabled_detail"] == {"kind": "auth", "threshold": 3}
+
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""
         automation = Automation(
@@ -1931,6 +1959,57 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_persists_blocking_factor_metadata(
+        self, async_client, async_session
+    ):
+        """Completed callbacks can still expose task-blocking metadata."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Blocked Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "COMPLETED",
+                "blocking_factor": {
+                    "kind": "config",
+                    "reason": "Missing Slack token",
+                    "source": "mcp",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["status_detail"]["kind"] == "config"
+        assert data["status_detail"]["blocking_factor"] == {
+            "kind": "config",
+            "reason": "Missing Slack token",
+            "source": "mcp",
+        }
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.COMPLETED
+        assert run.status_detail is not None
+        assert run.status_detail["detail"] == "Missing Slack token"
 
     async def test_complete_run_saves_conversation_id_for_failed_runs(
         self, async_client, async_session
