@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
 
+from openhands.automation.models import AutomationRun
 from openhands.automation.utils import conversation_outcome as outcome_module
 from openhands.automation.utils.conversation_outcome import (
     ACTION_EVENT_KIND,
@@ -132,7 +134,9 @@ async def test_fetch_latest_finish_tool_response_queries_conversation_events():
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_finish_tool_response_for_run_uses_local_context(monkeypatch):
+async def test_fetch_latest_finish_tool_response_for_run_uses_local_context(
+    monkeypatch,
+):
     calls = {}
 
     class FakeBackend:
@@ -150,11 +154,9 @@ async def test_fetch_latest_finish_tool_response_for_run_uses_local_context(monk
         return {"status": "success"}
 
     monkeypatch.setattr(outcome_module, "get_backend", lambda run: FakeBackend())
-    monkeypatch.setattr(
-        outcome_module, "fetch_latest_finish_tool_response", fake_fetch
-    )
+    monkeypatch.setattr(outcome_module, "fetch_latest_finish_tool_response", fake_fetch)
 
-    run = SimpleNamespace(id="run-1", sandbox_id=None)
+    run = cast(AutomationRun, SimpleNamespace(id="run-1", sandbox_id=None))
 
     assert await outcome_module.fetch_latest_finish_tool_response_for_run(
         run, "conv-1"
@@ -192,11 +194,9 @@ async def test_fetch_latest_finish_tool_response_for_run_uses_remote_sandbox(
     monkeypatch.setattr(
         outcome_module, "get_sandbox_agent_url", fake_get_sandbox_agent_url
     )
-    monkeypatch.setattr(
-        outcome_module, "fetch_latest_finish_tool_response", fake_fetch
-    )
+    monkeypatch.setattr(outcome_module, "fetch_latest_finish_tool_response", fake_fetch)
 
-    run = SimpleNamespace(id="run-2", sandbox_id="sandbox-123")
+    run = cast(AutomationRun, SimpleNamespace(id="run-2", sandbox_id="sandbox-123"))
 
     assert await outcome_module.fetch_latest_finish_tool_response_for_run(
         run, "conv-2"
