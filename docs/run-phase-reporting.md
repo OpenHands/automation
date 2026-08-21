@@ -79,7 +79,9 @@ you want phases in local mode.
   request is rejected with 422.
 - `label` is what users read. Send one whenever the phase is meant for a
   human: without it the UI falls back to showing the raw `code`, so
-  `checking_out` appears exactly like that, underscores and all.
+  `checking_out` appears exactly like that, underscores and all. A
+  whitespace-only label counts as none — it is stored as sent, and the UI
+  falls back the same way rather than rendering blank text.
 - Neither field may contain Unicode `Cc` (control) or `Zl`/`Zp` (line/paragraph
   separator) characters — also 422. `Cf` (format) characters are allowed, so
   emoji sequences and non-Latin labels pass through fine.
