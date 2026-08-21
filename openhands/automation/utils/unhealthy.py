@@ -11,12 +11,14 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.config import get_config
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
 )
+from openhands.automation.utils.run import skip_pending_runs_for_disabled_automation
 from openhands.automation.utils.time import utcnow
 
 
@@ -110,7 +112,7 @@ async def maybe_disable_unhealthy_automation(
 ) -> bool:
     """Disable an automation once permanent failures reach the threshold."""
     if threshold is None:
-        threshold = get_config().service.automation_failure_disable_threshold
+        threshold = get_config().service.failure_disable_threshold
     if threshold <= 0:
         return False
 
@@ -130,6 +132,7 @@ async def maybe_disable_unhealthy_automation(
         "run_id": str(latest_run_id) if latest_run_id else None,
         "status_detail": latest_detail,
     }
+    disabled_at = utcnow()
     result: CursorResult = await session.execute(  # type: ignore[assignment]
         update(Automation)
         .where(
@@ -140,11 +143,23 @@ async def maybe_disable_unhealthy_automation(
             enabled=False,
             disabled_reason=disabled_reason,
             disabled_detail=disabled_detail,
-            disabled_at=utcnow(),
+            disabled_at=disabled_at,
         )
     )
     if result.rowcount == 0:
         return False
+
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        automation_id,
+        reason=disabled_reason,
+        disabled_detail=disabled_detail,
+        completed_at=disabled_at,
+    )
+
+    automation = await session.get(Automation, automation_id)
+    if automation is not None:
+        await mark_git_sync_dirty(session, automation)
 
     session.add(
         AutomationDisableEvent(

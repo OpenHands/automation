@@ -8,6 +8,7 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
@@ -59,6 +60,7 @@ async def disable_automation(
 
     try:
         async with session_factory() as session:
+            disabled_at = utcnow()
             # Use optimistic locking: only update if currently enabled
             result: CursorResult = await session.execute(  # type: ignore[assignment]
                 update(Automation)
@@ -70,7 +72,7 @@ async def disable_automation(
                     enabled=False,
                     disabled_reason=reason,
                     disabled_detail=disabled_detail,
-                    disabled_at=utcnow(),
+                    disabled_at=disabled_at,
                 )
             )
 
@@ -84,6 +86,18 @@ async def disable_automation(
                 else:
                     logger.info("Automation already disabled", extra=extra)
                 return False
+
+            await skip_pending_runs_for_disabled_automation(
+                session,
+                automation_id,
+                reason=reason,
+                disabled_detail=disabled_detail,
+                completed_at=disabled_at,
+            )
+
+            automation = await session.get(Automation, automation_id)
+            if automation is not None:
+                await mark_git_sync_dirty(session, automation)
 
             session.add(
                 AutomationDisableEvent(
@@ -106,6 +120,44 @@ async def disable_automation(
     except Exception:
         logger.exception("Failed to disable automation", extra=extra)
         return False
+
+
+async def skip_pending_runs_for_disabled_automation(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    *,
+    reason: str,
+    disabled_detail: dict | None = None,
+    completed_at: datetime | None = None,
+) -> int:
+    """Mark accepted-but-not-dispatched runs terminal when automation is disabled."""
+    completed_at = completed_at or utcnow()
+    status_detail: dict = {
+        "phase": "dispatch",
+        "kind": "blocked",
+        "detail": reason,
+        "transient": False,
+        "source": "automation_service",
+        "operation": "automation_disabled",
+        "user_action": "settings",
+    }
+    if disabled_detail is not None:
+        status_detail["disabled_detail"] = disabled_detail
+
+    result: CursorResult = await session.execute(  # type: ignore[assignment]
+        update(AutomationRun)
+        .where(
+            AutomationRun.automation_id == automation_id,
+            AutomationRun.status == AutomationRunStatus.PENDING,
+        )
+        .values(
+            status=AutomationRunStatus.SKIPPED,
+            completed_at=completed_at,
+            error_detail="Automation disabled",
+            status_detail=status_detail,
+        )
+    )
+    return result.rowcount or 0
 
 
 async def create_pending_run(

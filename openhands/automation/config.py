@@ -534,7 +534,7 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
-    automation_failure_disable_threshold: int = 3
+    failure_disable_threshold: int = 3
 
     # API pagination
     api_default_page_size: int = 50

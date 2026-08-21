@@ -130,6 +130,12 @@ async def test_auto_disables_after_consecutive_permanent_failures(
         await _add_terminal_run(
             session, automation, status_detail=_permanent_detail(), index=3
         )
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        session.add(pending_run)
+        await session.flush()
 
         disabled = await maybe_disable_unhealthy_automation(
             session,
@@ -144,6 +150,11 @@ async def test_auto_disables_after_consecutive_permanent_failures(
         assert "auth" in automation.disabled_reason
         assert automation.disabled_detail is not None
         assert automation.disabled_detail["consecutive_permanent_failures"] == 3
+        await session.refresh(pending_run)
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at is not None
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["operation"] == "automation_disabled"
 
         events = (
             (
@@ -173,8 +184,15 @@ async def test_direct_disable_records_event_history(sqlite_session_factory):
             status_detail=_permanent_detail(),
             index=1,
         )
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        session.add(pending_run)
+        await session.flush()
         automation_id = automation.id
         run_id = run.id
+        pending_run_id = pending_run.id
         await session.commit()
 
     disabled = await disable_automation(
@@ -205,6 +223,13 @@ async def test_direct_disable_records_event_history(sqlite_session_factory):
         assert events[0].reason == "Tarball not found"
         assert events[0].detail == {"kind": "config"}
         assert events[0].source == "permanent_dispatch_failure"
+
+        pending_run = await session.get(AutomationRun, pending_run_id)
+        assert pending_run is not None
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at is not None
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["operation"] == "automation_disabled"
 
 
 async def test_transient_failures_do_not_count_toward_disable(
