@@ -77,6 +77,9 @@ you want phases in local mode.
 
 - At least one of `code`/`label` must be non-blank after `.strip()`, or the
   request is rejected with 422.
+- `label` is what users read. Send one whenever the phase is meant for a
+  human: without it the UI falls back to showing the raw `code`, so
+  `checking_out` appears exactly like that, underscores and all.
 - Neither field may contain Unicode `Cc` (control) or `Zl`/`Zp` (line/paragraph
   separator) characters — also 422. `Cf` (format) characters are allowed, so
   emoji sequences and non-Latin labels pass through fine.
