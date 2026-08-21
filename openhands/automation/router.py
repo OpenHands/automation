@@ -6,7 +6,16 @@ import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
@@ -194,8 +203,14 @@ async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    # Function scope commits the session when the handler returns, BEFORE the
+    # response is sent and its background tasks run. With the default request
+    # scope the deferred tarball delete would run before the commit, and a
+    # commit failure would strand a live upload record pointing at an
+    # already-deleted object.
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -223,7 +238,7 @@ async def update_automation(
         and auto.prompt != original_prompt
     ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session
+            auto, auto.prompt, session, background_tasks
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path

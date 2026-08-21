@@ -35,6 +35,7 @@ from openhands.automation.git_sync.loop import (
     GIT_SYNC_LAST_COMMIT_KEY,
     GIT_SYNC_LAST_ERROR_AT_KEY,
     GIT_SYNC_LAST_ERROR_KEY,
+    _delete_superseded_upload,
 )
 from openhands.automation.git_sync.serializer import encrypt_file_tree
 from openhands.automation.models import (
@@ -1753,6 +1754,34 @@ class TestTarballUploadLifecycle:
             assert automation.tarball_path != old_path
             old_upload = await session.get(TarballUpload, old_upload_id)
             assert old_upload.deleted_at is not None
+            # The superseded object itself is removed once the cycle commits.
+            with pytest.raises(FileNotFoundError):
+                file_store.read(old_upload.storage_path)
+
+    async def test_superseding_does_not_delete_the_object_before_commit(
+        self, sqlite_session_factory, file_store
+    ):
+        """Superseding an upload must leave its storage object intact.
+
+        The object is only removed after the cycle's commit. Deleting it here
+        meant a rolled-back cycle revived the upload row pointing at an
+        already-destroyed object, permanently breaking dispatch (OSS-9505).
+        """
+        # Arrange
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        pending: list[str] = []
+
+        # Act — supersede the upload inside a transaction that never commits.
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            upload_id = parse_internal_upload_id(automation.tarball_path)
+            await _delete_superseded_upload(session, automation.tarball_path, pending)
+
+        # Assert — only the path was queued; the object is still readable.
+        assert pending == [f"uploads/test/{upload_id}.tar"]
+        assert file_store.read(pending[0])
 
 
 class TestEnabledKeyWithNullValue:

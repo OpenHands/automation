@@ -14,6 +14,7 @@ from openhands.automation.models import (
     UploadStatus,
 )
 from openhands.automation.preset_router import _build_storage_path, _generate_tarball
+from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -1300,6 +1301,94 @@ class TestUpdateAutomation:
         assert response.status_code == 500
         await async_session.refresh(automation)
         assert automation.tarball_path == original_tarball_path
+
+    async def test_update_prompt_transient_storage_error_fails_the_edit(
+        self, async_client, async_session, preset_store
+    ):
+        """A transient storage error during a prompt edit fails the request.
+
+        Previously it was swallowed as "nothing to regenerate": the PATCH
+        returned 200 and updated the prompt column while the tarball kept the
+        old baked prompt, so the automation silently kept running the previous
+        prompt.
+        """
+        # Arrange — reading the current tarball fails transiently (e.g. S3 5xx).
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        preset_store.read = MagicMock(
+            side_effect=FileNotFoundError("S3 read failed (ServiceUnavailable)")
+        )
+
+        # Act & Assert — the request fails (rolling back the edit in
+        # production) instead of succeeding with a stale tarball.
+        with pytest.raises(FileNotFoundError):
+            await async_client.patch(
+                f"/api/automation/v1/{automation.id}",
+                json={"prompt": "Updated prompt"},
+            )
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_prompt_missing_source_tarball_skips_regeneration(
+        self, async_client, async_session, preset_store
+    ):
+        """A confirmed-missing source tarball leaves the tarball untouched.
+
+        Only genuine absence means "not a regenerable preset": the prompt
+        column still updates, but no new upload is written and the automation
+        keeps its existing tarball reference.
+        """
+        # Arrange — the current tarball object is confirmed absent.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        original_tarball_path = automation.tarball_path
+        preset_store.read = MagicMock(side_effect=ObjectNotFoundError("File not found"))
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert data["prompt"] == "Updated prompt"
+        assert data["tarball_path"] == original_tarball_path
+        preset_store.write_stream.assert_not_called()
+
+    async def test_failed_update_does_not_delete_current_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """A request that fails after regeneration keeps the current tarball.
+
+        The superseded object may only be removed once the transaction commits.
+        Deleting it earlier meant a later failure rolled the automation back to
+        a tarball reference whose object was already destroyed, permanently
+        breaking every future dispatch (OSS-9505).
+        """
+        # Arrange — fail the request after the tarball has been regenerated.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        old_upload_id = parse_internal_upload_id(automation.tarball_path)
+        assert old_upload_id is not None
+        old_storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, old_upload_id)
+
+        # Act
+        with patch(
+            "openhands.automation.router.mark_git_sync_dirty",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with pytest.raises(RuntimeError):
+                await async_client.patch(
+                    f"/api/automation/v1/{automation.id}",
+                    json={"prompt": "Updated prompt"},
+                )
+
+        # Assert — the object the automation still points at survives.
+        assert old_storage_path in preset_store._storage
 
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
