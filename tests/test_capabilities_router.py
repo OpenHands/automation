@@ -37,6 +37,13 @@ EVENT_DRAFT = {
     },
 }
 
+BUNDLE_DRAFT = {
+    "name": "PR reviewer",
+    "tarball_path": "oh-internal://uploads/12345678-1234-1234-1234-123456789abc",
+    "entrypoint": "uv run main.py",
+    "trigger": {"type": "cron", "schedule": "*/15 * * * *", "timezone": "UTC"},
+}
+
 GITHUB_USER = {"id": 3, "login": "someone"}
 
 
@@ -46,7 +53,7 @@ def with_trigger(draft: dict, **overrides: str) -> dict:
 
 
 def preflight(draft: dict, **extra: object) -> dict:
-    """Build a preflight request body for the prompt-preset endpoint."""
+    """Build a preflight request body, defaulting to the prompt-preset endpoint."""
     return {
         "automationId": "github-pr-reviewer",
         "endpoint": "/v1/preset/prompt",
@@ -130,6 +137,19 @@ class TestGetCapabilities:
         assert "UTC" in body["triggers"]["cron"]["timezones"]
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
+        assert "customTarball" in body["features"]
+
+    async def test_advertises_the_configured_timeout_ceiling(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """The setup client learns the same maximum the API enforces."""
+        monkeypatch.setenv("AUTOMATION_MAX_RUN_DURATION", "900")
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        assert response.status_code == 200
+        assert response.json()["maxAutomationTimeoutSeconds"] == 900
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch
@@ -356,6 +376,42 @@ class TestValidateDraft:
         body = response.json()
         assert body["valid"] is False
         assert addressed_errors(body) == [("model", "model_profile_not_found")]
+
+    async def test_valid_bundle_draft_reports_no_errors(self, async_client):
+        """A catalog entry shipping its own tarball can preflight its draft too."""
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(BUNDLE_DRAFT, endpoint="/v1"),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    async def test_bundle_draft_reports_schema_errors(self, async_client):
+        """A body the raw create endpoint would 422 is caught before creation."""
+        draft = {**BUNDLE_DRAFT}
+        del draft["entrypoint"]
+
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint="/v1")
+        )
+
+        body = response.json()
+        assert body["valid"] is False
+        assert ("entrypoint", "missing") in addressed_errors(body)
+
+    async def test_bundle_draft_is_checked_against_the_cron_floor(self, async_client):
+        """Trigger checks are model-agnostic, so a bundle gets them unchanged."""
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                with_trigger(BUNDLE_DRAFT, schedule="*/10 * * * * *"), endpoint="/v1"
+            ),
+        )
+
+        body = response.json()
+        assert body["valid"] is False
+        assert addressed_errors(body) == [("trigger.schedule", "interval_too_short")]
 
     async def test_unknown_creation_endpoint_is_rejected(self, async_client):
         """Preflight only validates drafts for the endpoints it may name."""

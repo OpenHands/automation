@@ -50,12 +50,20 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_timeout_at,
     update_sandbox_id,
+)
+from openhands.automation.utils.run_status_detail import (
+    RunStatusDetailKind,
+    RunStatusPhase,
+    make_run_status_detail,
+    run_status_detail_from_exception,
 )
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
 )
+from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
@@ -69,8 +77,9 @@ async def _download_internal_tarball(
     """Download a tarball from storage using the TarballUpload record.
 
     Raises:
-        TarballNotFoundError: If the tarball upload record doesn't exist.
-            This is a permanent error that should disable the automation.
+        TarballNotFoundError: If the tarball upload record doesn't exist, or if
+            the record exists but its storage object is missing. Both are
+            permanent errors that should disable the automation.
         ValueError: If no database session is provided.
     """
     if session is None:
@@ -86,10 +95,19 @@ async def _download_internal_tarball(
             "The tarball may have been deleted."
         )
 
-    from openhands.automation.storage import get_file_store
+    from openhands.automation.storage import ObjectNotFoundError, get_file_store
 
     store = get_file_store()
-    return store.read(upload.storage_path)
+    try:
+        return store.read(upload.storage_path)
+    except ObjectNotFoundError as e:
+        # Only confirmed absence is permanent; transient storage errors raise
+        # plain FileNotFoundError and keep retrying on the next schedule tick.
+        raise TarballNotFoundError(
+            f"Internal tarball object missing from storage at "
+            f"{upload.storage_path!r} for upload {upload_id}. "
+            "Recreate the automation to restore it."
+        ) from e
 
 
 async def _poll_pending_runs(
@@ -185,9 +203,19 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    async def _fail(error: str, disable: bool = False) -> None:
+    async def _fail(
+        error: str,
+        disable: bool = False,
+        status_detail: dict | None = None,
+    ) -> None:
         """Mark run as failed and optionally disable the automation."""
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            error,
+            status_detail=status_detail,
+        )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -216,7 +244,20 @@ async def _execute_run(
             exc,
             extra=_log_ctx(),
         )
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.SKIPPED)
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.CONCURRENCY_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
         await capture_automation_event(
             "automation_run_skipped",
             automation=automation,
@@ -228,9 +269,18 @@ async def _execute_run(
             },
         )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
-        await _fail("Failed to get execution context")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Failed to get execution context",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source=source,
+                operation="get_execution_context",
+            ),
+        )
         return
 
     logger.info(
@@ -296,7 +346,19 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
         return
     except (APIKeyError, ValueError) as exc:
         logger.error(
@@ -306,7 +368,18 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc))
+        await _fail(
+            str(exc),
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
         return
 
     # 5. Execute in context
@@ -332,14 +405,35 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.EXECUTION,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="execute_in_context",
+                code=type(exc).__name__,
+            ),
+        )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
         )
         await backend.release_context(client, ctx)
-        await _fail("Internal error")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.EXECUTION,
+                source=source,
+                operation="execute_in_context",
+            ),
+        )
         return
 
     # 6. Handle result
@@ -353,17 +447,41 @@ async def _execute_run(
             await update_bash_command_id(
                 session_factory, run.id, result.bash_command_id
             )
+        # Phase-2 deadline: the bash command has started, so its own timeout
+        # (enforced by the agent-server from bash start) now governs the run.
+        # Align the watchdog deadline with it, plus margin so the bash
+        # service's kill always fires first and verification finds a
+        # concrete exit code instead of a still-running command.
+        await update_run_timeout_at(
+            session_factory,
+            run.id,
+            utcnow()
+            + timedelta(
+                seconds=effective_timeout + get_config().sandbox.run_timeout_margin
+            ),
+        )
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         return
 
+    error = result.error or "Execution failed"
     logger.warning(
         "Execution failed: %s", result.error, extra=_log_ctx(sandbox_id=ctx.sandbox_id)
     )
     await backend.release_context(client, ctx)
-    await _fail(result.error or "Execution failed")
+    await _fail(
+        error,
+        status_detail=make_run_status_detail(
+            phase=RunStatusPhase.EXECUTION,
+            kind=RunStatusDetailKind.EXECUTION_ERROR,
+            detail=error,
+            transient=False,
+            source="agent_server" if backend.is_local_mode else "sandbox_api",
+            operation="execute_in_context",
+        ),
+    )
 
 
 async def dispatch_pending_runs(
@@ -401,11 +519,22 @@ async def dispatch_pending_runs(
                 run_timeout_seconds = resolve_automation_timeout_seconds(
                     run.automation.timeout if run.automation else None
                 )
+                # Phase-1 provisioning deadline: pads the run budget with the
+                # sandbox-ready budget and margin so the watchdog only reaps
+                # runs that die during provisioning. Once the bash command
+                # actually starts, _execute_run resets timeout_at to
+                # bash-start + run budget + margin (phase 2).
+                sandbox_cfg = get_config().sandbox
+                provisioning_deadline = (
+                    sandbox_cfg.sandbox_ready_timeout
+                    + run_timeout_seconds
+                    + sandbox_cfg.run_timeout_margin
+                )
                 await mark_run_status(
                     session,
                     run,
                     AutomationRunStatus.RUNNING,
-                    max_duration=timedelta(seconds=run_timeout_seconds),
+                    max_duration=timedelta(seconds=provisioning_deadline),
                 )
                 dispatched_runs.append(run)
             except Exception:
@@ -453,10 +582,19 @@ async def _execute_run_safe(
     extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory, client)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
         await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="automation_service",
+                operation="execute_run_task",
+            ),
         )
 
 

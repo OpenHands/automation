@@ -2,15 +2,12 @@
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
@@ -22,6 +19,8 @@ from openhands.automation.db import (
 )
 from openhands.automation.dispatcher import dispatcher_loop
 from openhands.automation.event_router import router as event_router
+from openhands.automation.git_sync import git_sync_loop, is_git_sync_supported
+from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
@@ -93,8 +92,9 @@ async def lifespan(app: FastAPI):
         migrations_path = package_dir / "migrations"
 
         if not migrations_path.is_dir():
-            # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
+            # Fallback: a source checkout keeps migrations at the repo root --
+            # two levels up from openhands/automation, not one.
+            repo_root_migrations = package_dir.parent.parent / "migrations"
             if repo_root_migrations.is_dir():
                 migrations_path = repo_root_migrations
             else:
@@ -162,6 +162,39 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Git sync: mirrors automations to/from a git repo. Local mode only.
+    git_sync_task = None
+    config = get_config()
+    if config.git_sync.git_sync_repo_url and not settings.is_local_mode:
+        logger.warning(
+            "AUTOMATION_GIT_SYNC_REPO_URL is set but the service is not in "
+            "local mode (AUTOMATION_AGENT_SERVER_URL not configured); "
+            "git sync will remain disabled."
+        )
+    if is_git_sync_supported():
+        # Only once a repo exists: without one the loop is idle, and warning
+        # about pushing to a repo that isn't configured is noise on the start
+        # of every local deployment.
+        if config.git_sync.git_sync_repo_url:
+            logger.warning(
+                "Git sync is enabled — automation prompts and metadata will be "
+                "pushed to %s. Make sure that repo is private, since it may "
+                "contain sensitive automation content.",
+                config.git_sync.git_sync_repo_url,
+            )
+        # Started whenever the deployment could sync, not only when it is
+        # already configured: the repo comes from the UI, and gating on it left
+        # the loop (and mark_git_sync_dirty) off for the process lifetime,
+        # reporting a healthy sync while exporting nothing.
+        #
+        # Started even while manual-only, since this task is what notices a
+        # newly set interval. It idles without syncing while the interval is 0.
+        git_sync_task = asyncio.create_task(
+            git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
+        )
+        app.state.git_sync_task = git_sync_task
+        logger.info("Background git sync started")
+
     yield
 
     # Shutdown
@@ -169,11 +202,15 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    for task_name, task in [
+    background_tasks = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-    ]:
+    ]
+    if git_sync_task is not None:
+        background_tasks.append(("git_sync", git_sync_task))
+
+    for task_name, task in background_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
@@ -208,7 +245,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.5.0",  # x-release-please-version
+        version="1.8.0",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -243,6 +280,7 @@ app.include_router(preset_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
+app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
@@ -265,9 +303,8 @@ async def readiness():
     Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
     """
     try:
-        async with app.state.engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        async with app.state.engine.connect():
+            return {"status": "ready"}
     except Exception as e:
         logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(
@@ -306,56 +343,4 @@ async def server_info():
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
-        )
-
-
-# ---------------------------------------------------------------------------
-# Frontend static file hosting (opt-in via AUTOMATION_FRONTEND_DIR)
-# ---------------------------------------------------------------------------
-_settings = get_settings()
-_frontend_dir = _settings.frontend_dir
-if _frontend_dir:
-    _frontend_path = Path(_frontend_dir)
-    if not _frontend_path.is_dir():
-        logger.warning(
-            "AUTOMATION_FRONTEND_DIR=%s is not a directory — frontend hosting disabled",
-            _frontend_dir,
-        )
-    else:
-        _frontend_mount = _settings.frontend_path
-        logger.info("Serving frontend from %s at %s", _frontend_dir, _frontend_mount)
-
-        _index_full_path = str(_frontend_path / "index.html")
-        _index_stat = os.stat(_index_full_path)
-
-        class _SPAStaticFiles(StaticFiles):
-            """StaticFiles that falls back to index.html for SPA client routes."""
-
-            def lookup_path(self, path: str) -> tuple[str, os.stat_result | None]:
-                full_path, stat_result = super().lookup_path(path)
-                if stat_result is None:
-                    # Unknown path → serve index.html for client-side routing
-                    return _index_full_path, _index_stat
-                return full_path, stat_result
-
-            def file_response(self, full_path, stat_result, scope, status_code=200):
-                response = super().file_response(
-                    full_path, stat_result, scope, status_code
-                )
-                # Hashed assets are immutable; everything else (especially
-                # index.html) must be revalidated on every request.
-                if "/assets/" in str(full_path):
-                    response.headers["Cache-Control"] = (
-                        "public, max-age=31536000, immutable"
-                    )
-                else:
-                    response.headers.setdefault(
-                        "Cache-Control", "no-cache, must-revalidate"
-                    )
-                return response
-
-        app.mount(
-            _frontend_mount,
-            _SPAStaticFiles(directory=_frontend_path, html=True),
-            name="frontend",
         )

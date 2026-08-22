@@ -3,12 +3,14 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     String,
@@ -59,6 +61,11 @@ class Automation(Base):
 
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Preset-specific metadata (populated by preset endpoints; NULL for custom
+    # SDK automations).
+    # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
+    preset_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Model profile name to use for automation runs.
     # None is only used for legacy/local fallback.
@@ -150,8 +157,18 @@ class AutomationRun(Base):
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Structured current/last run lifecycle detail. Unlike error_detail, this
+    # can describe non-terminal transient infrastructure issues while the run
+    # remains PENDING/RUNNING.
+    status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Accumulated LLM cost in USD (set by completion callback).
+    # NULL means "unknown" — e.g. runs that predate cost tracking, or that were
+    # force-terminated by the watchdog / cancelled so no callback ever fired.
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Pre-computed deadline: started_at + max_duration. Set when transitioning
     # to RUNNING, used by the staleness watchdog for efficient indexed queries.
@@ -415,4 +432,53 @@ class AutomationKV(Base):
             "automation_id",
             unique=True,
         ),
+    )
+
+
+class AutomationGitSyncState(Base):
+    """Per-automation git sync bookkeeping, one row per synced automation.
+
+    See ``openhands/automation/git_sync/``. Tracks the repo directory name and
+    whether the DB side has changed since it was last written to git.
+
+    ``dirty`` is a plain boolean column, not a JSON field, so the sync loop can
+    query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
+    """
+
+    __tablename__ = "automation_git_sync_state"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # Directory name within the sync path, e.g. "automations/{slug}/" in the
+    # repo. Stable once assigned.
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+
+    # SHA-256 of the last-synced content (metadata + tarball files), used to
+    # detect no-op sync cycles.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Git commit SHA this automation was last reconciled against.
+    last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Set on every API create/update/delete, cleared once exported. While
+    # dirty, the DB side wins over a conflicting git-side change.
+    dirty: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
     )

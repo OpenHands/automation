@@ -19,6 +19,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -217,7 +218,15 @@ async def poll_and_schedule(
             for automation in automations:
                 automation.last_polled_at = now
 
-        due_automations = [a for a in automations if _is_automation_due_safely(a, now)]
+        due_automations = []
+        for automation in automations:
+            was_enabled = automation.enabled
+            if _is_automation_due_safely(automation, now):
+                due_automations.append(automation)
+            if was_enabled and not automation.enabled:
+                # _is_automation_due_safely can disable an automation as a side
+                # effect, which git sync needs to hear about too.
+                await mark_git_sync_dirty(session, automation)
         in_flight_statuses = await _get_in_flight_run_statuses(session, due_automations)
 
         for automation in due_automations:

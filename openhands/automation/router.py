@@ -4,8 +4,18 @@ import asyncio
 import logging
 import re
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
@@ -14,6 +24,7 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.db import get_session
+from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -40,13 +51,21 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
+from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run_status_detail import (
+    run_status_detail_from_callback_error,
+)
 from openhands.automation.utils.sandbox import cleanup_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
     validate_tarball_path,
+)
+from openhands.automation.utils.templates import (
+    TEMPLATE_EXISTS_RESPONSE,
+    find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 
@@ -61,10 +80,13 @@ _require_manage_automations = require_permission("manage_automations")
 # --- CRUD ---
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", status_code=status.HTTP_201_CREATED, responses=TEMPLATE_EXISTS_RESPONSE
+)
 async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
+    response: Response,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
@@ -73,7 +95,21 @@ async def create_automation(
     The tarball_path can be either:
     - Internal upload: oh-internal://uploads/{uuid} (from /v1/uploads)
     - External public URL: https://, s3://, or gs:// URLs
+
+    An entry shipping its own tarball creates here rather than through a
+    preset, so it may carry the same ``template`` provenance those accept.
     """
+    # Enabling the same template twice returns the existing automation rather
+    # than a duplicate. Before tarball validation, so a repeat enable costs one
+    # query and leaves the new upload unreferenced rather than adopting it.
+    if body.template is not None:
+        existing = await find_existing_template_automation(
+            session, user.user_id, user.org_id, body.template.id
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return AutomationResponse.model_validate(existing)
+
     # Validate tarball_path (checks ownership for internal uploads)
     await validate_tarball_path(
         tarball_path=body.tarball_path,
@@ -83,11 +119,16 @@ async def create_automation(
     )
     model = resolve_model_profile_for_user(body.model, user)
 
+    preset_metadata: dict[str, Any] | None = None
+    if body.template is not None:
+        preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
+
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         model=model,
+        preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
@@ -101,12 +142,17 @@ async def create_automation(
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
+    creation_properties: dict[str, Any] = {"creation_path": "raw"}
+    if body.template is not None:
+        creation_properties["template_id"] = body.template.id
+        creation_properties["template_version"] = body.template.version
     await capture_automation_event(
         "automation_created",
         request=request,
         user=user,
         automation=auto,
-        properties={"creation_path": "raw"},
+        properties=creation_properties,
     )
     return AutomationResponse.model_validate(auto)
 
@@ -157,8 +203,14 @@ async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    # Function scope commits the session when the handler returns, BEFORE the
+    # response is sent and its background tasks run. With the default request
+    # scope the deferred tarball delete would run before the commit, and a
+    # commit failure would strand a live upload record pointing at an
+    # already-deleted object.
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -186,14 +238,19 @@ async def update_automation(
         and auto.prompt != original_prompt
     ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session
+            auto, auto.prompt, session, background_tasks
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path
+        # Keep preset metadata in sync with the edited prompt. Reassign the
+        # whole dict: in-place mutation of a JSON column is not change-tracked.
+        if auto.preset_metadata is not None:
+            auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
         "automation_updated",
         request=request,
@@ -216,6 +273,7 @@ async def delete_automation(
     auto.enabled = False
     auto.deleted_at = utcnow()
     await session.flush()
+    await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
         "automation_deleted",
         request=request,
@@ -418,8 +476,22 @@ async def complete_run(
     }
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
-    if body.status == "FAILED" and body.error:
-        values["error_detail"] = body.error
+    if body.cost is not None:
+        values["cost"] = body.cost
+    if body.status == "FAILED":
+        error_detail = (
+            format_callback_error(body.error)
+            if body.error
+            else "Completion callback reported failure"
+        )
+        values["error_detail"] = error_detail
+        values["status_detail"] = run_status_detail_from_callback_error(
+            body.error or error_detail,
+            formatted_detail=error_detail,
+            previous=run.status_detail,
+        )
+    elif body.status == "COMPLETED":
+        values["status_detail"] = None
 
     stmt = (
         update(AutomationRun)
@@ -431,14 +503,45 @@ async def complete_run(
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
 
+    reconciled = False
     if db_result.rowcount == 0:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"Run is {run.status.value}, expected RUNNING",
-        )
+        # See the *current* terminal state, not the pre-UPDATE snapshot
+        # (the watchdog may have committed FAILED while we held a stale row).
+        await session.refresh(run)
+        if (
+            new_status == AutomationRunStatus.COMPLETED
+            and run.status == AutomationRunStatus.FAILED
+            and (run.error_detail or "").startswith("Timed out: ")
+        ):
+            # The watchdog guessed FAILED at its deadline; the callback is
+            # direct proof the entrypoint finished successfully. Flip it.
+            # The "Timed out: " prefix is written only by the watchdog, so
+            # dispatcher-authored failures and cancellations still 409.
+            values["error_detail"] = None
+            reconcile_stmt = (
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status == AutomationRunStatus.FAILED,
+                    AutomationRun.error_detail.startswith("Timed out: "),
+                )
+                .values(**values)
+            )
+            reconcile_result: CursorResult = await session.execute(  # type: ignore[assignment]
+                reconcile_stmt
+            )
+            reconciled = reconcile_result.rowcount > 0
+        if not reconciled:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"Run is {run.status.value}, expected RUNNING",
+            )
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    telemetry_properties: dict = {"trigger_source": "callback"}
+    if reconciled:
+        telemetry_properties["reconciled_watchdog_timeout"] = True
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED
@@ -447,8 +550,9 @@ async def complete_run(
         user=user,
         automation=automation,
         run=run,
-        properties={"trigger_source": "callback"},
+        properties=telemetry_properties,
     )
+    await record_first_run_outcome(run, new_status, "execution", session=session)
 
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
@@ -536,6 +640,7 @@ async def cancel_run(
             status=AutomationRunStatus.CANCELLED,
             completed_at=now,
             error_detail="Cancelled by user",
+            status_detail=None,
         )
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]

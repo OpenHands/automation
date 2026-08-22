@@ -2,17 +2,26 @@
 
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation.db import using_sqlite
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 logger = logging.getLogger(__name__)
+
+# Terminal statuses that count as a first-run outcome. CANCELLED and SKIPPED
+# are excluded so a later real run still records the one outcome.
+FIRST_RUN_OUTCOME_STATUSES = (
+    AutomationRunStatus.COMPLETED,
+    AutomationRunStatus.FAILED,
+)
 
 
 async def disable_automation(
@@ -125,6 +134,7 @@ async def mark_run_status(
     status: AutomationRunStatus,
     error_detail: str | None = None,
     max_duration: timedelta | None = None,
+    status_detail: dict | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -138,6 +148,7 @@ async def mark_run_status(
         status: The new status to set
         error_detail: Optional error message (only used for FAILED status)
         max_duration: Maximum run duration for computing timeout_at
+        status_detail: Optional structured lifecycle detail to persist
     """
     if max_duration is None:
         max_duration = timedelta(seconds=resolve_automation_timeout_seconds(None))
@@ -162,6 +173,13 @@ async def mark_run_status(
     if error_detail and status == AutomationRunStatus.FAILED:
         values["error_detail"] = error_detail
         run.error_detail = error_detail
+
+    if status_detail is not None:
+        values["status_detail"] = status_detail
+        run.status_detail = status_detail
+    elif status in (AutomationRunStatus.RUNNING, AutomationRunStatus.COMPLETED):
+        values["status_detail"] = None
+        run.status_detail = None
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
@@ -219,11 +237,137 @@ async def update_bash_command_id(
         logger.exception("Failed to update bash_command_id for run %s", run_id)
 
 
+async def update_run_timeout_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    timeout_at: datetime,
+) -> None:
+    """Reset the watchdog deadline for a run that is still RUNNING.
+
+    Guarded by status == RUNNING so a run that already reached a terminal
+    state (callback, cancel, dispatch failure) never gets a deadline
+    resurrected. Failure is non-fatal: the run keeps its previous (longer)
+    provisioning-phase deadline, which errs toward a later watchdog check,
+    never an earlier one.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(timeout_at=timeout_at)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update timeout_at for run %s", run_id)
+
+
+async def _record_first_run_outcome_in_session(
+    session: AsyncSession,
+    run: AutomationRun,
+    status: AutomationRunStatus,
+    stage: str,
+) -> bool:
+    """Write the first-run record if this automation still lacks one.
+
+    Returns True when a record was written (caller commits).
+    """
+    query = select(Automation).where(Automation.id == run.automation_id)
+    if not using_sqlite():
+        # Serialize racing terminal transitions; SQLite writes serialize anyway.
+        query = query.with_for_update()
+    automation = (await session.execute(query)).scalars().first()
+    if automation is None:
+        return False
+
+    metadata = automation.preset_metadata
+    if not metadata or "template" not in metadata or "first_run" in metadata:
+        return False
+
+    outcome = "success" if status == AutomationRunStatus.COMPLETED else "failure"
+    failure_stage = stage if status == AutomationRunStatus.FAILED else None
+    # Reassign the whole dict: in-place mutation of a JSON column is not
+    # change-tracked.
+    automation.preset_metadata = {
+        **metadata,
+        "first_run": {
+            "status": outcome,
+            "failure_stage": failure_stage,
+            "template_version": metadata["template"].get("version"),
+            "recorded_at": utcnow().isoformat(),
+        },
+    }
+    await session.flush()
+
+    await capture_automation_event(
+        "automation_template_first_run",
+        automation=automation,
+        run=run,
+        session=session,
+        properties={
+            "template_id": metadata["template"].get("id"),
+            "template_version": metadata["template"].get("version"),
+            "outcome": outcome,
+            "failure_stage": failure_stage,
+        },
+    )
+    return True
+
+
+async def record_first_run_outcome(
+    run: AutomationRun,
+    status: AutomationRunStatus,
+    stage: str,
+    *,
+    session: AsyncSession | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    """Record the one-time first terminal outcome of a template-created automation.
+
+    Writes a non-sensitive record (no prompt, no error text) under
+    ``preset_metadata["first_run"]`` and emits one telemetry event. The absence
+    of that key is the once-guard; only automations carrying template
+    provenance record an outcome. Never raises — the run lifecycle must not be
+    affected.
+
+    Args:
+        run: The run that reached a terminal status.
+        status: The terminal status (only COMPLETED/FAILED record an outcome).
+        stage: Lifecycle stage that produced the outcome:
+            "dispatch", "execution", or "watchdog".
+        session: Session to record in; the caller commits.
+        session_factory: Opens (and commits) a dedicated session when no
+            session is given.
+    """
+    if status not in FIRST_RUN_OUTCOME_STATUSES:
+        return
+
+    try:
+        if session is not None:
+            await _record_first_run_outcome_in_session(session, run, status, stage)
+        elif session_factory is not None:
+            async with session_factory() as local_session:
+                recorded = await _record_first_run_outcome_in_session(
+                    local_session, run, status, stage
+                )
+                if recorded:
+                    await local_session.commit()
+    except Exception:
+        logger.exception(
+            "Failed to record first-run outcome",
+            extra={"run_id": str(run.id), "automation_id": str(run.automation_id)},
+        )
+
+
 async def mark_run_terminal(
     session_factory: async_sessionmaker[AsyncSession],
     run: AutomationRun,
     status: AutomationRunStatus,
     error: str | None = None,
+    status_detail: dict | None = None,
 ) -> None:
     """Mark a run with a terminal status (COMPLETED or FAILED) if still RUNNING.
 
@@ -238,6 +382,7 @@ async def mark_run_terminal(
         run: The run to update (used to get the ID)
         status: The terminal status to set (COMPLETED or FAILED)
         error: Optional error message (only used for FAILED status)
+        status_detail: Optional structured lifecycle detail to persist
     """
     from sqlalchemy import select
 
@@ -259,9 +404,15 @@ async def mark_run_terminal(
                     db_run,
                     status,
                     error_detail=error,
+                    status_detail=status_detail,
                 )
                 await session.commit()
                 logger.info("Run marked as %s", status.value, extra=extra)
+                # Dedicated session so a recording failure cannot affect the
+                # already-committed run transition.
+                await record_first_run_outcome(
+                    db_run, status, "dispatch", session_factory=session_factory
+                )
             else:
                 logger.info(
                     "Run not marked %s (current status: %s)",

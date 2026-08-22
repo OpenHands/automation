@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.config import get_config
 from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
@@ -22,7 +23,11 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.run import mark_run_status
+from openhands.automation.utils.run import (
+    mark_run_status,
+    mark_run_terminal,
+    update_run_timeout_at,
+)
 from openhands.automation.utils.tarball_validation import is_http_url
 
 
@@ -208,6 +213,108 @@ class TestMarkRunStatus:
             assert updated.status == AutomationRunStatus.FAILED
             assert updated.completed_at is not None
             assert before <= updated.completed_at <= after
+
+
+class TestUpdateRunTimeoutAt:
+    """Tests for the RUNNING-guarded watchdog-deadline reset."""
+
+    async def test_does_not_resurrect_terminal_run_deadline(
+        self, async_session_factory
+    ):
+        """A run that reached a terminal state keeps its original deadline."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            original_timeout_at = utcnow() + timedelta(minutes=5)
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.COMPLETED,
+                started_at=utcnow(),
+                completed_at=utcnow(),
+                timeout_at=original_timeout_at,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        await update_run_timeout_at(
+            async_session_factory, run_id, utcnow() + timedelta(hours=1)
+        )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.timeout_at == original_timeout_at
+
+
+class TestMarkRunTerminalFirstRunOutcome:
+    """First-run outcome recording when the dispatcher terminates a run."""
+
+    async def _seed_template_run(self, async_session_factory):
+        """A RUNNING run on an automation created from an extension template."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Template Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                preset_metadata={
+                    "preset_type": "prompt",
+                    "prompt": "p",
+                    "template": {"id": "tpl", "version": "1.0.0"},
+                },
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(run)
+            await session.commit()
+            return automation.id, run
+
+    async def test_dispatch_failure_records_dispatch_stage(self, async_session_factory):
+        """A run failed at dispatch records the dispatch failure stage."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            first_run = automation.preset_metadata["first_run"]
+            assert first_run["status"] == "failure"
+            assert first_run["failure_stage"] == "dispatch"
+
+    async def test_skipped_run_does_not_consume_the_first_run_slot(
+        self, async_session_factory
+    ):
+        """A skipped run records nothing, so a later real run still can."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(async_session_factory, run, AutomationRunStatus.SKIPPED)
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert "first_run" not in automation.preset_metadata
 
 
 class TestDispatchPendingRuns:
@@ -565,9 +672,16 @@ class TestEffectiveTimeout:
             assert updated_run is not None
             assert updated_run.timeout_at is not None
             assert updated_run.started_at is not None
+            # Phase-1 provisioning deadline: run budget padded with the
+            # sandbox-ready budget and margin (reset at bash start).
+            sandbox_cfg = get_config().sandbox
             assert (
                 updated_run.timeout_at - updated_run.started_at
-            ).total_seconds() == 1200
+            ).total_seconds() == (
+                1200
+                + sandbox_cfg.sandbox_ready_timeout
+                + sandbox_cfg.run_timeout_margin
+            )
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
@@ -610,9 +724,88 @@ class TestEffectiveTimeout:
             assert updated_run is not None
             assert updated_run.timeout_at is not None
             assert updated_run.started_at is not None
+            # Phase-1 provisioning deadline: default run budget padded with
+            # the sandbox-ready budget and margin (reset at bash start).
+            sandbox_cfg = get_config().sandbox
             assert (
                 updated_run.timeout_at - updated_run.started_at
-            ).total_seconds() == 600
+            ).total_seconds() == (
+                sandbox_cfg.default_run_duration
+                + sandbox_cfg.sandbox_ready_timeout
+                + sandbox_cfg.run_timeout_margin
+            )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_successful_dispatch_resets_timeout_to_bash_start(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Once the bash command starts, timeout_at is re-anchored to bash
+        start + run budget + margin, dropping the provisioning padding."""
+        sandbox_cfg = get_config().sandbox
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Reset Timeout",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=None,
+            )
+            session.add(automation)
+            await session.commit()
+
+            now = utcnow()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=now,
+                timeout_at=now
+                + timedelta(
+                    seconds=sandbox_cfg.default_run_duration
+                    + sandbox_cfg.sandbox_ready_timeout
+                    + sandbox_cfg.run_timeout_margin
+                ),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.RUNNING
+            # Re-anchored to bash start: provisioning padding dropped.
+            remaining = (updated.timeout_at - utcnow()).total_seconds()
+            expected = sandbox_cfg.default_run_duration + sandbox_cfg.run_timeout_margin
+            assert expected - 30 < remaining <= expected
 
 
 class TestBuildEventPayload:
@@ -807,6 +1000,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
             side_effect=ConcurrencyLimitReachedError(
                 "You have reached your limit of 3 concurrent conversations."
@@ -829,6 +1023,10 @@ class TestExecuteRunConcurrencyLimit:
             )
             assert updated.status == AutomationRunStatus.SKIPPED
             assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["transient"] is True
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
@@ -853,6 +1051,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, _ = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
         backend.release_context = AsyncMock()
 
@@ -870,3 +1069,10 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert updated.status == AutomationRunStatus.FAILED
+            assert updated.error_detail == "Failed to get execution context"
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["transient"] is False
