@@ -39,6 +39,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunPhaseRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -585,6 +586,96 @@ async def complete_run(
                 )
             )
 
+    return AutomationRunResponse.model_validate(run)
+
+
+# --- Run phase callback ---
+
+
+@router.post("/runs/{run_id}/phase")
+async def update_run_phase(
+    run_id: uuid.UUID,
+    body: RunPhaseRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Receive a phase update from code running inside the sandbox.
+
+    Called by automation code (via the SDK) to report human-readable
+    progress within a run, e.g. {"code": "checking_out", "label": "Checking
+    out PR #123"}. Authenticated via the same credentials that were passed
+    into the sandbox. The credentials are validated against
+    ``/api/v1/users/me`` (by ``authenticate_request``) and the resulting user
+    must own the run's parent automation.
+
+    Last write wins at the pair level: a phase is the (code, label) pair as
+    a whole, so every call replaces the entire pair, not just the fields it
+    carries. A request with only ``label`` stores that label with
+    ``phase_code`` cleared to NULL, and vice versa — never merging with the
+    previous write. There is no history — only the current phase is stored.
+    No run status transition happens here.
+
+    Only a PENDING or RUNNING run accepts a phase; anything else is 409,
+    matching ``cancel_run``. A finished run's phase is a record of where it
+    got to — for a failed run it is the place it stopped, which the UI shows
+    next to the failure — so a late write from a sandbox that outlived the
+    run must not be able to overwrite it.
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    # Only an in-flight run has a current phase to report.
+    if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run is {run.status.value}, only PENDING or"
+                " RUNNING runs accept a phase"
+            ),
+        )
+
+    # A phase is one value — the (code, label) pair — so a write replaces
+    # both. An omitted field is stored as NULL rather than left behind, so a
+    # pair nobody ever wrote together can never be observed.
+    values: dict = {
+        "phase_code": body.code,
+        "phase_label": body.label,
+        "phase_updated_at": utcnow(),
+    }
+
+    # Re-check the status in the UPDATE itself: the completion callback may
+    # land between the check above and this write, and the phase of a run
+    # that has just finished must stay the one it finished in.
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+            ),
+        )
+        .values(**values)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+
+    if db_result.rowcount == 0:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Run finished concurrently, phase not recorded",
+        )
+
+    await session.refresh(run)
     return AutomationRunResponse.model_validate(run)
 
 

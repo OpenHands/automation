@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -174,6 +174,31 @@ def _build_event_payload(
     return payload
 
 
+async def _record_run_phase(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    code: str,
+    label: str,
+) -> None:
+    """Persist the run's current service-owned phase (queued /
+    sandbox_provisioning / bundle_upload / entrypoint_start).
+
+    Telemetry, not control flow: mirrors update_sandbox_id/update_bash_command_id
+    in utils/run.py — a write failure is logged and swallowed here so it can
+    never fail the run itself.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(phase_code=code, phase_label=label, phase_updated_at=utcnow())
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to record phase %r for run %s", code, run_id)
+
+
 async def _execute_run(
     run: AutomationRun,
     settings: ServiceSettings,
@@ -202,6 +227,9 @@ async def _execute_run(
         return log_extra(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
+
+    async def _record_phase(code: str, label: str) -> None:
+        await _record_run_phase(session_factory, run.id, code, label)
 
     async def _fail(
         error: str,
@@ -236,6 +264,7 @@ async def _execute_run(
 
     # 2. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
+    await _record_phase("sandbox_provisioning", "Provisioning sandbox")
     try:
         ctx = await backend.get_execution_context(client)
     except ConcurrencyLimitReachedError as exc:
@@ -291,8 +320,10 @@ async def _execute_run(
 
     # 3. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
+    phase_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_PHASE_URL"] = phase_url
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -396,6 +427,7 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            phase_callback=_record_phase,
         )
     except PermanentDispatchError as exc:
         logger.error(
@@ -557,6 +589,7 @@ async def dispatch_pending_runs(
                 properties={"trigger_source": "dispatcher"},
                 session_factory=session_factory,
             )
+            await _record_run_phase(session_factory, run.id, "queued", "Queued")
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",
