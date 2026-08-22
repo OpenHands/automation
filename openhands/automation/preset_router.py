@@ -19,7 +19,15 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +42,7 @@ from openhands.automation.schemas import (
     TemplateProvenance,
     Trigger,
 )
-from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
     capture_automation_event,
     get_request_telemetry_context,
@@ -298,10 +306,23 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
     return out_buffer.read()
 
 
+def _delete_storage_object_best_effort(
+    file_store: FileStore, storage_path: str
+) -> None:
+    """Best-effort post-commit removal of a superseded tarball object."""
+    try:
+        file_store.delete(storage_path)
+    except ObjectNotFoundError:
+        pass  # already gone -- nothing to clean up
+    except Exception:
+        logger.exception("Failed to delete superseded tarball at %s", storage_path)
+
+
 async def regenerate_preset_prompt_tarball(
     automation: Automation,
     new_prompt: str,
     session: AsyncSession,
+    background_tasks: BackgroundTasks,
 ) -> str | None:
     """Rebuild a preset automation's tarball with an updated prompt.
 
@@ -313,6 +334,8 @@ async def regenerate_preset_prompt_tarball(
     Reads the automation's current internal-upload tarball, swaps in ``new_prompt``
     (leaving all other files untouched), uploads the result as a new internal upload,
     and returns its ``oh-internal://`` URL for the caller to store on ``tarball_path``.
+    The superseded upload is soft-deleted in the current transaction; its storage
+    object is removed via ``background_tasks`` only after the transaction commits.
 
     Returns ``None`` — leaving the tarball unchanged — when the automation is not a
     regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
@@ -333,7 +356,10 @@ async def regenerate_preset_prompt_tarball(
 
     try:
         current_tarball = file_store.read(source_upload.storage_path)
-    except FileNotFoundError:
+    except ObjectNotFoundError:
+        # Only confirmed absence means "not regenerable"; a transient storage
+        # error must propagate (rolling back the edit) rather than silently
+        # leaving the old prompt baked into the tarball.
         return None
 
     new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt)
@@ -376,46 +402,32 @@ async def regenerate_preset_prompt_tarball(
             detail=f"Failed to upload regenerated tarball: {e!s}",
         )
 
-    # The old tarball is now superseded. Remove its file and soft-delete the
-    # upload record so repeated prompt edits don't accumulate orphaned storage.
-    # Only soft-delete once the file is confirmed gone: if the delete fails the
-    # record stays live so the still-present file remains discoverable for a
-    # later retry/cleanup instead of becoming a hidden orphan (file on disk,
-    # record marked deleted).
-    old_object_delete_succeeded = False
-    old_object_already_missing = False
-    try:
-        file_store.delete(source_upload.storage_path)
-        old_object_delete_succeeded = True
-    except FileNotFoundError:
-        old_object_already_missing = True
-    except Exception as e:
-        logger.exception(
-            "Failed to delete superseded tarball at %s: %s",
-            source_upload.storage_path,
-            e,
-        )
-    file_removed = old_object_delete_succeeded or old_object_already_missing
-    if file_removed:
-        source_upload.deleted_at = utcnow()
+    # The old tarball is now superseded. Soft-delete its record inside this
+    # transaction, but remove its storage object only after the commit, via a
+    # background task (which runs only for a successful response, after the
+    # function-scoped session has committed -- see update_automation). Deleting
+    # before the commit destroyed the object irreversibly while a rollback
+    # reverted this soft-delete and the tarball_path update, stranding a live
+    # record pointing at a missing object. Worst case now -- a crash between
+    # commit and task -- leaks an orphaned object whose record is already
+    # soft-deleted, which is the recoverable direction.
+    source_upload.deleted_at = utcnow()
+    background_tasks.add_task(
+        _delete_storage_object_best_effort, file_store, source_upload.storage_path
+    )
 
     logger.info(
         "Regenerated preset tarball: automation_id=%s, old_upload_id=%s, "
-        "new_upload_id=%s, old_object_delete_succeeded=%s, "
-        "old_object_already_missing=%s",
+        "new_upload_id=%s",
         automation.id,
         source_upload.id,
         new_upload_id,
-        old_object_delete_succeeded,
-        old_object_already_missing,
         extra={
             "automation_id": str(automation.id),
             "old_upload_id": str(source_upload.id),
             "old_storage_path": source_upload.storage_path,
             "new_upload_id": str(new_upload_id),
             "new_storage_path": storage_path,
-            "old_object_delete_succeeded": old_object_delete_succeeded,
-            "old_object_already_missing": old_object_already_missing,
         },
     )
 
