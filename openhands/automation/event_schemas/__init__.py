@@ -13,7 +13,6 @@ expressions against the raw payload. The event schemas are for validation
 and providing typed access to payload fields.
 """
 
-from collections.abc import Callable
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, computed_field
@@ -54,19 +53,13 @@ class WebhookEvent(BaseModel):
 
 
 # =============================================================================
-# Parser Registry
+# Parsing
 # =============================================================================
-
-# Type for auto-detection parse functions: (payload) -> WebhookEvent
-AutoParseFunc = Callable[[dict[str, Any]], WebhookEvent]
-
-# Registry of parse functions for known sources (auto-detect event type from payload)
-_PARSERS: dict[str, AutoParseFunc] = {}
-
-
-def register_parser(source: str, parser: AutoParseFunc) -> None:
-    """Register a parse function for a source."""
-    _PARSERS[source] = parser
+#
+# The parser for a known source lives on its provider descriptor
+# (`openhands.automation.providers`), alongside its verifier, secret and
+# capabilities, so a provider is described in one place. `parse_event()` reads
+# that registry; there is no separate parser registry here.
 
 
 def parse_event(
@@ -94,10 +87,14 @@ def parse_event(
     Raises:
         ValueError: If event type cannot be determined from payload
     """
+    # Imported lazily: providers.py imports the parsers this module's
+    # submodules define, so a module-level import here would be circular.
+    from openhands.automation.providers import get_provider
+
     # Known source - auto-detect event type from payload
-    parser = _PARSERS.get(source)
-    if parser:
-        return parser(payload)
+    provider = get_provider(source)
+    if provider:
+        return provider.parse(payload)
 
     # Unknown source = custom webhook (no registration needed)
     from openhands.automation.event_schemas.custom import (
@@ -114,19 +111,3 @@ def parse_event(
         payload=payload,
         source_override=source,
     )
-
-
-def _register_builtin_parsers() -> None:
-    """Register parsers for built-in sources. Called at module load."""
-    from openhands.automation.event_schemas.bitbucket_data_center import (
-        parse_bitbucket_data_center_event,
-    )
-    from openhands.automation.event_schemas.github import parse_github_event_auto
-    from openhands.automation.event_schemas.jira_dc import parse_jira_dc_event
-
-    register_parser("bitbucket_data_center", parse_bitbucket_data_center_event)
-    register_parser("github", parse_github_event_auto)
-    register_parser("jira_dc", parse_jira_dc_event)
-
-
-_register_builtin_parsers()
