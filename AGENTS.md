@@ -2,6 +2,18 @@
 
 Self-contained microservice that schedules and dispatches automation runs inside OpenHands Cloud sandboxes.
 
+## Cross-Repository Boundaries
+
+This repository owns the Automation Service: automation definitions, cron scheduling, webhooks, run history, dispatch, and sandbox lifecycle orchestration. It manages when work runs and dispatches conversations to the Agent Server/SDK, which owns agent/tool behavior, conversations, workspaces, events, and API endpoints.
+
+Related repositories have different responsibilities:
+
+- [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk) owns the Python SDK, Agent Server, canonical API, and execution behavior.
+- [`OpenHands/typescript-client`](https://github.com/OpenHands/typescript-client) owns the browser-compatible typed client for the Agent Server API.
+- [`OpenHands/OpenHands`](https://github.com/OpenHands/OpenHands) owns Agent Canvas UI, frontend integration, and local-stack orchestration.
+
+If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
+
 ## Repository Structure
 
 ```
