@@ -241,8 +241,7 @@ async def receive_event(
         },
     )
 
-    # 6. Hand the authenticated, interpreted event to the transport-neutral
-    #    ingestion path, which matches triggers and creates the runs.
+    # 6. Match triggers and create runs (transport-neutral)
     result = await accept_event(
         org_id,
         AcceptedEvent(

@@ -1,22 +1,8 @@
-"""
-Transport-neutral event ingestion.
+"""Transport-neutral event ingestion.
 
-`accept_event()` is the boundary between *how an event arrived* and *what the
-service does with it*. Everything above the boundary — reading bytes, proving
-the event is genuine, turning a provider payload into an ``event_key`` — belongs
-to the transport. Everything below it — finding the org's event automations,
-matching triggers, creating PENDING runs — is identical for every transport and
-lives here.
-
-Authentication is deliberately **not** part of this module. HTTP proves
-authenticity with an HMAC over the raw body; a Socket Mode connection proves it
-by possession of an app-level token over TLS; a poller proves it by having made
-the outbound call itself. `accept_event()` receives an already-authenticated
-event and never asks how it was authenticated. Without that rule, every
-non-HTTP transport is tempted to manufacture a signature to satisfy a check that
-does not apply to it.
-
-The only caller today is the webhook handler in `event_router.py`.
+`accept_event()` separates how an event arrived from what the service does with
+it. Transports own acquisition, authentication and interpretation; trigger
+matching and run creation live here and are shared by every transport.
 """
 
 import logging
@@ -40,40 +26,29 @@ from openhands.automation.utils.webhook import (
 logger = logging.getLogger("automation.ingest")
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class EventSubject:
-    """The external thing an event is about (a Slack thread, a pull request).
-
-    Reserved for subject -> conversation routing; nothing populates or reads it
-    yet. `key` is the value that will be stored as `subject_key`.
-    """
+    """The external thing an event is about. Reserved; nothing reads it yet."""
 
     key: str
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AcceptedEvent:
-    """An authenticated, interpreted event, ready to be routed.
-
-    The transport owns everything that produces one of these: acquiring the
-    bytes, proving they are genuine, and deriving `event_key`.
-    """
+    """An authenticated, interpreted event, ready to be routed."""
 
     source: str
     event_key: str
-    # Raw provider payload. JMESPath trigger filters run against this.
+    # Raw provider payload; JMESPath trigger filters run on this.
     payload: dict[str, Any] = field(default_factory=dict)
     provider_event_id: str | None = None
     subject: EventSubject | None = None
     occurred_at: datetime | None = None
-    # Optional typed event, when the transport parsed the payload into a
-    # Pydantic model (the webhook handler does this via `parse_event()`). When
-    # present it — not `payload` — is what gets persisted as the run's
-    # `event_payload`, preserving the shape existing automations already see.
+    # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AcceptResult:
     """The outcome of routing an accepted event."""
 
@@ -89,29 +64,18 @@ async def accept_event(
     *,
     request: Request | None = None,
 ) -> AcceptResult:
-    """
-    Route an already-authenticated event to the org's matching automations.
+    """Route an already-authenticated event to the org's matching automations.
 
-    Args:
-        org_id: The organization the event belongs to
-        event: The authenticated, interpreted event
-        session: Database session (committed before returning)
-        request: Originating HTTP request, for telemetry only. Non-HTTP
-                 transports omit it; every telemetry event still fires.
-
-    Returns:
-        AcceptResult with the number of matched automations and the IDs of the
-        runs created for them.
+    Commits before returning. `request` is telemetry only; non-HTTP transports
+    omit it and every telemetry event still fires.
     """
     source = event.source
     webhook_payload = event.payload
 
-    # 1. Find matching automations
     automations = await get_event_automations(org_id, source, session)
     matched_automations = []
 
     for automation, trigger in automations:
-        # Match trigger against webhook payload using JMESPath filter
         if matches_trigger(trigger, source, event.event_key, webhook_payload):
             matched_automations.append(automation)
 
@@ -133,9 +97,7 @@ async def accept_event(
         },
     )
 
-    # 2. Create PENDING runs for matched automations
-    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
-    # For custom webhooks, use the webhook payload directly
+    # Typed events (GitHub) keep their model shape; others store the payload.
     event_payload = (
         event.parsed_event.model_dump(mode="json")
         if isinstance(event.parsed_event, BaseModel)

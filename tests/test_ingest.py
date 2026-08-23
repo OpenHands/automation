@@ -1,9 +1,7 @@
-"""Direct unit tests for the transport-neutral ingestion seam.
+"""Direct unit tests for `accept_event()`.
 
-Every test here constructs an `AcceptedEvent` by hand and calls `accept_event()`
-without going through HTTP — no request, no signature, no FastAPI app. That is
-the point of the seam: a non-HTTP transport can reach trigger matching and run
-creation without faking a request.
+Every test builds an `AcceptedEvent` by hand — no request, no signature, no
+FastAPI app — which is the point of the seam.
 """
 
 import uuid
@@ -44,7 +42,7 @@ def slack_payload() -> dict:
 
 @pytest.fixture
 def github_push_payload() -> dict:
-    """Sample GitHub push webhook payload (the inner payload, already unwrapped)."""
+    """Sample GitHub push payload, already unwrapped."""
     return {
         "ref": "refs/heads/main",
         "before": "abc123",
@@ -96,7 +94,7 @@ async def test_accept_event_no_automations(
     async_session,
     slack_payload: dict,
 ):
-    """With no automations configured, nothing matches and nothing is created."""
+    """No automations configured: nothing matches, nothing is created."""
     result = await accept_event(
         org_id,
         AcceptedEvent(
@@ -158,7 +156,7 @@ async def test_accept_event_without_parsed_event_stores_raw_payload(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """A transport that has no typed model gets its raw payload on the run."""
+    """A transport with no typed model gets its raw payload on the run."""
     async_session.add(
         make_automation(
             org_id,
@@ -189,12 +187,7 @@ async def test_accept_event_with_parsed_event_stores_model_dump(
     github_push_payload: dict,
     mock_authenticated_user,
 ):
-    """When the transport parsed a typed event, that model_dump is persisted.
-
-    This pins the subtle behaviour the webhook handler had before the split:
-    Pydantic-parsed events (GitHub) store `model_dump(mode="json")`, not the
-    raw provider payload.
-    """
+    """A typed event persists its model_dump, not the raw provider payload."""
     async_session.add(
         make_automation(
             org_id,
@@ -441,11 +434,7 @@ async def test_accept_event_reserved_fields_are_ignored(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """`provider_event_id`, `subject` and `occurred_at` are accepted but unused.
-
-    They are reserved for later phases; setting them must not change routing or
-    what is persisted today.
-    """
+    """Setting the reserved fields changes neither routing nor what is stored."""
     async_session.add(
         make_automation(
             org_id,
@@ -478,7 +467,7 @@ async def test_accept_event_reserved_fields_are_ignored(
 
 @pytest.mark.asyncio
 async def test_accepted_event_defaults():
-    """Only `source` and `event_key` are required; the rest default to empty."""
+    """Only `source` and `event_key` are required."""
     event = AcceptedEvent(source="slack", event_key="app_mention")
 
     assert event.payload == {}
@@ -486,3 +475,29 @@ async def test_accepted_event_defaults():
     assert event.subject is None
     assert event.occurred_at is None
     assert event.parsed_event is None
+
+
+def test_dataclasses_are_frozen():
+    """The ingest dataclasses are immutable."""
+    event = AcceptedEvent(source="slack", event_key="app_mention")
+    result = AcceptResult(matched=0, run_ids=[])
+    subject = EventSubject(key="T1/C1/1.0")
+
+    for obj, attr, value in (
+        (event, "source", "github"),
+        (result, "matched", 1),
+        (subject, "key", "other"),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(obj, attr, value)
+
+
+def test_dataclasses_use_slots():
+    """The ingest dataclasses use slots, so instances carry no __dict__."""
+    for obj in (
+        AcceptedEvent(source="slack", event_key="app_mention"),
+        AcceptResult(matched=0, run_ids=[]),
+        EventSubject(key="T1/C1/1.0"),
+    ):
+        assert hasattr(type(obj), "__slots__")
+        assert not hasattr(obj, "__dict__")
