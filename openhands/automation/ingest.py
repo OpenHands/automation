@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import Request
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
@@ -63,11 +63,19 @@ async def accept_event(
     session: AsyncSession,
     *,
     request: Request | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> AcceptResult:
     """Route an already-authenticated event to the org's matching automations.
 
-    Commits before returning. `request` is telemetry only; non-HTTP transports
-    omit it and every telemetry event still fires.
+    Commits before returning.
+
+    `request` and `session_factory` are both telemetry plumbing. Telemetry
+    resolves its distinct id from the database, and HTTP callers supply that
+    reader indirectly as `request.app.state.session_factory`; a caller that
+    passes neither drops every event silently. So non-HTTP transports must pass
+    `session_factory`. It is deliberately not `session`: telemetry writes its id
+    row, and sharing this session would move that write into the caller's
+    transaction.
     """
     source = event.source
     webhook_payload = event.payload
@@ -88,6 +96,7 @@ async def accept_event(
     await capture_automation_event(
         "automation_event_matched",
         request=request,
+        session_factory=session_factory,
         properties={
             "event_source": source,
             "event_key": event.event_key,
@@ -118,6 +127,7 @@ async def accept_event(
         await capture_automation_event(
             "automation_run_scheduled",
             request=request,
+            session_factory=session_factory,
             automation=automation,
             run=run,
             properties=run_properties,
@@ -125,6 +135,7 @@ async def accept_event(
         await capture_automation_event(
             "automation_run_created",
             request=request,
+            session_factory=session_factory,
             automation=automation,
             run=run,
             properties=run_properties,

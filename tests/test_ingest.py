@@ -6,11 +6,14 @@ FastAPI app — which is the point of the seam.
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 
+from openhands.automation import telemetry
 from openhands.automation.auth import AuthenticatedUser
+from openhands.automation.config import clear_config_cache
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.ingest import (
     AcceptedEvent,
@@ -86,6 +89,37 @@ async def fetch_runs(session) -> list[AutomationRun]:
     """Return every run in the database."""
     result = await session.execute(select(AutomationRun))
     return list(result.scalars().all())
+
+
+@pytest.fixture
+def captured_telemetry(monkeypatch: pytest.MonkeyPatch):
+    """Record the events telemetry would POST instead of sending them."""
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "phc-test-key")
+    clear_config_cache()
+
+    events: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def post(self, url: str, *, json: dict[str, Any]) -> FakeResponse:
+            events.append(str(json["event"]))
+            return FakeResponse()
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", FakeClient)
+    yield events
+    clear_config_cache()
 
 
 @pytest.mark.asyncio
@@ -463,6 +497,80 @@ async def test_accept_event_reserved_fields_are_ignored(
     runs = await fetch_runs(async_session)
     assert len(runs) == 1
     assert runs[0].event_payload == slack_payload
+
+
+@pytest.mark.asyncio
+async def test_accept_event_emits_telemetry_without_a_request(
+    org_id: uuid.UUID,
+    async_session,
+    async_session_factory,
+    slack_payload: dict,
+    mock_authenticated_user,
+    captured_telemetry: list[str],
+):
+    """A non-HTTP caller gets the full telemetry sequence via session_factory."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+        ),
+        async_session,
+        session_factory=async_session_factory,
+    )
+
+    assert result.matched == 1
+    assert captured_telemetry == [
+        "automation_event_matched",
+        "automation_run_scheduled",
+        "automation_run_created",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_accept_event_telemetry_needs_a_session_source(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+    captured_telemetry: list[str],
+):
+    """Neither a request nor a session_factory: telemetry is silently dropped.
+
+    Routing still works, which is why this is easy to miss. Pins the reason
+    `session_factory` exists on the signature.
+    """
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+        ),
+        async_session,
+    )
+
+    assert result.matched == 1
+    assert captured_telemetry == []
 
 
 @pytest.mark.asyncio
