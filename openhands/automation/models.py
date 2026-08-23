@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from openhands.automation.providers import DEFAULT_VERIFIER as DEFAULT_SIGNATURE_SCHEME
 from openhands.automation.utils import utcnow
 
 
@@ -335,6 +336,22 @@ class CustomWebhook(Base):
     # Slack: "X-Slack-Signature"). Defaults to "X-Signature-256".
     signature_header: Mapped[str] = mapped_column(
         String(100), nullable=False, default="X-Signature-256"
+    )
+
+    # How the value in `signature_header` is computed and encoded. Names a
+    # verifier in `openhands.automation.providers.VERIFIERS`:
+    # - "hmac_sha256_hex" (default): hex(HMAC-SHA256(secret, body)),
+    #   GitHub/Linear style, with an optional "sha256=" prefix.
+    # - "standard_webhooks": standardwebhooks.com (GitLab 19.1+ signing
+    #   tokens, Svix) -- "v1,<base64>" over "{id}.{timestamp}.{body}".
+    # - "slack_v0": Slack Events API -- "v0=<hex>" over "v0:{ts}:{body}".
+    # Nullable: rows created before this column existed carry no scheme and are
+    # read as the default, which is the behaviour they were created with.
+    signature_scheme: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        default=DEFAULT_SIGNATURE_SCHEME,
+        server_default=DEFAULT_SIGNATURE_SCHEME,
     )
 
     # Timestamp when the webhook integration was created

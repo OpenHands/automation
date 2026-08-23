@@ -10,6 +10,12 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.providers import (
+    DEFAULT_VERIFIER,
+    is_builtin_source,
+    reserved_sources,
+    verifier_schemes,
+)
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -440,6 +446,9 @@ class WebhookConfig(BaseModel):
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
+    # Names a verifier in providers.VERIFIERS. Always resolved by the time it
+    # reaches here, so this is a concrete scheme rather than None.
+    signature_scheme: str = DEFAULT_VERIFIER
 
 
 class EventResponse(BaseModel):
@@ -468,12 +477,30 @@ class RequestedEventTypesResponse(BaseModel):
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
-# Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+# Reserved source names, derived from the provider registry so a provider
+# cannot be added without also being reserved. This is a snapshot for
+# introspection and tests; validation calls `is_builtin_source()` so a provider
+# registered after import time is still protected.
+RESERVED_SOURCES = reserved_sources()
 
 
 # Valid HTTP header name pattern
 _HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]$")
+
+
+def _validate_signature_scheme(v: str) -> str:
+    """Reject a scheme with no verifier behind it.
+
+    Derived from the verifier registry, so adding a verifier makes it
+    configurable without touching this validator.
+    """
+    schemes = verifier_schemes()
+    if v not in schemes:
+        raise ValueError(
+            f"Invalid signature_scheme '{v}'. Must be one of: "
+            f"{', '.join(sorted(schemes))}"
+        )
+    return v
 
 
 class CustomWebhookCreate(BaseModel):
@@ -512,6 +539,20 @@ class CustomWebhookCreate(BaseModel):
             "Examples: 'X-Signature-256', 'Stripe-Signature', 'X-Slack-Signature'"
         ),
     )
+    signature_scheme: str = Field(
+        default=DEFAULT_VERIFIER,
+        max_length=50,
+        description=(
+            "How the value in `signature_header` is computed. "
+            "'hmac_sha256_hex' (default) is a hex digest over the raw body "
+            "(GitHub, Linear). 'standard_webhooks' follows "
+            "standardwebhooks.com (GitLab 19.1+ signing tokens, Svix) and also "
+            "reads the webhook-id and webhook-timestamp headers. 'slack_v0' is "
+            "the Slack Events API scheme and also reads "
+            "X-Slack-Request-Timestamp. The timestamped schemes reject "
+            "deliveries outside a 5-minute replay window."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -527,7 +568,7 @@ class CustomWebhookCreate(BaseModel):
     def validate_source_name(cls, v: str) -> str:
         """Validate source name format and check for reserved names."""
         v_lower = v.lower()
-        if v_lower in RESERVED_SOURCES:
+        if is_builtin_source(v_lower):
             raise ValueError(
                 f"'{v}' is a reserved source name. "
                 "Use the built-in integration instead."
@@ -538,6 +579,12 @@ class CustomWebhookCreate(BaseModel):
                 "starting and ending with alphanumeric"
             )
         return v_lower
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str) -> str:
+        """Validate the scheme names a registered verifier."""
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -572,7 +619,16 @@ class CustomWebhookUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
+    signature_scheme: str | None = Field(default=None, max_length=50)
     enabled: bool | None = None
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str | None) -> str | None:
+        """Validate the scheme names a registered verifier, if provided."""
+        if v is None:
+            return v
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -613,6 +669,7 @@ class CustomWebhookResponse(BaseModel):
     webhook_url: str
     event_key_expr: str
     signature_header: str
+    signature_scheme: str
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime

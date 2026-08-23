@@ -30,6 +30,25 @@ OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 
 @pytest.fixture
+def local_mode(monkeypatch):
+    """Force local mode for tests asserting on a browser-supplied distinct id.
+
+    Cloud must derive telemetry identity from auth, so
+    `telemetry._trusted_telemetry_context()` discards the header outside local
+    mode and the assertion only holds inside it. The config is cached, so it
+    has to be cleared on the way in and on the way out; without this the tests
+    happen to pass only when an earlier test file leaves a local-mode config in
+    the cache, and fail whenever they run first.
+    """
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
+
+@pytest.fixture
 def preset_store(monkeypatch):
     """Stateful in-memory file store wired into the preset tarball helpers.
 
@@ -164,7 +183,9 @@ class TestPermissionEnforcement:
 class TestCreateAutomation:
     """Tests for POST /v1 endpoint."""
 
-    async def test_create_automation_success(self, async_client, async_session):
+    async def test_create_automation_success(
+        self, async_client, async_session, local_mode
+    ):
         """Valid request creates automation and returns 201."""
         payload = {
             "name": "My Test Automation",
@@ -1458,7 +1479,9 @@ class TestUpdateAutomation:
 class TestDispatchAutomation:
     """Tests for POST /v1/{id}/dispatch endpoint."""
 
-    async def test_dispatch_automation_success(self, async_client, async_session):
+    async def test_dispatch_automation_success(
+        self, async_client, async_session, local_mode
+    ):
         """Dispatching an automation creates a PENDING run."""
         automation = Automation(
             user_id=TEST_USER_ID,
