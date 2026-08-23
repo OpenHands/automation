@@ -338,6 +338,7 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "conversation_title.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -367,6 +368,10 @@ class TestGenerateTarball:
             # Verify key SDK imports and patterns are present
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
+            assert "set_conversation_title" in main_content
+            assert main_content.index("set_conversation_title(") < main_content.index(
+                "conversation.send_message("
+            )
             assert "OpenHandsCloudWorkspace" in main_content
             assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
@@ -460,7 +465,13 @@ class TestReplacePromptInTarball:
         new_files, new_setup_mode = _read(updated)
 
         assert new_files["prompt.txt"].decode() == "New prompt"
-        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+        for name in (
+            "main.py",
+            "conversation_title.py",
+            "setup.sh",
+            "plugins_config.json",
+            "repos_config.json",
+        ):
             assert new_files[name] == old_files[name]
         assert new_setup_mode & 0o100  # setup.sh stays executable
 
@@ -1193,6 +1204,7 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "conversation_title.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -1257,6 +1269,10 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
+            assert "set_conversation_title" in main_content
+            assert main_content.index("set_conversation_title(") < main_content.index(
+                "conversation.send_message("
+            )
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""

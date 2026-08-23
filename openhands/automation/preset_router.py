@@ -75,6 +75,7 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 PRESETS_DIR = Path(__file__).parent / "presets"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
+CONVERSATION_TITLE_FILE = PRESETS_DIR / "conversation_title.py"
 
 
 def _get_preset_entrypoint() -> str:
@@ -102,6 +103,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
     if _PROMPT_PRESET_CACHE is None:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
+            "conversation_title.py": CONVERSATION_TITLE_FILE.read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
         }
     return _PROMPT_PRESET_CACHE
@@ -116,6 +118,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
     if _PLUGIN_PRESET_CACHE is None:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
+            "conversation_title.py": CONVERSATION_TITLE_FILE.read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
         }
     return _PLUGIN_PRESET_CACHE
@@ -247,6 +250,9 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "conversation_title.py", preset_files["conversation_title.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -792,6 +798,9 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "conversation_title.py", preset_files["conversation_title.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
