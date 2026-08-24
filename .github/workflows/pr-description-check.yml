@@ -1,0 +1,38 @@
+---
+name: PR Description Check
+
+# Gates a pull request on the readiness of its linked issues: every issue the
+# PR closes (`Fixes #123`, `Closes #123`, …) must carry the `ready-for-dev`
+# label (or predate the label rollout). See issue-readiness-check.yml for how
+# issues earn the label, and the refresh-linked-pr-gates job there for how this
+# check is re-run when the label changes.
+#
+# Use pull_request_target so fork PR descriptions can be checked, but only run
+# trusted validation code from the base branch checkout below.
+
+on:
+    pull_request_target:
+        types: [opened, edited, reopened, ready_for_review, synchronize]
+
+permissions:
+    contents: read
+    pull-requests: read
+    issues: read
+
+jobs:
+    validate-pr-description:
+        name: Validate PR description
+        # Bots (dependabot, release-please) write their own bodies and do not
+        # link issues, so exempt them rather than failing every such PR.
+        if: github.event.pull_request.user.type != 'Bot'
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Checkout trusted workflow scripts
+              uses: actions/checkout@v5
+              with:
+                  ref: ${{ github.event.pull_request.base.sha }}
+
+            - name: Validate linked-issue readiness
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: python .github/scripts/check_pr_description.py
