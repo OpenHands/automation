@@ -236,8 +236,8 @@ async def update_automation(
         update_data["disabled_detail"] = None
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
-        skip_pending_reason = "Automation disabled by user"
         if auto.enabled:
+            skip_pending_reason = "Automation disabled by user"
             disabled_at = utcnow()
             disabled_detail = {"reason": "manual", "source": "user"}
             update_data["disabled_reason"] = "manual"
@@ -620,10 +620,13 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
-    automation_disabled = await maybe_disable_unhealthy_automation(
-        session,
-        automation.id,
-    )
+    if new_status == AutomationRunStatus.FAILED:
+        automation_disabled = await maybe_disable_unhealthy_automation(
+            session,
+            automation.id,
+        )
+    else:
+        automation_disabled = False
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
