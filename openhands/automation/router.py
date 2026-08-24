@@ -63,8 +63,6 @@ from openhands.automation.utils.run import (
     skip_pending_runs_for_disabled_automation,
 )
 from openhands.automation.utils.run_status_detail import (
-    blocking_factor_from_task_outcome,
-    run_status_detail_from_blocking_factor,
     run_status_detail_from_callback_error,
 )
 from openhands.automation.utils.sandbox import cleanup_sandbox
@@ -553,9 +551,6 @@ async def complete_run(
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
         values["cost"] = body.cost
-    blocking_factor = body.blocking_factor or blocking_factor_from_task_outcome(
-        body.task_outcome
-    )
     if body.status == "FAILED":
         error_detail = (
             format_callback_error(body.error)
@@ -563,23 +558,14 @@ async def complete_run(
             else "Completion callback reported failure"
         )
         values["error_detail"] = error_detail
-        if blocking_factor is not None:
-            values["status_detail"] = run_status_detail_from_blocking_factor(
-                blocking_factor,
-                previous=run.status_detail,
-            )
-        else:
-            values["status_detail"] = run_status_detail_from_callback_error(
-                body.error or error_detail,
-                formatted_detail=error_detail,
-                previous=run.status_detail,
-            )
-    elif blocking_factor is not None:
-        values["status_detail"] = run_status_detail_from_blocking_factor(
-            blocking_factor,
+        values["status_detail"] = run_status_detail_from_callback_error(
+            body.error or error_detail,
+            formatted_detail=error_detail,
             previous=run.status_detail,
         )
     elif body.status == "COMPLETED":
+        # Task outcomes and blocking factors are agent/user-level result metadata;
+        # only SDK callback errors and system dispatch errors feed auto-disablement.
         values["status_detail"] = None
     if body.conversation_id:
         finish_tool_response = await fetch_latest_finish_tool_response_for_run(

@@ -259,31 +259,32 @@ async def test_transient_failures_do_not_count_toward_disable(
         assert automation.disabled_reason is None
 
 
-async def test_completed_blocking_runs_count_as_permanent_failures(
+async def test_sdk_callback_error_runs_count_as_permanent_failures(
     sqlite_session_factory,
 ):
     async with sqlite_session_factory() as session:
         automation = await _create_automation(session)
-        blocking_detail = {
+        callback_error_detail = {
             "phase": "callback",
-            "kind": "blocked",
-            "detail": "MCP server credentials missing",
+            "kind": "auth",
+            "detail": "Missing MCP token",
             "transient": False,
+            "source": "environment",
+            "code": "MissingSecret",
             "user_action": "settings",
-            "blocking_factor": {"kind": "config", "reason": "Missing MCP token"},
         }
         await _add_terminal_run(
             session,
             automation,
-            status=AutomationRunStatus.COMPLETED,
-            status_detail=blocking_detail,
+            status=AutomationRunStatus.FAILED,
+            status_detail=callback_error_detail,
             index=1,
         )
         await _add_terminal_run(
             session,
             automation,
-            status=AutomationRunStatus.COMPLETED,
-            status_detail=blocking_detail,
+            status=AutomationRunStatus.FAILED,
+            status_detail=callback_error_detail,
             index=2,
         )
 
@@ -297,4 +298,5 @@ async def test_completed_blocking_runs_count_as_permanent_failures(
         assert disabled is True
         assert automation.enabled is False
         assert automation.disabled_detail is not None
-        assert automation.disabled_detail["status_detail"]["blocking_factor"]
+        assert automation.disabled_detail["status_detail"]["source"] == "environment"
+        assert automation.disabled_detail["status_detail"]["code"] == "MissingSecret"

@@ -2066,16 +2066,16 @@ class TestCompleteRun:
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
 
-    async def test_complete_run_persists_blocking_factor_metadata(
+    async def test_complete_run_ignores_task_result_metadata_for_status_detail(
         self, async_client, async_session
     ):
-        """Completed callbacks can still expose task-blocking metadata."""
+        """Task result metadata is not trusted for automation disablement."""
         from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name="Blocked Automation",
+            name="Task Outcome Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -2096,8 +2096,13 @@ class TestCompleteRun:
                 "status": "COMPLETED",
                 "blocking_factor": {
                     "kind": "config",
-                    "reason": "Missing Slack token",
-                    "source": "mcp",
+                    "reason": "User-defined task outcome",
+                    "source": "task",
+                },
+                "task_outcome": {
+                    "success": False,
+                    "message": "User-defined incomplete state",
+                    "classification": {"kind": "auth", "user_action": "settings"},
                 },
             },
         )
@@ -2105,28 +2110,22 @@ class TestCompleteRun:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "COMPLETED"
-        assert data["status_detail"]["kind"] == "config"
-        assert data["status_detail"]["blocking_factor"] == {
-            "kind": "config",
-            "reason": "Missing Slack token",
-            "source": "mcp",
-        }
+        assert data["status_detail"] is None
 
         await async_session.refresh(run)
         assert run.status == AutomationRunStatus.COMPLETED
-        assert run.status_detail is not None
-        assert run.status_detail["detail"] == "Missing Slack token"
+        assert run.status_detail is None
 
-    async def test_failed_complete_run_prefers_blocking_factor_metadata(
+    async def test_failed_complete_run_uses_sdk_callback_error_classification(
         self, async_client, async_session
     ):
-        """Failed callbacks use blocking-factor classification when present."""
+        """Only SDK callback errors classify failed callbacks for disablement."""
         from openhands.automation.models import AutomationRun, AutomationRunStatus
 
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
-            name="Blocked Failure Automation",
+            name="Callback Error Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
@@ -2145,10 +2144,70 @@ class TestCompleteRun:
             f"/api/automation/v1/runs/{run.id}/complete",
             json={
                 "status": "FAILED",
-                "blocking_factor": {
-                    "kind": "config",
-                    "reason": "Missing GitHub token",
-                    "source": "mcp",
+                "error": {
+                    "source": "environment",
+                    "code": "MissingSecret",
+                    "detail": "Missing GitHub token",
+                    "classification": {
+                        "kind": "auth",
+                        "retryable": False,
+                        "user_action": "settings",
+                    },
+                },
+                "task_outcome": {
+                    "success": False,
+                    "classification": {"kind": "quota", "user_action": "settings"},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["status_detail"]["kind"] == "auth"
+        assert data["status_detail"]["source"] == "environment"
+        assert data["status_detail"]["code"] == "MissingSecret"
+        assert data["status_detail"]["user_action"] == "settings"
+        assert "blocking_factor" not in data["status_detail"]
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.status_detail is not None
+        assert run.status_detail["kind"] == "auth"
+        assert run.status_detail["source"] == "environment"
+
+    async def test_failed_complete_run_ignores_task_outcome_without_sdk_error(
+        self, async_client, async_session
+    ):
+        """User-defined task outcomes alone remain generic execution failures."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Generic Failure Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "task_outcome": {
+                    "success": False,
+                    "message": "User-defined failed task",
+                    "classification": {"kind": "auth", "user_action": "settings"},
                 },
             },
         )
@@ -2157,22 +2216,14 @@ class TestCompleteRun:
         data = response.json()
         assert data["status"] == "FAILED"
         assert data["error_detail"] == "Completion callback reported failure"
-        assert data["status_detail"]["kind"] == "config"
-        assert data["status_detail"]["transient"] is False
-        assert data["status_detail"]["user_action"] == "settings"
-        assert data["status_detail"]["detail"] == "Missing GitHub token"
-        assert data["status_detail"]["blocking_factor"] == {
-            "kind": "config",
-            "reason": "Missing GitHub token",
-            "source": "mcp",
-        }
+        assert data["status_detail"]["kind"] == "execution_error"
+        assert data["status_detail"]["source"] == "sdk_callback"
+        assert "user_action" not in data["status_detail"]
 
         await async_session.refresh(run)
         assert run.status == AutomationRunStatus.FAILED
-        assert run.error_detail == "Completion callback reported failure"
         assert run.status_detail is not None
-        assert run.status_detail["kind"] == "config"
-        assert run.status_detail["user_action"] == "settings"
+        assert run.status_detail["kind"] == "execution_error"
 
     async def test_complete_run_stores_finish_tool_response_metadata(
         self, async_client, async_session, monkeypatch
