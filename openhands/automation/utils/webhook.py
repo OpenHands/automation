@@ -98,8 +98,7 @@ async def get_webhook_config(
             is_builtin=False,
             event_key_expr=webhook.event_key_expr,
             signature_header=webhook.signature_header,
-            # NULL on rows predating the column: the default is what they were
-            # created with.
+            # A cleared column reads as the default.
             signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
         )
     return None

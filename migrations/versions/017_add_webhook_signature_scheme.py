@@ -1,6 +1,7 @@
 """Add signature_scheme to custom_webhooks.
 
-Nullable: existing rows carry no scheme and are read as "hmac_sha256_hex".
+The server_default backfills existing rows, so nothing has to be migrated. The
+column stays nullable because a PATCH may clear it; NULL reads as the default.
 
 Revision ID: 017
 Revises: 016

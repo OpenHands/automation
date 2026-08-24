@@ -46,6 +46,92 @@ SubjectFunc = Callable[[dict[str, Any]], "EventSubject | None"]
 HandshakeFunc = Callable[["Request"], "Response | None"]
 
 
+class WebhookVerifier(Protocol):
+    """Proves a raw delivery was signed by the holder of the shared secret.
+
+    `signature_header` is a parameter because custom webhooks configure it per
+    row; anything else a scheme needs is read from `headers`, since those names
+    are fixed by the scheme.
+    """
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        secret: str,
+        signature_header: str,
+    ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Capabilities:
+    """What a provider's transport tolerates. Declared, never assumed."""
+
+    # Slack load-balances a payload across an app's open connections and
+    # endorses up to 10, so Socket Mode is safe to run active-active; an
+    # arbitrary WebSocket upstream would duplicate every event per replica.
+    tolerates_multiple_connections: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Provider:
+    """Everything the service knows about one event provider."""
+
+    source: str
+    parse: ParseFunc
+    verifier: str = DEFAULT_VERIFIER
+    signature_header: str = DEFAULT_BUILTIN_SIGNATURE_HEADER
+    secret_from_settings: SecretFunc | None = None
+    # Reserved for subject-based routing. Nothing reads it.
+    subject: SubjectFunc | None = None
+    # Reserved. Deliberately not wired: no provider on the roadmap performs an
+    # HTTP handshake, and Socket Mode is our Slack path.
+    handshake: HandshakeFunc | None = None
+    capabilities: Capabilities = Capabilities()
+
+
+# Both registries are filled at the bottom of this module, once the verifier
+# implementations and the parsers they name exist.
+VERIFIERS: dict[str, WebhookVerifier] = {}
+PROVIDERS: dict[str, Provider] = {}
+
+
+def get_verifier(scheme: str | None) -> WebhookVerifier | None:
+    """Resolve a signature scheme name, treating None as the default."""
+    return VERIFIERS.get(scheme or DEFAULT_VERIFIER)
+
+
+def verifier_schemes() -> frozenset[str]:
+    """Every signature scheme a webhook may be configured with."""
+    return frozenset(VERIFIERS)
+
+
+def register_provider(provider: Provider) -> None:
+    """Register a provider descriptor, replacing any entry for the same source."""
+    PROVIDERS[provider.source] = provider
+
+
+def get_provider(source: str) -> Provider | None:
+    """Return the descriptor for a source, or None if it is not built in."""
+    return PROVIDERS.get(source)
+
+
+def is_builtin_source(source: str) -> bool:
+    """Check if a source is a builtin integration."""
+    return source in PROVIDERS
+
+
+def builtin_sources() -> list[str]:
+    """Every registered provider source, sorted."""
+    return sorted(PROVIDERS)
+
+
+def reserved_sources() -> frozenset[str]:
+    """Source names a custom webhook may not claim, derived from the registry."""
+    return frozenset(PROVIDERS)
+
+
 def get_header(headers: Mapping[str, str], name: str) -> str | None:
     """Look up a header case-insensitively, for callers passing a plain dict."""
     value = headers.get(name)
@@ -65,24 +151,6 @@ def _now_seconds() -> int:
     return int(time.time())
 
 
-class WebhookVerifier(Protocol):
-    """Proves a raw delivery was signed by the holder of the shared secret.
-
-    `signature_header` is a parameter because custom webhooks configure it per
-    row; anything else a scheme needs is read from `headers`, since those names
-    are fixed by the scheme.
-    """
-
-    def verify(
-        self,
-        *,
-        body: bytes,
-        headers: Mapping[str, str],
-        secret: str,
-        signature_header: str,
-    ) -> bool: ...
-
-
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     """Verify a hex HMAC-SHA256 digest, with or without a `sha256=` prefix."""
     if signature.startswith("sha256="):
@@ -94,7 +162,9 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
         digestmod=hashlib.sha256,
     ).hexdigest()
 
-    return hmac.compare_digest(computed, signature)
+    # Compared as bytes: a header carrying non-ASCII decodes to a str that
+    # `compare_digest` refuses outright, raising instead of returning False.
+    return hmac.compare_digest(computed.encode("utf-8"), signature.encode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +231,7 @@ class StandardWebhooksVerifier:
         signed_content = f"{msg_id}.{timestamp}.".encode() + body
         expected = base64.b64encode(
             hmac.new(key, signed_content, hashlib.sha256).digest()
-        ).decode("utf-8")
+        )
 
         # Space-separated list so a secret can be rotated without a gap; any one
         # match is enough, and every token is compared to keep the work
@@ -171,7 +241,7 @@ class StandardWebhooksVerifier:
             version, _, candidate = token.partition(",")
             if not candidate or version != "v1":
                 continue
-            if hmac.compare_digest(candidate, expected):
+            if hmac.compare_digest(candidate.encode("utf-8"), expected):
                 matched = True
         return matched
 
@@ -204,85 +274,19 @@ class SlackV0Verifier:
             return False
 
         signed_content = b"v0:" + timestamp.encode("utf-8") + b":" + body
-        expected = (
-            "v0="
-            + hmac.new(
-                secret.encode("utf-8"), signed_content, hashlib.sha256
-            ).hexdigest()
-        )
-        return hmac.compare_digest(signature, expected)
+        expected = b"v0=" + hmac.new(
+            secret.encode("utf-8"), signed_content, hashlib.sha256
+        ).hexdigest().encode("utf-8")
+        return hmac.compare_digest(signature.encode("utf-8"), expected)
 
 
-VERIFIERS: dict[str, WebhookVerifier] = {
-    "hmac_sha256_hex": HmacSha256HexVerifier(),
-    "standard_webhooks": StandardWebhooksVerifier(),
-    "slack_v0": SlackV0Verifier(),
-}
-
-
-def get_verifier(scheme: str | None) -> WebhookVerifier | None:
-    """Resolve a signature scheme name, treating None as the default."""
-    return VERIFIERS.get(scheme or DEFAULT_VERIFIER)
-
-
-def verifier_schemes() -> frozenset[str]:
-    """Every signature scheme a webhook may be configured with."""
-    return frozenset(VERIFIERS)
-
-
-@dataclass(frozen=True, slots=True)
-class Capabilities:
-    """What a provider's transport tolerates. Declared, never assumed."""
-
-    # Slack load-balances a payload across an app's open connections and
-    # endorses up to 10, so Socket Mode is safe to run active-active; an
-    # arbitrary WebSocket upstream would duplicate every event per replica.
-    tolerates_multiple_connections: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class Provider:
-    """Everything the service knows about one event provider."""
-
-    source: str
-    parse: ParseFunc
-    verifier: str = DEFAULT_VERIFIER
-    signature_header: str = DEFAULT_BUILTIN_SIGNATURE_HEADER
-    secret_from_settings: SecretFunc | None = None
-    # Reserved for subject-based routing. Nothing reads it.
-    subject: SubjectFunc | None = None
-    # Reserved. Deliberately not wired: no provider on the roadmap performs an
-    # HTTP handshake, and Socket Mode is our Slack path.
-    handshake: HandshakeFunc | None = None
-    capabilities: Capabilities = Capabilities()
-
-
-PROVIDERS: dict[str, Provider] = {}
-
-
-def register_provider(provider: Provider) -> None:
-    """Register a provider descriptor, replacing any entry for the same source."""
-    PROVIDERS[provider.source] = provider
-
-
-def get_provider(source: str) -> Provider | None:
-    """Return the descriptor for a source, or None if it is not built in."""
-    return PROVIDERS.get(source)
-
-
-def is_builtin_source(source: str) -> bool:
-    """Check if a source is a builtin integration."""
-    return source in PROVIDERS
-
-
-def builtin_sources() -> list[str]:
-    """Every registered provider source, sorted."""
-    return sorted(PROVIDERS)
-
-
-def reserved_sources() -> frozenset[str]:
-    """Source names a custom webhook may not claim, derived from the registry."""
-    return frozenset(PROVIDERS)
+VERIFIERS.update(
+    {
+        "hmac_sha256_hex": HmacSha256HexVerifier(),
+        "standard_webhooks": StandardWebhooksVerifier(),
+        "slack_v0": SlackV0Verifier(),
+    }
+)
 
 
 def _register_builtin_providers() -> None:
