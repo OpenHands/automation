@@ -1,7 +1,7 @@
 """Add automation disabled reason metadata.
 
-Revision ID: 019
-Revises: 018
+Revision ID: 020
+Revises: 019
 Create Date: 2026-08-20
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "019"
-down_revision: str = "018"
+revision: str = "020"
+down_revision: str = "019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
