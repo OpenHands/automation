@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -109,7 +109,7 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     # 1. Check for explicit db_url (supports SQLite for local mode)
     if settings.db_url:
         if is_sqlite_url(settings.db_url):
-            return _create_sqlite_engine(settings.db_url)
+            return _create_sqlite_engine(settings.db_url, settings)
         # PostgreSQL URL provided directly
         engine = create_async_engine(
             settings.db_url,
@@ -148,24 +148,40 @@ async def create_engine(settings: ServiceSettings | None = None) -> EngineResult
     return EngineResult(engine=engine, is_sqlite=False)
 
 
-def _create_sqlite_engine(db_url: str) -> EngineResult:
+def _create_sqlite_engine(
+    db_url: str, settings: ServiceSettings | None = None
+) -> EngineResult:
     """Create SQLite engine for local deployments.
 
     SQLite configuration notes:
     - Uses aiosqlite driver for async support
-    - No connection pooling (SQLite handles this internally)
+    - File-backed databases use the configured connection pool limits
+    - In-memory databases retain SQLAlchemy's StaticPool defaults
     - check_same_thread=False required for async usage
     """
+    if settings is None:
+        settings = get_config().service
+
     # Ensure the URL uses aiosqlite driver
     if not db_url.startswith("sqlite+aiosqlite"):
         db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+
+    url = make_url(db_url)
+    database = url.database or ""
+    pool_options = {}
+    if database and ":memory:" not in database and url.query.get("mode") != "memory":
+        pool_options = {
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_timeout": settings.db_pool_timeout,
+        }
 
     engine = create_async_engine(
         db_url,
         # SQLite-specific settings
         connect_args={"check_same_thread": False},
-        # No pooling for SQLite - it handles this internally
         pool_pre_ping=True,
+        **pool_options,
     )
     logger.info("Created SQLite engine: %s", db_url.split("?")[0])
     return EngineResult(engine=engine, is_sqlite=True)
