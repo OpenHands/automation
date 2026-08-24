@@ -563,11 +563,17 @@ async def complete_run(
             else "Completion callback reported failure"
         )
         values["error_detail"] = error_detail
-        values["status_detail"] = run_status_detail_from_callback_error(
-            body.error or error_detail,
-            formatted_detail=error_detail,
-            previous=run.status_detail,
-        )
+        if blocking_factor is not None:
+            values["status_detail"] = run_status_detail_from_blocking_factor(
+                blocking_factor,
+                previous=run.status_detail,
+            )
+        else:
+            values["status_detail"] = run_status_detail_from_callback_error(
+                body.error or error_detail,
+                formatted_detail=error_detail,
+                previous=run.status_detail,
+            )
     elif blocking_factor is not None:
         values["status_detail"] = run_status_detail_from_blocking_factor(
             blocking_factor,
