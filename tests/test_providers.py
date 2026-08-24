@@ -560,6 +560,17 @@ class TestProviderDescriptors:
             assert provider is not None
             assert provider.capabilities.tolerates_multiple_connections is False
 
+    def test_only_github_names_its_deliveries(self):
+        """`event_id_header` is opt-in, and only GitHub sends one today."""
+        github = get_provider("github")
+        assert github is not None
+        assert github.event_id_header == "X-GitHub-Delivery"
+
+        for source in sorted(BUILTIN_PROVIDER_SOURCES - {"github"}):
+            provider = get_provider(source)
+            assert provider is not None
+            assert provider.event_id_header is None
+
     def test_reserved_hooks_are_unset_on_every_builtin(self):
         """Both hooks are reserved and deliberately unwired, not forgotten."""
         for source in sorted(BUILTIN_PROVIDER_SOURCES):

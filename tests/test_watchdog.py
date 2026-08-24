@@ -9,15 +9,22 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from openhands.automation.config import Settings
 from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    IntegrationEvent,
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
-from openhands.automation.watchdog import _verify_and_mark_run
+from openhands.automation.watchdog import (
+    PRUNE_BATCH_SIZE,
+    _verify_and_mark_run,
+    prune_integration_events,
+)
 
 
 # Test UUIDs
@@ -589,3 +596,71 @@ class TestVerifyAndMarkRunStillRunning:
             run = await session.get(AutomationRun, run_id)
             assert run.status == AutomationRunStatus.COMPLETED
             assert run.timeout_at == stale_timeout_at
+
+
+def _make_event(age: timedelta, index: int = 0) -> IntegrationEvent:
+    """An accepted event received `age` ago."""
+    return IntegrationEvent(
+        org_id=TEST_ORG_ID,
+        source="github",
+        provider_event_id=f"delivery-{index}",
+        event_key="push",
+        payload={"ref": "refs/heads/main"},
+        received_at=utcnow() - age,
+    )
+
+
+class TestPruneIntegrationEvents:
+    """Pruning keeps `integration_events` bounded without a loop of its own."""
+
+    @pytest.mark.asyncio
+    async def test_prunes_only_past_the_retention_window(self, async_session_factory):
+        """Old rows go; anything inside the window stays deduplicable."""
+        settings = Settings(integration_event_retention_days=14)
+
+        async with async_session_factory() as session:
+            session.add(_make_event(timedelta(days=15), index=1))
+            session.add(_make_event(timedelta(days=13), index=2))
+            await session.commit()
+
+        assert await prune_integration_events(async_session_factory, settings) == 1
+
+        async with async_session_factory() as session:
+            surviving = (
+                (await session.execute(select(IntegrationEvent.provider_event_id)))
+                .scalars()
+                .all()
+            )
+        assert list(surviving) == ["delivery-2"]
+
+    @pytest.mark.asyncio
+    async def test_is_a_no_op_when_nothing_has_expired(self, async_session_factory):
+        """The common case costs one DELETE that matches nothing."""
+        settings = Settings(integration_event_retention_days=14)
+
+        async with async_session_factory() as session:
+            session.add(_make_event(timedelta(hours=1)))
+            await session.commit()
+
+        assert await prune_integration_events(async_session_factory, settings) == 0
+
+    @pytest.mark.asyncio
+    async def test_deletes_at_most_one_batch_per_scan(
+        self, async_session_factory, monkeypatch
+    ):
+        """A backlog drains over several scans rather than one long DELETE."""
+        monkeypatch.setattr("openhands.automation.watchdog.PRUNE_BATCH_SIZE", 2)
+        settings = Settings(integration_event_retention_days=1)
+
+        async with async_session_factory() as session:
+            for index in range(3):
+                session.add(_make_event(timedelta(days=2), index=index))
+            await session.commit()
+
+        assert await prune_integration_events(async_session_factory, settings) == 2
+        assert await prune_integration_events(async_session_factory, settings) == 1
+        assert await prune_integration_events(async_session_factory, settings) == 0
+
+    def test_batch_size_is_bounded(self):
+        """An unbounded default is the bug this guards."""
+        assert 0 < PRUNE_BATCH_SIZE <= 10_000

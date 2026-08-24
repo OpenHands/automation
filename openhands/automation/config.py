@@ -536,6 +536,12 @@ class ServiceSettings(BaseSettings):
     watchdog_interval_seconds: int = 60
     failure_disable_threshold: int = 3
 
+    # How long an accepted event stays in `integration_events`. It bounds two
+    # things: the dedupe window (a redelivery older than this is indistinguishable
+    # from a new event) and the table, which otherwise grows with every delivery.
+    # Well past any provider's own retry horizon -- GitHub gives up after ~3 days.
+    integration_event_retention_days: int = 14
+
     # API pagination
     api_default_page_size: int = 50
     api_max_page_size: int = 100
