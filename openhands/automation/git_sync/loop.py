@@ -58,7 +58,7 @@ from openhands.automation.models import (
     UploadStatus,
 )
 from openhands.automation.schemas import Trigger, validate_command_string
-from openhands.automation.storage import get_file_store
+from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.service_metadata import (
@@ -357,13 +357,20 @@ async def _stored_tarball_matches(
         return False
 
 
-async def _delete_superseded_upload(session: AsyncSession, tarball_path: str) -> None:
-    """Remove the upload an automation just stopped pointing at.
+async def _delete_superseded_upload(
+    session: AsyncSession, tarball_path: str, pending_storage_deletes: list[str]
+) -> None:
+    """Mark the upload an automation just stopped pointing at for removal.
 
     Without this, every git-side edit left the previous upload row and file
     referenced by nothing, so routine PR edits accumulated a tarball copy per
     merge with no reaper to collect them. Mirrors the cleanup
     `regenerate_preset_prompt_tarball` does for prompt edits.
+
+    Soft-deletes the record in the current transaction; the storage object is
+    only queued on `pending_storage_deletes` and removed after the cycle's
+    commit. Deleting before the commit destroyed the object irreversibly while
+    a rollback revived the record, stranding it pointing at a missing object.
     """
     upload_id = parse_internal_upload_id(tarball_path)
     if upload_id is None:
@@ -375,21 +382,22 @@ async def _delete_superseded_upload(session: AsyncSession, tarball_path: str) ->
     if upload is None or upload.deleted_at is not None:
         return
 
-    file_removed = False
-    try:
-        await asyncio.to_thread(get_file_store().delete, upload.storage_path)
-        file_removed = True
-    except FileNotFoundError:
-        file_removed = True
-    except Exception:
-        logger.exception(
-            "Failed to delete superseded tarball at %s", upload.storage_path
-        )
-    # Soft-delete only once the file is confirmed gone: a failed delete leaves
-    # the record live, so the file stays discoverable for a retry rather than
-    # becoming a hidden orphan.
-    if file_removed:
-        upload.deleted_at = utcnow()
+    upload.deleted_at = utcnow()
+    pending_storage_deletes.append(upload.storage_path)
+
+
+async def _delete_pending_storage_objects(storage_paths: list[str]) -> None:
+    """Best-effort removal of superseded tarball objects after the commit."""
+    if not storage_paths:
+        return
+    file_store = get_file_store()
+    for path in storage_paths:
+        try:
+            await asyncio.to_thread(file_store.delete, path)
+        except ObjectNotFoundError:
+            pass  # already gone
+        except Exception:
+            logger.exception("Failed to delete superseded tarball at %s", path)
 
 
 async def _resolve_tarball_path(
@@ -398,6 +406,7 @@ async def _resolve_tarball_path(
     deserialized: DeserializedAutomation,
     slug: str,
     existing: Automation | None,
+    pending_storage_deletes: list[str],
 ) -> str:
     if deserialized.tarball_bytes is not None:
         if existing is not None and await _stored_tarball_matches(
@@ -417,7 +426,9 @@ async def _resolve_tarball_path(
             slug,
         )
         if existing is not None:
-            await _delete_superseded_upload(session, existing.tarball_path)
+            await _delete_superseded_upload(
+                session, existing.tarball_path, pending_storage_deletes
+            )
         return new_path
 
     tarball_source = fields.get("tarball_source") or {}
@@ -439,6 +450,7 @@ async def _validate_and_resolve_fields(
     fields: dict,
     deserialized: DeserializedAutomation,
     slug: str,
+    pending_storage_deletes: list[str],
     existing: Automation | None = None,
 ) -> dict:
     """Validate automation.yaml fields and resolve a tarball_path, mirroring
@@ -459,7 +471,7 @@ async def _validate_and_resolve_fields(
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
     tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing
+        session, fields, deserialized, slug, existing, pending_storage_deletes
     )
 
     return {
@@ -486,9 +498,10 @@ async def _create_automation_from_git(
     deserialized: DeserializedAutomation,
     dir_files: dict[str, bytes],
     head: str,
+    pending_storage_deletes: list[str],
 ) -> None:
     values = await _validate_and_resolve_fields(
-        session, deserialized.fields, deserialized, slug
+        session, deserialized.fields, deserialized, slug, pending_storage_deletes
     )
     local_user = _get_local_user()
     automation = Automation(
@@ -516,6 +529,7 @@ async def _update_automation_from_git(
     deserialized: DeserializedAutomation,
     dir_files: dict[str, bytes],
     head: str,
+    pending_storage_deletes: list[str],
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -531,7 +545,12 @@ async def _update_automation_from_git(
         )
 
     values = await _validate_and_resolve_fields(
-        session, deserialized.fields, deserialized, state.slug, existing=automation
+        session,
+        deserialized.fields,
+        deserialized,
+        state.slug,
+        pending_storage_deletes,
+        existing=automation,
     )
     for column, value in values.items():
         setattr(automation, column, value)
@@ -612,6 +631,7 @@ async def _import_from_git(
     timeout: float,
     encryption_key: str,
     result: SyncCycleResult,
+    pending_storage_deletes: list[str],
 ) -> None:
     all_dirs = _list_slug_directories(sync_root)
 
@@ -635,6 +655,9 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
+        # A rolled-back savepoint revives the soft-deleted upload rows queued
+        # inside it, so their storage paths must not stay pending for deletion.
+        pending_snapshot = len(pending_storage_deletes)
         try:
             # One SAVEPOINT per directory: a failure rolls back just its writes
             # (a half-populated Automation, a flushed TarballUpload) and leaves
@@ -648,18 +671,30 @@ async def _import_from_git(
 
                 if state is None:
                     await _create_automation_from_git(
-                        session, slug, deserialized, dir_files, head
+                        session,
+                        slug,
+                        deserialized,
+                        dir_files,
+                        head,
+                        pending_storage_deletes,
                     )
                     result.imported += 1
                 else:
                     await _update_automation_from_git(
-                        session, state, deserialized, dir_files, head
+                        session,
+                        state,
+                        deserialized,
+                        dir_files,
+                        head,
+                        pending_storage_deletes,
                     )
         except (ValidationError, ValueError) as e:
+            del pending_storage_deletes[pending_snapshot:]
             logger.warning(
                 "Skipping invalid automation directory %r from git: %s", slug, e
             )
         except Exception:
+            del pending_storage_deletes[pending_snapshot:]
             # Deliberately broad: anything escaping aborts the whole cycle --
             # no export, no push -- every cycle until someone fixes that one
             # directory by hand. Traceback logged, since reaching here means an
@@ -945,6 +980,11 @@ async def _run_sync_cycle_locked(
 
     result = SyncCycleResult(head=head)
 
+    # Storage paths of superseded uploads soft-deleted during the import; their
+    # objects are only removed after the commit below succeeds, so a rollback
+    # can never revive a record whose object is already gone.
+    pending_storage_deletes: list[str] = []
+
     # Committed *before* the push, not held open across it: SQLite holds its
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
@@ -970,6 +1010,7 @@ async def _run_sync_cycle_locked(
                 timeout,
                 encryption_key,
                 result,
+                pending_storage_deletes,
             )
 
         # After the import, so automations that arrived from git this cycle
@@ -980,6 +1021,10 @@ async def _run_sync_cycle_locked(
         # run regardless of whether anything was exported (see below).
         await _export_dirty_automations(session, sync_root, encryption_key, result)
         await session.commit()
+
+    # Only after the commit: the soft-deletes are durable, so removing the
+    # objects can no longer strand a live record. A commit failure skips this.
+    await _delete_pending_storage_objects(pending_storage_deletes)
 
     # Unconditional, not gated on `exported`: commit_and_push also retries a
     # previous cycle's unpushed commit and pushes to a newly-repointed remote.

@@ -80,8 +80,9 @@ async def _download_internal_tarball(
     """Download a tarball from storage using the TarballUpload record.
 
     Raises:
-        TarballNotFoundError: If the tarball upload record doesn't exist.
-            This is a permanent error that should disable the automation.
+        TarballNotFoundError: If the tarball upload record doesn't exist, or if
+            the record exists but its storage object is missing. Both are
+            permanent errors that should disable the automation.
         ValueError: If no database session is provided.
     """
     if session is None:
@@ -97,10 +98,19 @@ async def _download_internal_tarball(
             "The tarball may have been deleted."
         )
 
-    from openhands.automation.storage import get_file_store
+    from openhands.automation.storage import ObjectNotFoundError, get_file_store
 
     store = get_file_store()
-    return store.read(upload.storage_path)
+    try:
+        return store.read(upload.storage_path)
+    except ObjectNotFoundError as e:
+        # Only confirmed absence is permanent; transient storage errors raise
+        # plain FileNotFoundError and keep retrying on the next schedule tick.
+        raise TarballNotFoundError(
+            f"Internal tarball object missing from storage at "
+            f"{upload.storage_path!r} for upload {upload_id}. "
+            "Recreate the automation to restore it."
+        ) from e
 
 
 async def _poll_pending_runs(

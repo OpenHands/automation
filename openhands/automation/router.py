@@ -6,7 +6,16 @@ import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
@@ -44,6 +53,9 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
+from openhands.automation.utils.conversation_outcome import (
+    fetch_latest_finish_tool_response_for_run,
+)
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -202,8 +214,14 @@ async def update_automation(
     automation_id: uuid.UUID,
     body: UpdateAutomationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    # Function scope commits the session when the handler returns, BEFORE the
+    # response is sent and its background tasks run. With the default request
+    # scope the deferred tarball delete would run before the commit, and a
+    # commit failure would strand a live upload record pointing at an
+    # already-deleted object.
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
@@ -252,7 +270,7 @@ async def update_automation(
         and auto.prompt != original_prompt
     ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session
+            auto, auto.prompt, session, background_tasks
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path
@@ -557,6 +575,15 @@ async def complete_run(
         )
     elif body.status == "COMPLETED":
         values["status_detail"] = None
+    if body.conversation_id:
+        finish_tool_response = await fetch_latest_finish_tool_response_for_run(
+            run, body.conversation_id
+        )
+        if finish_tool_response is not None:
+            values["run_metadata"] = {
+                **(run.run_metadata or {}),
+                "finish_tool_response": finish_tool_response,
+            }
 
     stmt = (
         update(AutomationRun)

@@ -122,6 +122,7 @@ class TestAutomationRunResponseUtcSerialisation:
             timeout_at=None,
             sandbox_id=None,
             bash_command_id=None,
+            run_metadata=None,
             created_at=_NAIVE,
             started_at=_NAIVE,
             completed_at=_NAIVE,
