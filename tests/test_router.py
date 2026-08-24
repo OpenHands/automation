@@ -1955,6 +1955,69 @@ class TestCompleteRun:
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
 
+    async def test_complete_run_stores_finish_tool_response_metadata(
+        self, async_client, async_session, monkeypatch
+    ):
+        """Complete endpoint stores the raw latest FinishTool response."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            run_metadata={"existing": "value"},
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        async def fake_fetch_latest_finish_tool_response_for_run(
+            callback_run, conversation_id
+        ):
+            assert callback_run.id == run.id
+            assert conversation_id == "conv-outcome-123"
+            return {
+                "status": "success",
+                "outcome_summary": "Completed all requested work.",
+                "confidence": 0.95,
+                "terminal_reason": "finish_action",
+            }
+
+        monkeypatch.setattr(
+            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
+            fake_fetch_latest_finish_tool_response_for_run,
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "conversation_id": "conv-outcome-123"},
+        )
+
+        assert response.status_code == 200
+        finish_tool_response = response.json()["run_metadata"]["finish_tool_response"]
+        assert finish_tool_response == {
+            "status": "success",
+            "outcome_summary": "Completed all requested work.",
+            "confidence": 0.95,
+            "terminal_reason": "finish_action",
+        }
+
+        await async_session.refresh(run)
+        assert run.run_metadata is not None
+        assert run.run_metadata["existing"] == "value"
+        assert run.run_metadata["finish_tool_response"]["status"] == "success"
+
+        assert run.status == AutomationRunStatus.COMPLETED
+
     async def test_complete_run_saves_conversation_id_for_failed_runs(
         self, async_client, async_session
     ):

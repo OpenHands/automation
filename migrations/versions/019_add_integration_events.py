@@ -1,7 +1,7 @@
 """Add integration_events: one row per accepted delivery.
 
-Revision ID: 018
-Revises: 017
+Revision ID: 019
+Revises: 018
 Create Date: 2026-08-24
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "018"
-down_revision: str = "017"
+revision: str = "019"
+down_revision: str = "018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

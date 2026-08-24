@@ -786,6 +786,7 @@ class AutomationRunResponse(BaseModel):
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
