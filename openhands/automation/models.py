@@ -338,8 +338,8 @@ class CustomWebhook(Base):
         String(100), nullable=False, default="X-Signature-256"
     )
 
-    # Names a verifier in `providers.VERIFIERS`. NULL on rows predating the
-    # column, read as the default.
+    # Names a verifier in `providers.VERIFIERS`. Nullable because a PATCH may
+    # clear it; NULL reads as the default.
     signature_scheme: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
