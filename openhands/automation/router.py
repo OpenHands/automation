@@ -52,6 +52,9 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
+from openhands.automation.utils.conversation_outcome import (
+    fetch_latest_finish_tool_response_for_run,
+)
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
 from openhands.automation.utils.run_status_detail import (
@@ -492,6 +495,15 @@ async def complete_run(
         )
     elif body.status == "COMPLETED":
         values["status_detail"] = None
+    if body.conversation_id:
+        finish_tool_response = await fetch_latest_finish_tool_response_for_run(
+            run, body.conversation_id
+        )
+        if finish_tool_response is not None:
+            values["run_metadata"] = {
+                **(run.run_metadata or {}),
+                "finish_tool_response": finish_tool_response,
+            }
 
     stmt = (
         update(AutomationRun)
