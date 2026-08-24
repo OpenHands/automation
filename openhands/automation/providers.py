@@ -321,6 +321,14 @@ class Provider:
     verifier: str = DEFAULT_VERIFIER
     signature_header: str = DEFAULT_BUILTIN_SIGNATURE_HEADER
     secret_from_settings: SecretFunc | None = None
+    # Header carrying the provider's own id for a delivery, used to drop
+    # redeliveries (#361). None means the provider does not identify its
+    # deliveries, and its events are recorded but never deduplicated.
+    #
+    # It names a header rather than a payload path because HTTP is the only
+    # transport that has to go looking: a stream transport is handed the
+    # envelope and sets `AcceptedEvent.provider_event_id` from it directly.
+    event_id_header: str | None = None
     # Reserved for #362 (subject -> conversation routing). Nothing reads it.
     subject: SubjectFunc | None = None
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
@@ -374,16 +382,21 @@ def _register_builtin_providers() -> None:
 
     # All three are forwarded by the OpenHands server, which signs with the
     # single shared AUTOMATION_WEBHOOK_SECRET into GitHub's header name.
-    for source, parse in (
-        ("bitbucket_data_center", parse_bitbucket_data_center_event),
-        ("github", parse_github_event_auto),
-        ("jira_dc", parse_jira_dc_event),
+    #
+    # Only GitHub names its deliveries. Jira DC and Bitbucket DC send no
+    # equivalent, so their events are recorded without being deduplicated --
+    # which is the same position every custom webhook is in.
+    for source, parse, event_id_header in (
+        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
+        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
+        ("jira_dc", parse_jira_dc_event, None),
     ):
         register_provider(
             Provider(
                 source=source,
                 parse=parse,
                 secret_from_settings=lambda s: s.webhook_secret or None,
+                event_id_header=event_id_header,
             )
         )
 

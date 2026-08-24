@@ -29,11 +29,15 @@ Authentication Model:
     Replay Attack Considerations:
     - Under `hmac_sha256_hex` old valid payloads could be replayed, since
       nothing in the signed content expires
-    - GitHub includes delivery IDs for deduplication; consider tracking these
     - The `standard_webhooks` and `slack_v0` schemes sign a timestamp and
       reject deliveries outside a 5-minute window, so they do not have this
       property
-    - Current risk is acceptable: replay triggers same automation again (idempotent)
+    - Accepted events are recorded and deduplicated by the provider's delivery
+      id (`Provider.event_id_header`), so a verbatim replay of a captured
+      GitHub delivery no longer starts a second run. That is deduplication, not
+      replay protection: the delivery id is not part of the signed content, so
+      a replayer who alters it gets a fresh id. Only the timestamp-signing
+      schemes above close that off.
 """
 
 import json
@@ -51,7 +55,12 @@ from openhands.automation.event_schemas.github import (
     get_supported_event_types,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
-from openhands.automation.providers import WebhookVerifier, get_verifier
+from openhands.automation.providers import (
+    WebhookVerifier,
+    get_header,
+    get_provider,
+    get_verifier,
+)
 from openhands.automation.schemas import (
     EventDetectionRule,
     EventResponse,
@@ -287,13 +296,25 @@ async def receive_event(
         },
     )
 
-    # 6. Match triggers and create runs (transport-neutral)
+    # 6. Record, match triggers and create runs (transport-neutral)
+    #
+    # The delivery id is where HTTP has to do the looking: `accept_event()`
+    # deduplicates on whatever the transport hands it, and for a webhook that
+    # is a header. A provider that names no header, and every custom webhook,
+    # yields None -- recorded, routed, not deduplicated.
+    provider = get_provider(source)
+    provider_event_id = (
+        get_header(request.headers, provider.event_id_header)
+        if provider is not None and provider.event_id_header
+        else None
+    )
     result = await accept_event(
         org_id,
         AcceptedEvent(
             source=source,
             event_key=event.event_key,
             payload=webhook_payload,
+            provider_event_id=provider_event_id,
             parsed_event=event if isinstance(event, BaseModel) else None,
         ),
         session,

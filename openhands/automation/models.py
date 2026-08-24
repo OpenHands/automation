@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     Uuid,
@@ -366,6 +367,83 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class IntegrationEvent(Base):
+    """One accepted delivery, recorded with what it matched.
+
+    Written by ``accept_event()`` in the same transaction as the runs it
+    creates, so a row claiming ``matched_count = 3`` always has three runs
+    behind it. It exists for two reasons:
+
+    - **Deduplication.** When the transport knows the provider's own id for a
+      delivery, the partial unique index below rejects the second insert and
+      the event is dropped without creating runs. This is what makes a
+      redelivery safe across replicas, where an in-process set cannot see the
+      first delivery (see #361).
+    - **Visibility.** An event that matched nothing leaves no ``AutomationRun``
+      behind, so today it leaves no trace at all. "Did my webhook arrive, or is
+      my filter wrong?" is unanswerable without this row.
+
+    Rows are pruned by the watchdog; see ``prune_integration_events()``.
+    """
+
+    __tablename__ = "integration_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    # Provider slug, matching AutomationRun's trigger source: "github" for a
+    # builtin, or the custom webhook's own source name.
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The provider's id for this delivery, when the transport can supply one:
+    # GitHub's X-GitHub-Delivery, Slack's envelope event_id. NULL for providers
+    # and custom webhooks that send none -- those events are still recorded,
+    # they are just not deduplicated. See the partial index below.
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    event_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The payload trigger filters ran against, kept verbatim so a mismatched
+    # JMESPath filter can be evaluated against the real thing after the fact.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    # How many automations this event started a run for. Zero is the
+    # interesting value: the event arrived and matched nothing.
+    matched_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Deduplication key. Partial, because a NULL provider_event_id means
+        # "this provider does not identify its deliveries" rather than "the id
+        # is unknown" -- under a plain unique index every such event past the
+        # first would collide with the others.
+        #
+        # Scoped by org, unlike the sketch in #361: `source` is only unique per
+        # org for custom webhooks (see ix_custom_webhooks_org_source), so two
+        # orgs each running a webhook they both call "ci" would deduplicate
+        # against each other's ids. No provider is weakened by the extra
+        # column, since a delivery belongs to exactly one org either way.
+        Index(
+            "ix_integration_events_dedupe",
+            "org_id",
+            "source",
+            "provider_event_id",
+            unique=True,
+            postgresql_where=text("provider_event_id IS NOT NULL"),
+            sqlite_where=text("provider_event_id IS NOT NULL"),
+        ),
+        # Drives pruning, which is the only query this phase issues.
+        Index("ix_integration_events_received_at", "received_at"),
     )
 
 
