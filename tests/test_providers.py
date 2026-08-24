@@ -1,10 +1,7 @@
 """Tests for the provider descriptor registry and the signature verifiers.
 
-The verifier tests construct verifiers directly -- no HTTP, no app, no DB -- so
-a scheme's behaviour is pinned independently of the router that resolves it.
-The HTTP tests at the bottom cover the two things only the wired-up path can
-show: that a custom webhook can select a non-default scheme, and that adding a
-provider takes a registry entry and nothing else.
+Verifiers are constructed directly; the HTTP tests at the bottom cover what
+only the wired-up path can show.
 """
 
 import base64
@@ -57,6 +54,11 @@ from openhands.automation.utils.webhook import get_webhook_config
 
 BUILTIN_PROVIDER_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
 
+# Header bytes reach an app latin-1 decoded, so a signature header can carry a
+# non-ASCII str. `hmac.compare_digest` raises on those rather than returning
+# False, which would turn a bad signature into a 500.
+NON_ASCII_SIGNATURE = b"\xff\xfe".decode("latin-1")
+
 
 @pytest.fixture
 def org_id(mock_authenticated_user: AuthenticatedUser) -> uuid.UUID:
@@ -74,11 +76,7 @@ def clear_settings_cache():
 
 @pytest.fixture
 def temp_provider():
-    """Register a provider for one test and remove it afterwards.
-
-    The registry is process-global, so a test that adds to it has to put it
-    back or it leaks into every test that reads RESERVED_SOURCES.
-    """
+    """Register a provider for one test; the registry is process-global."""
     registered: list[str] = []
 
     def _register(provider: Provider) -> Provider:
@@ -90,11 +88,6 @@ def temp_provider():
 
     for source in registered:
         PROVIDERS.pop(source, None)
-
-
-# =============================================================================
-# Header access
-# =============================================================================
 
 
 class TestGetHeader:
@@ -117,11 +110,6 @@ class TestGetHeader:
 
     def test_empty_mapping(self):
         assert get_header({}, "X-Sig") is None
-
-
-# =============================================================================
-# hmac_sha256_hex
-# =============================================================================
 
 
 class TestHmacSha256HexVerifier:
@@ -182,6 +170,15 @@ class TestHmacSha256HexVerifier:
             signature_header=self.HEADER,
         )
 
+    def test_non_ascii_signature_rejected(self):
+        """Starlette decodes header bytes as latin-1, so this is reachable."""
+        assert not HmacSha256HexVerifier().verify(
+            body=b'{"a":1}',
+            headers={self.HEADER: NON_ASCII_SIGNATURE},
+            secret=self.SECRET,
+            signature_header=self.HEADER,
+        )
+
     def test_reads_the_configured_header_not_a_fixed_one(self):
         """A custom webhook may put the same scheme behind any header name."""
         body = b'{"a":1}'
@@ -211,11 +208,6 @@ class TestHmacSha256HexVerifier:
             secret=self.SECRET,
             signature_header=self.HEADER,
         )
-
-
-# =============================================================================
-# standard_webhooks
-# =============================================================================
 
 
 class TestStandardWebhooksVerifier:
@@ -269,6 +261,21 @@ class TestStandardWebhooksVerifier:
 
     def test_non_base64_secret_falls_back_to_raw_bytes(self):
         assert standard_webhooks_key("plain-text-secret") == b"plain-text-secret"
+
+    def test_a_plain_secret_that_parses_as_base64_is_still_decoded(self):
+        """The scheme defines the secret as base64, so this is spec, not a bug.
+
+        Worth pinning: an operator who types a literal secret that happens to
+        be valid base64 gets a key that is not the characters they typed.
+        """
+        assert standard_webhooks_key("abcdefgh") == base64.b64decode("abcdefgh")
+        assert standard_webhooks_key("abcdefgh") != b"abcdefgh"
+
+    def test_non_ascii_signature_rejected(self):
+        body = b'{"object_kind":"note"}'
+        assert not self._verify(
+            self._verifier(), body, self._headers(f"v1,{NON_ASCII_SIGNATURE}")
+        )
 
     def test_tampered_body_rejected(self):
         signature = self._sign(b'{"object_kind":"note"}')
@@ -357,11 +364,6 @@ class TestStandardWebhooksVerifier:
         assert not self._verify(self._verifier(), body, self._headers(bare))
 
 
-# =============================================================================
-# slack_v0
-# =============================================================================
-
-
 class TestSlackV0Verifier:
     """Slack Events API: hex HMAC over "v0:{timestamp}:{body}"."""
 
@@ -426,6 +428,13 @@ class TestSlackV0Verifier:
             self._verifier(), b"team_id=T1DC2JH3J", {SLACK_TIMESTAMP_HEADER: self.TS}
         )
 
+    def test_non_ascii_signature_rejected(self):
+        assert not self._verify(
+            self._verifier(),
+            b"team_id=T1DC2JH3J",
+            self._headers(NON_ASCII_SIGNATURE),
+        )
+
     def test_non_integer_timestamp_rejected(self):
         body = b"team_id=T1DC2JH3J"
         headers = self._headers(self._sign(body), ts="nope")
@@ -435,11 +444,6 @@ class TestSlackV0Verifier:
         body = b"team_id=T1DC2JH3J"
         bare = self._sign(body).removeprefix("v0=")
         assert not self._verify(self._verifier(), body, self._headers(bare))
-
-
-# =============================================================================
-# Verifier registry
-# =============================================================================
 
 
 class TestVerifierRegistry:
@@ -455,7 +459,7 @@ class TestVerifierRegistry:
         assert isinstance(VERIFIERS[DEFAULT_VERIFIER], HmacSha256HexVerifier)
 
     def test_none_resolves_to_the_default(self):
-        """A row predating the column has no scheme and must not lose one."""
+        """A row whose scheme was cleared must not lose its verifier."""
         assert get_verifier(None) is VERIFIERS[DEFAULT_VERIFIER]
 
     def test_named_scheme_resolves(self):
@@ -464,11 +468,6 @@ class TestVerifierRegistry:
 
     def test_unknown_scheme_resolves_to_nothing(self):
         assert get_verifier("pgp") is None
-
-
-# =============================================================================
-# Provider registry
-# =============================================================================
 
 
 class TestProviderRegistry:
@@ -573,7 +572,7 @@ class TestProviderDescriptors:
             assert provider.event_id_header is None
 
     def test_reserved_hooks_are_unset_on_every_builtin(self):
-        """`subject` waits for #362; `handshake` is deferred, not forgotten."""
+        """Both hooks are reserved and deliberately unwired, not forgotten."""
         for source in sorted(BUILTIN_PROVIDER_SOURCES):
             provider = get_provider(source)
             assert provider is not None
@@ -587,11 +586,6 @@ class TestProviderDescriptors:
             provider.verifier = "slack_v0"  # type: ignore[misc]
         with pytest.raises(FrozenInstanceError):
             Capabilities().tolerates_multiple_connections = True  # type: ignore[misc]
-
-
-# =============================================================================
-# Schema validation
-# =============================================================================
 
 
 class TestSignatureSchemeValidation:
@@ -623,11 +617,6 @@ class TestSignatureSchemeValidation:
         assert CustomWebhookUpdate(signature_scheme="slack_v0").signature_scheme == (
             "slack_v0"
         )
-
-
-# =============================================================================
-# get_webhook_config
-# =============================================================================
 
 
 class TestGetWebhookConfigScheme:
@@ -666,10 +655,10 @@ class TestGetWebhookConfigScheme:
         assert config.signature_header == "webhook-signature"
 
     @pytest.mark.asyncio
-    async def test_a_row_predating_the_column_reads_as_the_default(
+    async def test_a_row_with_a_cleared_scheme_reads_as_the_default(
         self, async_session, org_id
     ):
-        """The acceptance criterion for existing rows, tested as a NULL column."""
+        """Migration 017 backfills, so NULL comes from a PATCH, not from age."""
         webhook = CustomWebhook(
             org_id=org_id,
             name="Legacy",
@@ -679,7 +668,6 @@ class TestGetWebhookConfigScheme:
         async_session.add(webhook)
         await async_session.commit()
 
-        # Simulate a row written before the migration added the column.
         await async_session.execute(
             text("UPDATE custom_webhooks SET signature_scheme = NULL WHERE id = :id"),
             {"id": webhook.id},
@@ -690,11 +678,6 @@ class TestGetWebhookConfigScheme:
         config = await get_webhook_config("legacy", org_id, async_session)
         assert config is not None
         assert config.signature_scheme == DEFAULT_VERIFIER
-
-
-# =============================================================================
-# End-to-end through the real endpoint
-# =============================================================================
 
 
 def _make_automation(org_id: uuid.UUID, user_id: uuid.UUID, source: str) -> Automation:
@@ -849,7 +832,7 @@ async def test_standard_webhooks_rejects_a_replayed_delivery(
 
 
 class _GitLabEvent(WebhookEvent):
-    """Stands in for the file PR #66 would add, so the wiring is what's tested."""
+    """Stands in for a real provider's event class, so the wiring is tested."""
 
     object_kind: str = ""
 
@@ -871,12 +854,10 @@ async def test_adding_a_provider_takes_a_registry_entry_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
     temp_provider,
 ):
-    """The acceptance criterion for PR #66: is adding a provider now easy?
+    """One descriptor routes a brand-new source end to end.
 
-    A parser, a verifier name and a secret accessor -- one descriptor -- and a
-    source the service has never heard of routes end to end. No change to
-    `event_router.py`, `utils/webhook.py` or `schemas.py` was needed to make
-    this pass; the only new code is the descriptor and its event class.
+    No change to `event_router.py`, `utils/webhook.py` or `schemas.py` was
+    needed to make this pass.
     """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "shared")
     temp_provider(
@@ -925,12 +906,7 @@ async def test_a_scheme_with_no_verifier_refuses_the_delivery(
     async_session,
     org_id: uuid.UUID,
 ):
-    """A scheme this build cannot implement is a 500, not a silent fallback.
-
-    Only reachable by editing the row directly, since the API validates the
-    scheme on write -- but falling back to the default would reject genuine
-    events as bad signatures and hide the misconfiguration.
-    """
+    """A scheme this build cannot implement is a 500, not a silent fallback."""
     webhook = CustomWebhook(
         org_id=org_id,
         name="Exotic",
@@ -961,3 +937,94 @@ async def test_a_scheme_with_no_verifier_refuses_the_delivery(
     )
 
     assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_a_non_ascii_signature_header_is_refused_not_a_crash(
+    async_client: AsyncClient,
+    async_session,
+    org_id: uuid.UUID,
+):
+    """A garbage signature must be a 401, not an unhandled TypeError."""
+    webhook = CustomWebhook(
+        org_id=org_id,
+        name="Legacy",
+        source="legacy",
+        webhook_secret="s3cret-value",
+        signature_header="X-Signature-256",
+    )
+    async_session.add(webhook)
+    await async_session.commit()
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/legacy",
+        content=json.dumps({"type": "order.created"}).encode(),
+        headers=[
+            (b"X-Signature-256", b"\xff\xfe"),
+            (b"Content-Type", b"application/json"),
+        ],
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid signature"
+
+
+@pytest.mark.asyncio
+async def test_patching_the_scheme_changes_what_verifies(
+    async_client: AsyncClient,
+    async_session,
+    org_id: uuid.UUID,
+    mock_authenticated_user: AuthenticatedUser,
+):
+    """The PATCH persists, and the delivery path honours the new scheme."""
+    webhook = CustomWebhook(
+        org_id=org_id,
+        name="Switcher",
+        source="switcher",
+        webhook_secret="s3cret-value",
+        event_key_expr="type",
+        signature_header="X-Signature-256",
+    )
+    async_session.add(webhook)
+    async_session.add(
+        _make_automation(org_id, mock_authenticated_user.user_id, "switcher")
+    )
+    await async_session.commit()
+
+    patched = await async_client.patch(
+        f"/api/automation/v1/webhooks/{webhook.id}",
+        json={"signature_scheme": "slack_v0"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["signature_scheme"] == "slack_v0"
+    async_session.expire_all()
+
+    body = json.dumps({"type": "order.created"}).encode()
+
+    # The scheme it used to verify with is no longer accepted.
+    stale = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/switcher",
+        content=body,
+        headers={
+            "X-Signature-256": (
+                "sha256=" + hmac.new(b"s3cret-value", body, hashlib.sha256).hexdigest()
+            ),
+            "Content-Type": "application/json",
+        },
+    )
+    assert stale.status_code == 401
+
+    now = str(int(time.time()))
+    signed = b"v0:" + now.encode() + b":" + body
+    digest = hmac.new(b"s3cret-value", signed, hashlib.sha256).hexdigest()
+    accepted = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/switcher",
+        content=body,
+        headers={
+            "X-Signature-256": f"v0={digest}",
+            "X-Slack-Request-Timestamp": now,
+            "Content-Type": "application/json",
+        },
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["matched"] == 1

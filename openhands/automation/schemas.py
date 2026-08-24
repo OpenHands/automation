@@ -446,9 +446,7 @@ class WebhookConfig(BaseModel):
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
-    # Names a verifier in providers.VERIFIERS. Always resolved by the time it
-    # reaches here, so this is a concrete scheme rather than None.
-    signature_scheme: str = DEFAULT_VERIFIER
+    signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
 
 
 class EventResponse(BaseModel):
@@ -477,10 +475,8 @@ class RequestedEventTypesResponse(BaseModel):
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
-# Reserved source names, derived from the provider registry so a provider
-# cannot be added without also being reserved. This is a snapshot for
-# introspection and tests; validation calls `is_builtin_source()` so a provider
-# registered after import time is still protected.
+# Snapshot for introspection; validation calls `is_builtin_source()` so a
+# provider registered after import time is still protected.
 RESERVED_SOURCES = reserved_sources()
 
 
@@ -489,11 +485,7 @@ _HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]
 
 
 def _validate_signature_scheme(v: str) -> str:
-    """Reject a scheme with no verifier behind it.
-
-    Derived from the verifier registry, so adding a verifier makes it
-    configurable without touching this validator.
-    """
+    """Reject a scheme with no verifier behind it."""
     schemes = verifier_schemes()
     if v not in schemes:
         raise ValueError(

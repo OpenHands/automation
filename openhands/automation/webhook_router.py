@@ -63,7 +63,7 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         webhook_url=_build_webhook_url(webhook.org_id, webhook.source),
         event_key_expr=webhook.event_key_expr,
         signature_header=webhook.signature_header,
-        # NULL on rows predating the column; they verify as the default.
+        # A cleared column verifies as the default.
         signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
