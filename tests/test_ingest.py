@@ -481,12 +481,7 @@ async def test_accept_event_reserved_fields_are_ignored(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """`subject` and `occurred_at` are read by nobody and change nothing.
-
-    `provider_event_id` is no longer among them -- it is the dedupe key now
-    (see the recording tests below) -- but it still has no effect on which
-    automations match or on what the run stores.
-    """
+    """`subject` and `occurred_at` are read by nobody and change nothing."""
     async_session.add(
         make_automation(
             org_id,
@@ -680,13 +675,7 @@ async def test_accept_event_records_events_that_match_nothing(
     async_session,
     slack_payload: dict,
 ):
-    """The support question this table exists to answer.
-
-    No automation matches, so no run is created and nothing else in the
-    service remembers the delivery. The row is the only evidence that it
-    arrived at all, and `matched_count = 0` is what distinguishes "your filter
-    is wrong" from "it never got here".
-    """
+    """Nothing matches, so the row is the only evidence the event arrived."""
     result = await accept_event(
         org_id,
         AcceptedEvent(
@@ -751,13 +740,7 @@ async def test_accept_event_deduplicates_through_the_database(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """Two sessions, no shared memory: the index is what does the work.
-
-    This is the case a process-local dedupe set cannot cover, and the reason
-    Slack Socket Mode (#360) is single-replica-only without this table: the
-    redelivery of an un-acked envelope may land on a connection held by a
-    different process entirely.
-    """
+    """Two sessions, no shared memory: the index is what does the work."""
     async with async_session_factory() as setup:
         setup.add(
             make_automation(
@@ -794,12 +777,7 @@ async def test_accept_event_does_not_deduplicate_without_an_id(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """No id means "this provider does not name its deliveries".
-
-    Every such event is therefore distinct, and the partial index has to let
-    them coexist -- under a plain unique index the second would collide with
-    the first.
-    """
+    """No id means every event is distinct, so the index must let them coexist."""
     async_session.add(
         make_automation(
             org_id,
@@ -830,12 +808,7 @@ async def test_accept_event_deduplicates_within_one_org_only(
     async_session,
     slack_payload: dict,
 ):
-    """A custom webhook's source name is only unique per org.
-
-    Two orgs may each run a webhook they both call "ci", numbering their
-    deliveries from 1. Without org in the key, the second org's first delivery
-    would be silently dropped as a duplicate of the first org's.
-    """
+    """A custom webhook's source name is only unique per org, so the key is too."""
     other_org = uuid.uuid4()
     delivery = AcceptedEvent(
         source="ci",
@@ -863,12 +836,7 @@ async def test_accept_event_records_and_creates_runs_atomically(
     mock_authenticated_user,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A failure creating runs leaves no row claiming the event was routed.
-
-    The alternative -- record, commit, then create runs -- would leave a row
-    saying `matched_count = 1` with no run behind it, which is worse than no
-    row at all: the operator would stop looking.
-    """
+    """A failure creating runs leaves no row claiming the event was routed."""
     async_session.add(
         make_automation(
             org_id,
@@ -908,12 +876,7 @@ async def test_accept_event_dedupe_survives_a_rolled_back_delivery(
     mock_authenticated_user,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A delivery that failed to route can be retried under the same id.
-
-    The dedupe row rolls back with everything else, so the provider's retry is
-    a first delivery rather than a duplicate. Without this, one transient
-    failure would swallow the event permanently.
-    """
+    """The dedupe row rolls back too, so the provider's retry is not a duplicate."""
     async with async_session_factory() as setup:
         setup.add(
             make_automation(

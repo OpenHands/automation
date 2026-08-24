@@ -371,22 +371,10 @@ class CustomWebhook(Base):
 
 
 class IntegrationEvent(Base):
-    """One accepted delivery, recorded with what it matched.
+    """One accepted delivery, written in the same transaction as its runs.
 
-    Written by ``accept_event()`` in the same transaction as the runs it
-    creates, so a row claiming ``matched_count = 3`` always has three runs
-    behind it. It exists for two reasons:
-
-    - **Deduplication.** When the transport knows the provider's own id for a
-      delivery, the partial unique index below rejects the second insert and
-      the event is dropped without creating runs. This is what makes a
-      redelivery safe across replicas, where an in-process set cannot see the
-      first delivery (see #361).
-    - **Visibility.** An event that matched nothing leaves no ``AutomationRun``
-      behind, so today it leaves no trace at all. "Did my webhook arrive, or is
-      my filter wrong?" is unanswerable without this row.
-
-    Rows are pruned by the watchdog; see ``prune_integration_events()``.
+    The dedupe key for redeliveries, and the only trace an event that matched
+    nothing leaves.
     """
 
     __tablename__ = "integration_events"

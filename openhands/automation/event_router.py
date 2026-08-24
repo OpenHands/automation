@@ -32,12 +32,8 @@ Authentication Model:
     - The `standard_webhooks` and `slack_v0` schemes sign a timestamp and
       reject deliveries outside a 5-minute window, so they do not have this
       property
-    - Accepted events are recorded and deduplicated by the provider's delivery
-      id (`Provider.event_id_header`), so a verbatim replay of a captured
-      GitHub delivery no longer starts a second run. That is deduplication, not
-      replay protection: the delivery id is not part of the signed content, so
-      a replayer who alters it gets a fresh id. Only the timestamp-signing
-      schemes above close that off.
+    - Events are deduplicated by the provider's delivery id, which is not
+      itself signed: that stops a verbatim replay, not a crafted one
 """
 
 import json

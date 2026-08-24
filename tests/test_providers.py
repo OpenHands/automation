@@ -562,11 +562,7 @@ class TestProviderDescriptors:
             assert provider.capabilities.tolerates_multiple_connections is False
 
     def test_only_github_names_its_deliveries(self):
-        """`event_id_header` is opt-in, and only GitHub sends one today.
-
-        A provider without it is not broken: its events are recorded and
-        routed, just never deduplicated (#361).
-        """
+        """`event_id_header` is opt-in, and only GitHub sends one today."""
         github = get_provider("github")
         assert github is not None
         assert github.event_id_header == "X-GitHub-Delivery"

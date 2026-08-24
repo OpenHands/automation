@@ -630,11 +630,7 @@ async def test_redelivered_github_event_creates_runs_once(
     monkeypatch: pytest.MonkeyPatch,
     mock_authenticated_user,
 ):
-    """A repeated X-GitHub-Delivery is acknowledged but not routed again.
-
-    The second response is still 2XX: from GitHub's side the delivery
-    succeeded, and anything else would only invite more retries.
-    """
+    """A repeated X-GitHub-Delivery is acknowledged 2XX but not routed again."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     async_session.add(
@@ -684,13 +680,7 @@ async def test_github_event_without_a_delivery_header_is_still_recorded(
     async_session,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """No delivery id: recorded with a NULL key, and never deduplicated.
-
-    The OpenHands server re-envelopes and re-signs built-in deliveries, so
-    whether the original header survives the hop is up to the forwarder. When
-    it does not, this is the behaviour -- unchanged from before the table
-    existed, plus the row.
-    """
+    """No delivery id: recorded with a NULL key, and never deduplicated."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     signature, body = sign_payload(github_push_payload, "test-secret")

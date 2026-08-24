@@ -662,5 +662,5 @@ class TestPruneIntegrationEvents:
         assert await prune_integration_events(async_session_factory, settings) == 0
 
     def test_batch_size_is_bounded(self):
-        """Guards the constant itself: an unbounded default is the bug."""
+        """An unbounded default is the bug this guards."""
         assert 0 < PRUNE_BATCH_SIZE <= 10_000

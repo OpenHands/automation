@@ -1,16 +1,5 @@
 """Add integration_events: one row per accepted delivery.
 
-Gives the service a durable record of every event it accepted, which it has
-never had -- until now the only trace of an incoming event was the
-``AutomationRun`` rows it happened to create, and an event that matched nothing
-left none. Two things follow from the row existing: redeliveries can be
-deduplicated across replicas, and "it arrived but matched nothing" becomes
-distinguishable from "it never arrived".
-
-The unique index is partial. A NULL ``provider_event_id`` means the provider
-does not identify its deliveries, not that the id is unknown, so those rows
-must not collide with each other.
-
 Revision ID: 018
 Revises: 017
 Create Date: 2026-08-24

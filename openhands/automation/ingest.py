@@ -69,15 +69,9 @@ async def accept_event(
 ) -> AcceptResult:
     """Route an already-authenticated event to the org's matching automations.
 
-    Records the event as an `IntegrationEvent` and creates a run for every
-    matching automation, in one transaction. Commits before returning.
-
-    When `event.provider_event_id` is set, that record is also the
-    deduplication gate: a delivery whose id this org has already accepted for
-    this source creates nothing and comes back as
-    `AcceptResult(duplicate=True)`. Transports supply the id -- the same rule
-    that puts authentication in the transport -- so an event with no id is
-    recorded and routed normally, just never deduplicated.
+    Records the event and creates the runs in one transaction, deduplicating on
+    `event.provider_event_id` when the transport supplies one. Commits before
+    returning.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that

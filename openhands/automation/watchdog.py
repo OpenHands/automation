@@ -14,9 +14,8 @@ reset to bash-start + run budget + margin once the bash command starts
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
 
-The same loop also prunes ``integration_events``. It is the service's only
-periodic janitor, and the alternative — a second loop with its own interval,
-task and shutdown handling — buys nothing for a single bounded DELETE.
+The same loop prunes ``integration_events``: it is the service's only periodic
+janitor, and a second loop buys nothing for one bounded DELETE.
 """
 
 import asyncio
@@ -546,12 +545,7 @@ async def prune_integration_events(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> int:
-    """Delete accepted events past the retention window.
-
-    Bounded on both sides: by ``received_at`` so the table cannot grow without
-    limit, and by ``PRUNE_BATCH_SIZE`` so one scan cannot turn into a long
-    lock-holding DELETE. Returns the number of rows deleted.
-    """
+    """Delete accepted events past the retention window, one batch per scan."""
     cutoff = utcnow() - timedelta(days=settings.integration_event_retention_days)
 
     async with session_factory() as session:
