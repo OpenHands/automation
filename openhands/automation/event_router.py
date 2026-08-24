@@ -30,9 +30,8 @@ Authentication Model:
     - Under `hmac_sha256_hex` old valid payloads could be replayed, since
       nothing in the signed content expires
     - GitHub includes delivery IDs for deduplication; consider tracking these
-    - The `standard_webhooks` and `slack_v0` schemes sign a timestamp and
-      reject deliveries outside a 5-minute window, so they do not have this
-      property
+    - `standard_webhooks` and `slack_v0` sign a timestamp and reject
+      deliveries outside a 5-minute window, so they are not replayable
     - Current risk is acceptable: replay triggers same automation again (idempotent)
 """
 
@@ -71,13 +70,10 @@ router = APIRouter(prefix="/v1/events", tags=["events"])
 
 
 def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
-    """Resolve the configured signature scheme to a verifier.
+    """Resolve the configured scheme, refusing one this build cannot verify.
 
-    A scheme with no verifier behind it means the stored configuration names
-    something this build does not implement. Refusing the delivery is the only
-    safe reading: the alternative is falling back to a scheme the sender is not
-    using, which would reject every genuine event as a bad signature and read
-    as an authentication failure rather than the misconfiguration it is.
+    Falling back would reject every genuine delivery as a bad signature, hiding
+    a misconfiguration behind a 401.
     """
     verifier = get_verifier(config.signature_scheme)
     if verifier is None:
@@ -118,8 +114,7 @@ async def requested_event_types(
             status_code=401,
             detail=f"Missing signature header: {config.signature_header}",
         )
-    # The signed content here is the source string, not a request body: this is
-    # a read, so there is nothing else for the forwarder to authenticate with.
+    # Signed content is the source string: this is a read, so there is no body.
     verifier = _resolve_verifier(config, source)
     if not verifier.verify(
         body=source.encode("utf-8"),

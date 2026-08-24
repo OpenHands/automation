@@ -52,16 +52,6 @@ class WebhookEvent(BaseModel):
         raise NotImplementedError("Subclasses must implement event_key")
 
 
-# =============================================================================
-# Parsing
-# =============================================================================
-#
-# The parser for a known source lives on its provider descriptor
-# (`openhands.automation.providers`), alongside its verifier, secret and
-# capabilities, so a provider is described in one place. `parse_event()` reads
-# that registry; there is no separate parser registry here.
-
-
 def parse_event(
     source: str,
     payload: dict[str, Any],
@@ -87,8 +77,7 @@ def parse_event(
     Raises:
         ValueError: If event type cannot be determined from payload
     """
-    # Imported lazily: providers.py imports the parsers this module's
-    # submodules define, so a module-level import here would be circular.
+    # Lazy: providers imports WebhookEvent from this module.
     from openhands.automation.providers import get_provider
 
     # Known source - auto-detect event type from payload

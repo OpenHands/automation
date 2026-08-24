@@ -33,8 +33,8 @@ from openhands.automation.schemas import EventTrigger, WebhookConfig
 logger = logging.getLogger("automation.utils.webhook")
 
 
-# Re-exported for callers that predate the provider registry. Both now live in
-# `openhands.automation.providers`, which is the single description of a source.
+# `is_builtin_source` and `verify_signature` now live in `providers`; re-exported
+# here for callers that predate the registry.
 __all__ = [
     "create_automation_run",
     "get_event_automations",
@@ -43,11 +43,6 @@ __all__ = [
     "is_builtin_source",
     "verify_signature",
 ]
-
-
-# =============================================================================
-# Webhook Functions
-# =============================================================================
 
 
 async def get_webhook_config(
@@ -103,8 +98,8 @@ async def get_webhook_config(
             is_builtin=False,
             event_key_expr=webhook.event_key_expr,
             signature_header=webhook.signature_header,
-            # Nullable column: rows written before the scheme existed read as
-            # NULL and mean the behaviour they were created with.
+            # NULL on rows predating the column: the default is what they were
+            # created with.
             signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
         )
     return None

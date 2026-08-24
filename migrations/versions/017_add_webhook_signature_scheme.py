@@ -1,12 +1,6 @@
 """Add signature_scheme to custom_webhooks.
 
-Names the verifier a custom webhook's signatures are checked with, so sources
-that do not sign the raw body with hex HMAC-SHA256 can be onboarded -- Standard
-Webhooks (GitLab 19.1+ signing tokens, Svix) and Slack's v0 scheme.
-
-Nullable on purpose. Existing rows carry no scheme and are read as
-"hmac_sha256_hex", which is the behaviour they were created with, so nothing
-has to be backfilled for correctness.
+Nullable: existing rows carry no scheme and are read as "hmac_sha256_hex".
 
 Revision ID: 017
 Revises: 016

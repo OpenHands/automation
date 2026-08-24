@@ -333,15 +333,8 @@ class CustomWebhook(Base):
         String(100), nullable=False, default="X-Signature-256"
     )
 
-    # How the value in `signature_header` is computed and encoded. Names a
-    # verifier in `openhands.automation.providers.VERIFIERS`:
-    # - "hmac_sha256_hex" (default): hex(HMAC-SHA256(secret, body)),
-    #   GitHub/Linear style, with an optional "sha256=" prefix.
-    # - "standard_webhooks": standardwebhooks.com (GitLab 19.1+ signing
-    #   tokens, Svix) -- "v1,<base64>" over "{id}.{timestamp}.{body}".
-    # - "slack_v0": Slack Events API -- "v0=<hex>" over "v0:{ts}:{body}".
-    # Nullable: rows created before this column existed carry no scheme and are
-    # read as the default, which is the behaviour they were created with.
+    # Names a verifier in `providers.VERIFIERS`. NULL on rows predating the
+    # column, read as the default.
     signature_scheme: Mapped[str | None] = mapped_column(
         String(50),
         nullable=True,
