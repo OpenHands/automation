@@ -82,14 +82,35 @@ def test_run_status_detail_from_blocking_factor_defaults_to_settings_action():
     }
 
 
-def test_blocking_factor_from_failed_task_outcome():
+def test_blocking_factor_from_failed_task_outcome_defaults_to_execution_error():
     blocking_factor = blocking_factor_from_task_outcome(
         {"success": False, "message": "Agent could not access Slack"}
     )
 
     assert blocking_factor is not None
-    assert blocking_factor["kind"] == RunStatusDetailKind.BLOCKED
+    assert blocking_factor["kind"] == RunStatusDetailKind.EXECUTION_ERROR
     assert blocking_factor["detail"] == "Agent could not access Slack"
+
+
+def test_blocking_factor_from_task_outcome_preserves_explicit_classification():
+    blocking_factor = blocking_factor_from_task_outcome(
+        {
+            "success": False,
+            "message": "Missing Slack token",
+            "classification": {
+                "kind": "config",
+                "retryable": False,
+                "user_action": "settings",
+            },
+        }
+    )
+
+    assert blocking_factor is not None
+    detail = run_status_detail_from_blocking_factor(blocking_factor)
+
+    assert detail["kind"] == "config"
+    assert detail["transient"] is False
+    assert detail["user_action"] == "settings"
 
 
 def test_run_status_detail_from_exception_classifies_http_429():

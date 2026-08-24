@@ -896,6 +896,8 @@ class TestDeleteAutomation:
 
     async def test_delete_automation_soft_deletes(self, async_client, async_session):
         """DELETE sets enabled=False and deleted_at."""
+        from openhands.automation.models import AutomationRunStatus
+
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -906,6 +908,12 @@ class TestDeleteAutomation:
             enabled=True,
         )
         async_session.add(automation)
+        await async_session.flush()
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        async_session.add(pending_run)
         await async_session.commit()
         automation_id = automation.id
 
@@ -915,8 +923,13 @@ class TestDeleteAutomation:
 
         # Refresh from DB
         await async_session.refresh(automation)
+        await async_session.refresh(pending_run)
         assert automation.enabled is False
         assert automation.deleted_at is not None
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at == automation.deleted_at
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["detail"] == "Automation deleted by user"
 
     async def test_delete_automation_not_found(self, async_client):
         """DELETE on non-existent ID returns 404."""
@@ -1013,6 +1026,8 @@ class TestUpdateAutomation:
 
     async def test_update_automation_disable(self, async_client, async_session):
         """PATCH can disable an automation."""
+        from openhands.automation.models import AutomationRunStatus
+
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -1023,6 +1038,12 @@ class TestUpdateAutomation:
             enabled=True,
         )
         async_session.add(automation)
+        await async_session.flush()
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        async_session.add(pending_run)
         await async_session.commit()
 
         response = await async_client.patch(
@@ -1032,6 +1053,12 @@ class TestUpdateAutomation:
 
         assert response.status_code == 200
         assert response.json()["enabled"] is False
+
+        await async_session.refresh(pending_run)
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at is not None
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["detail"] == "Automation disabled by user"
 
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""

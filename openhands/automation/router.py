@@ -44,7 +44,11 @@ from openhands.automation.utils.api_key import (
 )
 from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run import (
+    create_pending_run,
+    record_first_run_outcome,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.run_status_detail import (
     blocking_factor_from_task_outcome,
     run_status_detail_from_blocking_factor,
@@ -208,10 +212,13 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    skip_pending_reason: str | None = None
     if update_data.get("enabled") is True:
         update_data["disabled_reason"] = None
         update_data["disabled_detail"] = None
         update_data["disabled_at"] = None
+    elif update_data.get("enabled") is False:
+        skip_pending_reason = "Automation disabled by user"
 
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
@@ -240,6 +247,13 @@ async def update_automation(
         if auto.preset_metadata is not None:
             auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
+    if skip_pending_reason is not None:
+        await skip_pending_runs_for_disabled_automation(
+            session,
+            auto.id,
+            reason=skip_pending_reason,
+        )
+
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
@@ -264,7 +278,14 @@ async def delete_automation(
     """Soft delete an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
     auto.enabled = False
-    auto.deleted_at = utcnow()
+    deleted_at = utcnow()
+    auto.deleted_at = deleted_at
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation deleted by user",
+        completed_at=deleted_at,
+    )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
     await capture_automation_event(

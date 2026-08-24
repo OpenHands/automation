@@ -205,8 +205,9 @@ def blocking_factor_from_task_outcome(
     if not is_blocked:
         return None
 
-    return {
-        "kind": _string_value(task_outcome.get("kind")) or RunStatusDetailKind.BLOCKED,
+    generated_blocking_factor: dict[str, Any] = {
+        "kind": _string_value(task_outcome.get("kind"))
+        or RunStatusDetailKind.EXECUTION_ERROR,
         "detail": _string_value(task_outcome.get("detail"))
         or _string_value(task_outcome.get("message"))
         or _string_value(task_outcome.get("reason"))
@@ -214,6 +215,10 @@ def blocking_factor_from_task_outcome(
         "source": _string_value(task_outcome.get("source")) or "task_outcome",
         "task_outcome": dict(task_outcome),
     }
+    classification = task_outcome.get("classification")
+    if isinstance(classification, Mapping):
+        generated_blocking_factor["classification"] = dict(classification)
+    return generated_blocking_factor
 
 
 def run_status_detail_from_blocking_factor(
