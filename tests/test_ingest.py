@@ -21,7 +21,12 @@ from openhands.automation.ingest import (
     EventSubject,
     accept_event,
 )
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    IntegrationEvent,
+)
 
 
 @pytest.fixture
@@ -88,6 +93,14 @@ def make_automation(
 async def fetch_runs(session) -> list[AutomationRun]:
     """Return every run in the database."""
     result = await session.execute(select(AutomationRun))
+    return list(result.scalars().all())
+
+
+async def fetch_events(session) -> list[IntegrationEvent]:
+    """Return every recorded event, oldest first."""
+    result = await session.execute(
+        select(IntegrationEvent).order_by(IntegrationEvent.received_at)
+    )
     return list(result.scalars().all())
 
 
@@ -468,7 +481,7 @@ async def test_accept_event_reserved_fields_are_ignored(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """Setting the reserved fields changes neither routing nor what is stored."""
+    """`subject` and `occurred_at` are read by nobody and change nothing."""
     async_session.add(
         make_automation(
             org_id,
@@ -609,3 +622,289 @@ def test_dataclasses_use_slots():
     ):
         assert hasattr(type(obj), "__slots__")
         assert not hasattr(obj, "__dict__")
+
+
+# ---------------------------------------------------------------------------
+# Recording and deduplication
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_accept_event_records_what_it_matched(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+):
+    """A routed event leaves a row describing itself and its match count."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+            provider_event_id="Ev123456",
+        ),
+        async_session,
+    )
+
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    recorded = events[0]
+    assert recorded.org_id == org_id
+    assert recorded.source == "slack"
+    assert recorded.event_key == "app_mention"
+    assert recorded.provider_event_id == "Ev123456"
+    assert recorded.payload == slack_payload
+    assert recorded.matched_count == 1
+    assert recorded.received_at is not None
+
+
+@pytest.mark.asyncio
+async def test_accept_event_records_events_that_match_nothing(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+):
+    """Nothing matches, so the row is the only evidence the event arrived."""
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+        ),
+        async_session,
+    )
+
+    assert result.matched == 0
+    assert await fetch_runs(async_session) == []
+
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    assert events[0].matched_count == 0
+    assert events[0].payload == slack_payload
+
+
+@pytest.mark.asyncio
+async def test_accept_event_drops_a_redelivered_provider_event_id(
+    org_id: uuid.UUID,
+    async_session,
+    github_push_payload: dict,
+    mock_authenticated_user,
+):
+    """The same delivery id twice: runs once, and says so."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "github", "on": "push"},
+        )
+    )
+    await async_session.commit()
+
+    delivery = AcceptedEvent(
+        source="github",
+        event_key="push",
+        payload=github_push_payload,
+        provider_event_id="72d3162e-cc78-11e3-81ab-4c9367dc0958",
+    )
+
+    first = await accept_event(org_id, delivery, async_session)
+    second = await accept_event(org_id, delivery, async_session)
+
+    assert first.matched == 1
+    assert first.duplicate is False
+
+    assert second.duplicate is True
+    assert second.matched == 0
+    assert second.run_ids == []
+
+    assert len(await fetch_runs(async_session)) == 1
+    assert len(await fetch_events(async_session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_accept_event_deduplicates_through_the_database(
+    org_id: uuid.UUID,
+    async_session_factory,
+    slack_payload: dict,
+    mock_authenticated_user,
+):
+    """Two sessions, no shared memory: the index is what does the work."""
+    async with async_session_factory() as setup:
+        setup.add(
+            make_automation(
+                org_id,
+                mock_authenticated_user.user_id,
+                {"type": "event", "source": "slack", "on": "app_mention"},
+            )
+        )
+        await setup.commit()
+
+    delivery = AcceptedEvent(
+        source="slack",
+        event_key="app_mention",
+        payload=slack_payload,
+        provider_event_id="Ev08MFMKH6",
+    )
+
+    async with async_session_factory() as replica_a:
+        first = await accept_event(org_id, delivery, replica_a)
+    async with async_session_factory() as replica_b:
+        second = await accept_event(org_id, delivery, replica_b)
+
+    assert first.matched == 1
+    assert second.duplicate is True
+
+    async with async_session_factory() as session:
+        assert len(await fetch_runs(session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_accept_event_does_not_deduplicate_without_an_id(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+):
+    """No id means every event is distinct, so the index must let them coexist."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    delivery = AcceptedEvent(
+        source="slack",
+        event_key="app_mention",
+        payload=slack_payload,
+    )
+
+    first = await accept_event(org_id, delivery, async_session)
+    second = await accept_event(org_id, delivery, async_session)
+
+    assert first.duplicate is False
+    assert second.duplicate is False
+    assert len(await fetch_runs(async_session)) == 2
+    assert len(await fetch_events(async_session)) == 2
+
+
+@pytest.mark.asyncio
+async def test_accept_event_deduplicates_within_one_org_only(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+):
+    """A custom webhook's source name is only unique per org, so the key is too."""
+    other_org = uuid.uuid4()
+    delivery = AcceptedEvent(
+        source="ci",
+        event_key="build",
+        payload=slack_payload,
+        provider_event_id="1",
+    )
+
+    first = await accept_event(org_id, delivery, async_session)
+    second = await accept_event(other_org, delivery, async_session)
+
+    assert first.duplicate is False
+    assert second.duplicate is False
+    assert {event.org_id for event in await fetch_events(async_session)} == {
+        org_id,
+        other_org,
+    }
+
+
+@pytest.mark.asyncio
+async def test_accept_event_records_and_creates_runs_atomically(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failure creating runs leaves no row claiming the event was routed."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "app_mention"},
+        )
+    )
+    await async_session.commit()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("run creation failed")
+
+    monkeypatch.setattr("openhands.automation.ingest.create_automation_run", boom)
+
+    with pytest.raises(RuntimeError):
+        await accept_event(
+            org_id,
+            AcceptedEvent(
+                source="slack",
+                event_key="app_mention",
+                payload=slack_payload,
+                provider_event_id="Ev123456",
+            ),
+            async_session,
+        )
+
+    await async_session.rollback()
+    assert await fetch_events(async_session) == []
+    assert await fetch_runs(async_session) == []
+
+
+@pytest.mark.asyncio
+async def test_accept_event_dedupe_survives_a_rolled_back_delivery(
+    org_id: uuid.UUID,
+    async_session_factory,
+    slack_payload: dict,
+    mock_authenticated_user,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The dedupe row rolls back too, so the provider's retry is not a duplicate."""
+    async with async_session_factory() as setup:
+        setup.add(
+            make_automation(
+                org_id,
+                mock_authenticated_user.user_id,
+                {"type": "event", "source": "slack", "on": "app_mention"},
+            )
+        )
+        await setup.commit()
+
+    delivery = AcceptedEvent(
+        source="slack",
+        event_key="app_mention",
+        payload=slack_payload,
+        provider_event_id="Ev08MFMKH6",
+    )
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("run creation failed")
+
+    monkeypatch.setattr("openhands.automation.ingest.create_automation_run", boom)
+    async with async_session_factory() as failing:
+        with pytest.raises(RuntimeError):
+            await accept_event(org_id, delivery, failing)
+
+    monkeypatch.undo()
+    async with async_session_factory() as retry:
+        result = await accept_event(org_id, delivery, retry)
+
+    assert result.duplicate is False
+    assert result.matched == 1
