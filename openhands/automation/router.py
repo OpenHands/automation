@@ -18,6 +18,7 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
     TarballUpload,
@@ -212,6 +213,7 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
     if update_data.get("enabled") is True:
         update_data["disabled_reason"] = None
@@ -219,6 +221,18 @@ async def update_automation(
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
         skip_pending_reason = "Automation disabled by user"
+        if auto.enabled:
+            disabled_at = utcnow()
+            disabled_detail = {"reason": "manual", "source": "user"}
+            update_data["disabled_reason"] = "manual"
+            update_data["disabled_detail"] = disabled_detail
+            update_data["disabled_at"] = disabled_at
+            disable_event = AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual",
+                detail=disabled_detail,
+                source="manual",
+            )
 
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
@@ -252,7 +266,11 @@ async def update_automation(
             session,
             auto.id,
             reason=skip_pending_reason,
+            disabled_detail=auto.disabled_detail,
+            completed_at=auto.disabled_at,
         )
+    if disable_event is not None:
+        session.add(disable_event)
 
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
@@ -277,13 +295,28 @@ async def delete_automation(
 ) -> None:
     """Soft delete an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    was_enabled = auto.enabled
     auto.enabled = False
     deleted_at = utcnow()
     auto.deleted_at = deleted_at
+    if was_enabled:
+        disabled_detail = {"reason": "manual_delete", "source": "user"}
+        auto.disabled_reason = "manual_delete"
+        auto.disabled_detail = disabled_detail
+        auto.disabled_at = deleted_at
+        session.add(
+            AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual_delete",
+                detail=disabled_detail,
+                source="manual_delete",
+            )
+        )
     await skip_pending_runs_for_disabled_automation(
         session,
         auto.id,
         reason="Automation deleted by user",
+        disabled_detail=auto.disabled_detail,
         completed_at=deleted_at,
     )
     await session.flush()

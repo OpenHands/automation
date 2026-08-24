@@ -95,8 +95,7 @@ class Automation(Base):
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
-    # Auto-disable metadata for automations blocked by permanent configuration faults.
-    # Manual user toggles can set enabled=False without setting these fields.
+    # Current disabled-state metadata. AutomationDisableEvent keeps history.
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     disabled_at: Mapped[datetime | None] = mapped_column(
@@ -238,7 +237,7 @@ class AutomationRun(Base):
 
 
 class AutomationDisableEvent(Base):
-    """Historical record of an automation being auto-disabled."""
+    """Historical record of an automation being disabled."""
 
     __tablename__ = "automation_disable_events"
 

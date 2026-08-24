@@ -6,9 +6,11 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
     AutomationRun,
     TarballUpload,
     UploadStatus,
@@ -926,10 +928,36 @@ class TestDeleteAutomation:
         await async_session.refresh(pending_run)
         assert automation.enabled is False
         assert automation.deleted_at is not None
+        assert automation.disabled_reason == "manual_delete"
+        assert automation.disabled_detail == {
+            "reason": "manual_delete",
+            "source": "user",
+        }
+        assert automation.disabled_at == automation.deleted_at
         assert pending_run.status == AutomationRunStatus.SKIPPED
         assert pending_run.completed_at == automation.deleted_at
         assert pending_run.status_detail is not None
         assert pending_run.status_detail["detail"] == "Automation deleted by user"
+        assert pending_run.status_detail["disabled_detail"] == {
+            "reason": "manual_delete",
+            "source": "user",
+        }
+
+        events = (
+            (
+                await async_session.execute(
+                    select(AutomationDisableEvent).where(
+                        AutomationDisableEvent.automation_id == automation.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+        assert events[0].reason == "manual_delete"
+        assert events[0].detail == {"reason": "manual_delete", "source": "user"}
+        assert events[0].source == "manual_delete"
 
     async def test_delete_automation_not_found(self, async_client):
         """DELETE on non-existent ID returns 404."""
@@ -1052,13 +1080,41 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 200
-        assert response.json()["enabled"] is False
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["disabled_reason"] == "manual"
+        assert data["disabled_detail"] == {"reason": "manual", "source": "user"}
+        assert data["disabled_at"] is not None
 
+        await async_session.refresh(automation)
         await async_session.refresh(pending_run)
+        assert automation.disabled_reason == "manual"
+        assert automation.disabled_detail == {"reason": "manual", "source": "user"}
+        assert automation.disabled_at is not None
         assert pending_run.status == AutomationRunStatus.SKIPPED
-        assert pending_run.completed_at is not None
+        assert pending_run.completed_at == automation.disabled_at
         assert pending_run.status_detail is not None
         assert pending_run.status_detail["detail"] == "Automation disabled by user"
+        assert pending_run.status_detail["disabled_detail"] == {
+            "reason": "manual",
+            "source": "user",
+        }
+
+        events = (
+            (
+                await async_session.execute(
+                    select(AutomationDisableEvent).where(
+                        AutomationDisableEvent.automation_id == automation.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+        assert events[0].reason == "manual"
+        assert events[0].detail == {"reason": "manual", "source": "user"}
+        assert events[0].source == "manual"
 
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""
