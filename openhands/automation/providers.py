@@ -7,10 +7,8 @@ per-org custom webhook can pick one. No transport imports.
 """
 
 import base64
-import binascii
 import hashlib
 import hmac
-import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -24,9 +22,6 @@ if TYPE_CHECKING:
     from fastapi import Request, Response
 
     from openhands.automation.ingest import EventSubject
-
-
-logger = logging.getLogger("automation.providers")
 
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
@@ -138,17 +133,20 @@ def get_header(headers: Mapping[str, str], name: str) -> str | None:
     if value is not None:
         return value
     lowered = name.lower()
-    value = headers.get(lowered)
-    if value is not None:
-        return value
-    for key, candidate in headers.items():
-        if key.lower() == lowered:
-            return candidate
-    return None
+    return next((v for k, v in headers.items() if k.lower() == lowered), None)
 
 
 def _now_seconds() -> int:
     return int(time.time())
+
+
+def _within_tolerance(timestamp: str, clock: Callable[[], int], tolerance: int) -> bool:
+    """Whether a signed timestamp sits inside the replay window."""
+    try:
+        sent_at = int(timestamp)
+    except ValueError:
+        return False
+    return abs(clock() - sent_at) <= tolerance
 
 
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
@@ -191,8 +189,9 @@ def standard_webhooks_key(secret: str) -> bytes:
     if key_material.startswith("whsec_"):
         key_material = key_material[len("whsec_") :]
     try:
+        # binascii.Error, which b64decode raises, subclasses ValueError.
         return base64.b64decode(key_material, validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:
         return secret.encode("utf-8")
 
 
@@ -219,12 +218,7 @@ class StandardWebhooksVerifier:
         timestamp = get_header(headers, STANDARD_WEBHOOKS_TIMESTAMP_HEADER)
         if not signature or not msg_id or not timestamp:
             return False
-
-        try:
-            sent_at = int(timestamp)
-        except (TypeError, ValueError):
-            return False
-        if abs(self.clock() - sent_at) > self.tolerance_seconds:
+        if not _within_tolerance(timestamp, self.clock, self.tolerance_seconds):
             return False
 
         key = standard_webhooks_key(secret)
@@ -265,12 +259,7 @@ class SlackV0Verifier:
         timestamp = get_header(headers, SLACK_TIMESTAMP_HEADER)
         if not signature or not timestamp:
             return False
-
-        try:
-            sent_at = int(timestamp)
-        except (TypeError, ValueError):
-            return False
-        if abs(self.clock() - sent_at) > self.tolerance_seconds:
+        if not _within_tolerance(timestamp, self.clock, self.tolerance_seconds):
             return False
 
         signed_content = b"v0:" + timestamp.encode("utf-8") + b":" + body
