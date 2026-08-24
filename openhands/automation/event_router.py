@@ -43,16 +43,14 @@ from openhands.automation.event_schemas.github import (
     get_event_detection_rules,
     get_supported_event_types,
 )
+from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.schemas import (
     EventDetectionRule,
     EventResponse,
     RequestedEventTypesResponse,
 )
 from openhands.automation.telemetry import capture_automation_event
-from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
-    create_automation_run,
-    get_event_automations,
     get_requested_event_types,
     get_webhook_config,
     verify_signature,
@@ -243,72 +241,21 @@ async def receive_event(
         },
     )
 
-    # 6. Find matching automations
-    automations = await get_event_automations(org_id, source, session)
-    matched_automations = []
-
-    for automation, trigger in automations:
-        # Match trigger against webhook payload using JMESPath filter
-        if matches_trigger(trigger, source, event.event_key, webhook_payload):
-            matched_automations.append(automation)
-
-    logger.info(
-        "Event matched %d/%d automations for org=%s",
-        len(matched_automations),
-        len(automations),
+    # 6. Match triggers and create runs (transport-neutral)
+    result = await accept_event(
         org_id,
-    )
-    await capture_automation_event(
-        "automation_event_matched",
+        AcceptedEvent(
+            source=source,
+            event_key=event.event_key,
+            payload=webhook_payload,
+            parsed_event=event if isinstance(event, BaseModel) else None,
+        ),
+        session,
         request=request,
-        properties={
-            "event_source": source,
-            "event_key": event.event_key,
-            "org_id": str(org_id),
-            "candidate_count": len(automations),
-            "matched_count": len(matched_automations),
-        },
     )
-
-    # 7. Create PENDING runs for matched automations
-    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
-    # For custom webhooks, use the webhook payload directly
-    event_payload = (
-        event.model_dump(mode="json")
-        if isinstance(event, BaseModel)
-        else webhook_payload
-    )
-
-    run_ids: list[str] = []
-    for automation in matched_automations:
-        run = await create_automation_run(
-            automation, session, event_payload=event_payload
-        )
-        run_ids.append(str(run.id))
-        run_properties = {
-            "trigger_source": "event",
-            "event_source": source,
-            "event_key": event.event_key,
-        }
-        await capture_automation_event(
-            "automation_run_scheduled",
-            request=request,
-            automation=automation,
-            run=run,
-            properties=run_properties,
-        )
-        await capture_automation_event(
-            "automation_run_created",
-            request=request,
-            automation=automation,
-            run=run,
-            properties=run_properties,
-        )
-
-    await session.commit()
 
     return EventResponse(
         received=True,
-        matched=len(matched_automations),
-        runs_created=run_ids,
+        matched=result.matched,
+        runs_created=result.run_ids,
     )
