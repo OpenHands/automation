@@ -193,6 +193,11 @@ class AutomationRun(Base):
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Additional metadata captured during run execution.
+    # For preset automations this may include the semantic task outcome parsed
+    # from the final conversation action.
+    run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
