@@ -3,8 +3,8 @@
 The server_default backfills existing rows, so nothing has to be migrated. The
 column stays nullable because a PATCH may clear it; NULL reads as the default.
 
-Revision ID: 017
-Revises: 016
+Revision ID: 018
+Revises: 017
 Create Date: 2026-08-23
 """
 
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "017"
-down_revision: str = "016"
+revision: str = "018"
+down_revision: str = "017"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
