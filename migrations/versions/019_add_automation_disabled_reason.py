@@ -1,7 +1,7 @@
 """Add automation disabled reason metadata.
 
-Revision ID: 017
-Revises: 016
+Revision ID: 019
+Revises: 018
 Create Date: 2026-08-20
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "017"
-down_revision: str = "016"
+revision: str = "019"
+down_revision: str = "018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -71,11 +71,11 @@ def upgrade() -> None:
 
     op.execute(
         "COMMENT ON COLUMN automations.disabled_reason IS "
-        "'Human-readable reason an automation was auto-disabled.'"
+        "'Human-readable reason an automation is currently disabled.'"
     )
     op.execute(
         "COMMENT ON COLUMN automations.disabled_detail IS "
-        "'Structured metadata for auto-disabled automation state.'"
+        "'Structured metadata for current automation disabled state.'"
     )
     op.execute(
         "COMMENT ON TABLE automation_disable_events IS "
