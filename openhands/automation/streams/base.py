@@ -9,9 +9,9 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from openhands.automation.ingest import AcceptedEvent
 
@@ -48,7 +48,7 @@ class StreamProvider(Protocol):
         ...
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class SourceHealth:
     """Whether a source is working, in the terms an operator would ask in."""
 
@@ -65,6 +65,13 @@ _HEALTH: dict[str, SourceHealth] = {}
 def health_for(name: str) -> SourceHealth:
     """The health record for one connection, created on first use."""
     return _HEALTH.setdefault(name, SourceHealth())
+
+
+def record_health(name: str, **changes: Any) -> SourceHealth:
+    """Store an updated copy of one connection's health record."""
+    updated = replace(health_for(name), **changes)
+    _HEALTH[name] = updated
+    return updated
 
 
 def stream_health() -> dict[str, SourceHealth]:

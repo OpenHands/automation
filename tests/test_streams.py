@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -15,13 +16,15 @@ from openhands.automation.config import (
 from openhands.automation.ingest import AcceptedEvent
 from openhands.automation.models import Automation, AutomationRun
 from openhands.automation.streams import (
+    SourceHealth,
     StreamConfigError,
     build_stream_providers,
     stream_health,
     stream_supervisor_loop,
 )
-from openhands.automation.streams.base import reset_stream_health
+from openhands.automation.streams.base import record_health, reset_stream_health
 from openhands.automation.streams.slack import SlackStreamProvider
+from openhands.automation.utils.time import utcnow
 
 
 TEAM_ID = "T06P212QSEA"
@@ -90,6 +93,29 @@ def request(payload: dict, request_type: str = "events_api"):
     from slack_sdk.socket_mode.request import SocketModeRequest
 
     return SocketModeRequest(type=request_type, envelope_id="env-1", payload=payload)
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+
+def test_health_records_are_frozen_and_slotted():
+    health = SourceHealth()
+    with pytest.raises(FrozenInstanceError):
+        health.consecutive_failures = 1  # type: ignore[misc]
+    assert not hasattr(health, "__dict__")
+
+
+def test_recording_health_replaces_the_record():
+    """An update leaves the fields it does not name alone."""
+    stamped = record_health("fake:one", last_event_at=utcnow())
+    updated = record_health("fake:one", consecutive_failures=2)
+
+    assert updated is not stamped
+    assert updated.last_event_at == stamped.last_event_at
+    assert updated.consecutive_failures == 2
+    assert stream_health()["fake:one"] == updated
 
 
 # ---------------------------------------------------------------------------

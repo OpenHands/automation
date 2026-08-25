@@ -1,14 +1,16 @@
 """Supervises one task per stream source for the life of the process.
 
-Moving a source out of its own systemd unit and into the service process gives
-up that unit's failure isolation. The supervisor buys it back: every source is
-a child task whose exceptions are caught here, so one bad provider can never
-take down the others, the scheduler, the dispatcher, or HTTP webhook handling.
+A source holds a connection open for the life of the process, in the same
+process as everything else. The supervisor is what keeps that from mattering:
+every source is a child task whose exceptions are caught here, so one bad
+provider can never take down the others, the scheduler, the dispatcher, or
+HTTP webhook handling.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -20,6 +22,7 @@ from openhands.automation.streams.base import (
     StreamConfigError,
     StreamProvider,
     health_for,
+    record_health,
 )
 from openhands.automation.streams.slack import build_slack_providers
 from openhands.automation.utils.time import utcnow
@@ -90,7 +93,6 @@ async def _supervise(
     settings: StreamSettings,
 ) -> None:
     """Run one source, restarting it with backoff for as long as it can work."""
-    health = health_for(provider.name)
     emit = _make_emit(provider, session_factory)
 
     while not shutdown_event.is_set():
@@ -104,29 +106,28 @@ async def _supervise(
         except asyncio.CancelledError:
             raise
         except Exception:
-            health.consecutive_failures += 1
+            failures = health_for(provider.name).consecutive_failures + 1
+            record_health(provider.name, consecutive_failures=failures)
             logger.exception(
-                "Stream source %s failed (%d consecutive)",
-                provider.name,
-                health.consecutive_failures,
+                "Stream source %s failed (%d consecutive)", provider.name, failures
             )
         else:
-            health.consecutive_failures = 0
+            failures = 0
+            record_health(provider.name, consecutive_failures=failures)
 
         if shutdown_event.is_set():
             return
 
         delay = min(
             settings.stream_backoff_seconds
-            * 2 ** min(max(health.consecutive_failures - 1, 0), _MAX_BACKOFF_DOUBLINGS),
+            * 2 ** min(max(failures - 1, 0), _MAX_BACKOFF_DOUBLINGS),
             settings.stream_max_backoff_seconds,
         )
         logger.info("Restarting stream source %s in %.0fs", provider.name, delay)
-        try:
+        # The loop condition re-reads the event, so a shutdown landing during
+        # the wait ends the source instead of restarting it.
+        with suppress(TimeoutError):
             await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
-        except TimeoutError:
-            continue
-        return
 
 
 def _make_emit(
@@ -138,10 +139,9 @@ def _make_emit(
     Each event gets its own session: the connection is long-lived and holding
     one open across it would pin a pooled connection for the process lifetime.
     """
-    health = health_for(provider.name)
 
     async def emit(event: AcceptedEvent) -> None:
-        health.last_event_at = utcnow()
+        record_health(provider.name, last_event_at=utcnow())
         async with session_factory() as session:
             result = await accept_event(
                 provider.org_id,

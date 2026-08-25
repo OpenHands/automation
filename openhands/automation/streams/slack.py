@@ -1,11 +1,10 @@
 """Slack Socket Mode as a stream source.
 
-Ports the semantics of the OSS VM's `slack-socket-bot` bridge, which has run
-this way in production since 2026-08-13. What changes is only where the code
-lives: the bridge acked Slack and then POSTed the envelope to this service's
-own webhook endpoint on a daemon thread with no retry, so a forward that timed
-out dropped an event Slack would never redeliver. `emit()` is an in-process
-call, so that failure mode ceases to exist.
+Slack holds the connection open and pushes envelopes down it, so there is no
+inbound request to authenticate: the app token is the credential, and the four
+rules below are what keep the stream honest. Because `emit()` is an in-process
+call there is no forwarding hop that can fail after the envelope is acked,
+which is the failure an out-of-process bridge cannot avoid.
 """
 
 import asyncio
@@ -25,17 +24,15 @@ from openhands.automation.ingest import AcceptedEvent
 from openhands.automation.streams.base import (
     Emit,
     StreamConfigError,
-    health_for,
+    record_health,
 )
 from openhands.automation.utils.time import utcnow
 
 
 logger = logging.getLogger("automation.streams.slack")
 
-SOURCE = "slack"
-
 # Widen once the transport is proven; every other event type is acked and
-# dropped, exactly as the bridge does today.
+# dropped.
 SUPPORTED_EVENT_TYPES = frozenset({"app_mention"})
 
 
@@ -48,7 +45,7 @@ class SlackStreamProvider:
     bot_token: str
     team_id: str
     bot_user_id: str
-    source: str = SOURCE
+    source: str = "slack"
 
     @property
     def name(self) -> str:
@@ -64,7 +61,7 @@ class SlackStreamProvider:
         try:
             client.socket_mode_request_listeners.append(self.build_listener(emit))
             await client.connect()
-            health_for(self.name).last_connected_at = utcnow()
+            record_health(self.name, last_connected_at=utcnow())
             logger.info("Slack Socket Mode connected for team=%s", self.team_id)
             await shutdown.wait()
         finally:
@@ -119,8 +116,8 @@ class SlackStreamProvider:
         """Interpret a Slack event envelope, or None if it is not for us.
 
         The payload handed on is the whole envelope, not the inner event: that
-        is what the bridge POSTs today, and what existing triggers filter on
-        (`team_id == '...'` reads a top-level field).
+        is the shape Slack's own webhook delivers, so a trigger filter reads
+        the same fields either way (`team_id == '...'` is a top-level one).
         """
         if envelope.get("team_id") != self.team_id:
             # The socket is per-app, so this should not happen; if it does,

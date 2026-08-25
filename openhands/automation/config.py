@@ -403,11 +403,6 @@ class GitSyncSettings(BaseSettings):
         return bool(self.git_sync_repo_url and self.git_sync_enabled)
 
 
-# ---------------------------------------------------------------------------
-# StreamSettings - Stream source configuration
-# ---------------------------------------------------------------------------
-
-
 class SlackAppSettings(BaseModel):
     """One Slack app this deployment holds a Socket Mode connection for.
 

@@ -10,7 +10,9 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  # Socket Mode transport for slack-sdk's async client.
+  # WebSocket transport for slack-sdk's async Socket Mode client. httpx has no
+  # WebSocket client, and slack-sdk declares aiohttp only under an `optional`
+  # extra that also drags in boto3/SQLAlchemy/websockets, so it is direct here.
   "aiohttp>=3.10",
   "aiosqlite>=0.20",
   "alembic>=1.14",
@@ -32,6 +34,8 @@ dependencies = [
   "pyjwt>=2.8",
   "python-json-logger>=3",
   "pyyaml>=6",
+  # Socket Mode client: apps.connections.open, envelope framing, ping/pong and
+  # reconnect. Only needed when AUTOMATION_STREAMS_ENABLED is on.
   "slack-sdk>=3.33",
   "sqlalchemy[asyncio]>=2",
   "tenacity>=9.1.4",
