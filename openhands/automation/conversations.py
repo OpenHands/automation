@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from openhands.automation.db import using_sqlite
 from openhands.automation.filter_eval import (
@@ -144,7 +145,20 @@ async def continue_conversation(
         # continue, and this design has no queue to hold the event in.
         return None
 
-    run = await session.get(AutomationRun, mapping.run_id)
+    # The automation is eager-loaded: minting a cloud API key reads
+    # `run.automation`, and a lazy load there raises MissingGreenlet, which
+    # `send_conversation_turn` would swallow into a silent fallback.
+    run = (
+        (
+            await session.execute(
+                select(AutomationRun)
+                .where(AutomationRun.id == mapping.run_id)
+                .options(selectinload(AutomationRun.automation))
+            )
+        )
+        .scalars()
+        .first()
+    )
     if run is None:
         return None
 

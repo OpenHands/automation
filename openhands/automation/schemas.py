@@ -133,9 +133,9 @@ class EventTrigger(BaseModel):
 
     `destination: continue_conversation` sends events about the same external
     subject -- one Slack thread, one pull request -- to the conversation the
-    first of them created, instead of starting a run each time. `slack` and
-    `github` derive the subject from the payload; any other source needs
-    `subject_key_expr`.
+    first of them created, instead of starting a run each time. `github`
+    derives the subject from the payload, and `slack` does over Socket Mode;
+    any other source needs `subject_key_expr`.
 
     ```json
     {
@@ -186,8 +186,10 @@ class EventTrigger(BaseModel):
         default=None,
         description=(
             "JMESPath expression yielding the subject key events are grouped "
-            "by. Only needed for sources with no built-in subject; 'slack' and "
-            "'github' derive one. Ignored unless destination is "
+            "by. Needed for any source with no built-in subject. 'github' "
+            "derives one; 'slack' does so only over Socket Mode, so a Slack "
+            "webhook needs join('/', [team_id, event.channel, "
+            "event.thread_ts || event.ts]). Ignored unless destination is "
             "'continue_conversation'."
         ),
     )

@@ -6,15 +6,18 @@ Sending the turn is stubbed here; `test_conversation_turn.py` covers it.
 import asyncio
 import json
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.conversations import (
     attach_run_conversation,
+    continue_conversation,
     resolve_subject_key,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
@@ -852,3 +855,221 @@ async def test_completing_an_ordinary_run_still_cleans_up(
 
     assert response.status_code == 200
     mock_cleanup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_continue_conversation_loads_the_run_s_automation(
+    org_id, async_session_factory, mock_authenticated_user, monkeypatch
+):
+    """Minting a cloud API key reads `run.automation`.
+
+    A lazy load raises MissingGreenlet, which `send_conversation_turn` catches
+    and turns into a silent fallback to a run -- the feature would look
+    switched off in cloud mode. Stubs sit at the HTTP boundary so the ORM path
+    is the real one.
+    """
+    key_urls: list[str] = []
+
+    class KeyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"key": "minted-key"}
+
+    class KeyClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            key_urls.append(url)
+            return KeyResponse()
+
+    monkeypatch.setattr(
+        "openhands.automation.utils.api_key.httpx",
+        SimpleNamespace(AsyncClient=KeyClient, HTTPStatusError=httpx.HTTPStatusError),
+    )
+
+    async def fake_sandbox_url(client, api_url, api_key, sandbox_id):
+        return "https://sandbox.example.com", "sandbox-key"
+
+    monkeypatch.setattr(
+        "openhands.automation.utils.conversation_turn.get_sandbox_agent_url",
+        fake_sandbox_url,
+    )
+
+    posted: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(request.url.path)
+        return httpx.Response(200, json={"success": True})
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(
+        "openhands.automation.utils.conversation_turn.httpx",
+        SimpleNamespace(AsyncClient=client_factory),
+    )
+
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.COMPLETED,
+            sandbox_id="sbx-1",
+        )
+        setup.add(run)
+        await setup.commit()
+        setup.add(
+            ExternalConversation(
+                org_id=org_id,
+                source="slack",
+                subject_key=f"{TEAM}/C123/1.1",
+                automation_id=automation.id,
+                conversation_id="conv-cloud",
+                run_id=run.id,
+            )
+        )
+        await setup.commit()
+        automation_id = automation.id
+
+    # A session with nothing preloaded, so no identity-map hit can mask it.
+    async with async_session_factory() as session:
+        result = await continue_conversation(
+            session,
+            org_id=org_id,
+            source="slack",
+            subject_key=f"{TEAM}/C123/1.1",
+            automation_id=automation_id,
+            event_key="app_mention",
+            event_payload={"hello": "world"},
+        )
+        await session.commit()
+
+    assert result == "conv-cloud"
+    assert key_urls, "the API key was never minted, so run.automation failed"
+    assert posted == ["/api/conversations/conv-cloud/events"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_follow_ups_all_continue_one_conversation(
+    org_id, async_session_factory, mock_authenticated_user, monkeypatch
+):
+    """The row lock serialises them; none forks off a run of its own."""
+    sent: list[str] = []
+
+    async def fake_send(run, conversation_id, text):
+        sent.append(conversation_id)
+        await asyncio.sleep(0.01)  # hold the lock across an await
+        return True
+
+    monkeypatch.setattr(
+        "openhands.automation.conversations.send_conversation_turn", fake_send
+    )
+
+    async with async_session_factory() as setup:
+        setup.add(
+            make_automation(
+                org_id, mock_authenticated_user.user_id, continuing_trigger()
+            )
+        )
+        await setup.commit()
+
+    envelope = slack_envelope()
+
+    async def deliver(event_id: str):
+        async with async_session_factory() as session:
+            return await accept_event(
+                org_id,
+                AcceptedEvent(
+                    source="slack",
+                    event_key="app_mention",
+                    payload=envelope,
+                    provider_event_id=event_id,
+                    subject=slack_subject(envelope),
+                ),
+                session,
+            )
+
+    first = await deliver("Ev0")
+    async with async_session_factory() as session:
+        await attach_run_conversation(session, uuid.UUID(first.run_ids[0]), "conv-1")
+        await session.commit()
+
+    results = await asyncio.gather(*(deliver(f"Later{n}") for n in range(5)))
+
+    assert sent == ["conv-1"] * 5
+    assert all(r.conversation_ids == ["conv-1"] for r in results)
+    assert all(r.run_ids == [] for r in results)
+
+    async with async_session_factory() as session:
+        assert len(await fetch_runs(session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_deadlock_across_several_automations_on_one_subject(
+    org_id, async_session_factory, mock_authenticated_user, monkeypatch
+):
+    """Why `get_event_automations` orders by id.
+
+    Without a stable lock order, two events on one subject can take the same
+    mapping rows in opposite orders and deadlock.
+    """
+
+    async def fake_send(run, conversation_id, text):
+        return True
+
+    monkeypatch.setattr(
+        "openhands.automation.conversations.send_conversation_turn", fake_send
+    )
+
+    async with async_session_factory() as setup:
+        for name in ("Alpha", "Bravo", "Charlie"):
+            setup.add(
+                make_automation(
+                    org_id,
+                    mock_authenticated_user.user_id,
+                    continuing_trigger(),
+                    name,
+                )
+            )
+        await setup.commit()
+
+    envelope = slack_envelope()
+    errors: list[str] = []
+
+    async def deliver(event_id: str) -> None:
+        try:
+            async with async_session_factory() as session:
+                await accept_event(
+                    org_id,
+                    AcceptedEvent(
+                        source="slack",
+                        event_key="app_mention",
+                        payload=envelope,
+                        provider_event_id=event_id,
+                        subject=slack_subject(envelope),
+                    ),
+                    session,
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    await asyncio.gather(*(deliver(f"Ev{n}") for n in range(8)))
+
+    assert errors == []
+    async with async_session_factory() as session:
+        mappings = await fetch_mappings(session)
+    assert len(mappings) == 3
+    assert len({m.automation_id for m in mappings}) == 3

@@ -18,6 +18,9 @@ class EventSubject:
 def slack_subject(envelope: dict[str, Any]) -> EventSubject | None:
     """`team/channel/thread_ts` for a Slack event envelope.
 
+    Applied by the Socket Mode transport. Slack arriving as a custom webhook
+    has no provider descriptor, so such a trigger needs `subject_key_expr`.
+
     Falls back to `ts`: the mention that opens a thread carries no `thread_ts`,
     and its own `ts` becomes the thread id once someone replies.
     """
