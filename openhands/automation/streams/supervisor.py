@@ -40,8 +40,13 @@ BUILTIN_STREAM_SOURCES: Final[
     "slack": build_slack_providers,
 }
 
-# Doubling is capped well below this, but an unbounded shift on a long-running
-# failure would build an integer instead of a delay.
+# Restart backoff: doubled per consecutive failure, up to the ceiling. Not
+# configurable -- these bound how fast a dead source is retried, which is a
+# property of the transport rather than of a deployment.
+_BACKOFF_SECONDS: Final[float] = 5.0
+_MAX_BACKOFF_SECONDS: Final[float] = 300.0
+# The ceiling caps the delay long before this, but an unbounded shift on a
+# long-running failure would build an integer instead of a delay.
 _MAX_BACKOFF_DOUBLINGS: Final[int] = 20
 
 
@@ -80,7 +85,7 @@ async def stream_supervisor_loop(
     )
     await asyncio.gather(
         *(
-            _supervise(provider, session_factory, shutdown_event, settings)
+            _supervise(provider, session_factory, shutdown_event)
             for provider in providers
         )
     )
@@ -90,7 +95,6 @@ async def _supervise(
     provider: StreamProvider,
     session_factory: async_sessionmaker[AsyncSession],
     shutdown_event: asyncio.Event,
-    settings: StreamSettings,
 ) -> None:
     """Run one source, restarting it with backoff for as long as it can work."""
     emit = _make_emit(provider, session_factory)
@@ -119,9 +123,8 @@ async def _supervise(
             return
 
         delay = min(
-            settings.stream_backoff_seconds
-            * 2 ** min(max(failures - 1, 0), _MAX_BACKOFF_DOUBLINGS),
-            settings.stream_max_backoff_seconds,
+            _BACKOFF_SECONDS * 2 ** min(max(failures - 1, 0), _MAX_BACKOFF_DOUBLINGS),
+            _MAX_BACKOFF_SECONDS,
         )
         logger.info("Restarting stream source %s in %.0fs", provider.name, delay)
         # The loop condition re-reads the event, so a shutdown landing during

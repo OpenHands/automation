@@ -21,6 +21,7 @@ from openhands.automation.streams import (
     build_stream_providers,
     stream_health,
     stream_supervisor_loop,
+    supervisor,
 )
 from openhands.automation.streams.base import record_health, reset_stream_health
 from openhands.automation.streams.slack import SlackStreamProvider
@@ -288,8 +289,11 @@ class FakeProvider:
         await self.behaviour(self, emit, shutdown)
 
 
-def fast_settings() -> StreamSettings:
-    return StreamSettings(stream_backoff_seconds=0.01, stream_max_backoff_seconds=0.01)
+@pytest.fixture
+def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the restart backoff so a supervisor test is not a sleep test."""
+    monkeypatch.setattr(supervisor, "_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(supervisor, "_MAX_BACKOFF_SECONDS", 0.01)
 
 
 async def hold(_provider, _emit, shutdown: asyncio.Event) -> None:
@@ -297,7 +301,9 @@ async def hold(_provider, _emit, shutdown: asyncio.Event) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failing_source_does_not_affect_the_others(async_session_factory):
+async def test_a_failing_source_does_not_affect_the_others(
+    async_session_factory, fast_backoff
+):
     """The isolation a separate systemd unit used to provide."""
     shutdown = asyncio.Event()
     failures = 0
@@ -317,7 +323,6 @@ async def test_a_failing_source_does_not_affect_the_others(async_session_factory
             async_session_factory,
             shutdown_event=shutdown,
             providers=[flaky, healthy],
-            settings=fast_settings(),
         )
     )
     while flaky.runs < 3:
@@ -330,7 +335,9 @@ async def test_a_failing_source_does_not_affect_the_others(async_session_factory
 
 
 @pytest.mark.asyncio
-async def test_a_misconfigured_source_is_not_retried(async_session_factory):
+async def test_a_misconfigured_source_is_not_retried(
+    async_session_factory, fast_backoff
+):
     """Nothing a restart can fix, so it stops rather than spinning."""
     shutdown = asyncio.Event()
 
@@ -345,7 +352,6 @@ async def test_a_misconfigured_source_is_not_retried(async_session_factory):
             async_session_factory,
             shutdown_event=shutdown,
             providers=[broken, healthy],
-            settings=fast_settings(),
         )
     )
     await asyncio.sleep(0.05)
@@ -357,7 +363,7 @@ async def test_a_misconfigured_source_is_not_retried(async_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_shutdown_ends_every_source(async_session_factory):
+async def test_shutdown_ends_every_source(async_session_factory, fast_backoff):
     shutdown = asyncio.Event()
     providers = [FakeProvider(f"fake:{i}", hold) for i in range(3)]
 
@@ -366,7 +372,6 @@ async def test_shutdown_ends_every_source(async_session_factory):
             async_session_factory,
             shutdown_event=shutdown,
             providers=providers,
-            settings=fast_settings(),
         )
     )
     await asyncio.sleep(0.05)
@@ -430,7 +435,6 @@ async def test_emitted_event_creates_a_run(
             async_session_factory,
             shutdown_event=shutdown,
             providers=[source],
-            settings=fast_settings(),
         ),
         timeout=10,
     )

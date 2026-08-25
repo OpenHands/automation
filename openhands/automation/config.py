@@ -433,16 +433,10 @@ class StreamSettings(BaseSettings):
             off the supervisor never starts and nothing else changes.
         AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
             {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
-        AUTOMATION_STREAM_BACKOFF_SECONDS: Delay before the first restart of
-            a failed source, doubled per consecutive failure (default: 5).
-        AUTOMATION_STREAM_MAX_BACKOFF_SECONDS: Ceiling for that delay
-            (default: 300).
     """
 
     streams_enabled: bool = False
     slack_apps: list[SlackAppSettings] = Field(default_factory=list)
-    stream_backoff_seconds: float = 5.0
-    stream_max_backoff_seconds: float = 300.0
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
