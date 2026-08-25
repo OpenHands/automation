@@ -28,6 +28,10 @@ automation/
 │       │   ├── router.py       # Git sync status/trigger API
 │       │   ├── schemas.py      # Git sync request/response schemas
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
+│       ├── streams/            # Stream sources (Slack Socket Mode, see below)
+│       │   ├── base.py         # StreamProvider protocol, per-source health
+│       │   ├── slack.py        # Slack Socket Mode provider
+│       │   └── supervisor.py   # Source registry, supervised task per source
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
 │       │   └── google_cloud.py # GCS implementation
@@ -376,6 +380,54 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
   when one is already running — that cycle covers everything the new one
   would, and the lock would only queue it behind anyway.
+
+## Stream Sources
+
+Some events arrive over a connection this service holds open rather than over
+an inbound HTTP request — today that means Slack Socket Mode. Everything past
+the transport is unchanged: a streamed event goes through `accept_event()` like
+any webhook, so it matches **unmodified automation definitions** and is
+deduplicated by `IntegrationEvent` on the provider's own delivery id.
+
+- **Off by default.** `AUTOMATION_STREAMS_ENABLED` plus at least one configured
+  app is what starts the supervisor; with it off nothing changes. This is a
+  self-hosted capability: Slack does not allow Socket Mode apps in the public
+  Marketplace, and a held-open connection does not fit a stateless autoscaled
+  tier. Webhooks remain the cloud path.
+- **Configuration is environment-only** — `AUTOMATION_SLACK_APPS`, a JSON list
+  of `{org_id, app_token, bot_token, team_id, bot_user_id}`. There is
+  deliberately no table and no CRUD API: per-org socket configuration is a
+  multi-tenant requirement, and taking it now would cost a migration and a
+  credential-encryption surface before anyone needs it. See `StreamSettings` in
+  `config.py`.
+- **A provider owns its own loop.** `StreamProvider.run(emit, shutdown)` holds
+  the connection and pushes events out; it is not polled. A callback-driven SDK
+  like `slack_sdk` already reconnects correctly and forcing it into a
+  `receive()` shape means reimplementing that badly.
+- **The supervisor catches per source.** Each source is a child task whose
+  exceptions are caught and restarted with exponential backoff, so one bad
+  provider cannot take down the others, the scheduler, the dispatcher, or HTTP
+  webhook handling — the isolation a separate systemd unit used to provide. A
+  `StreamConfigError` is terminal: nothing a restart can fix.
+- **Slack semantics**, ported from the OSS VM's `slack-socket-bot` bridge:
+  ack the envelope before any other work (Slack redelivers anything unacked),
+  drop the bot's own messages (`bot_id`/`subtype`), assert `team_id` on every
+  envelope, and assert both `team_id` and `bot_user_id` against `auth.test`
+  *before* connecting, so a mis-pasted token fails loudly instead of bridging
+  the wrong workspace. The payload handed to `accept_event()` is the whole
+  Slack envelope, which is what the bridge POSTs today and what existing
+  triggers filter on (`team_id == '...'`).
+- **Health** is process-local (`stream_health()`): `last_connected_at`,
+  `last_event_at`, `consecutive_failures` per connection. Nothing renders it
+  yet.
+- Slack permits up to 10 concurrent Socket Mode connections per app and
+  distributes payloads across them, so this is safe active-active and a rolling
+  deploy can drop nothing. That is a Slack guarantee, not a general one — see
+  `Capabilities.tolerates_multiple_connections` in `providers.py`.
+
+Cutover on the OSS VM: deploy with the flag on, verify runs are created from
+in-service events, then `systemctl disable --now slack-socket-bot`. No
+automation definitions change; roll back by re-enabling the unit.
 
 ## Release Procedure
 

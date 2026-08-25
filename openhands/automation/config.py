@@ -43,13 +43,14 @@ different values, use monkeypatching or reload the affected modules.
 """
 
 import os
+import uuid
 import warnings
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -403,6 +404,60 @@ class GitSyncSettings(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
+# StreamSettings - Stream source configuration
+# ---------------------------------------------------------------------------
+
+
+class SlackAppSettings(BaseModel):
+    """One Slack app this deployment holds a Socket Mode connection for.
+
+    `team_id` and `bot_user_id` are asserted against `auth.test` before the
+    socket opens, so a mis-pasted token fails loudly instead of silently
+    bridging the wrong workspace into this organization.
+    """
+
+    org_id: uuid.UUID
+    # App-level token (xapp-), which opens the socket.
+    app_token: str
+    # Bot token (xoxb-), used only to assert identity at startup.
+    bot_token: str
+    team_id: str
+    bot_user_id: str
+
+
+class StreamSettings(BaseSettings):
+    """Stream sources: long-lived inbound connections, supervised in-process.
+
+    Off by default, and a self-hosted capability for two independent reasons:
+    Slack does not allow Socket Mode apps in the public Marketplace, and
+    connection-scoped state does not fit a stateless autoscaled tier. Webhooks
+    remain the cloud path.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_STREAMS_ENABLED: Master switch (default: false). With it
+            off the supervisor never starts and nothing else changes.
+        AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
+            {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
+        AUTOMATION_STREAM_BACKOFF_SECONDS: Delay before the first restart of
+            a failed source, doubled per consecutive failure (default: 5).
+        AUTOMATION_STREAM_MAX_BACKOFF_SECONDS: Ceiling for that delay
+            (default: 300).
+    """
+
+    streams_enabled: bool = False
+    slack_apps: list[SlackAppSettings] = Field(default_factory=list)
+    stream_backoff_seconds: float = 5.0
+    stream_max_backoff_seconds: float = 300.0
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether to start the supervisor: switched on, and something to run."""
+        return bool(self.streams_enabled and self.slack_apps)
+
+
+# ---------------------------------------------------------------------------
 # ServiceSettings - Core service configuration (formerly "Settings")
 # ---------------------------------------------------------------------------
 
@@ -640,6 +695,7 @@ class AppConfig:
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
         git_sync: Git sync settings (repo, branch, credentials)
+        streams: Stream source settings (Slack Socket Mode)
 
     Example:
         config = get_config()
@@ -684,6 +740,11 @@ class AppConfig:
     def git_sync(self) -> GitSyncSettings:
         """Git sync configuration (AUTOMATION_ prefix)."""
         return GitSyncSettings()
+
+    @cached_property
+    def streams(self) -> StreamSettings:
+        """Stream source configuration (AUTOMATION_ prefix)."""
+        return StreamSettings()
 
 
 @lru_cache
