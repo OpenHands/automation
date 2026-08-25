@@ -1,8 +1,7 @@
-"""Tests for the one request the service makes to a conversation it did not open.
+"""Tests for the request that continues a conversation.
 
-`POST /api/conversations/{id}/events` with `run: true` is the agent-server
-behaviour `continue_conversation` is built on -- append a message, and start the
-agent loop only if it is not already running. These tests pin that request.
+`POST /api/conversations/{id}/events` with `run: true` is what
+`continue_conversation` is built on; these tests pin its shape.
 """
 
 import json
@@ -70,7 +69,7 @@ async def test_a_turn_is_a_user_message_that_starts_the_loop(monkeypatch):
     assert seen["key"] == "local-key"
     assert body["role"] == "user"
     assert body["content"] == [{"type": "text", "text": "another turn"}]
-    # Without this the message lands in history and nothing answers it.
+    # Without this the message lands in history unanswered.
     assert body["run"] is True
 
 
@@ -112,7 +111,7 @@ async def test_a_cloud_run_with_no_sandbox_never_sends(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_reaped_sandbox_is_a_false_not_an_exception(monkeypatch):
-    """The caller answers False by starting a run, which is the right answer."""
+    """The caller answers a False by starting a run."""
 
     async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("should not have been called")

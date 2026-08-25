@@ -580,11 +580,7 @@ class TestProviderDescriptors:
             assert provider.handshake is None
 
     def test_only_github_names_a_subject(self):
-        """GitHub numbers issues and pull requests; the other two do not.
-
-        A source without an extractor is not shut out of conversation reuse --
-        its triggers supply `subject_key_expr` instead.
-        """
+        """The others are not shut out; their triggers use `subject_key_expr`."""
         github = get_provider("github")
         assert github is not None
         assert github.subject is github_subject

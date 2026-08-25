@@ -1,15 +1,8 @@
-"""Routing an event to the conversation its subject already has.
+"""Mapping an external subject to a conversation the agent server owns.
 
-Two things live here: deriving a subject key from an event, and the mapping
-from that key to a conversation the agent server manages. The service stores
-the correspondence and nothing else -- no session states, no pending-event
-queue, no sandbox restart semantics. A conversation's lifecycle stays where the
-conversation does.
-
-The order of operations is fixed by one fact: the service does not learn a
-conversation id until the run that created it completes and posts one on the
-completion callback. So a mapping is written when a run is created, pointing at
-that run, and filled in later by `attach_run_conversation()`.
+The service stores only the correspondence. Ordering is fixed by one fact: a
+conversation id arrives on the run's completion callback, so a mapping is
+written when a run is created and filled in by `attach_run_conversation()`.
 """
 
 import logging
@@ -41,8 +34,7 @@ logger = logging.getLogger("automation.conversations")
 
 CONTINUE_CONVERSATION = "continue_conversation"
 
-# Matches ExternalConversation.subject_key. A longer key is a broken extractor,
-# not a long thread, and truncating one would silently merge two subjects.
+# Matches ExternalConversation.subject_key. Truncating would merge two subjects.
 MAX_SUBJECT_KEY_LENGTH = 500
 
 
@@ -63,15 +55,9 @@ def resolve_subject_key(
     payload: dict[str, Any],
     subject: EventSubject | None,
 ) -> str | None:
-    """The key `continue_conversation` groups this event's siblings by.
+    """The key this event's siblings are grouped by, or None for a plain run.
 
-    A trigger's own `subject_key_expr` wins over the provider's extractor: the
-    provider describes its source in general, the trigger knows what this
-    particular automation considers one conversation.
-
-    None means this event has no subject -- a GitHub `push`, a custom webhook
-    with no expression configured -- and the caller starts a run, which is what
-    it would have done anyway.
+    A trigger's `subject_key_expr` wins over the provider's extractor.
     """
     if trigger.subject_key_expr:
         return _key_from_expression(trigger.subject_key_expr, payload)
@@ -88,8 +74,7 @@ def _key_from_expression(expression: str, payload: dict[str, Any]) -> str | None
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, str | int | float):
-        # A dict or a list is not an identity. Booleans are excluded for the
-        # same reason: `true` would collapse every event onto one subject.
+        # A dict is not an identity; `true` would collapse every event onto one.
         logger.warning(
             "subject_key_expr %r yielded a non-scalar (%s); ignoring it",
             expression,
@@ -117,10 +102,8 @@ async def _lock_mapping(
 ) -> ExternalConversation | None:
     """Read the subject's mapping, locking it for the rest of the transaction.
 
-    The lock is the answer to concurrency: a second event for the same Slack
-    thread blocks here until the first has committed, so it sees the first's
-    decision rather than racing it. SQLite has no row locks and runs
-    single-process, so it simply reads.
+    The lock serialises concurrent events for one subject. SQLite has no row
+    locks and runs single-process, so it simply reads.
     """
     stmt = select(ExternalConversation).where(
         ExternalConversation.org_id == org_id,
@@ -146,12 +129,10 @@ async def continue_conversation(
 ) -> str | None:
     """Deliver this event as another turn on the subject's conversation.
 
-    Returns the conversation id when the agent server accepted the turn, and
-    None when the caller should create a run instead -- no mapping yet, no
-    conversation recorded against it yet, or a conversation that can no longer
-    be reached.
-
-    Takes the mapping's row lock, which is held until the caller commits.
+    Returns the conversation id when the turn landed, None when the caller
+    should create a run: no mapping, no conversation recorded yet, or one that
+    can no longer be reached. Holds the mapping's row lock until the caller
+    commits.
     """
     mapping = await _lock_mapping(session, org_id, source, subject_key, automation_id)
     if mapping is None:
@@ -159,10 +140,8 @@ async def continue_conversation(
 
     conversation_id = mapping.conversation_id
     if not conversation_id or mapping.run_id is None:
-        # A run for this subject is in flight and has not reported its
-        # conversation yet. There is nothing to continue, so this event gets a
-        # run of its own; the alternative is a queue, which this design does
-        # not have.
+        # A run is in flight and has not reported its conversation. Nothing to
+        # continue, and this design has no queue to hold the event in.
         return None
 
     run = await session.get(AutomationRun, mapping.run_id)
@@ -175,9 +154,8 @@ async def continue_conversation(
         compose_turn(source, event_key, event_payload),
     )
     if not delivered:
-        # Unreachable: the sandbox was reaped, or the conversation is gone.
-        # Forget it, so the run the caller is about to create takes over the
-        # subject instead of the mapping staying pinned to a dead sandbox.
+        # Forget it, so the caller's new run takes over the subject rather than
+        # leaving the mapping pinned to a dead sandbox.
         mapping.conversation_id = None
         mapping.run_id = None
         mapping.last_event_at = utcnow()
@@ -198,9 +176,8 @@ async def record_subject_run(
 ) -> None:
     """Point the subject's mapping at the run that will own its conversation.
 
-    Best effort by design. Losing the race to insert means a concurrent event
-    for the same subject claimed it first; that event's run becomes the
-    subject's conversation and this one is an ordinary run. Nothing is dropped.
+    Losing the insert race means a concurrent event claimed the subject first;
+    this run then just does not own it, and nothing is dropped.
     """
     now = utcnow()
     mapping = await _lock_mapping(session, org_id, source, subject_key, automation_id)
@@ -218,9 +195,7 @@ async def record_subject_run(
         run_id=run.id,
         last_event_at=now,
     )
-    # A savepoint, for the same reason the event insert has one: the unique
-    # violation has to stay recoverable, because the caller still has runs to
-    # commit in this transaction.
+    # Savepoint: the caller still has runs to commit in this transaction.
     try:
         async with session.begin_nested():
             session.add(mapping)
@@ -241,14 +216,8 @@ async def attach_run_conversation(
 ) -> bool:
     """Record the conversation a run created, against the subject it was for.
 
-    Called from the completion callback, which is the first moment the service
-    knows the id.
-
-    Returns whether this run owns a subject's conversation. False is the
-    ordinary case -- most runs are not about an external subject -- and the
-    caller uses it to decide whether the sandbox may be deleted: a conversation
-    inside a deleted sandbox cannot be continued, which would make
-    `continue_conversation` a no-op in cloud mode.
+    Returns whether this run owns one. The caller uses it to keep the sandbox:
+    a conversation inside a deleted sandbox cannot be continued.
     """
     result: CursorResult = await session.execute(  # type: ignore[assignment]
         update(ExternalConversation)

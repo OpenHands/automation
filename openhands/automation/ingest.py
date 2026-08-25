@@ -36,8 +36,7 @@ from openhands.automation.utils.webhook import (
 
 logger = logging.getLogger("automation.ingest")
 
-# Re-exported: phase 1 put `EventSubject` here, and it now lives in the leaf
-# module the provider registry can import without a cycle.
+# `EventSubject` moved to the leaf module `subjects`; re-exported for callers.
 __all__ = ["AcceptResult", "AcceptedEvent", "EventSubject", "accept_event"]
 
 
@@ -50,8 +49,7 @@ class AcceptedEvent:
     # Raw provider payload; JMESPath trigger filters run on this.
     payload: dict[str, Any] = field(default_factory=dict)
     provider_event_id: str | None = None
-    # What the event is about, when the transport could name it. A trigger with
-    # `subject_key_expr` overrides it; see `conversations.resolve_subject_key`.
+    # What the event is about, when the transport could name it.
     subject: EventSubject | None = None
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
@@ -65,8 +63,8 @@ class AcceptResult:
     matched: int
     run_ids: list[str]
     duplicate: bool = False
-    # Conversations this event continued instead of starting a run for. A
-    # matched automation contributes to exactly one of these two lists.
+    # Conversations continued instead of starting a run. A matched automation
+    # contributes to exactly one of these two lists.
     conversation_ids: list[str] = field(default_factory=list)
 
 
@@ -85,11 +83,9 @@ async def accept_event(
     returning.
 
     A matched automation whose trigger sets `destination` to
-    `continue_conversation` gets one more step first: the event's subject is
-    resolved, and if that subject already has a reachable conversation the
-    event is delivered to it as another turn and no run is created. Everything
-    else -- no subject, no conversation yet, a conversation that has gone --
-    falls back to creating a run, which is what would have happened anyway.
+    `continue_conversation` first tries to deliver the event as another turn on
+    its subject's conversation, creating no run. Anything else -- no subject,
+    no conversation yet, one that has gone -- falls back to creating a run.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -166,9 +162,7 @@ async def accept_event(
         else webhook_payload
     )
 
-    # Derived once, and only when something is going to read it: every trigger
-    # without a `subject_key_expr` of its own shares the provider's answer for
-    # this payload, and the ordinary event matches no continuing trigger at all.
+    # Derived once, and only when a matched trigger will read it.
     continuing = any(
         trigger.destination == CONTINUE_CONVERSATION for _, trigger in matched
     )
@@ -217,9 +211,7 @@ async def accept_event(
         )
         run_ids.append(str(run.id))
         if subject_key is not None:
-            # The run has to exist before the mapping can point at it, and the
-            # conversation id arrives later still -- on this run's completion
-            # callback, which is the only place the service ever learns one.
+            # The conversation id follows later, on this run's completion.
             await record_subject_run(
                 session,
                 org_id=org_id,

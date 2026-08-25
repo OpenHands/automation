@@ -481,10 +481,7 @@ async def test_accept_event_ignores_a_subject_nobody_opted_into(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """A trigger that does not set `destination` never looks at `subject`.
-
-    `occurred_at` is still read by nobody.
-    """
+    """Without `destination`, `subject` is never read. Nor is `occurred_at`."""
     async_session.add(
         make_automation(
             org_id,

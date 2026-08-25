@@ -81,9 +81,9 @@ class Provider:
     # None means the provider does not identify deliveries, so its events are
     # recorded but never deduplicated.
     event_id_header: str | None = None
-    # Names the external thing an event is about, for a trigger whose
-    # destination is `continue_conversation`. None means this provider has no
-    # notion of one, and such a trigger has to supply `subject_key_expr`.
+    # Names the external thing an event is about, for a
+    # `continue_conversation` trigger. None means such a trigger must supply
+    # its own `subject_key_expr`.
     subject: SubjectFunc | None = None
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
     # HTTP handshake, and Socket Mode is our Slack path.
@@ -293,9 +293,8 @@ def _register_builtin_providers() -> None:
 
     # All forwarded by the OpenHands server, which signs with the single shared
     # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated, and
-    # only GitHub has a subject extractor -- the other two can still opt into
-    # conversation reuse with an explicit `subject_key_expr`.
+    # deliveries; the other two are recorded without being deduplicated. Only
+    # GitHub has a subject extractor; the others use `subject_key_expr`.
     for source, parse, event_id_header, subject in (
         ("bitbucket_data_center", parse_bitbucket_data_center_event, None, None),
         ("github", parse_github_event_auto, "X-GitHub-Delivery", github_subject),

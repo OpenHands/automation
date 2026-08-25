@@ -552,9 +552,7 @@ async def complete_run(
 
     owns_conversation = False
     if body.conversation_id:
-        # The first and only moment the service learns this run's conversation
-        # id. If the run was routing an external subject, its mapping has been
-        # waiting for exactly this.
+        # The only moment the service learns this run's conversation id.
         owns_conversation = await attach_run_conversation(
             session, run_id, body.conversation_id
         )
@@ -579,10 +577,9 @@ async def complete_run(
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
     #
-    # A run that owns an external subject's conversation is treated like
+    # A run owning an external subject's conversation is treated like
     # keep_alive: deleting its sandbox would destroy the conversation the next
-    # event on that subject is meant to continue, and the runtime TTL reaper
-    # still collects it.
+    # event is meant to continue. The runtime TTL reaper still collects it.
     if run.sandbox_id and automation.keep_alive is not True and not owns_conversation:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings

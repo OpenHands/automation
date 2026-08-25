@@ -1,9 +1,6 @@
 """Tests for routing events to an existing conversation.
 
-Three layers, kept apart on purpose: deriving a subject key from a payload is
-pure and tested as such; the mapping and its concurrency need the database; and
-sending the turn is stubbed everywhere except the one test that asserts what
-the agent server is actually asked for.
+Sending the turn is stubbed here; `test_conversation_turn.py` covers it.
 """
 
 import asyncio
@@ -51,7 +48,7 @@ def slack_envelope(
     thread_ts: str | None = None,
     text: str = "<@U999> take a look",
 ) -> dict[str, Any]:
-    """A Socket Mode envelope, in the shape the stream provider passes on."""
+    """A Socket Mode envelope, as the stream provider passes it on."""
     event: dict[str, Any] = {
         "type": "app_mention",
         "channel": channel,
@@ -144,12 +141,7 @@ class TestSlackSubject:
         assert subject == EventSubject(key=f"{TEAM}/C123/1755000000.000100")
 
     def test_an_opening_mention_keys_on_its_own_ts(self):
-        """The mention that starts a thread is the same subject as its replies.
-
-        Slack gives the opening message no `thread_ts`; its `ts` becomes the
-        thread's id the moment somebody replies. Without the fallback the
-        opening mention and the reply to it would be two subjects.
-        """
+        """The mention that starts a thread is the same subject as its replies."""
         opener = slack_subject(slack_envelope(ts="1755000000.000100"))
         reply = slack_subject(
             slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
@@ -183,11 +175,7 @@ class TestGithubSubject:
         assert subject == EventSubject(key="org/repo#12")
 
     def test_an_issue_comment_on_a_pr_is_the_same_subject(self):
-        """GitHub numbers issues and pull requests from one sequence.
-
-        A review on PR 12 and an `issue_comment` on PR 12 are the same thing to
-        a person, so they have to be the same key.
-        """
+        """GitHub numbers issues and pull requests from one sequence."""
         review = github_subject(
             {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 12}}
         )
@@ -203,7 +191,7 @@ class TestGithubSubject:
         assert subject == EventSubject(key="org/repo#12")
 
     def test_a_push_has_no_subject(self):
-        """There is no conversation to continue for a branch."""
+        """Nothing numbered, so nothing to continue."""
         assert (
             github_subject(
                 {"repository": {"full_name": "org/repo"}, "ref": "refs/heads/main"}
@@ -222,7 +210,7 @@ class TestResolveSubjectKey:
         assert resolve_subject_key(trigger, {}, subject) == f"{TEAM}/C123/1.1"
 
     def test_a_trigger_expression_overrides_the_provider(self):
-        """The provider describes its source; the trigger knows this automation."""
+        """The trigger's expression wins over the provider's extractor."""
         trigger = EventTrigger.model_validate(
             continuing_trigger(subject_key_expr="event.channel")
         )
@@ -282,14 +270,14 @@ class TestTriggerValidation:
             EventTrigger.model_validate(continuing_trigger(destination="whatever"))
 
     def test_a_broken_subject_expression_is_refused_at_creation(self):
-        """Otherwise the typo looks exactly like the feature being switched off."""
+        """A typo would otherwise look like the feature being switched off."""
         with pytest.raises(ValueError, match="subject_key_expr"):
             EventTrigger.model_validate(continuing_trigger(subject_key_expr="((("))
 
 
 class TestComposeTurn:
     def test_the_payload_travels_verbatim(self):
-        """The script that opened the conversation was handed this same event."""
+        """The payload goes over verbatim."""
         text = compose_turn("slack", "app_mention", slack_envelope(text="ping"))
         assert "app_mention" in text
         assert "ping" in text
@@ -311,7 +299,7 @@ class TestComposeTurn:
 async def test_first_event_creates_a_run_and_claims_the_subject(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """Nothing to continue yet, so this is today's behaviour plus a mapping."""
+    """Nothing to continue yet: today's behaviour, plus a mapping."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -349,7 +337,7 @@ async def test_first_event_creates_a_run_and_claims_the_subject(
 async def test_two_mentions_in_one_thread_reach_the_same_conversation(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """The acceptance criterion: a follow-up lands on the first conversation."""
+    """A follow-up lands on the conversation the first event created."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -401,8 +389,7 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
     assert len(delivered_turns) == 1
     conversation_id, text = delivered_turns[0]
     assert conversation_id == "conv-thread-1"
-    # The turn carries the new event, so the agent can answer the follow-up
-    # with the first exchange still in its history.
+    # The turn carries the new event, with the first exchange still in history.
     assert "and now?" in text
 
     # Still one run in total: the second event started none.
@@ -459,7 +446,7 @@ async def test_a_mention_in_another_thread_starts_its_own_run(
 async def test_an_automation_that_does_not_opt_in_is_untouched(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """No `destination`, no mapping, no lookup, no turn: exactly as today."""
+    """No `destination`: no mapping, no lookup, no turn."""
     automation = make_automation(
         org_id,
         mock_authenticated_user.user_id,
@@ -493,7 +480,7 @@ async def test_an_automation_that_does_not_opt_in_is_untouched(
 async def test_an_unreachable_conversation_degrades_to_a_run(
     org_id, async_session, mock_authenticated_user, unreachable_conversations
 ):
-    """A reaped sandbox is ordinary, not an error."""
+    """A reaped sandbox degrades to a run rather than erroring."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -534,8 +521,7 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
     assert second.conversation_ids == []
     assert len(second.run_ids) == 1
 
-    # The dead conversation is forgotten, and the new run now owns the subject
-    # -- otherwise the mapping would keep pointing at a sandbox that is gone.
+    # The dead conversation is forgotten; the new run owns the subject.
     mappings = await fetch_mappings(async_session)
     assert len(mappings) == 1
     assert mappings[0].conversation_id is None
@@ -546,11 +532,7 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
 async def test_a_run_still_in_flight_does_not_hold_up_the_next_event(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """No conversation reported yet means there is nothing to continue.
-
-    This design has no pending-event queue, so the event gets its own run
-    rather than waiting for one.
-    """
+    """No conversation reported yet, and no queue: the event gets its own run."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -621,7 +603,7 @@ async def test_an_event_without_a_subject_falls_back_to_a_run(
 async def test_github_derives_its_subject_without_the_transport_naming_one(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """The webhook path passes no subject; the provider descriptor supplies it."""
+    """The webhook path passes no subject; the descriptor supplies it."""
     automation = make_automation(
         org_id,
         mock_authenticated_user.user_id,
@@ -657,12 +639,7 @@ async def test_github_derives_its_subject_without_the_transport_naming_one(
 async def test_two_automations_do_not_share_one_subject(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """A conversation belongs to the automation whose script created it.
-
-    Sharing a row would send the second automation's turns into the first's
-    conversation, which has the first automation's prompt and tools and cannot
-    answer them.
-    """
+    """A conversation belongs to the automation whose script created it."""
     for name in ("Triage", "Summarise"):
         async_session.add(
             make_automation(
@@ -699,9 +676,8 @@ async def test_concurrent_events_for_one_subject_yield_one_mapping(
 ):
     """Two workers, one brand-new subject: the unique index picks a winner.
 
-    Both events still run -- there was no conversation to continue, and this
-    design drops nothing -- but only one of them owns the subject, so the two
-    do not race into two conversations for the follow-ups that come after.
+    Both events still run -- there was nothing to continue -- but only one owns
+    the subject, so later events do not split across two conversations.
     """
 
     async def fake_send(run, conversation_id, text):
@@ -750,7 +726,7 @@ async def test_concurrent_events_for_one_subject_yield_one_mapping(
 async def test_attach_run_conversation_reports_whether_a_subject_was_waiting(
     org_id, async_session, mock_authenticated_user
 ):
-    """The return value is what tells the callback to keep the sandbox."""
+    """The return value tells the callback whether to keep the sandbox."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -790,7 +766,7 @@ async def test_attach_run_conversation_reports_whether_a_subject_was_waiting(
 async def test_completing_a_subject_owning_run_keeps_its_sandbox(
     async_client, async_session, mock_authenticated_user
 ):
-    """Deleting it would destroy the conversation the next event must continue."""
+    """Deleting it would destroy the conversation the next event continues."""
     automation = make_automation(
         mock_authenticated_user.org_id,
         mock_authenticated_user.user_id,
@@ -843,7 +819,7 @@ async def test_completing_a_subject_owning_run_keeps_its_sandbox(
 async def test_completing_an_ordinary_run_still_cleans_up(
     async_client, async_session, mock_authenticated_user
 ):
-    """The retention is scoped to runs that own a subject, and nothing else."""
+    """Retention is scoped to runs that own a subject."""
     automation = make_automation(
         mock_authenticated_user.org_id,
         mock_authenticated_user.user_id,

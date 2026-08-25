@@ -165,9 +165,8 @@ def evaluate_filter(expression: str, payload: dict[str, Any]) -> bool:
 def evaluate_expression(expression: str, payload: dict[str, Any]) -> Any:
     """Evaluate a JMESPath expression and return its raw result.
 
-    The same compilation and custom functions as `evaluate_filter`, without the
-    coercion to bool. Used where the value itself is the answer -- a trigger's
-    `subject_key_expr` -- rather than whether it is truthy.
+    As `evaluate_filter`, without the coercion to bool: used where the value
+    itself is the answer, not whether it is truthy.
 
     Raises:
         FilterEvaluationError: If the expression is invalid or evaluation fails

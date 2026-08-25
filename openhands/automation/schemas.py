@@ -131,28 +131,17 @@ class EventTrigger(BaseModel):
 
     ## Conversation reuse
 
-    By default every matching event starts its own run, and therefore its own
-    conversation. Set `destination` to `continue_conversation` to have events
-    about the same external subject -- one Slack thread, one pull request --
-    reach the conversation the first of them created:
+    `destination: continue_conversation` sends events about the same external
+    subject -- one Slack thread, one pull request -- to the conversation the
+    first of them created, instead of starting a run each time. `slack` and
+    `github` derive the subject from the payload; any other source needs
+    `subject_key_expr`.
 
     ```json
     {
       "source": "slack",
       "on": "app_mention",
       "destination": "continue_conversation"
-    }
-    ```
-
-    `slack` and `github` derive the subject from the payload. Any other source
-    needs `subject_key_expr`, a JMESPath expression over the payload:
-
-    ```json
-    {
-      "source": "linear",
-      "on": "Comment.create",
-      "destination": "continue_conversation",
-      "subject_key_expr": "data.issue.id"
     }
     ```
     """
@@ -187,22 +176,19 @@ class EventTrigger(BaseModel):
     destination: Literal["dispatch_run", "continue_conversation"] = Field(
         default="dispatch_run",
         description=(
-            "Where a matching event goes. 'dispatch_run' (the default) starts "
-            "a fresh run with no memory of earlier events. "
-            "'continue_conversation' sends the event as another turn on the "
-            "conversation already associated with the event's subject -- the "
-            "Slack thread, the pull request -- and falls back to starting a "
-            "run when there is no such conversation."
+            "Where a matching event goes. 'dispatch_run' starts a fresh run. "
+            "'continue_conversation' sends it as another turn on the "
+            "conversation for the event's subject, falling back to a run when "
+            "there is none."
         ),
     )
     subject_key_expr: str | None = Field(
         default=None,
         description=(
-            "JMESPath expression yielding the subject key that "
-            "'continue_conversation' groups events by. Only needed for "
-            "sources the service has no built-in subject for: 'slack' and "
-            "'github' derive one from the payload already. Ignored unless "
-            "destination is 'continue_conversation'."
+            "JMESPath expression yielding the subject key events are grouped "
+            "by. Only needed for sources with no built-in subject; 'slack' and "
+            "'github' derive one. Ignored unless destination is "
+            "'continue_conversation'."
         ),
     )
 
@@ -223,9 +209,7 @@ class EventTrigger(BaseModel):
     def validate_subject_key_expr(cls, v: str | None) -> str | None:
         """Validate the subject expression at creation time.
 
-        Same compile check as `filter`: a typo here would otherwise surface as
-        every event silently starting a fresh run, which looks exactly like the
-        feature not being switched on.
+        A typo would otherwise look exactly like the feature being switched off.
         """
         if v:
             from openhands.automation.filter_eval import validate_filter
@@ -521,9 +505,7 @@ class EventResponse(BaseModel):
     received: bool
     matched: int
     runs_created: list[str]  # List of run IDs created
-    # Conversations this event was delivered to as another turn instead of
-    # starting a run. Empty unless a matched trigger sets destination to
-    # 'continue_conversation'.
+    # Conversations continued instead of starting a run.
     conversations_continued: list[str] = Field(default_factory=list)
 
 

@@ -151,8 +151,8 @@ class SlackStreamProvider:
             # Slack's own delivery id. `accept_event()` deduplicates on it, so
             # a redelivered envelope creates no second run.
             provider_event_id=envelope.get("event_id"),
-            # The thread this mention belongs to. Read only by a trigger that
-            # opts into `continue_conversation`; None is harmless otherwise.
+            # The thread this mention belongs to; read only by a
+            # `continue_conversation` trigger.
             subject=slack_subject(envelope),
         )
 
