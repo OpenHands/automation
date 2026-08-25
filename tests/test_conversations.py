@@ -757,9 +757,7 @@ async def test_attach_run_conversation_reports_whether_a_subject_was_waiting(
     async_session.add(automation)
     await async_session.commit()
 
-    run = AutomationRun(
-        automation_id=automation.id, status=AutomationRunStatus.RUNNING
-    )
+    run = AutomationRun(automation_id=automation.id, status=AutomationRunStatus.RUNNING)
     async_session.add(run)
     await async_session.commit()
 

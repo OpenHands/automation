@@ -17,6 +17,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -249,7 +250,7 @@ async def attach_run_conversation(
     inside a deleted sandbox cannot be continued, which would make
     `continue_conversation` a no-op in cloud mode.
     """
-    result = await session.execute(
+    result: CursorResult = await session.execute(  # type: ignore[assignment]
         update(ExternalConversation)
         .where(ExternalConversation.run_id == run_id)
         .values(conversation_id=conversation_id)

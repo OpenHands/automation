@@ -47,9 +47,7 @@ def cloud_backend():
 
 
 def make_run(sandbox_id: str | None = None) -> AutomationRun:
-    return cast(
-        AutomationRun, SimpleNamespace(id="run-1", sandbox_id=sandbox_id)
-    )
+    return cast(AutomationRun, SimpleNamespace(id="run-1", sandbox_id=sandbox_id))
 
 
 @pytest.mark.asyncio
