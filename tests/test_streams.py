@@ -88,13 +88,24 @@ class FakeSocketClient:
 
 
 class FakeWebClient:
-    """Stands in for `AsyncWebClient.auth_test()`."""
+    """Stands in for `AsyncWebClient.auth_test()`.
 
-    def __init__(self, **identity: str) -> None:
-        self.identity = identity
+    Takes the identity in Slack's own vocabulary and answers in Slack's own
+    response shape: `auth.test` reports the bot's user id as `user_id`, and
+    never returns a `bot_user_id`. An earlier version of this fake invented
+    that key, which let the identity assertion pass here while failing against
+    every real token.
+    """
+
+    def __init__(self, team_id: str | None = None, bot_user_id: str | None = None):
+        self.identity: dict[str, str] = {}
+        if team_id is not None:
+            self.identity["team_id"] = team_id
+        if bot_user_id is not None:
+            self.identity["user_id"] = bot_user_id
 
     async def auth_test(self) -> dict:
-        return self.identity
+        return dict(self.identity)
 
 
 def request(payload: dict, request_type: str = "events_api"):
@@ -275,6 +286,48 @@ async def test_identity_assertion_refuses_a_mismatched_token(provider, identity:
     """A mis-pasted token fails loudly instead of bridging the wrong workspace."""
     with pytest.raises(StreamConfigError):
         await provider.assert_identity(FakeWebClient(**identity))
+
+
+class RawWebClient:
+    """Answers with a verbatim `auth.test` body, no translation."""
+
+    def __init__(self, body: dict) -> None:
+        self.body = body
+
+    async def auth_test(self) -> dict:
+        return self.body
+
+
+@pytest.mark.asyncio
+async def test_identity_assertion_reads_the_real_auth_test_shape(provider):
+    """Slack reports the bot's own id as `user_id`.
+
+    Verbatim from a live `auth.test` on a bot token. Reading `bot_user_id`
+    here -- a field that belongs to `oauth.v2.access` -- yields None for every
+    real token, so the source could never start.
+    """
+    await provider.assert_identity(
+        RawWebClient(
+            {
+                "ok": True,
+                "url": "https://openhands.slack.com/",
+                "team": "OpenHands",
+                "user": "openhands",
+                "team_id": TEAM_ID,
+                "user_id": BOT_USER_ID,
+                "bot_id": "B0123456789",
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_identity_assertion_refuses_a_body_without_user_id(provider):
+    """The shape the old fake invented is not a shape Slack ever sends."""
+    with pytest.raises(StreamConfigError):
+        await provider.assert_identity(
+            RawWebClient({"ok": True, "team_id": TEAM_ID, "bot_user_id": BOT_USER_ID})
+        )
 
 
 # ---------------------------------------------------------------------------
