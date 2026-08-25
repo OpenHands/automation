@@ -26,6 +26,7 @@ from openhands.automation.auth import AuthenticatedUser, authenticate_request
 from openhands.automation.config import get_settings
 from openhands.automation.db import get_session
 from openhands.automation.models import CustomWebhook
+from openhands.automation.providers import DEFAULT_VERIFIER
 from openhands.automation.schemas import (
     CustomWebhookCreate,
     CustomWebhookCreateResponse,
@@ -62,6 +63,8 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         webhook_url=_build_webhook_url(webhook.org_id, webhook.source),
         event_key_expr=webhook.event_key_expr,
         signature_header=webhook.signature_header,
+        # A cleared column verifies as the default.
+        signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -120,6 +123,7 @@ async def create_webhook(
         webhook_secret=secret,
         event_key_expr=data.event_key_expr,
         signature_header=data.signature_header,
+        signature_scheme=data.signature_scheme,
         enabled=True,
     )
 
@@ -198,7 +202,8 @@ async def update_webhook(
     """
     Update a webhook's configuration.
 
-    Updatable fields: `name`, `event_key_expr`, `signature_header`, `enabled`.
+    Updatable fields: `name`, `event_key_expr`, `signature_header`,
+    `signature_scheme`, `enabled`.
     The `source` cannot be changed after creation.
     """
     webhook = await session.get(CustomWebhook, webhook_id)

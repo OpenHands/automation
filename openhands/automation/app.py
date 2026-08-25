@@ -9,7 +9,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
@@ -268,7 +267,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.7.1",  # x-release-please-version
+        version="1.8.0",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -326,9 +325,8 @@ async def readiness():
     Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
     """
     try:
-        async with app.state.engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        async with app.state.engine.connect():
+            return {"status": "ready"}
     except Exception as e:
         logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(

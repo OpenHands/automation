@@ -13,13 +13,16 @@ reset to bash-start + run budget + margin once the bash command starts
 
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
+
+The same loop prunes ``integration_events``: it is the service's only periodic
+janitor, and a second loop buys nothing for one bounded DELETE.
 """
 
 import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import inspect, select, update
+from sqlalchemy import delete, inspect, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -30,23 +33,29 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    IntegrationEvent,
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
+from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.automation.utils.run import record_first_run_outcome
+from openhands.automation.utils.run_status_detail import (
+    RunStatusDetailKind,
+    RunStatusPhase,
+    make_run_status_detail,
+    run_status_detail_from_exception,
+    run_status_detail_from_transient_error,
+)
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
 
 logger = logging.getLogger("automation.watchdog")
 
-# Verification outcomes that mean "the bash command may still be executing".
-# "Command still running": the latest BashOutput event has exit_code=None.
-# "No bash output found": the agent-server only emits BashOutput events on
-# 1 MiB stream chunks or on command completion, so a still-running command
-# with modest output has no BashOutput row at all — this is the *common*
-# still-running signature, not just a startup race.
-STILL_RUNNING_VERIFICATION_ERRORS = ("Command still running", "No bash output found")
+# Most rows a single prune deletes. Caps how long one statement holds locks on
+# a table the receive path writes to; the loop runs again a minute later, so a
+# backlog drains rather than being dropped.
+PRUNE_BATCH_SIZE = 5000
 
 
 async def _get_automation_keep_alive(
@@ -115,7 +124,7 @@ async def _defer_still_running(
             AutomationRun.id == run.id,
             AutomationRun.status == AutomationRunStatus.RUNNING,
         )
-        .values(timeout_at=new_timeout_at)
+        .values(timeout_at=new_timeout_at, status_detail=None)
     )
     if result.rowcount > 0:
         logger.info(
@@ -161,7 +170,6 @@ async def _verify_and_mark_run(
 
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
-    keep_alive = await _get_automation_keep_alive(session, run)
 
     # Verify run status via backend
     try:
@@ -179,6 +187,13 @@ async def _verify_and_mark_run(
                 status=AutomationRunStatus.FAILED,
                 completed_at=now,
                 error_detail=f"Timed out: verification failed: {e}",
+                status_detail=run_status_detail_from_exception(
+                    e,
+                    phase=RunStatusPhase.VERIFICATION,
+                    source="automation_service",
+                    operation="verify_run",
+                    previous=run.status_detail,
+                ),
             )
         )
         result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
@@ -198,11 +213,14 @@ async def _verify_and_mark_run(
             )
         return result.rowcount > 0
 
-    if verification.verified:
+    if verification.outcome in (
+        VerificationOutcome.COMPLETED,
+        VerificationOutcome.FAILED,
+    ):
         exit_code = verification.exit_code
 
-        # exit_code == 0: Command completed successfully, we just missed the callback
-        if exit_code == 0:
+        # Command completed successfully; the callback was missed.
+        if verification.outcome == VerificationOutcome.COMPLETED:
             logger.info(
                 "Verified run completed successfully (exit_code=%s), "
                 "callback was missed",
@@ -218,6 +236,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.COMPLETED,
                     completed_at=now,
+                    status_detail=None,
                 )
             )
 
@@ -232,6 +251,7 @@ async def _verify_and_mark_run(
                 exit_code,
                 extra=extra,
             )
+            error_detail = f"Timed out: {error_msg}"
             stmt = (
                 update(AutomationRun)
                 .where(
@@ -241,7 +261,18 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
-                    error_detail=f"Timed out: {error_msg}",
+                    error_detail=error_detail,
+                    status_detail=make_run_status_detail(
+                        phase=RunStatusPhase.EXECUTION,
+                        kind=RunStatusDetailKind.TIMEOUT,
+                        detail=error_msg,
+                        transient=False,
+                        source="agent_server",
+                        operation="verify_run",
+                        code=str(exit_code) if exit_code is not None else None,
+                        previous=run.status_detail,
+                        extra={"formatted_detail": error_detail},
+                    ),
                 )
             )
 
@@ -269,6 +300,16 @@ async def _verify_and_mark_run(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
                     error_detail=error_detail,
+                    status_detail=make_run_status_detail(
+                        phase=RunStatusPhase.EXECUTION,
+                        kind=RunStatusDetailKind.EXECUTION_ERROR,
+                        detail=error_detail,
+                        transient=False,
+                        source="agent_server",
+                        operation="verify_run",
+                        code=str(exit_code),
+                        previous=run.status_detail,
+                    ),
                 )
             )
 
@@ -294,22 +335,56 @@ async def _verify_and_mark_run(
                 "watchdog",
                 session=session,
             )
-        if result.rowcount > 0 and _should_cleanup_sandbox_after_terminal(
-            run, keep_alive
-        ):
-            try:
-                await backend.cleanup_after_verification(run_id)
-            except Exception as e:
-                logger.warning(
-                    "Cleanup after terminal verification failed: %s", e, extra=extra
-                )
+        if result.rowcount > 0:
+            keep_alive = await _get_automation_keep_alive(session, run)
+            if _should_cleanup_sandbox_after_terminal(run, keep_alive):
+                try:
+                    await backend.cleanup_after_verification(run_id)
+                except Exception as e:
+                    logger.warning(
+                        "Cleanup after terminal verification failed: %s",
+                        e,
+                        extra=extra,
+                    )
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
+    if verification.outcome == VerificationOutcome.TRANSIENT_ERROR:
+        logger.warning(
+            "Verification temporarily unavailable; leaving run RUNNING: %s",
+            verification.detail,
+            extra=extra,
+        )
+        if verification.error_info is not None:
+            status_detail = run_status_detail_from_transient_error(
+                verification.error_info,
+                phase=RunStatusPhase.VERIFICATION,
+                previous=run.status_detail,
+            )
+        else:
+            status_detail = make_run_status_detail(
+                phase=RunStatusPhase.VERIFICATION,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=verification.detail or "Verification temporarily unavailable",
+                transient=True,
+                source="automation_service",
+                operation="verify_run",
+                previous=run.status_detail,
+            )
+        await session.execute(
+            update(AutomationRun)
+            .where(
+                AutomationRun.id == run.id,
+                AutomationRun.status == AutomationRunStatus.RUNNING,
+            )
+            .values(status_detail=status_detail)
+        )
+        return False
+
     # A still-running bash command is not a failure: its own timeout
     # (enforced by the agent-server) has not fired yet, so defer instead of
     # destroying a live run. Must happen before any cleanup below.
-    if verification.error in STILL_RUNNING_VERIFICATION_ERRORS:
+    if verification.outcome == VerificationOutcome.STILL_RUNNING:
         if await _defer_still_running(session, run, settings, now):
             return False
         logger.warning(
@@ -317,22 +392,24 @@ async def _verify_and_mark_run(
             extra=extra,
         )
 
-    # This likely means the sandbox crashed or was cleaned up
+    # This likely means the sandbox crashed, was cleaned up, or verification
+    # failed in a way that is not known to be transient.
     logger.warning(
         "Could not verify run status: %s, marking as timed out",
-        verification.error,
+        verification.detail,
         extra=extra,
     )
 
     # Clean up resources via backend only when the automation owns explicit
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
+    keep_alive = await _get_automation_keep_alive(session, run)
     if _should_cleanup_sandbox_after_terminal(run, keep_alive):
         try:
             await backend.cleanup_after_verification(run_id)
         except Exception as e:
             logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
-    error_msg = verification.error or "no completion callback received"
+    error_msg = verification.detail or "no completion callback received"
 
     logger.warning(
         "Marking run as timed out: run_id=%s, sandbox_id=%s, timeout_at=%s, reason=%s",
@@ -353,6 +430,27 @@ async def _verify_and_mark_run(
             status=AutomationRunStatus.FAILED,
             completed_at=now,
             error_detail=f"Timed out: {error_msg}",
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.VERIFICATION,
+                kind=(
+                    RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE
+                    if verification.outcome
+                    == VerificationOutcome.ENVIRONMENT_UNAVAILABLE
+                    else RunStatusDetailKind.TIMEOUT
+                ),
+                detail=error_msg,
+                transient=False,
+                source="automation_service",
+                operation="verify_run",
+                previous=run.status_detail,
+                extra={
+                    "verification_outcome": (
+                        verification.outcome.value
+                        if verification.outcome
+                        else "unknown"
+                    )
+                },
+            ),
         )
     )
     result = await session.execute(stmt)  # type: ignore[assignment]
@@ -443,6 +541,28 @@ async def mark_stale_runs(
     return marked
 
 
+async def prune_integration_events(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> int:
+    """Delete accepted events past the retention window, one batch per scan."""
+    cutoff = utcnow() - timedelta(days=settings.integration_event_retention_days)
+
+    async with session_factory() as session:
+        result: CursorResult = await session.execute(  # type: ignore[assignment]
+            delete(IntegrationEvent).where(
+                IntegrationEvent.id.in_(
+                    select(IntegrationEvent.id)
+                    .where(IntegrationEvent.received_at < cutoff)
+                    .limit(PRUNE_BATCH_SIZE)
+                )
+            )
+        )
+        await session.commit()
+
+    return result.rowcount
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -473,6 +593,13 @@ async def watchdog_loop(
                 logger.info("Processed %d stale run(s)", marked)
         except Exception:
             logger.exception("Error in watchdog scan")
+
+        try:
+            pruned = await prune_integration_events(session_factory, settings)
+            if pruned:
+                logger.info("Pruned %d expired integration event(s)", pruned)
+        except Exception:
+            logger.exception("Error pruning integration events")
 
         if shutdown_event is not None:
             try:

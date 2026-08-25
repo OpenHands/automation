@@ -14,6 +14,7 @@ from openhands.automation.models import (
     UploadStatus,
 )
 from openhands.automation.preset_router import _build_storage_path, _generate_tarball
+from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -26,6 +27,25 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+
+@pytest.fixture
+def local_mode(monkeypatch):
+    """Force local mode for tests asserting on a browser-supplied distinct id.
+
+    Cloud must derive telemetry identity from auth, so
+    `telemetry._trusted_telemetry_context()` discards the header outside local
+    mode and the assertion only holds inside it. The config is cached, so it
+    has to be cleared on the way in and on the way out; without this the tests
+    happen to pass only when an earlier test file leaves a local-mode config in
+    the cache, and fail whenever they run first.
+    """
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
+    clear_config_cache()
+    yield
+    clear_config_cache()
 
 
 @pytest.fixture
@@ -163,7 +183,9 @@ class TestPermissionEnforcement:
 class TestCreateAutomation:
     """Tests for POST /v1 endpoint."""
 
-    async def test_create_automation_success(self, async_client, async_session):
+    async def test_create_automation_success(
+        self, async_client, async_session, local_mode
+    ):
         """Valid request creates automation and returns 201."""
         payload = {
             "name": "My Test Automation",
@@ -211,6 +233,121 @@ class TestCreateAutomation:
 
         assert response.status_code == 201
         assert response.json()["preset_metadata"] is None
+
+    async def test_create_automation_stores_template_provenance(self, async_client):
+        """A catalog entry shipping its own tarball records where it came from."""
+        payload = {
+            "name": "PR Reviewer Bundle",
+            "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+            "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+            "entrypoint": "uv run main.py",
+            "template": {
+                "id": "github-pr-reviewer",
+                "version": "1.2.0",
+                "config": {"repos": ["OpenHands/automation"]},
+            },
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "template": {
+                "id": "github-pr-reviewer",
+                "version": "1.2.0",
+                "config": {"repos": ["OpenHands/automation"]},
+            }
+        }
+
+    async def test_create_automation_with_known_template_returns_existing(
+        self, async_client
+    ):
+        """Enabling the same bundle twice returns the first automation, 200."""
+        payload = {
+            "name": "PR Reviewer Bundle",
+            "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+            "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+            "entrypoint": "uv run main.py",
+            "template": {"id": "github-pr-reviewer", "version": "1.2.0"},
+        }
+        first = await async_client.post("/api/automation/v1", json=payload)
+        assert first.status_code == 201
+
+        second = await async_client.post("/api/automation/v1", json=payload)
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
+        listing = await async_client.get("/api/automation/v1")
+        assert listing.json()["total"] == 1
+
+    async def test_create_automation_shares_template_identity_with_presets(
+        self, async_client
+    ):
+        """A template enabled as a preset is not enabled again as a bundle."""
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "Reviewer",
+                "prompt": "Review open pull requests.",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "template": {"id": "shared-entry", "version": "1.0.0"},
+            },
+        )
+        assert first.status_code == 201
+
+        second = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Reviewer Bundle",
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+                "entrypoint": "uv run main.py",
+                "template": {"id": "shared-entry", "version": "2.0.0"},
+            },
+        )
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
+
+    async def test_deleted_bundle_automation_does_not_block_reenabling(
+        self, async_client
+    ):
+        """After deleting a bundle automation, the entry can be enabled again."""
+        payload = {
+            "name": "Recreate Me",
+            "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+            "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+            "entrypoint": "uv run main.py",
+            "template": {"id": "github-pr-reviewer", "version": "1.2.0"},
+        }
+        first = await async_client.post("/api/automation/v1", json=payload)
+        deleted = await async_client.delete(f"/api/automation/v1/{first.json()['id']}")
+        assert deleted.status_code == 204
+
+        second = await async_client.post("/api/automation/v1", json=payload)
+
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
+
+    async def test_create_automation_rejects_oversized_template_config(
+        self, async_client
+    ):
+        """A template config over the serialized-size cap is a validation error."""
+        payload = {
+            "name": "Oversized Config",
+            "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+            "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+            "entrypoint": "uv run main.py",
+            "template": {
+                "id": "big-entry",
+                "version": "1.0.0",
+                "config": {"blob": "x" * 20_000},
+            },
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
 
     async def test_create_automation_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
@@ -1186,6 +1323,94 @@ class TestUpdateAutomation:
         await async_session.refresh(automation)
         assert automation.tarball_path == original_tarball_path
 
+    async def test_update_prompt_transient_storage_error_fails_the_edit(
+        self, async_client, async_session, preset_store
+    ):
+        """A transient storage error during a prompt edit fails the request.
+
+        Previously it was swallowed as "nothing to regenerate": the PATCH
+        returned 200 and updated the prompt column while the tarball kept the
+        old baked prompt, so the automation silently kept running the previous
+        prompt.
+        """
+        # Arrange — reading the current tarball fails transiently (e.g. S3 5xx).
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        preset_store.read = MagicMock(
+            side_effect=FileNotFoundError("S3 read failed (ServiceUnavailable)")
+        )
+
+        # Act & Assert — the request fails (rolling back the edit in
+        # production) instead of succeeding with a stale tarball.
+        with pytest.raises(FileNotFoundError):
+            await async_client.patch(
+                f"/api/automation/v1/{automation.id}",
+                json={"prompt": "Updated prompt"},
+            )
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_prompt_missing_source_tarball_skips_regeneration(
+        self, async_client, async_session, preset_store
+    ):
+        """A confirmed-missing source tarball leaves the tarball untouched.
+
+        Only genuine absence means "not a regenerable preset": the prompt
+        column still updates, but no new upload is written and the automation
+        keeps its existing tarball reference.
+        """
+        # Arrange — the current tarball object is confirmed absent.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        original_tarball_path = automation.tarball_path
+        preset_store.read = MagicMock(side_effect=ObjectNotFoundError("File not found"))
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert data["prompt"] == "Updated prompt"
+        assert data["tarball_path"] == original_tarball_path
+        preset_store.write_stream.assert_not_called()
+
+    async def test_failed_update_does_not_delete_current_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """A request that fails after regeneration keeps the current tarball.
+
+        The superseded object may only be removed once the transaction commits.
+        Deleting it earlier meant a later failure rolled the automation back to
+        a tarball reference whose object was already destroyed, permanently
+        breaking every future dispatch (OSS-9505).
+        """
+        # Arrange — fail the request after the tarball has been regenerated.
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        old_upload_id = parse_internal_upload_id(automation.tarball_path)
+        assert old_upload_id is not None
+        old_storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, old_upload_id)
+
+        # Act
+        with patch(
+            "openhands.automation.router.mark_git_sync_dirty",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with pytest.raises(RuntimeError):
+                await async_client.patch(
+                    f"/api/automation/v1/{automation.id}",
+                    json={"prompt": "Updated prompt"},
+                )
+
+        # Assert — the object the automation still points at survives.
+        assert old_storage_path in preset_store._storage
+
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
         automation = Automation(
@@ -1254,7 +1479,9 @@ class TestUpdateAutomation:
 class TestDispatchAutomation:
     """Tests for POST /v1/{id}/dispatch endpoint."""
 
-    async def test_dispatch_automation_success(self, async_client, async_session):
+    async def test_dispatch_automation_success(
+        self, async_client, async_session, local_mode
+    ):
         """Dispatching an automation creates a PENDING run."""
         automation = Automation(
             user_id=TEST_USER_ID,
@@ -1412,6 +1639,7 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["runs"] == []
         assert data["total"] == 0
+        assert data["status_counts"] == {}
 
     async def test_list_runs_returns_runs(self, async_client, async_session):
         """Listing runs after dispatch shows created runs."""
@@ -1526,6 +1754,81 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["total"] == 5
         assert len(data["runs"]) == 2
+
+    async def test_list_runs_counts_by_status(self, async_client, async_session):
+        """status_counts reports lifetime per-status counts, sparsely."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        # Arrange — runs across three statuses; CANCELLED/SKIPPED never occur.
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        for status in [
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.FAILED,
+            AutomationRunStatus.PENDING,
+        ]:
+            async_session.add(AutomationRun(automation_id=automation.id, status=status))
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
+
+        # Assert — only statuses with runs appear, and total is their sum.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status_counts"] == {
+            "COMPLETED": 2,
+            "FAILED": 1,
+            "PENDING": 1,
+        }
+        assert data["total"] == 4
+
+    async def test_list_runs_counts_unaffected_by_pagination(
+        self, async_client, async_session
+    ):
+        """status_counts stays lifetime-wide on a paginated page."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        # Arrange
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        for _ in range(3):
+            async_session.add(
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.COMPLETED,
+                )
+            )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs",
+            params={"limit": 1, "offset": 1},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["runs"]) == 1
+        assert data["status_counts"] == {"COMPLETED": 3}
 
     async def test_list_runs_not_found(self, async_client):
         """Listing runs for nonexistent automation returns 404."""
@@ -1728,6 +2031,69 @@ class TestCompleteRun:
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
 
+    async def test_complete_run_stores_finish_tool_response_metadata(
+        self, async_client, async_session, monkeypatch
+    ):
+        """Complete endpoint stores the raw latest FinishTool response."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            run_metadata={"existing": "value"},
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        async def fake_fetch_latest_finish_tool_response_for_run(
+            callback_run, conversation_id
+        ):
+            assert callback_run.id == run.id
+            assert conversation_id == "conv-outcome-123"
+            return {
+                "status": "success",
+                "outcome_summary": "Completed all requested work.",
+                "confidence": 0.95,
+                "terminal_reason": "finish_action",
+            }
+
+        monkeypatch.setattr(
+            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
+            fake_fetch_latest_finish_tool_response_for_run,
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED", "conversation_id": "conv-outcome-123"},
+        )
+
+        assert response.status_code == 200
+        finish_tool_response = response.json()["run_metadata"]["finish_tool_response"]
+        assert finish_tool_response == {
+            "status": "success",
+            "outcome_summary": "Completed all requested work.",
+            "confidence": 0.95,
+            "terminal_reason": "finish_action",
+        }
+
+        await async_session.refresh(run)
+        assert run.run_metadata is not None
+        assert run.run_metadata["existing"] == "value"
+        assert run.run_metadata["finish_tool_response"]["status"] == "success"
+
+        assert run.status == AutomationRunStatus.COMPLETED
+
     async def test_complete_run_saves_conversation_id_for_failed_runs(
         self, async_client, async_session
     ):
@@ -1810,6 +2176,66 @@ class TestCompleteRun:
         data = response.json()
         assert data["status"] == "COMPLETED"
         assert data["conversation_id"] is None
+
+    async def test_complete_run_failed_with_structured_sdk_error(
+        self, async_client, async_session
+    ):
+        """Complete endpoint accepts SDK ConversationErrorEvent callback errors."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "conversation_id": "conv-structured-789",
+                "error": {
+                    "source": "environment",
+                    "code": "RuntimeError",
+                    "detail": "script crashed",
+                    "classification": {"kind": "unknown", "retryable": False},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["conversation_id"] == "conv-structured-789"
+        assert (
+            data["error_detail"]
+            == "RuntimeError: script crashed [kind=unknown, source=environment]"
+        )
+        assert data["status_detail"]["phase"] == "callback"
+        assert data["status_detail"]["kind"] == "unknown"
+        assert data["status_detail"]["source"] == "environment"
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert (
+            run.error_detail
+            == "RuntimeError: script crashed [kind=unknown, source=environment]"
+        )
+        assert run.status_detail is not None
+        assert run.status_detail["phase"] == "callback"
+        assert run.status_detail["kind"] == "unknown"
 
     async def test_complete_run_default_keep_alive_null_cleans_up_sandbox(
         self, async_client, async_session

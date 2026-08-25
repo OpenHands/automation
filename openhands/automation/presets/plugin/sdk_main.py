@@ -86,9 +86,8 @@ sandbox_id = os.environ.get("SANDBOX_ID", "")
 # may be missing here even when the agent-server has a valid session key.
 # We still fall back to SESSION_API_KEY for compatibility with cloud-mode
 # deployments and older agent-server versions that only set the bare name.
-session_key = (
-    os.environ.get("OH_SESSION_API_KEYS_0")
-    or os.environ.get("SESSION_API_KEY", "")
+session_key = os.environ.get("OH_SESSION_API_KEYS_0") or os.environ.get(
+    "SESSION_API_KEY", ""
 )
 model_profile = os.environ.get("AUTOMATION_MODEL") or None
 automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
@@ -100,10 +99,7 @@ print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
     # Local mode: AGENT_SERVER_URL required
     print(f"  AGENT_SERVER_URL: {'OK' if agent_server_url else 'MISSING'}")
-    print(
-        f"  OH_SESSION_API_KEYS_0: "
-        f"{'OK' if session_key else 'NONE (may fail auth)'}"
-    )
+    print(f"  OH_SESSION_API_KEYS_0: {'OK' if session_key else 'NONE (may fail auth)'}")
     if not agent_server_url:
         print("FAIL: AGENT_SERVER_URL not set for local mode", file=sys.stderr)
         sys.exit(1)
@@ -130,6 +126,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.tools.preset import TaskOutcome
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
@@ -395,7 +392,12 @@ This automation was triggered by a webhook event:
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
-    agent = get_default_agent(llm=llm, cli_mode=True)
+    # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
+    agent = get_default_agent(
+        llm=llm,
+        cli_mode=True,
+        finish_tool_response_schema=TaskOutcome,
+    )
 
     # Add MCP config and agent_context using model_copy if configured
     # (Plugin MCP configs will be merged when plugins are loaded)
@@ -436,13 +438,27 @@ This automation was triggered by a webhook event:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
+    # Cloud workspaces supply richer automation tags (for example, whether the
+    # trigger was cron or webhook). Only add fallback tags in local mode.
+    default_tags = workspace.default_conversation_tags or {}
+    conversation_tags = dict(experiment_tags)
+    if not any(
+        default_tags.get(key)
+        for key in ("automationtrigger", "automationid", "automationrunid")
+    ):
+        conversation_tags["automationtrigger"] = "automation"
+
+    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
+    if automation_run_id and not default_tags.get("automationrunid"):
+        conversation_tags["automationrunid"] = automation_run_id
+
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
         "callbacks": [event_callback],
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": experiment_tags or None,
+        "tags": conversation_tags,
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
