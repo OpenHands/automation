@@ -231,6 +231,39 @@ def test_app_mention_becomes_an_accepted_event(provider):
     assert event.provider_event_id == "Ev0001"
 
 
+def test_the_run_payload_matches_the_webhook_path_exactly(provider):
+    """Both transports must hand the run the identical structure.
+
+    `accept_event()` persists `parsed_event` when there is one, so what a
+    script reads is the parsed model, not the raw body. The HTTP path parses a
+    custom webhook into a CustomWebhookEvent whose envelope sits at `payload`;
+    emitting the bare envelope here instead would shift every field one level
+    up and existing Slack automations would silently read nothing.
+
+    Observed on the OSS VM: a mention delivered over the socket logged
+    "ignoring non-app_mention event: None" and exited, while the identical
+    mention over the bridge ran normally.
+    """
+    from openhands.automation.event_schemas import parse_event
+
+    payload = envelope()
+    event = provider.accepted_event(payload)
+    assert event is not None
+    assert event.parsed_event is not None
+
+    # What POST /v1/events/{org}/slack builds for the same body. The box
+    # configures this custom webhook with event_key_expr = "event.type".
+    from_webhook = parse_event("slack", payload, event_key_expr="event.type")
+
+    assert event.parsed_event.model_dump(mode="json") == from_webhook.model_dump(
+        mode="json"
+    )
+    # And the shape a script actually reaches for.
+    dumped = event.parsed_event.model_dump(mode="json")
+    assert dumped["payload"]["event"]["type"] == "app_mention"
+    assert dumped["event_key"] == "app_mention"
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

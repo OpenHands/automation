@@ -20,6 +20,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
 from openhands.automation.config import SlackAppSettings, StreamSettings
+from openhands.automation.event_schemas.custom import CustomWebhookEvent
 from openhands.automation.ingest import AcceptedEvent
 from openhands.automation.streams.base import (
     Emit,
@@ -153,6 +154,18 @@ class SlackStreamProvider:
             # Slack's own delivery id. `accept_event()` deduplicates on it, so
             # a redelivered envelope creates no second run.
             provider_event_id=envelope.get("event_id"),
+            # What the *run* is handed, which is not the same thing as what
+            # trigger filters read. The HTTP path parses a custom webhook into
+            # a CustomWebhookEvent, and `accept_event()` persists that model
+            # rather than the raw body -- so a script finds the envelope at
+            # `payload`. Emitting the bare envelope here would put the same
+            # data one level higher, and every existing Slack automation would
+            # read nothing at all.
+            parsed_event=CustomWebhookEvent(
+                _event_key=event_key,
+                payload=envelope,
+                source_override=self.source,
+            ),
         )
 
 
