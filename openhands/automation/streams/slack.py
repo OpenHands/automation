@@ -79,7 +79,10 @@ class SlackStreamProvider:
         """
         response = await web_client.auth_test()
         team_id = response.get("team_id")
-        bot_user_id = response.get("bot_user_id")
+        # `auth.test` names the bot's own user id `user_id`. `bot_user_id` is a
+        # real Slack field, but it belongs to `oauth.v2.access`; reading it here
+        # yields None for every token, so the check below could never pass.
+        bot_user_id = response.get("user_id")
         if team_id != self.team_id or bot_user_id != self.bot_user_id:
             raise StreamConfigError(
                 f"Slack token identifies team={team_id} bot_user={bot_user_id}, "
