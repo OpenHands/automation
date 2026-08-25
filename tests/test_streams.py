@@ -23,7 +23,11 @@ from openhands.automation.streams import (
     stream_supervisor_loop,
     supervisor,
 )
-from openhands.automation.streams.base import record_health, reset_stream_health
+from openhands.automation.streams.base import (
+    health_for,
+    record_health,
+    reset_stream_health,
+)
 from openhands.automation.streams.slack import SlackStreamProvider
 from openhands.automation.utils.time import utcnow
 
@@ -78,6 +82,9 @@ class FakeSocketClient:
 
     async def send_socket_mode_response(self, response) -> None:
         self.calls.append(f"ack:{response.envelope_id}")
+
+    async def emit(self, event: AcceptedEvent) -> None:
+        self.calls.append(f"emit:{event.event_key}")
 
 
 class FakeWebClient:
@@ -176,10 +183,7 @@ async def test_envelope_is_acked_before_it_is_routed(provider):
     """Slack redelivers anything unacked, so the ack cannot wait on routing."""
     client = FakeSocketClient()
 
-    async def emit(event: AcceptedEvent) -> None:
-        client.calls.append(f"emit:{event.event_key}")
-
-    await provider.handle(client, request(envelope()), emit)
+    await provider.handle(client, request(envelope()), client.emit)
 
     assert client.calls == ["ack:env-1", "emit:app_mention"]
 
@@ -188,31 +192,21 @@ async def test_envelope_is_acked_before_it_is_routed(provider):
 async def test_ignored_envelope_is_still_acked(provider):
     """A message we drop is a message Slack must not redeliver."""
     client = FakeSocketClient()
-    emitted: list[AcceptedEvent] = []
 
-    await provider.handle(
-        client,
-        request(envelope(type="message")),
-        lambda event: emitted.append(event),  # never awaited
-    )
+    await provider.handle(client, request(envelope(type="message")), client.emit)
 
     assert client.calls == ["ack:env-1"]
-    assert emitted == []
 
 
 @pytest.mark.asyncio
 async def test_non_events_api_request_is_acked_only(provider):
     client = FakeSocketClient()
-    emitted: list[AcceptedEvent] = []
 
     await provider.handle(
-        client,
-        request({}, request_type="slash_commands"),
-        lambda event: emitted.append(event),
+        client, request({}, request_type="slash_commands"), client.emit
     )
 
     assert client.calls == ["ack:env-1"]
-    assert emitted == []
 
 
 def test_app_mention_becomes_an_accepted_event(provider):
@@ -332,6 +326,43 @@ async def test_a_failing_source_does_not_affect_the_others(
 
     assert healthy.runs == 1
     assert stream_health()["fake:flaky"].consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_failures_are_counted_until_the_source_connects(
+    async_session_factory, fast_backoff
+):
+    """Consecutive, not lifetime: a source that connected is not in a streak.
+
+    Without the reset a source that drops once a week would creep to the
+    maximum backoff and stay there, since `run()` only returns cleanly at
+    shutdown.
+    """
+    shutdown = asyncio.Event()
+    seen: list[int] = []
+
+    async def connect_then_die(provider, _emit, _shutdown) -> None:
+        seen.append(health_for(provider.name).consecutive_failures)
+        if provider.runs > 1:
+            # Second attempt gets as far as connecting, as the Slack provider
+            # does before it records last_connected_at.
+            record_health(provider.name, consecutive_failures=0)
+        raise RuntimeError("socket died")
+
+    source = FakeProvider("fake:flapping", connect_then_die)
+    task = asyncio.create_task(
+        stream_supervisor_loop(
+            async_session_factory, shutdown_event=shutdown, providers=[source]
+        )
+    )
+    while source.runs < 3:
+        await asyncio.sleep(0.01)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    # First run starts clean; the second inherits the first's failure; the
+    # third sees the count reset by the connection the second made.
+    assert seen[:3] == [0, 1, 1]
 
 
 @pytest.mark.asyncio

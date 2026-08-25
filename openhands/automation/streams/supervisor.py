@@ -72,7 +72,6 @@ async def stream_supervisor_loop(
 
     Started by app.py only when `config.streams.enabled`.
     """
-    settings = settings if settings is not None else get_config().streams
     providers = build_stream_providers(settings) if providers is None else providers
     if not providers:
         logger.info("No stream sources configured; supervisor idle")
@@ -144,7 +143,6 @@ def _make_emit(
     """
 
     async def emit(event: AcceptedEvent) -> None:
-        record_health(provider.name, last_event_at=utcnow())
         async with session_factory() as session:
             result = await accept_event(
                 provider.org_id,
@@ -152,6 +150,9 @@ def _make_emit(
                 session,
                 session_factory=session_factory,
             )
+        # Stamped after the event is accepted, not on arrival: a source whose
+        # routing fails every time would otherwise report itself healthy.
+        record_health(provider.name, last_event_at=utcnow())
         logger.info(
             "Stream source %s: %s matched %d automation(s)",
             provider.name,

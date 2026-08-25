@@ -61,7 +61,11 @@ class SlackStreamProvider:
         try:
             client.socket_mode_request_listeners.append(self.build_listener(emit))
             await client.connect()
-            record_health(self.name, last_connected_at=utcnow())
+            # Connecting ends any failure streak. Without this the count is
+            # lifetime failures rather than consecutive ones, and a source that
+            # drops once a week would creep to the maximum backoff and stay
+            # there -- `run()` only returns cleanly at shutdown.
+            record_health(self.name, last_connected_at=utcnow(), consecutive_failures=0)
             logger.info("Slack Socket Mode connected for team=%s", self.team_id)
             await shutdown.wait()
         finally:
