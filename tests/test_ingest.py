@@ -475,13 +475,16 @@ async def test_accept_event_commits_runs(
 
 
 @pytest.mark.asyncio
-async def test_accept_event_reserved_fields_are_ignored(
+async def test_accept_event_ignores_a_subject_nobody_opted_into(
     org_id: uuid.UUID,
     async_session,
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """`subject` and `occurred_at` are read by nobody and change nothing."""
+    """A trigger that does not set `destination` never looks at `subject`.
+
+    `occurred_at` is still read by nobody.
+    """
     async_session.add(
         make_automation(
             org_id,

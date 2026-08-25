@@ -16,12 +16,11 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from openhands.automation.config import Settings
 from openhands.automation.event_schemas import WebhookEvent
+from openhands.automation.subjects import EventSubject, github_subject
 
 
 if TYPE_CHECKING:
     from fastapi import Request, Response
-
-    from openhands.automation.ingest import EventSubject
 
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
@@ -37,7 +36,7 @@ SLACK_TIMESTAMP_HEADER: Final[str] = "X-Slack-Request-Timestamp"
 
 ParseFunc = Callable[[dict[str, Any]], WebhookEvent]
 SecretFunc = Callable[[Settings], str | None]
-SubjectFunc = Callable[[dict[str, Any]], "EventSubject | None"]
+SubjectFunc = Callable[[dict[str, Any]], EventSubject | None]
 HandshakeFunc = Callable[["Request"], "Response | None"]
 
 
@@ -82,7 +81,9 @@ class Provider:
     # None means the provider does not identify deliveries, so its events are
     # recorded but never deduplicated.
     event_id_header: str | None = None
-    # Reserved for subject-based routing. Nothing reads it.
+    # Names the external thing an event is about, for a trigger whose
+    # destination is `continue_conversation`. None means this provider has no
+    # notion of one, and such a trigger has to supply `subject_key_expr`.
     subject: SubjectFunc | None = None
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
     # HTTP handshake, and Socket Mode is our Slack path.
@@ -292,11 +293,13 @@ def _register_builtin_providers() -> None:
 
     # All forwarded by the OpenHands server, which signs with the single shared
     # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated.
-    for source, parse, event_id_header in (
-        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
-        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
-        ("jira_dc", parse_jira_dc_event, None),
+    # deliveries; the other two are recorded without being deduplicated, and
+    # only GitHub has a subject extractor -- the other two can still opt into
+    # conversation reuse with an explicit `subject_key_expr`.
+    for source, parse, event_id_header, subject in (
+        ("bitbucket_data_center", parse_bitbucket_data_center_event, None, None),
+        ("github", parse_github_event_auto, "X-GitHub-Delivery", github_subject),
+        ("jira_dc", parse_jira_dc_event, None, None),
     ):
         register_provider(
             Provider(
@@ -304,6 +307,7 @@ def _register_builtin_providers() -> None:
                 parse=parse,
                 secret_from_settings=lambda s: s.webhook_secret or None,
                 event_id_header=event_id_header,
+                subject=subject,
             )
         )
 

@@ -49,6 +49,7 @@ from openhands.automation.schemas import (
     CustomWebhookCreate,
     CustomWebhookUpdate,
 )
+from openhands.automation.subjects import github_subject
 from openhands.automation.utils.webhook import get_webhook_config
 
 
@@ -571,13 +572,27 @@ class TestProviderDescriptors:
             assert provider is not None
             assert provider.event_id_header is None
 
-    def test_reserved_hooks_are_unset_on_every_builtin(self):
-        """Both hooks are reserved and deliberately unwired, not forgotten."""
+    def test_handshake_is_unset_on_every_builtin(self):
+        """The hook is reserved and deliberately unwired, not forgotten."""
         for source in sorted(BUILTIN_PROVIDER_SOURCES):
             provider = get_provider(source)
             assert provider is not None
-            assert provider.subject is None
             assert provider.handshake is None
+
+    def test_only_github_names_a_subject(self):
+        """GitHub numbers issues and pull requests; the other two do not.
+
+        A source without an extractor is not shut out of conversation reuse --
+        its triggers supply `subject_key_expr` instead.
+        """
+        github = get_provider("github")
+        assert github is not None
+        assert github.subject is github_subject
+
+        for source in sorted(BUILTIN_PROVIDER_SOURCES - {"github"}):
+            provider = get_provider(source)
+            assert provider is not None
+            assert provider.subject is None
 
     def test_descriptors_are_frozen(self):
         provider = get_provider("github")

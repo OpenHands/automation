@@ -16,7 +16,16 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openhands.automation.models import IntegrationEvent
+from openhands.automation.conversations import (
+    CONTINUE_CONVERSATION,
+    continue_conversation,
+    event_subject,
+    record_subject_run,
+    resolve_subject_key,
+)
+from openhands.automation.models import Automation, IntegrationEvent
+from openhands.automation.schemas import EventTrigger
+from openhands.automation.subjects import EventSubject
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -27,12 +36,9 @@ from openhands.automation.utils.webhook import (
 
 logger = logging.getLogger("automation.ingest")
 
-
-@dataclass(frozen=True, slots=True)
-class EventSubject:
-    """The external thing an event is about. Reserved; nothing reads it yet."""
-
-    key: str
+# Re-exported: phase 1 put `EventSubject` here, and it now lives in the leaf
+# module the provider registry can import without a cycle.
+__all__ = ["AcceptResult", "AcceptedEvent", "EventSubject", "accept_event"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,8 @@ class AcceptedEvent:
     # Raw provider payload; JMESPath trigger filters run on this.
     payload: dict[str, Any] = field(default_factory=dict)
     provider_event_id: str | None = None
+    # What the event is about, when the transport could name it. A trigger with
+    # `subject_key_expr` overrides it; see `conversations.resolve_subject_key`.
     subject: EventSubject | None = None
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
@@ -57,6 +65,9 @@ class AcceptResult:
     matched: int
     run_ids: list[str]
     duplicate: bool = False
+    # Conversations this event continued instead of starting a run for. A
+    # matched automation contributes to exactly one of these two lists.
+    conversation_ids: list[str] = field(default_factory=list)
 
 
 async def accept_event(
@@ -72,6 +83,13 @@ async def accept_event(
     Records the event and creates the runs in one transaction, deduplicating on
     `event.provider_event_id` when the transport supplies one. Commits before
     returning.
+
+    A matched automation whose trigger sets `destination` to
+    `continue_conversation` gets one more step first: the event's subject is
+    resolved, and if that subject already has a reachable conversation the
+    event is delivered to it as another turn and no run is created. Everything
+    else -- no subject, no conversation yet, a conversation that has gone --
+    falls back to creating a run, which is what would have happened anyway.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -114,17 +132,17 @@ async def accept_event(
         return AcceptResult(matched=0, run_ids=[], duplicate=True)
 
     automations = await get_event_automations(org_id, source, session)
-    matched_automations = []
+    matched: list[tuple[Automation, EventTrigger]] = [
+        (automation, trigger)
+        for automation, trigger in automations
+        if matches_trigger(trigger, source, event.event_key, webhook_payload)
+    ]
 
-    for automation, trigger in automations:
-        if matches_trigger(trigger, source, event.event_key, webhook_payload):
-            matched_automations.append(automation)
-
-    record.matched_count = len(matched_automations)
+    record.matched_count = len(matched)
 
     logger.info(
         "Event matched %d/%d automations for org=%s",
-        len(matched_automations),
+        len(matched),
         len(automations),
         org_id,
     )
@@ -137,7 +155,7 @@ async def accept_event(
             "event_key": event.event_key,
             "org_id": str(org_id),
             "candidate_count": len(automations),
-            "matched_count": len(matched_automations),
+            "matched_count": len(matched),
         },
     )
 
@@ -148,12 +166,68 @@ async def accept_event(
         else webhook_payload
     )
 
+    # Derived once, and only when something is going to read it: every trigger
+    # without a `subject_key_expr` of its own shares the provider's answer for
+    # this payload, and the ordinary event matches no continuing trigger at all.
+    continuing = any(
+        trigger.destination == CONTINUE_CONVERSATION for _, trigger in matched
+    )
+    provider_subject = (
+        (event.subject or event_subject(source, webhook_payload))
+        if continuing
+        else None
+    )
+
     run_ids: list[str] = []
-    for automation in matched_automations:
+    conversation_ids: list[str] = []
+    for automation, trigger in matched:
+        subject_key = (
+            resolve_subject_key(trigger, webhook_payload, provider_subject)
+            if trigger.destination == CONTINUE_CONVERSATION
+            else None
+        )
+
+        if subject_key is not None:
+            conversation_id = await continue_conversation(
+                session,
+                org_id=org_id,
+                source=source,
+                subject_key=subject_key,
+                automation_id=automation.id,
+                event_key=event.event_key,
+                event_payload=event_payload,
+            )
+            if conversation_id is not None:
+                conversation_ids.append(conversation_id)
+                await capture_automation_event(
+                    "automation_conversation_continued",
+                    request=request,
+                    session_factory=session_factory,
+                    automation=automation,
+                    properties={
+                        "event_source": source,
+                        "event_key": event.event_key,
+                        "org_id": str(org_id),
+                    },
+                )
+                continue
+
         run = await create_automation_run(
             automation, session, event_payload=event_payload
         )
         run_ids.append(str(run.id))
+        if subject_key is not None:
+            # The run has to exist before the mapping can point at it, and the
+            # conversation id arrives later still -- on this run's completion
+            # callback, which is the only place the service ever learns one.
+            await record_subject_run(
+                session,
+                org_id=org_id,
+                source=source,
+                subject_key=subject_key,
+                automation_id=automation.id,
+                run=run,
+            )
         run_properties = {
             "trigger_source": "event",
             "event_source": source,
@@ -179,6 +253,7 @@ async def accept_event(
     await session.commit()
 
     return AcceptResult(
-        matched=len(matched_automations),
+        matched=len(matched),
         run_ids=run_ids,
+        conversation_ids=conversation_ids,
     )

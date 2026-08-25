@@ -153,8 +153,12 @@ async def get_event_automations(
             Automation.trigger.op("->>")("source") == literal(source),
         )
 
+    # Ordered so that an event matching several automations locks their
+    # subject mappings in the same order in every worker. Without it two
+    # concurrent events on one Slack thread can lock the same two rows in
+    # opposite orders and deadlock. See `conversations._lock_mapping`.
     result = await session.execute(
-        select(Automation).where(*base_filters, trigger_filter)
+        select(Automation).where(*base_filters, trigger_filter).order_by(Automation.id)
     )
     automations = result.scalars().all()
 

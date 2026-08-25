@@ -162,6 +162,24 @@ def evaluate_filter(expression: str, payload: dict[str, Any]) -> bool:
         raise FilterEvaluationError(f"Filter evaluation failed: {e}") from e
 
 
+def evaluate_expression(expression: str, payload: dict[str, Any]) -> Any:
+    """Evaluate a JMESPath expression and return its raw result.
+
+    The same compilation and custom functions as `evaluate_filter`, without the
+    coercion to bool. Used where the value itself is the answer -- a trigger's
+    `subject_key_expr` -- rather than whether it is truthy.
+
+    Raises:
+        FilterEvaluationError: If the expression is invalid or evaluation fails
+    """
+    try:
+        return jmespath.search(expression, payload, options=_FILTER_OPTIONS)
+    except jmespath_exceptions.JMESPathError as e:
+        raise FilterEvaluationError(f"Invalid expression: {e}") from e
+    except Exception as e:
+        raise FilterEvaluationError(f"Expression evaluation failed: {e}") from e
+
+
 def validate_filter(expression: str) -> tuple[bool, str | None]:
     """
     Validate a JMESPath filter expression without evaluating it.

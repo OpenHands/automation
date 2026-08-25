@@ -220,6 +220,20 @@ def test_app_mention_becomes_an_accepted_event(provider):
     assert event.provider_event_id == "Ev0001"
 
 
+def test_an_accepted_event_names_its_thread(provider):
+    """The subject a `continue_conversation` trigger routes on."""
+    opener = provider.accepted_event(envelope())
+    reply = provider.accepted_event(
+        envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+    )
+
+    assert opener is not None and reply is not None
+    assert opener.subject is not None
+    assert opener.subject.key == f"{TEAM_ID}/C123/1755000000.000100"
+    # The opening mention and a reply to it are one subject.
+    assert reply.subject == opener.subject
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

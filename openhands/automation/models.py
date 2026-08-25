@@ -433,6 +433,92 @@ class IntegrationEvent(Base):
     )
 
 
+class ExternalConversation(Base):
+    """The correspondence between an external subject and one conversation.
+
+    The service owns this mapping and nothing else about the conversation: the
+    agent server owns the conversation itself, its history and its lifecycle.
+    That division is the whole point of the design -- storing a row here costs
+    one table, where owning conversations would cost an event queue, session
+    states and sandbox restart semantics inside every automation sandbox.
+
+    ``conversation_id`` is nullable because the service does not learn it until
+    the run that created it completes: the SDK reports it on the completion
+    callback. A row with a run but no conversation therefore means "a run is in
+    flight for this subject and has not told us its conversation yet", and an
+    event arriving in that window creates a run of its own.
+    """
+
+    __tablename__ = "external_conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    # Provider slug, matching the trigger's source: "slack", "github", or a
+    # custom webhook's own source name.
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The provider's name for the external thing: "T123/C456/1755000000.000100"
+    # for a Slack thread, "owner/repo#12" for a pull request.
+    subject_key: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # Scoped per automation, unlike the sketch in #362. A conversation belongs
+    # to the automation whose script created it -- its prompt, its tools, its
+    # tarball. Two automations in one org both watching #engineering would
+    # otherwise share a row, and the second would send its turns into the
+    # first's conversation, which cannot answer them.
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # The agent server's id for the conversation. NULL until a run reports one.
+    conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # The run that owns the conversation. Kept because the conversation lives
+    # inside that run's sandbox: resolving an agent server to send a turn to
+    # starts from the run's sandbox_id.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+    # Last event routed to this subject, whether it continued the conversation
+    # or started a run. Drives expiry once there is a policy to enforce.
+    last_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # The arbiter for concurrent events on one subject: two transactions
+        # that both miss the lookup race to this index, and one loses.
+        Index(
+            "ix_external_conversations_subject",
+            "org_id",
+            "source",
+            "subject_key",
+            "automation_id",
+            unique=True,
+        ),
+        # The completion callback resolves a mapping from the run it is
+        # reporting for.
+        Index("ix_external_conversations_run_id", "run_id"),
+    )
+
+
 class AutomationServiceMetadata(Base):
     """Service-level metadata shared by all automation deployment modes."""
 

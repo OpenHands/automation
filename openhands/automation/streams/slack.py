@@ -26,6 +26,7 @@ from openhands.automation.streams.base import (
     StreamConfigError,
     record_health,
 )
+from openhands.automation.subjects import slack_subject
 from openhands.automation.utils.time import utcnow
 
 
@@ -150,6 +151,9 @@ class SlackStreamProvider:
             # Slack's own delivery id. `accept_event()` deduplicates on it, so
             # a redelivered envelope creates no second run.
             provider_event_id=envelope.get("event_id"),
+            # The thread this mention belongs to. Read only by a trigger that
+            # opts into `continue_conversation`; None is harmless otherwise.
+            subject=slack_subject(envelope),
         )
 
 
