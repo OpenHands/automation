@@ -151,6 +151,11 @@ def _automation_yaml_fields(
     # already-synced automation.yaml just to add an empty list.
     if tarball_executables:
         fields["tarball_executables"] = tarball_executables
+    # Same reasoning: emitting `description: null` for automations that have
+    # none would rewrite every automation.yaml (and its content hash) on the
+    # first cycle, pushing one no-op commit per already-synced automation.
+    if automation.description is not None:
+        fields["description"] = automation.description
     return fields
 
 

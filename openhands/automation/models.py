@@ -61,6 +61,10 @@ class Automation(Base):
         String(256), nullable=True
     )
 
+    # Optional human-facing description, shown wherever the automation is
+    # listed. Falls back to the prompt in the UI when absent.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Optional prompt (set when created via preset endpoints)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 

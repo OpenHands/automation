@@ -309,6 +309,14 @@ class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Optional human-facing description, shown wherever the automation "
+            "is listed. Falls back to the prompt in the UI when absent."
+        ),
+    )
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -387,6 +395,14 @@ class UpdateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Optional human-facing description, shown wherever the automation "
+            "is listed. Falls back to the prompt in the UI when absent."
+        ),
+    )
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -729,6 +745,7 @@ class AutomationResponse(BaseModel):
     model: str | None
 
     name: str
+    description: str | None
     prompt: str | None
     preset_metadata: dict | None = None
     trigger: dict

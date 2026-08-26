@@ -138,6 +138,14 @@ class CreatePromptAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Optional human-facing description, shown wherever the automation "
+            "is listed. Falls back to the prompt in the UI when absent."
+        ),
+    )
     prompt: str = Field(
         ...,
         min_length=1,
@@ -531,6 +539,7 @@ async def create_automation_from_prompt(
             user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
+            description=body.description,
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
@@ -618,6 +627,14 @@ class CreatePluginAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Optional human-facing description, shown wherever the automation "
+            "is listed. Falls back to the prompt in the UI when absent."
+        ),
+    )
     plugins: list[PluginSource] | None = Field(
         default=None,
         description="Plugin(s) to load. Mutually exclusive with 'variants'.",
@@ -961,6 +978,7 @@ async def create_automation_from_plugin(
             user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
+            description=body.description,
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
