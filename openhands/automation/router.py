@@ -138,6 +138,7 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
+        enabled=body.enabled,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,

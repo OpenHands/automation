@@ -342,6 +342,10 @@ class CreateAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    enabled: bool = Field(
+        default=True,
+        description="Whether the automation starts enabled.",
+    )
     template: TemplateProvenance | None = Field(
         default=None,
         description=(
