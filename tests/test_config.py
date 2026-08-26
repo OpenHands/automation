@@ -315,6 +315,11 @@ class TestLocalModeSettings:
         assert settings.purger_interval_seconds == 60 * 60
         assert settings.purger_batch_size == 50
 
+    def test_zero_workspace_retention_is_disabled_value(self):
+        settings = Settings(workspace_retention_seconds=0)
+
+        assert settings.workspace_retention_seconds == 0
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [

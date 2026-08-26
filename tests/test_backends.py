@@ -1,5 +1,6 @@
 """Tests for execution backends."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -12,6 +13,7 @@ from openhands.automation.backends import (
     get_backend,
 )
 from openhands.automation.backends.cloud import _concurrency_limit_detail
+from openhands.automation.backends.local import resolve_local_workspace_base
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 
 
@@ -127,7 +129,10 @@ class TestLocalAgentServerBackend:
         assert env_vars["SESSION_API_KEY"] == "agent-server-key"
         # Workspace should be isolated per-run and have ~ expanded
         assert "test-run-123" in env_vars["WORKSPACE_BASE"]
-        assert env_vars["WORKSPACE_BASE"].endswith("/automation-runs/test-run-123")
+        assert Path(env_vars["WORKSPACE_BASE"]).parts[-2:] == (
+            "automation-runs",
+            "test-run-123",
+        )
         assert "~" not in env_vars["WORKSPACE_BASE"]  # ~ should be expanded
         # Callback API key should be the automation service's key (NOT agent server key)
         assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "automation-service-key"
@@ -146,8 +151,8 @@ class TestLocalAgentServerBackend:
         assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
         assert env_vars["SESSION_API_KEY"] == "agent-key"
         assert (
-            env_vars["WORKSPACE_BASE"]
-            == "/custom/workspace/automation-runs/test-run-123"
+            Path(env_vars["WORKSPACE_BASE"])
+            == Path("/custom/workspace") / "automation-runs" / "test-run-123"
         )
         assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "callback-key"
 
@@ -202,7 +207,7 @@ class TestLocalAgentServerBackend:
         )
         work_dir = backend.get_work_dir("my-run-id")
         # Should expand ~ and include run_id in isolation path
-        assert work_dir.endswith("/automation-runs/my-run-id")
+        assert Path(work_dir).parts[-2:] == ("automation-runs", "my-run-id")
         assert "~" not in work_dir  # ~ should be expanded
 
     def test_get_work_dir_custom_workspace(self, mock_run):
@@ -214,7 +219,30 @@ class TestLocalAgentServerBackend:
             workspace_base="/my/custom/base",
         )
         work_dir = backend.get_work_dir("run-456")
-        assert work_dir == "/my/custom/base/automation-runs/run-456"
+        assert Path(work_dir) == Path("/my/custom/base") / "automation-runs" / "run-456"
+
+    def test_workspace_base_resolution_contract(self, mock_run, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        explicit = tmp_path / "explicit"
+        cases = (
+            (None, tmp_path / ".openhands" / "workspaces"),
+            ("", tmp_path / ".openhands" / "workspaces"),
+            (str(explicit), explicit),
+            ("~", tmp_path),
+        )
+
+        for configured, expected in cases:
+            assert Path(resolve_local_workspace_base(configured)) == expected
+            backend = LocalAgentServerBackend(
+                agent_server_url="http://localhost:3000",
+                api_key="test-key",
+                run=mock_run,
+                workspace_base=configured,
+            )
+            assert Path(backend.get_work_dir("run-id")) == (
+                expected / "automation-runs" / "run-id"
+            )
 
     @pytest.mark.asyncio
     async def test_verify_run_calls_agent_server(self, mock_run):

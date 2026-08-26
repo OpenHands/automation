@@ -543,6 +543,7 @@ class ServiceSettings(BaseSettings):
     purger_batch_size: int = Field(default=50, gt=0)
 
     # Workspace retention for local mode
+    # Set to 0 to disable workspace purging.
     workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
 
     # How long an accepted event stays in `integration_events`. It bounds two

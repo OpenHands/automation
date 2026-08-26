@@ -1,11 +1,13 @@
 """Tests for workspace purging of local-mode terminal runs."""
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy.ext.asyncio import (
@@ -14,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-import openhands.automation.workspace_cleaner as cleaner
+import openhands.automation.workspace_purger as cleaner
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -22,7 +24,9 @@ from openhands.automation.models import (
     Base,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.workspace_cleaner import (
+from openhands.automation.workspace_purger import (
+    DB_CLASSIFICATION_CHUNK_SIZE,
+    DELETE_ATTEMPT_FACTOR,
     DeleteOutcome,
     PurgeResult,
     _delete_workspace,
@@ -105,6 +109,7 @@ def _make_workspace(
     (path / "output.txt").write_text(content, encoding="utf-8")
     if mtime is not None:
         timestamp = mtime.timestamp()
+        os.utime(path / "output.txt", (timestamp, timestamp))
         os.utime(path, (timestamp, timestamp))
     return path
 
@@ -168,6 +173,43 @@ class TestCandidateScan:
         )
 
         assert _scan_candidates(runs_root) == {}
+
+    def test_bad_dirent_does_not_abort_other_candidates(
+        self, workspace_base, monkeypatch
+    ):
+        runs_root = Path(workspace_base) / "automation-runs"
+        run_ids = [_run_id() for _ in range(3)]
+        for run_id in run_ids:
+            (runs_root / str(run_id)).mkdir(parents=True, exist_ok=True)
+        with os.scandir(runs_root) as entries:
+            real_entries = list(entries)
+        expected = {
+            uuid.UUID(real_entries[0].name),
+            uuid.UUID(real_entries[2].name),
+        }
+
+        class BadEntry:
+            def __init__(self, entry):
+                self._entry = entry
+
+            def __getattr__(self, name):
+                return getattr(self._entry, name)
+
+            def is_symlink(self):
+                raise OSError("stale entry")
+
+        class Entries:
+            def __enter__(self):
+                return iter(
+                    [real_entries[0], BadEntry(real_entries[1]), real_entries[2]]
+                )
+
+            def __exit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(cleaner.os, "scandir", lambda _path: Entries())
+
+        assert set(_scan_candidates(runs_root)) == expected
 
     def test_empty_runs_root_is_safe(self, workspace_base):
         runs_root = Path(workspace_base) / "automation-runs"
@@ -322,7 +364,7 @@ class TestPurgeTerminalWorkspaces:
         running_path = _make_workspace(workspace_base, running_id)
 
         result = await purge_terminal_workspaces(
-            db_session_factory, workspace_base, retention_seconds=0, batch_size=10
+            db_session_factory, workspace_base, retention_seconds=3600, batch_size=10
         )
 
         assert result.candidates_found == 2
@@ -541,29 +583,20 @@ class TestPurgeTerminalWorkspaces:
         assert not terminal_path.exists()
         assert pending_path.exists()
 
-    async def test_uses_one_batched_database_lookup(
+    async def test_classification_queries_are_bounded_above_backend_ceiling(
         self, db_session_factory, workspace_base, monkeypatch
     ):
-        auto_id = uuid.uuid4()
-        await _create_automation(db_session_factory, auto_id)
-        old_time = utcnow() - timedelta(days=30)
-        for _ in range(3):
-            run_id = _run_id()
-            await _create_run(
-                db_session_factory,
-                run_id,
-                auto_id,
-                AutomationRunStatus.COMPLETED,
-                completed_at=old_time,
-            )
-            _make_workspace(workspace_base, run_id)
-
+        candidate_count = 32_767
+        candidates = {
+            uuid.uuid4(): utcnow().timestamp() for _ in range(candidate_count)
+        }
+        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
         execute = AsyncSession.execute
-        execute_calls = 0
+        query_sizes = []
 
         async def spy_execute(session, statement, *args, **kwargs):
-            nonlocal execute_calls
-            execute_calls += 1
+            values = next(iter(statement.compile().params.values()))
+            query_sizes.append(len(values))
             return await execute(session, statement, *args, **kwargs)
 
         monkeypatch.setattr(AsyncSession, "execute", spy_execute)
@@ -571,7 +604,157 @@ class TestPurgeTerminalWorkspaces:
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=10
         )
 
-        assert execute_calls == 1
+        assert len(query_sizes) > 1
+        assert sum(query_sizes) == candidate_count
+        assert max(query_sizes) <= DB_CLASSIFICATION_CHUNK_SIZE
+
+    async def test_database_session_closes_before_deletion(
+        self, db_session_factory, workspace_base, monkeypatch
+    ):
+        auto_id = uuid.uuid4()
+        run_id = _run_id()
+        await _create_automation(db_session_factory, auto_id)
+        await _create_run(
+            db_session_factory,
+            run_id,
+            auto_id,
+            AutomationRunStatus.COMPLETED,
+            completed_at=utcnow() - timedelta(days=30),
+        )
+        _make_workspace(workspace_base, run_id)
+        session_closed = False
+
+        class TrackedSession:
+            async def __aenter__(self):
+                self.context = db_session_factory()
+                return await self.context.__aenter__()
+
+            async def __aexit__(self, *args):
+                nonlocal session_closed
+                result = await self.context.__aexit__(*args)
+                session_closed = True
+                return result
+
+        real_delete = cleaner._delete_workspace
+
+        def assert_closed_then_delete(base, candidate_id):
+            assert session_closed
+            return real_delete(base, candidate_id)
+
+        monkeypatch.setattr(cleaner, "_delete_workspace", assert_closed_then_delete)
+        tracked_factory = cast(
+            async_sessionmaker[AsyncSession], lambda: TrackedSession()
+        )
+
+        result = await purge_terminal_workspaces(
+            tracked_factory, workspace_base, retention_seconds=3600
+        )
+
+        assert result.deleted == 1
+
+    async def test_recent_nested_write_keeps_old_orphan(
+        self, db_session_factory, workspace_base
+    ):
+        old_time = utcnow() - timedelta(days=30)
+        path = _make_workspace(workspace_base, _run_id(), mtime=old_time)
+        nested = path / "repo" / "src"
+        nested.mkdir(parents=True)
+        (nested / "active.py").write_text("active", encoding="utf-8")
+        os.utime(path, (old_time.timestamp(), old_time.timestamp()))
+
+        result = await purge_terminal_workspaces(
+            db_session_factory, workspace_base, retention_seconds=3600
+        )
+
+        assert result.deleted == 0
+        assert path.exists()
+
+    async def test_unknown_tree_liveness_keeps_old_orphan(
+        self, db_session_factory, workspace_base, monkeypatch
+    ):
+        old_time = utcnow() - timedelta(days=30)
+        path = _make_workspace(workspace_base, _run_id(), mtime=old_time)
+        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: None)
+
+        result = await purge_terminal_workspaces(
+            db_session_factory, workspace_base, retention_seconds=3600
+        )
+
+        assert result.deleted == 0
+        assert path.exists()
+
+    def test_nested_reparse_point_makes_tree_liveness_unknown(
+        self, workspace_base, monkeypatch
+    ):
+        path = _make_workspace(workspace_base, _run_id())
+        nested = path / "nested"
+        nested.mkdir()
+        monkeypatch.setattr(
+            cleaner,
+            "_is_link_or_junction",
+            lambda candidate: candidate == nested,
+        )
+
+        assert cleaner._latest_tree_mtime(path) is None
+
+    async def test_failed_deletions_stop_at_attempt_limit(
+        self, db_session_factory, workspace_base, monkeypatch
+    ):
+        old = (utcnow() - timedelta(days=30)).timestamp()
+        candidates = {uuid.uuid4(): old for _ in range(200)}
+        delete = Mock(
+            return_value=cleaner.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+        )
+        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
+        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: old)
+        monkeypatch.setattr(cleaner, "_delete_workspace", delete)
+
+        result = await purge_terminal_workspaces(
+            db_session_factory, workspace_base, retention_seconds=3600, batch_size=50
+        )
+
+        assert result.errors == 50 * DELETE_ATTEMPT_FACTOR
+        assert delete.call_count == 50 * DELETE_ATTEMPT_FACTOR
+
+    async def test_shutdown_stops_between_deletions(
+        self, db_session_factory, workspace_base, monkeypatch
+    ):
+        old = (utcnow() - timedelta(days=30)).timestamp()
+        candidates = {uuid.uuid4(): old for _ in range(2)}
+        shutdown_event = asyncio.Event()
+        delete = Mock()
+
+        def stop_after_first(_base, _run_id):
+            shutdown_event.set()
+            return cleaner.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+
+        delete.side_effect = stop_after_first
+        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
+        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: old)
+        monkeypatch.setattr(cleaner, "_delete_workspace", delete)
+
+        await purge_terminal_workspaces(
+            db_session_factory,
+            workspace_base,
+            retention_seconds=3600,
+            shutdown_event=shutdown_event,
+        )
+
+        assert delete.call_count == 1
+
+    async def test_zero_retention_disables_direct_purge(
+        self, db_session_factory, workspace_base
+    ):
+        path = _make_workspace(
+            workspace_base, _run_id(), mtime=utcnow() - timedelta(days=30)
+        )
+
+        result = await purge_terminal_workspaces(
+            db_session_factory, workspace_base, retention_seconds=0
+        )
+
+        assert result == PurgeResult(0, 0, 0, 0, 0, 0)
+        assert path.exists()
 
     async def test_permanent_delete_error_does_not_starve_newer_workspace(
         self, db_session_factory, workspace_base, monkeypatch
@@ -842,7 +1025,7 @@ class TestPurgerLoop:
 
         async def purge_once(**_kwargs):
             shutdown_event.set()
-            return PurgeResult()
+            return PurgeResult(0, 0, 0, 0, 0, 0)
 
         mock_purge = AsyncMock(side_effect=purge_once)
         monkeypatch.setattr(cleaner, "purge_terminal_workspaces", mock_purge)
@@ -867,17 +1050,21 @@ class TestPurgerLoop:
                 interval_seconds=0,
             )
 
+    async def test_zero_retention_returns_without_purge(self, monkeypatch):
+        mock_purge = AsyncMock()
+        monkeypatch.setattr(cleaner, "purge_terminal_workspaces", mock_purge)
+
+        await purger_loop(
+            session_factory=AsyncMock(),
+            workspace_base="/workspace",
+            retention_seconds=0,
+            interval_seconds=3600,
+        )
+
+        mock_purge.assert_not_awaited()
+
 
 class TestPurgeResult:
-    def test_default_values(self):
-        result = PurgeResult()
-        assert result.candidates_found == 0
-        assert result.deleted == 0
-        assert result.missing == 0
-        assert result.refused == 0
-        assert result.errors == 0
-        assert result.bytes_freed == 0
-
     def test_partial_success(self):
         result = PurgeResult(
             candidates_found=10,

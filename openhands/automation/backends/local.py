@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOCAL_WORKSPACE_BASE = "~/.openhands/workspaces"
 
 
+def resolve_local_workspace_base(
+    workspace_base: str | os.PathLike[str] | None,
+) -> str:
+    """Resolve the workspace base used by every local backend consumer."""
+    return os.path.expanduser(os.fspath(workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE))
+
+
 class LocalAgentServerBackend(ExecutionBackend):
     """Execution backend for local/self-hosted deployments.
 
@@ -197,10 +204,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         Returns:
             Path like ~/.openhands/workspaces/automation-runs/{run_id}/
         """
-        # Use configured workspace_base or default
-        base = self.workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE
-        # Expand ~ to home directory
-        base = os.path.expanduser(base)
+        base = resolve_local_workspace_base(self.workspace_base)
         work_dir = os.path.join(base, "automation-runs", run_id)
         logger.debug(f"Local mode work directory: {work_dir}")
         return work_dir

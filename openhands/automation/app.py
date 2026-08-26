@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
@@ -37,10 +36,14 @@ from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
-from openhands.automation.workspace_cleaner import purger_loop
+from openhands.automation.workspace_purger import purger_loop
 
 
 logger = logging.getLogger("automation.app")
+
+
+def _workspace_purger_enabled(settings) -> bool:
+    return settings.is_local_mode and settings.workspace_retention_seconds > 0
 
 
 @asynccontextmanager
@@ -166,13 +169,11 @@ async def lifespan(app: FastAPI):
 
     # Purger: removes old workspace directories in local mode only
     purger_task: asyncio.Task | None = None
-    if settings.is_local_mode:
+    if _workspace_purger_enabled(settings):
         purger_task = asyncio.create_task(
             purger_loop(
                 app.state.session_factory,
-                workspace_base=os.path.expanduser(
-                    settings.workspace_base or "/workspace"
-                ),
+                workspace_base=settings.workspace_base,
                 retention_seconds=settings.workspace_retention_seconds,
                 interval_seconds=settings.purger_interval_seconds,
                 batch_size=settings.purger_batch_size,
@@ -181,6 +182,8 @@ async def lifespan(app: FastAPI):
         )
         app.state.purger_task = purger_task
         logger.info("Background workspace purger started")
+    elif settings.is_local_mode:
+        logger.info("Background workspace purger disabled: retention is 0")
 
     # Git sync: mirrors automations to/from a git repo. Local mode only.
     git_sync_task = None
