@@ -326,6 +326,119 @@ class TestExecuteInContextErrors:
         assert result.sandbox_id == "test-sandbox-id"
 
 
+class TestSetupScriptPath:
+    """The stored ``setup_script_path`` must reach the executed command.
+
+    The field is validated, persisted and echoed back by the API, but the
+    executor historically ran a hardcoded root ``setup.sh`` — a tarball
+    naming anything else silently skipped its setup step (issue #343).
+    """
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_custom_path_is_used_in_command(self, mock_upload, mock_start_bash):
+        """execute_in_context runs the stored setup script path, quoted."""
+        mock_start_bash.return_value = "cmd-1"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            setup_script_path="scripts/setup.sh",
+        )
+
+        assert result.success is True
+        command = mock_start_bash.await_args.args[3]
+        assert "([ ! -f 'scripts/setup.sh' ] || bash 'scripts/setup.sh')" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_default_setup_sh_when_unset(self, mock_upload, mock_start_bash):
+        """Without a stored path the root setup.sh convention is kept."""
+        mock_start_bash.return_value = "cmd-1"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+        )
+
+        assert result.success is True
+        command = mock_start_bash.await_args.args[3]
+        assert "([ ! -f 'setup.sh' ] || bash 'setup.sh')" in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_path_with_single_quote_is_escaped(
+        self, mock_upload, mock_start_bash
+    ):
+        """A quote in the path (allowed by the validator) stays literal."""
+        mock_start_bash.return_value = "cmd-1"
+
+        result = await execute_in_context(
+            client=AsyncMock(),
+            agent_url="https://agent.example.com",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=DEFAULT_WORK_DIR,
+            setup_script_path="scripts/se'tup.sh",
+        )
+
+        assert result.success is True
+        command = mock_start_bash.await_args.args[3]
+        assert (
+            "([ ! -f 'scripts/se'\\''tup.sh' ] || bash 'scripts/se'\\''tup.sh')"
+            in command
+        )
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_path_uses_custom_setup_script(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        """run_automation (blocking mode) also honours the stored path."""
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            "session-key",
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        result = await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+            setup_script_path="scripts/setup.sh",
+        )
+
+        assert result.success is True
+        command = mock_bash.await_args.args[3]
+        assert "([ ! -f 'scripts/setup.sh' ] || bash 'scripts/setup.sh')" in command
+
+
 class TestPrivateEnvironmentInjection:
     def test_env_file_is_loaded_and_removed(self, tmp_path):
         env_path = tmp_path / "private.env"
