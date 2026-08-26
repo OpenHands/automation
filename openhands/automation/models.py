@@ -164,6 +164,13 @@ class AutomationRun(Base):
     # remains PENDING/RUNNING.
     status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Human-readable live progress phase ("Cloning repositories", tool-call
+    # summaries, ...) written by the dispatcher and by the run's entrypoint
+    # via POST /v1/runs/{id}/phase. Only written while PENDING/RUNNING, and
+    # deliberately never cleared on completion (unlike status_detail) — the
+    # UI renders it only for in-flight runs.
+    current_phase: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 

@@ -50,6 +50,7 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_current_phase,
     update_run_timeout_at,
     update_sandbox_id,
 )
@@ -293,6 +294,9 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_PHASE_URL"] = (
+        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+    )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -438,6 +442,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
@@ -535,6 +540,7 @@ async def dispatch_pending_runs(
                     run,
                     AutomationRunStatus.RUNNING,
                     max_duration=timedelta(seconds=provisioning_deadline),
+                    current_phase="Preparing environment",
                 )
                 dispatched_runs.append(run)
             except Exception:

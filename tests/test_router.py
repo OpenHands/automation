@@ -2719,6 +2719,124 @@ class TestCompleteRun:
         assert "first_run" not in metadata
 
 
+class TestReportRunPhase:
+    """Tests for POST /runs/{run_id}/phase endpoint."""
+
+    async def _seed_run(self, async_session, status, *, user_id=None, org_id=None):
+        """Create an automation + run in the given status; returns the run."""
+        from openhands.automation.models import AutomationRunStatus
+
+        automation = Automation(
+            user_id=user_id or TEST_USER_ID,
+            org_id=org_id or TEST_ORG_ID,
+            name="Phase Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus(status),
+        )
+        async_session.add(run)
+        await async_session.commit()
+        return run
+
+    async def test_report_phase_updates_in_flight_run(
+        self, async_client, async_session
+    ):
+        """A phase posted while the run is RUNNING is stored and returned."""
+        run = await self._seed_run(async_session, "RUNNING")
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": "Cloning repositories"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["current_phase"] == "Cloning repositories"
+        await async_session.refresh(run)
+        assert run.current_phase == "Cloning repositories"
+
+    async def test_report_phase_returns_409_for_terminal_run(
+        self, async_client, async_session
+    ):
+        """A phase posted after the run reached a terminal state is rejected."""
+        run = await self._seed_run(async_session, "COMPLETED")
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": "Too late"},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(run)
+        assert run.current_phase is None
+
+    async def test_report_phase_normalizes_control_characters_and_whitespace(
+        self, async_client, async_session
+    ):
+        """Control chars/newlines and whitespace runs collapse to single spaces."""
+        run = await self._seed_run(async_session, "RUNNING")
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": " Checking\nout\tPR   #123 "},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["current_phase"] == "Checking out PR #123"
+
+    async def test_report_phase_rejects_blank_phase(self, async_client, async_session):
+        """A phase that is empty after normalization fails validation."""
+        run = await self._seed_run(async_session, "RUNNING")
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": " \n\t "},
+        )
+
+        assert response.status_code == 422
+
+    async def test_report_phase_for_other_users_run_returns_403(
+        self, async_client, async_session
+    ):
+        """Reporting a phase on another user's run is forbidden."""
+        run = await self._seed_run(
+            async_session, "RUNNING", user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": "Sneaky"},
+        )
+
+        assert response.status_code == 403
+
+    async def test_last_phase_is_preserved_after_completion(
+        self, async_client, async_session
+    ):
+        """Completion keeps the last reported phase (unlike status_detail)."""
+        run = await self._seed_run(async_session, "RUNNING")
+        await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/phase",
+            json={"phase": "Running QA checks"},
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={"status": "COMPLETED"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["current_phase"] == "Running QA checks"
+        await async_session.refresh(run)
+        assert run.current_phase == "Running QA checks"
+
+
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
 

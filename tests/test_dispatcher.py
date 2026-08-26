@@ -361,6 +361,38 @@ class TestDispatchPendingRuns:
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
 
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatch_sets_initial_phase(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The RUNNING transition records the initial live progress phase."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.current_phase == "Preparing environment"
+
     @patch(
         "openhands.automation.dispatcher.capture_automation_event",
         new_callable=AsyncMock,
@@ -806,6 +838,90 @@ class TestEffectiveTimeout:
             remaining = (updated.timeout_at - utcnow()).total_seconds()
             expected = sandbox_cfg.default_run_duration + sandbox_cfg.run_timeout_margin
             assert expected - 30 < remaining <= expected
+
+
+class TestExecuteRunPhaseReporting:
+    """Phase-reporting wiring in _execute_run."""
+
+    async def _run_successful_execution(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Drive _execute_run through a successful dispatch; returns run_id."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Phase Wiring",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        return run_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_exposes_phase_url_to_sandbox(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The sandbox env carries the per-run phase reporting endpoint."""
+        run_id = await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_marks_starting_automation_phase_after_bash_dispatch(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A successful bash dispatch advances the phase past provisioning."""
+        run_id = await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.current_phase == "Starting automation"
 
 
 class TestBuildEventPayload:
