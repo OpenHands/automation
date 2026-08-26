@@ -1,6 +1,7 @@
 # Automation event-trigger test
 
-Temporary file used to verify that the GitHub PR Reviewer automation fires from a
-`pull_request` webhook instead of its old 5-minute cron poll.
+Throwaway file verifying the OSS VM PR reviewer fires from a `pull_request` webhook.
 
-This branch and its PR are throwaway and will be closed and deleted.
+Second commit: forces a new head SHA so the reviewer re-evaluates this PR.
+
+This branch and PR will be deleted.
