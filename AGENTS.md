@@ -389,10 +389,12 @@ special: the event goes through `accept_event()` like any webhook, so it
 matches **unmodified automation definitions** and is deduplicated on the
 provider's delivery id.
 
-- **Off by default**, and self-hosted only: Slack does not allow Socket Mode
-  apps in its public Marketplace, and a pinned connection does not fit a
-  stateless autoscaled tier. `AUTOMATION_STREAMS_ENABLED` plus at least one
-  configured app starts the supervisor; with it off nothing changes.
+- **Configuring an app is the switch**: the supervisor starts when
+  `AUTOMATION_SLACK_APPS` is non-empty, so a deployment that configures none is
+  unchanged and there is no second var to flip. `AUTOMATION_STREAMS_ENABLED`
+  defaults on and exists only as a kill switch. Self-hosted only: Slack does
+  not allow Socket Mode apps in its public Marketplace, and a pinned connection
+  does not fit a stateless autoscaled tier.
 - **Configured from the environment**, not a table — `AUTOMATION_SLACK_APPS`,
   a JSON list of `{org_id, app_token, bot_token, team_id, bot_user_id}`. Per-org
   socket configuration is a multi-tenant requirement; taking it now would cost

@@ -5,12 +5,14 @@ Submodules:
     slack.py       Slack Socket Mode provider
     supervisor.py  Source registry and the supervised task per source
 
-Off unless `AUTOMATION_STREAMS_ENABLED` is set, because this is a self-hosted
-capability rather than a cloud one, for two independent reasons: Slack does not
-allow Socket Mode apps in its public Marketplace, and a connection pinned to
-one replica does not fit a stateless autoscaled tier the way a request does.
-Webhooks stay the cloud path, and a deployment that sets nothing keeps exactly
-today's behaviour.
+Configuring `AUTOMATION_SLACK_APPS` is what starts a source; a deployment that
+configures none keeps exactly today's behaviour, so there is no second env var
+to flip. `AUTOMATION_STREAMS_ENABLED=false` is the kill switch for holding the
+sockets down without unsetting the credentials. Self-hosted only either way,
+for two independent reasons: Slack does not allow Socket Mode apps in its
+public Marketplace, and a connection pinned to one replica does not fit a
+stateless autoscaled tier the way a request does. Webhooks stay the cloud
+path.
 
 Everything past `emit()` is the ordinary event pipeline: a streamed event
 routes through `accept_event()` like any webhook, against unmodified automation

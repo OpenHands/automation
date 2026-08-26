@@ -35,7 +35,7 @@ dependencies = [
   "python-json-logger>=3",
   "pyyaml>=6",
   # Socket Mode client: apps.connections.open, envelope framing, ping/pong and
-  # reconnect. Only needed when AUTOMATION_STREAMS_ENABLED is on.
+  # reconnect. Only used when a Slack app is configured.
   "slack-sdk>=3.33",
   "sqlalchemy[asyncio]>=2",
   "tenacity>=9.1.4",

@@ -197,7 +197,7 @@ async def lifespan(app: FastAPI):
         logger.info("Background git sync started")
 
     # Stream sources: long-lived inbound connections (Slack Socket Mode),
-    # one supervised task each. Off unless AUTOMATION_STREAMS_ENABLED.
+    # one supervised task each. Starts only once an app is configured.
     streams_task = None
     if config.streams.enabled:
         streams_task = asyncio.create_task(
