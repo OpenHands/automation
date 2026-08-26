@@ -799,6 +799,9 @@ class AutomationRunListResponse(BaseModel):
 
     runs: list[AutomationRunResponse]
     total: int
+    # Lifetime run counts by status, unaffected by pagination. Sparse: only
+    # statuses with at least one run appear, so a missing key means zero.
+    status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
 # --- Capability and Preflight Schemas ---

@@ -13,8 +13,10 @@ from typing import Any
 
 from fastapi import Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation.models import IntegrationEvent
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -67,7 +69,9 @@ async def accept_event(
 ) -> AcceptResult:
     """Route an already-authenticated event to the org's matching automations.
 
-    Commits before returning.
+    Records the event and creates the runs in one transaction, deduplicating on
+    `event.provider_event_id` when the transport supplies one. Commits before
+    returning.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -80,12 +84,43 @@ async def accept_event(
     source = event.source
     webhook_payload = event.payload
 
+    record = IntegrationEvent(
+        org_id=org_id,
+        source=source,
+        provider_event_id=event.provider_event_id,
+        event_key=event.event_key,
+        payload=webhook_payload,
+    )
+    # Insert before doing any routing work, so a redelivery costs one failed
+    # INSERT rather than a match pass. The savepoint is what keeps the
+    # violation recoverable: without it the failure would poison the
+    # transaction the caller still has to commit.
+    try:
+        async with session.begin_nested():
+            session.add(record)
+            await session.flush()
+    except IntegrityError:
+        if event.provider_event_id is None:
+            # The dedupe index is partial: with no id there is nothing on this
+            # row that can conflict, so whatever failed is not a redelivery.
+            # Reading it as one would drop a genuine event without a trace.
+            raise
+        logger.info(
+            "Dropping duplicate %s event %s for org=%s",
+            source,
+            event.provider_event_id,
+            org_id,
+        )
+        return AcceptResult(matched=0, run_ids=[], duplicate=True)
+
     automations = await get_event_automations(org_id, source, session)
     matched_automations = []
 
     for automation, trigger in automations:
         if matches_trigger(trigger, source, event.event_key, webhook_payload):
             matched_automations.append(automation)
+
+    record.matched_count = len(matched_automations)
 
     logger.info(
         "Event matched %d/%d automations for org=%s",

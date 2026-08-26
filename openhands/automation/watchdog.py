@@ -13,13 +13,16 @@ reset to bash-start + run budget + margin once the bash command starts
 
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
+
+The same loop prunes ``integration_events``: it is the service's only periodic
+janitor, and a second loop buys nothing for one bounded DELETE.
 """
 
 import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import inspect, select, update
+from sqlalchemy import delete, inspect, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -30,6 +33,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    IntegrationEvent,
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
@@ -47,6 +51,11 @@ from openhands.automation.utils.timeout import resolve_automation_timeout_second
 
 
 logger = logging.getLogger("automation.watchdog")
+
+# Most rows a single prune deletes. Caps how long one statement holds locks on
+# a table the receive path writes to; the loop runs again a minute later, so a
+# backlog drains rather than being dropped.
+PRUNE_BATCH_SIZE = 5000
 
 
 async def _get_automation_keep_alive(
@@ -532,6 +541,28 @@ async def mark_stale_runs(
     return marked
 
 
+async def prune_integration_events(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> int:
+    """Delete accepted events past the retention window, one batch per scan."""
+    cutoff = utcnow() - timedelta(days=settings.integration_event_retention_days)
+
+    async with session_factory() as session:
+        result: CursorResult = await session.execute(  # type: ignore[assignment]
+            delete(IntegrationEvent).where(
+                IntegrationEvent.id.in_(
+                    select(IntegrationEvent.id)
+                    .where(IntegrationEvent.received_at < cutoff)
+                    .limit(PRUNE_BATCH_SIZE)
+                )
+            )
+        )
+        await session.commit()
+
+    return result.rowcount
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -562,6 +593,13 @@ async def watchdog_loop(
                 logger.info("Processed %d stale run(s)", marked)
         except Exception:
             logger.exception("Error in watchdog scan")
+
+        try:
+            pruned = await prune_integration_events(session_factory, settings)
+            if pruned:
+                logger.info("Pruned %d expired integration event(s)", pruned)
+        except Exception:
+            logger.exception("Error pruning integration events")
 
         if shutdown_event is not None:
             try:
