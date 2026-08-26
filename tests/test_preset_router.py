@@ -163,6 +163,51 @@ class TestPresetFileSyntax:
         )
 
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_setup_sh_clears_ambient_uv_python_before_install(self, preset_name):
+        """setup.sh clears UV_PYTHON so the install targets the run venv (#338).
+
+        ``uv pip install`` honours an ambient ``UV_PYTHON`` ahead of the ``.venv``
+        in the CWD, so an inherited value (e.g. from the agent-server's uvx
+        launcher) silently redirects the SDK install into a different
+        environment while setup still reports success.
+        """
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+        content = setup_sh_path.read_text()
+
+        assert "unset UV_PYTHON" in content, (
+            "setup.sh must unset UV_PYTHON before `uv pip install` so an ambient "
+            "value cannot redirect the install out of the run venv (#338)"
+        )
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_setup_sh_verifies_sdk_import_from_run_venv(self, preset_name):
+        """setup.sh verifies the SDK imports from the run venv before exiting.
+
+        A misdirected install would otherwise surface later as a confusing
+        ``ModuleNotFoundError`` inside ``main.py`` instead of failing at the
+        setup step (#338).
+        """
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+        content = setup_sh_path.read_text()
+
+        assert "import openhands.sdk" in content, (
+            "setup.sh must verify the SDK is importable from the run venv "
+            "before handing off to the entrypoint (#338)"
+        )
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_setup_sh_handles_windows_venv_layout(self, preset_name):
+        """The run-venv verification covers both POSIX and Windows layouts."""
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+        content = setup_sh_path.read_text()
+
+        assert ".venv/bin/python" in content, "POSIX venv python path missing"
+        assert ".venv/Scripts/python.exe" in content, (
+            "Windows venv python path missing — preset entrypoints support "
+            "Windows sandboxes (see _get_preset_entrypoint)"
+        )
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     def test_preset_finish_tool_uses_task_outcome_schema(self, preset_name):
         """Preset agents attach TaskOutcome structured output to FinishTool."""
         sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"

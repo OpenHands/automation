@@ -40,9 +40,32 @@ echo "[setup] Creating isolated virtual environment"
 uv venv .venv --python '>=3.12' --quiet
 
 echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+# Clear UV_PYTHON so an ambient value (e.g. exported by the agent-server's
+# own uvx/uv launcher) cannot redirect the install away from the .venv we
+# just created in the CWD: `uv pip install` honours UV_PYTHON ahead of the
+# local .venv, silently installing into a different environment while the
+# run venv stays empty (#338).
+unset UV_PYTHON
 uv pip install --quiet \
   "openhands-sdk==${SDK_VERSION}" \
   "openhands-tools==${SDK_VERSION}" \
   "openhands-workspace==${SDK_VERSION}"
+
+# Fail at the setup step when the SDK is not importable from the run venv:
+# a misdirected install would otherwise surface later as a confusing
+# ModuleNotFoundError inside main.py (#338).
+echo "[setup] Verifying SDK is importable from the run venv"
+if [ -x .venv/bin/python ]; then
+    VENV_PYTHON=.venv/bin/python
+elif [ -x .venv/Scripts/python.exe ]; then
+    VENV_PYTHON=.venv/Scripts/python.exe
+else
+    echo "[setup] ERROR: run venv python not found in .venv" >&2
+    exit 1
+fi
+"$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools.preset, openhands.workspace' || {
+    echo "[setup] ERROR: OpenHands SDK not importable in .venv (install misdirected?)" >&2
+    exit 1
+}
 
 echo "[setup] Done"
