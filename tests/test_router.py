@@ -1639,6 +1639,7 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["runs"] == []
         assert data["total"] == 0
+        assert data["status_counts"] == {}
 
     async def test_list_runs_returns_runs(self, async_client, async_session):
         """Listing runs after dispatch shows created runs."""
@@ -1753,6 +1754,81 @@ class TestListAutomationRuns:
         data = response.json()
         assert data["total"] == 5
         assert len(data["runs"]) == 2
+
+    async def test_list_runs_counts_by_status(self, async_client, async_session):
+        """status_counts reports lifetime per-status counts, sparsely."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        # Arrange — runs across three statuses; CANCELLED/SKIPPED never occur.
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        for status in [
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.COMPLETED,
+            AutomationRunStatus.FAILED,
+            AutomationRunStatus.PENDING,
+        ]:
+            async_session.add(AutomationRun(automation_id=automation.id, status=status))
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/runs")
+
+        # Assert — only statuses with runs appear, and total is their sum.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status_counts"] == {
+            "COMPLETED": 2,
+            "FAILED": 1,
+            "PENDING": 1,
+        }
+        assert data["total"] == 4
+
+    async def test_list_runs_counts_unaffected_by_pagination(
+        self, async_client, async_session
+    ):
+        """status_counts stays lifetime-wide on a paginated page."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        # Arrange
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        for _ in range(3):
+            async_session.add(
+                AutomationRun(
+                    automation_id=automation.id,
+                    status=AutomationRunStatus.COMPLETED,
+                )
+            )
+        await async_session.commit()
+
+        # Act
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/runs",
+            params={"limit": 1, "offset": 1},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["runs"]) == 1
+        assert data["status_counts"] == {"COMPLETED": 3}
 
     async def test_list_runs_not_found(self, async_client):
         """Listing runs for nonexistent automation returns 404."""
