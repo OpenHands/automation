@@ -33,6 +33,7 @@ from openhands.automation.utils.timeout import resolve_automation_timeout_second
 DEFAULT_WORK_DIR = "/workspace/project"
 
 logger = logging.getLogger(__name__)
+_ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -382,6 +383,7 @@ async def execute_in_context(
         if run_id and "/" not in run_id
         else TARBALL_PATH
     )
+    env_path: str | None = None
 
     try:
         # Get tarball into environment: upload bytes or download from URL
@@ -394,17 +396,24 @@ async def execute_in_context(
                 client, agent_url, session_key, tarball_source, tarball_path
             )
 
-        exports = ""
+        env_prefix = ""
         if env_vars:
-            parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
-            exports = " && ".join(parts) + " && "
+            env_path = f"{tarball_path}.env"
+            await _upload(
+                client,
+                agent_url,
+                session_key,
+                _serialize_env_vars(env_vars),
+                env_path,
+            )
+            env_prefix = _env_command_prefix(env_path)
 
         cmd = (
-            f"mkdir -p {work_dir}"
+            f"{env_prefix}mkdir -p {work_dir}"
             f" && tar xzf {tarball_path} -C {work_dir}"
             f" && rm -f {tarball_path}"
             f" && cd {work_dir}"
-            f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+            f" && ([ ! -f setup.sh ] || bash setup.sh)"
             f" && {entrypoint}"
         )
 
@@ -412,6 +421,7 @@ async def execute_in_context(
         command_id = await _start_bash(
             client, agent_url, session_key, cmd, timeout=timeout
         )
+        env_path = None
         logger.info(
             "Entrypoint started (command_id=%s), disconnecting",
             command_id,
@@ -430,6 +440,25 @@ async def execute_in_context(
     except Exception as e:
         logger.exception("Execution failed", extra=_log_ctx())
         return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
+    finally:
+        if env_path is not None:
+            try:
+                exit_code, _, stderr = await _bash(
+                    client,
+                    agent_url,
+                    session_key,
+                    f"rm -f -- {_shell_quote(env_path)}",
+                    timeout=int(get_config().http.http_timeout),
+                )
+                if exit_code != 0:
+                    raise RuntimeError(
+                        f"Environment file cleanup failed (exit={exit_code}): {stderr}"
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to remove private environment file",
+                    extra=_log_ctx(),
+                )
 
 
 @dataclass(frozen=True)
@@ -533,16 +562,23 @@ async def run_automation(
                     client, agent_url, session_key, tarball_source, TARBALL_PATH
                 )
 
-            exports = ""
+            env_prefix = ""
             if env_vars:
-                parts = [f"export {k}={_shell_quote(v)}" for k, v in env_vars.items()]
-                exports = " && ".join(parts) + " && "
+                env_path = f"{TARBALL_PATH}.env"
+                await _upload(
+                    client,
+                    agent_url,
+                    session_key,
+                    _serialize_env_vars(env_vars),
+                    env_path,
+                )
+                env_prefix = _env_command_prefix(env_path)
 
             cmd = (
-                f"mkdir -p {work_dir}"
+                f"{env_prefix}mkdir -p {work_dir}"
                 f" && tar xzf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
-                f" && {exports}([ ! -f setup.sh ] || bash setup.sh)"
+                f" && ([ ! -f setup.sh ] || bash setup.sh)"
                 f" && {entrypoint}"
             )
 
@@ -588,3 +624,24 @@ async def run_automation(
 def _shell_quote(s: str) -> str:
     """Single-quote a string for safe shell interpolation."""
     return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _serialize_env_vars(env_vars: dict[str, str]) -> bytes:
+    lines = []
+    for name, value in env_vars.items():
+        if _ENV_VAR_NAME_RE.fullmatch(name) is None:
+            raise ValueError("Invalid environment variable name")
+        lines.append(f"export {name}={_shell_quote(value)}")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _env_command_prefix(env_path: str) -> str:
+    quoted_path = _shell_quote(env_path)
+    cleanup = _shell_quote(f"rm -f {quoted_path}")
+    return (
+        f"set +x && trap {cleanup} EXIT"
+        f" && chmod 600 {quoted_path}"
+        f" && . {quoted_path}"
+        f" && rm -f {quoted_path}"
+        f" && "
+    )

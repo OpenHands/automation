@@ -1,13 +1,21 @@
 """Pydantic request/response schemas for the API."""
 
+import json
 import re
 import uuid
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.providers import (
+    DEFAULT_VERIFIER,
+    is_builtin_source,
+    reserved_sources,
+    verifier_schemes,
+)
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -17,6 +25,7 @@ from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
     validate_automation_timeout,
 )
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -208,14 +217,15 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-def _validate_command_string(
+def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
     """Validate a command/path is relative and safe.
 
     Rejects traversal patterns and shell metacharacters.
 
-    Used for both entrypoint and setup_script_path validation.
+    Used for both entrypoint and setup_script_path validation, including
+    by git_sync/loop.py when importing automations from git.
 
     Args:
         v: The value to validate
@@ -240,6 +250,53 @@ def _validate_command_string(
             f"{field_name} must not contain shell metacharacters (;&|`$(){{}}<>!\\\\)"
         )
     return v
+
+
+# --- Template provenance ---
+
+# Keeps an opaque payload from bloating the preset_metadata JSON column.
+MAX_TEMPLATE_CONFIG_BYTES: Final[int] = 16_384
+
+
+class TemplateProvenance(BaseModel):
+    """The extension-owned template an automation was created from.
+
+    Stored verbatim under ``preset_metadata["template"]`` and never validated
+    against any catalog, which OpenHands/extensions owns. Must not contain
+    secrets. Every creation path accepts it, which is why it lives here rather
+    than in ``preset_router``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Identifier of the extension template (catalog entry id).",
+    )
+    version: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="Version of the template at creation time.",
+    )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Non-secret configuration the user submitted when enabling the "
+            "template (e.g. setup form values)."
+        ),
+    )
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_size(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(json.dumps(v)) > MAX_TEMPLATE_CONFIG_BYTES:
+            raise ValueError(
+                f"config must serialize to at most {MAX_TEMPLATE_CONFIG_BYTES} bytes"
+            )
+        return v
 
 
 # --- Requests ---
@@ -285,6 +342,14 @@ class CreateAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    template: TemplateProvenance | None = Field(
+        default=None,
+        description=(
+            "Provenance of the extension template this automation comes from. "
+            "Makes creation idempotent: a live automation for the same user and "
+            "template id is returned unchanged with HTTP 200."
+        ),
+    )
 
     @field_validator("tarball_path")
     @classmethod
@@ -298,12 +363,12 @@ class CreateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str) -> str:
-        result = _validate_command_string(v, "entrypoint", allow_none=False)
+        result = validate_command_string(v, "entrypoint", allow_none=False)
         assert result is not None  # satisfy type checker
         return result
 
@@ -356,12 +421,12 @@ class UpdateAutomationRequest(BaseModel):
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "setup_script_path")
+        return validate_command_string(v, "setup_script_path")
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
-        return _validate_command_string(v, "entrypoint")
+        return validate_command_string(v, "entrypoint")
 
     @field_validator("timeout")
     @classmethod
@@ -381,6 +446,7 @@ class WebhookConfig(BaseModel):
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
+    signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
 
 
 class EventResponse(BaseModel):
@@ -391,15 +457,42 @@ class EventResponse(BaseModel):
     runs_created: list[str]  # List of run IDs created
 
 
+class EventDetectionRule(BaseModel):
+    """Payload rule used to detect a source event type."""
+
+    event_type: str
+    jmespath: str
+
+
+class RequestedEventTypesResponse(BaseModel):
+    """Event types currently requested by enabled automations for a source."""
+
+    source: str
+    event_types: list[str]
+    event_detection_rules: list[EventDetectionRule] = Field(default_factory=list)
+
+
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
-# Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+# Snapshot for introspection; validation calls `is_builtin_source()` so a
+# provider registered after import time is still protected.
+RESERVED_SOURCES = reserved_sources()
 
 
 # Valid HTTP header name pattern
 _HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]$")
+
+
+def _validate_signature_scheme(v: str) -> str:
+    """Reject a scheme with no verifier behind it."""
+    schemes = verifier_schemes()
+    if v not in schemes:
+        raise ValueError(
+            f"Invalid signature_scheme '{v}'. Must be one of: "
+            f"{', '.join(sorted(schemes))}"
+        )
+    return v
 
 
 class CustomWebhookCreate(BaseModel):
@@ -438,6 +531,20 @@ class CustomWebhookCreate(BaseModel):
             "Examples: 'X-Signature-256', 'Stripe-Signature', 'X-Slack-Signature'"
         ),
     )
+    signature_scheme: str = Field(
+        default=DEFAULT_VERIFIER,
+        max_length=50,
+        description=(
+            "How the value in `signature_header` is computed. "
+            "'hmac_sha256_hex' (default) is a hex digest over the raw body "
+            "(GitHub, Linear). 'standard_webhooks' follows "
+            "standardwebhooks.com (GitLab 19.1+ signing tokens, Svix) and also "
+            "reads the webhook-id and webhook-timestamp headers. 'slack_v0' is "
+            "the Slack Events API scheme and also reads "
+            "X-Slack-Request-Timestamp. The timestamped schemes reject "
+            "deliveries outside a 5-minute replay window."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -453,7 +560,7 @@ class CustomWebhookCreate(BaseModel):
     def validate_source_name(cls, v: str) -> str:
         """Validate source name format and check for reserved names."""
         v_lower = v.lower()
-        if v_lower in RESERVED_SOURCES:
+        if is_builtin_source(v_lower):
             raise ValueError(
                 f"'{v}' is a reserved source name. "
                 "Use the built-in integration instead."
@@ -464,6 +571,12 @@ class CustomWebhookCreate(BaseModel):
                 "starting and ending with alphanumeric"
             )
         return v_lower
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str) -> str:
+        """Validate the scheme names a registered verifier."""
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -498,7 +611,16 @@ class CustomWebhookUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
+    signature_scheme: str | None = Field(default=None, max_length=50)
     enabled: bool | None = None
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str | None) -> str | None:
+        """Validate the scheme names a registered verifier, if provided."""
+        if v is None:
+            return v
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -539,6 +661,7 @@ class CustomWebhookResponse(BaseModel):
     webhook_url: str
     event_key_expr: str
     signature_header: str
+    signature_scheme: str
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -578,6 +701,21 @@ class CustomWebhookListResponse(BaseModel):
     total: int
 
 
+class TelemetryConsentRequest(BaseModel):
+    """Frontend telemetry consent state for local automation telemetry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    consent_granted: bool
+    frontend_distinct_id: str | None = Field(default=None, max_length=256)
+
+
+class TelemetryConsentResponse(BaseModel):
+    """Stored aggregate telemetry consent for this automation service."""
+
+    consent_granted: bool
+
+
 # --- Responses ---
 
 
@@ -589,6 +727,7 @@ class AutomationResponse(BaseModel):
 
     name: str
     prompt: str | None
+    preset_metadata: dict | None = None
     trigger: dict
     tarball_path: str
     setup_script_path: str | None
@@ -619,7 +758,19 @@ class RunCompleteRequest(BaseModel):
     status: Literal["COMPLETED", "FAILED"]
     run_id: str | None = None
     conversation_id: str | None = None
-    error: str | None = None
+    error: str | ConversationErrorEvent | dict[str, Any] | None = None
+    cost: float | None = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def parse_sdk_conversation_error(cls, value: Any) -> Any:
+        """Coerce typed SDK callback errors while preserving legacy payloads."""
+        if not isinstance(value, dict):
+            return value
+        try:
+            return ConversationErrorEvent.model_validate(value)
+        except ValueError:
+            return value
 
 
 class AutomationRunResponse(BaseModel):
@@ -629,10 +780,13 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     error_detail: str | None
+    status_detail: dict[str, Any] | None = None
     conversation_id: str | None
+    cost: float | None = None
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
@@ -645,3 +799,126 @@ class AutomationRunListResponse(BaseModel):
 
     runs: list[AutomationRunResponse]
     total: int
+    # Lifetime run counts by status, unaffected by pagination. Sparse: only
+    # statuses with at least one run appear, so a missing key means zero.
+    status_counts: dict[RunStatus, int] = Field(default_factory=dict)
+
+
+# --- Capability and Preflight Schemas ---
+
+
+class _SetupContractModel(BaseModel):
+    """Base for the extension-owned setup contract, which is camelCase.
+
+    The rest of this service is snake_case. These two endpoints answer a
+    contract authored in OpenHands/extensions, whose catalog, schema and
+    TypeScript types are camelCase throughout.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class CronCapabilities(_SetupContractModel):
+    """Deployment constraints on cron triggers."""
+
+    min_interval_seconds: int = Field(
+        ...,
+        description="Shortest gap between fire times this deployment can honour",
+    )
+    timezones: list[str] = Field(..., description="Accepted IANA timezone names")
+
+
+class EventCapabilities(_SetupContractModel):
+    """Deployment constraints on event triggers."""
+
+    filter_language: Literal["jmespath"] = "jmespath"
+    filter_functions: list[str] = Field(
+        ..., description="Functions a filter expression may call"
+    )
+
+
+class TriggerCapabilities(_SetupContractModel):
+    """Per-trigger-kind constraints. A kind is present only when supported."""
+
+    cron: CronCapabilities | None = None
+    event: EventCapabilities | None = None
+
+
+class CapabilitiesResponse(_SetupContractModel):
+    """What this deployment supports, discovered before a setup form renders."""
+
+    ready: bool = Field(..., description="Whether the service can accept new work")
+    max_automation_timeout_seconds: int = Field(
+        ...,
+        description="Maximum timeout the service accepts for an automation run",
+    )
+    trigger_kinds: list[str]
+    event_sources: list[str]
+    event_types: list[str] = Field(
+        ...,
+        description=(
+            "Event key patterns matched with the same wildcard syntax a "
+            "trigger's 'on' field uses. Only sources publishing a known "
+            "catalog contribute; a custom webhook's keys come from its own "
+            "event_key_expr."
+        ),
+    )
+    triggers: TriggerCapabilities
+    features: list[str]
+
+
+class DraftValidationError(_SetupContractModel):
+    """A single problem with a draft, addressed to the field that caused it."""
+
+    field: str | None = Field(
+        ...,
+        description=(
+            "Dotted path into the draft, e.g. 'trigger.schedule' or "
+            "'repos[0].url'. Null when the problem spans the whole draft."
+        ),
+    )
+    code: str
+    message: str
+
+
+class ValidateDraftRequest(_SetupContractModel):
+    """Request to validate a draft automation without creating it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"] = Field(
+        ...,
+        description=(
+            "Creation endpoint the draft will be sent to. '/v1' is the raw path, "
+            "which an entry shipping its own tarball uses."
+        ),
+    )
+    draft: dict[str, Any] = Field(
+        ..., description="The request body that would be sent to that endpoint"
+    )
+    automation_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Catalog entry the draft came from, logged for correlation only",
+    )
+    sample_event: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Raw provider payload to test an event trigger against, as the "
+            "webhook endpoint would receive it."
+        ),
+    )
+
+
+class ValidateDraftResponse(_SetupContractModel):
+    """Outcome of validating a draft. An invalid draft is still a 200."""
+
+    valid: bool
+    errors: list[DraftValidationError] = Field(default_factory=list)
+    sample_event_matched: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the sample event would fire this trigger. Null when no "
+            "sample event was supplied or the trigger is not event-based."
+        ),
+    )

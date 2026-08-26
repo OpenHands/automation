@@ -481,3 +481,24 @@ def parse_github_event_auto(payload: dict[str, Any]) -> GitHubEvent:
 def get_supported_event_types() -> list[str]:
     """Get list of all supported GitHub event types."""
     return list(GITHUB_PAYLOAD_CLASSES.keys())
+
+
+def get_supported_event_patterns() -> list[str]:
+    """Get the event key patterns GitHub triggers can match.
+
+    Actions are free-form strings taken from the payload, so a type that
+    carries one supports every action GitHub sends for it. The patterns use
+    the same wildcard syntax a trigger's ``on`` field does.
+    """
+    return sorted(
+        f"{event_type}.*" if "action" in payload_class.model_fields else event_type
+        for event_type, payload_class in GITHUB_PAYLOAD_CLASSES.items()
+    )
+
+
+def get_event_detection_rules() -> list[dict[str, str]]:
+    """Get ordered GitHub event type detection rules."""
+    return [
+        {"event_type": event_type, "jmespath": expression}
+        for event_type, expression in GITHUB_DETECTION_RULES
+    ]

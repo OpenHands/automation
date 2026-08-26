@@ -8,6 +8,7 @@ from openhands.automation.utils.cron import (
     get_next_fire_time,
     get_prev_fire_time,
     is_automation_due,
+    min_interval_seconds,
     validate_cron_schedule,
     validate_timezone_name,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "get_next_fire_time",
     "get_prev_fire_time",
     "is_automation_due",
+    "min_interval_seconds",
     "validate_cron_schedule",
     "validate_timezone_name",
     "log_extra",

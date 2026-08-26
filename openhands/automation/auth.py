@@ -107,6 +107,13 @@ class AuthenticatedUser:
     active_model_profile_name: str | None = None
 
 
+def _store_authenticated_user(
+    request: Request, user: AuthenticatedUser
+) -> AuthenticatedUser:
+    request.state.authenticated_user = user
+    return user
+
+
 class _LLMProfiles(BaseModel):
     """Consuming subset of the upstream ``LLMProfiles`` model.
 
@@ -431,7 +438,7 @@ async def authenticate_request(
     if api_key and settings.is_local_mode and settings.local_api_key:
         if secrets.compare_digest(api_key, settings.local_api_key):
             logger.debug("Authenticated via local API key")
-            return _get_local_user()
+            return _store_authenticated_user(request, _get_local_user())
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -446,7 +453,7 @@ async def authenticate_request(
     cached_user = auth_cache.get(cache_key)
     if cached_user is not None:
         logger.debug("Auth cache hit for user %s", cached_user.user_id)
-        return cached_user
+        return _store_authenticated_user(request, cached_user)
 
     # --- Validate against OpenHands API ---
     logger.debug("Auth cache miss, validating with OpenHands API")
@@ -494,4 +501,4 @@ async def authenticate_request(
     # --- Build user and cache ---
     user = _parse_users_me(resp.json(), auth_method, credential)
     auth_cache[cache_key] = user
-    return user
+    return _store_authenticated_user(request, user)

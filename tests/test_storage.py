@@ -16,6 +16,8 @@ from openhands.automation.config import StorageSettings, clear_config_cache
 from openhands.automation.storage import (
     FileStore,
     GoogleCloudFileStore,
+    LocalFileStore,
+    ObjectNotFoundError,
     S3FileStore,
     get_file_store,
 )
@@ -52,14 +54,26 @@ class TestFileStoreAbstraction:
 class TestGetFileStoreFactory:
     """Test the get_file_store factory function."""
 
-    def test_default_returns_gcs(self):
-        """Default FILE_STORE returns GoogleCloudFileStore."""
-        with patch.dict(os.environ, {"GCS_BUCKET_NAME": "test-bucket"}, clear=False):
-            os.environ.pop("FILE_STORE", None)
+    def test_default_returns_local(self):
+        """Default FILE_STORE returns LocalFileStore."""
+        with patch.dict(
+            os.environ,
+            {"FILE_STORE": "local", "LOCAL_STORAGE_PATH": "/tmp/test-storage"},
+            clear=False,
+        ):
+            os.environ.pop("GCS_BUCKET_NAME", None)
             clear_config_cache()
-            with patch("openhands.automation.storage.google_cloud.storage"):
-                store = get_file_store()
-                assert isinstance(store, GoogleCloudFileStore)
+            store = get_file_store()
+            assert isinstance(store, LocalFileStore)
+
+    def test_default_path_works_without_env(self):
+        """LocalFileStore works with the built-in default path (no env needed)."""
+        env_override = {"FILE_STORE": "local"}
+        # Ensure LOCAL_STORAGE_PATH is not set
+        with patch.dict(os.environ, env_override, clear=True):
+            clear_config_cache()
+            store = get_file_store()
+            assert isinstance(store, LocalFileStore)
 
     def test_gcs_explicit(self):
         """FILE_STORE=gcs returns GoogleCloudFileStore."""
@@ -218,6 +232,44 @@ class TestGoogleCloudFileStore:
             # Verify the path is prefixed
             mock_bucket.blob.assert_called_once_with("automation/test/path.txt")
             mock_blob.delete.assert_called_once()
+
+    def test_read_not_found(self):
+        """Read raises ObjectNotFoundError when the blob doesn't exist."""
+        from google.cloud.exceptions import NotFound
+
+        settings = make_gcs_settings()
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
+            mock_client = MagicMock()
+            mock_bucket = MagicMock()
+            mock_blob = MagicMock()
+
+            mock_storage.Client.return_value = mock_client
+            mock_client.bucket.return_value = mock_bucket
+            mock_bucket.blob.return_value = mock_blob
+            mock_blob.download_as_bytes.side_effect = NotFound("blob missing")
+
+            store = GoogleCloudFileStore(settings)
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
+                store.read("test/nonexistent.txt")
+
+    def test_delete_not_found(self):
+        """Delete raises ObjectNotFoundError when the blob doesn't exist."""
+        from google.cloud.exceptions import NotFound
+
+        settings = make_gcs_settings()
+        with patch("openhands.automation.storage.google_cloud.storage") as mock_storage:
+            mock_client = MagicMock()
+            mock_bucket = MagicMock()
+            mock_blob = MagicMock()
+
+            mock_storage.Client.return_value = mock_client
+            mock_client.bucket.return_value = mock_bucket
+            mock_bucket.blob.return_value = mock_blob
+            mock_blob.delete.side_effect = NotFound("blob missing")
+
+            store = GoogleCloudFileStore(settings)
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
+                store.delete("test/nonexistent.txt")
 
     def test_emulator_creates_bucket(self):
         """When using emulator, bucket is created if it doesn't exist."""

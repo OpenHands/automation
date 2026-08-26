@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 _CRON_VALIDATION_BASE_TIME = datetime(2026, 7, 1)
 
+# Consecutive fire times sampled when measuring how often a schedule can fire.
+_INTERVAL_SAMPLE_SIZE = 10
+
 
 def validate_timezone_name(timezone: str) -> str:
     """Validate and return an IANA timezone name."""
@@ -57,6 +60,21 @@ def validate_cron_schedule(cron_schedule: str) -> str:
         raise ValueError(f"Invalid cron expression: {cron_schedule}") from e
 
     return cron_schedule
+
+
+def min_interval_seconds(cron_schedule: str) -> float:
+    """Return the shortest gap in seconds between consecutive fire times.
+
+    Sampled from the same fixed base time ``validate_cron_schedule`` uses, so
+    the answer is deterministic. Irregular schedules such as ``0 9 * * 1-5``
+    report their tightest gap, which is the one a deployment floor must clear.
+    """
+    cron = croniter(cron_schedule, _CRON_VALIDATION_BASE_TIME)
+    fire_times = [cron.get_next(datetime) for _ in range(_INTERVAL_SAMPLE_SIZE)]
+    return min(
+        (later - earlier).total_seconds()
+        for earlier, later in zip(fire_times, fire_times[1:], strict=False)
+    )
 
 
 def get_next_fire_time(
