@@ -387,8 +387,10 @@ async def test_execution_errors_disable_the_automation(
         assert await maybe_disable_unhealthy_automation(session, automation.id) is True
         await session.refresh(automation)
         assert automation.enabled is False
+        assert automation.disabled_detail is not None
         assert automation.disabled_detail["rule"] == "consecutive_failures"
         assert automation.disabled_detail["consecutive_failures"] == 10
+        assert automation.disabled_reason is not None
         assert "the last 10 runs all failed" in automation.disabled_reason
         assert "24 hours" in automation.disabled_reason
 
@@ -558,6 +560,7 @@ async def test_setting_the_count_turns_the_rule_on(
 
         assert await maybe_disable_unhealthy_automation(session, automation.id) is True
         await session.refresh(automation)
+        assert automation.disabled_detail is not None
         assert automation.disabled_detail["rule"] == "consecutive_failures"
 
 
