@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
+from openhands.automation.cleaner import purger_loop
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
@@ -36,7 +37,6 @@ from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
-from openhands.automation.workspace_purger import purger_loop
 
 
 logger = logging.getLogger("automation.app")

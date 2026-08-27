@@ -8,13 +8,13 @@ import asyncio
 import logging
 import os
 import shutil
-import stat
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from itertools import batched
 from pathlib import Path
+from typing import Final
 from uuid import UUID
 
 from sqlalchemy import select
@@ -25,12 +25,12 @@ from openhands.automation.models import AutomationRun, AutomationRunStatus
 from openhands.automation.utils import ensure_utc, utcnow
 
 
-logger = logging.getLogger("automation.workspace_purger")
+logger = logging.getLogger("automation.cleaner")
 
 # 500 stays below SQLite's historical 999-variable default as well as asyncpg's
 # much larger parameter ceiling, leaving room for future query predicates.
-DB_CLASSIFICATION_CHUNK_SIZE = 500
-DELETE_ATTEMPT_FACTOR = 3
+DB_CLASSIFICATION_CHUNK_SIZE: Final[int] = 500
+DELETE_ATTEMPT_FACTOR: Final[int] = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,68 +117,24 @@ def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
     return dict(candidates)
 
 
-def _latest_tree_mtime(path: Path) -> float | None:
-    """Return newest tree mtime without following links; fail closed on errors.
-
-    This bounded synchronous traversal runs through ``asyncio.to_thread``. It is
-    intentionally sequential so a large backlog does not create new parallelism.
-    """
-    try:
-        if _is_link_or_junction(path):
-            return None
-        newest = path.stat(follow_symlinks=False).st_mtime
-        if not _valid_mtime(newest):
-            return None
-        pending = [path]
-        while pending:
-            current = pending.pop()
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    candidate = Path(entry.path)
-                    if entry.is_symlink() or _is_link_or_junction(candidate):
-                        return None
-                    entry_stat = entry.stat(follow_symlinks=False)
-                    if not _valid_mtime(entry_stat.st_mtime):
-                        return None
-                    newest = max(newest, entry_stat.st_mtime)
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(candidate)
-        return newest
-    except (OSError, ValueError):
-        return None
-
-
-def _valid_mtime(value: float) -> bool:
-    try:
-        datetime.fromtimestamp(value, tz=UTC)
-    except (OverflowError, OSError, ValueError):
-        return False
-    return True
-
-
 def _dir_size(path: Path) -> int:
+    """Best-effort reclaimed-space estimate; may undercount on races."""
     total = 0
     with suppress(OSError):
         for dirpath, _, filenames in os.walk(path, followlinks=False):
             for filename in filenames:
-                filepath = Path(dirpath) / filename
-                if _is_link_or_junction(filepath):
-                    continue
+                # stat(follow_symlinks=False) reads the link itself rather than
+                # the target, so external targets never count as workspace bytes.
                 with suppress(OSError):
-                    total += filepath.stat(follow_symlinks=False).st_size
+                    total += (
+                        (Path(dirpath) / filename).stat(follow_symlinks=False).st_size
+                    )
     return total
 
 
 def _is_link_or_junction(path: Path) -> bool:
     """Return whether path is a symlink or Windows directory junction."""
-    is_junction = getattr(path, "is_junction", None)
-    if path.is_symlink() or (is_junction is not None and is_junction()):
-        return True
-    try:
-        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
-    except OSError:
-        return False
-    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return path.is_symlink() or path.is_junction()
 
 
 def _is_expired(timestamp: datetime | float, cutoff: datetime) -> bool:
@@ -192,16 +148,12 @@ def _is_expired(timestamp: datetime | float, cutoff: datetime) -> bool:
 
 
 def _is_terminal(status: AutomationRunStatus) -> bool:
-    match status:
-        case (
-            AutomationRunStatus.COMPLETED
-            | AutomationRunStatus.FAILED
-            | AutomationRunStatus.CANCELLED
-            | AutomationRunStatus.SKIPPED
-        ):
-            return True
-        case _:
-            return False
+    return status in {
+        AutomationRunStatus.COMPLETED,
+        AutomationRunStatus.FAILED,
+        AutomationRunStatus.CANCELLED,
+        AutomationRunStatus.SKIPPED,
+    }
 
 
 def _delete_workspace(
@@ -254,9 +206,12 @@ async def purge_terminal_workspaces(
 ) -> PurgeResult:
     """Purge expired terminal and inactive orphan workspace directories.
 
-    ``batch_size`` limits successful deletions. Total attempts are separately
-    limited to three times that value so failures cannot create an unbounded
-    warning storm while a few failures still cannot consume the success budget.
+    ``batch_size`` bounds successful deletions per cycle. Total deletion
+    attempts are additionally capped at ``DELETE_ATTEMPT_FACTOR`` times that
+    value, so permanently failing candidates cannot produce an unbounded
+    warning storm in a single cycle. This caps failure cost per cycle only;
+    a candidate that fails every cycle can still consume all attempts, so no
+    eventual-progress (anti-starvation) guarantee is implied.
     A retention of zero disables purging.
     """
     if retention_seconds < 0:
@@ -306,18 +261,11 @@ async def purge_terminal_workspaces(
         else:
             completed_at = None
 
-        age: datetime | float
-        if completed_at is not None:
-            age = completed_at
-        else:
-            if not _is_expired(root_mtime, cutoff):
-                continue
-            tree_mtime = await asyncio.to_thread(
-                _latest_tree_mtime, _workspace_path(workspace_base, run_id)
-            )
-            if tree_mtime is None:
-                continue
-            age = tree_mtime
+        # A workspace without an AutomationRun row can never belong to a live
+        # run: run directories are only designated for dispatched runs and
+        # dispatch requires a DB row, so the scandir-captured mtime is the
+        # sole guard for orphans (and terminal rows without completed_at).
+        age = completed_at if completed_at is not None else root_mtime
         if not _is_expired(age, cutoff):
             continue
         if shutdown_event is not None and shutdown_event.is_set():
@@ -337,7 +285,7 @@ async def purge_terminal_workspaces(
             case DeleteOutcome.DELETED:
                 deleted += 1
                 bytes_freed += delete_result.bytes_freed
-                logger.debug(
+                logger.info(
                     "Purged workspace for run %s (%d bytes freed)",
                     run_id,
                     delete_result.bytes_freed,
@@ -346,16 +294,27 @@ async def purge_terminal_workspaces(
     result = PurgeResult(
         len(candidates), deleted, missing, refused, errors, bytes_freed
     )
-    logger.info(
-        "Purge complete: %d deleted, %d missing, %d refused, %d errors, "
-        "%d bytes freed (%d candidates scanned)",
-        result.deleted,
-        result.missing,
-        result.refused,
-        result.errors,
-        result.bytes_freed,
-        result.candidates_found,
-    )
+    # An idle cycle must not flood INFO every interval; per-candidate failures
+    # are already logged as warnings inside _delete_workspace.
+    if result.deleted:
+        logger.info(
+            "Purge complete: %d deleted, %d missing, %d refused, %d errors, "
+            "%d bytes freed (%d candidates scanned)",
+            result.deleted,
+            result.missing,
+            result.refused,
+            result.errors,
+            result.bytes_freed,
+            result.candidates_found,
+        )
+    else:
+        logger.debug(
+            "Purge no-op: %d missing, %d refused, %d errors (%d candidates scanned)",
+            result.missing,
+            result.refused,
+            result.errors,
+            result.candidates_found,
+        )
     return result
 
 

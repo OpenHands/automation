@@ -1,6 +1,7 @@
-"""Tests for workspace purging of local-mode terminal runs."""
+"""Tests for local-mode workspace cleaning of terminal runs."""
 
 import asyncio
+import logging
 import os
 import uuid
 from collections.abc import AsyncGenerator
@@ -16,15 +17,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-import openhands.automation.workspace_purger as cleaner
-from openhands.automation.models import (
-    Automation,
-    AutomationRun,
-    AutomationRunStatus,
-    Base,
-)
-from openhands.automation.utils import utcnow
-from openhands.automation.workspace_purger import (
+import openhands.automation.cleaner as cleaner
+from openhands.automation.cleaner import (
     DB_CLASSIFICATION_CHUNK_SIZE,
     DELETE_ATTEMPT_FACTOR,
     DeleteOutcome,
@@ -36,6 +30,20 @@ from openhands.automation.workspace_purger import (
     purge_terminal_workspaces,
     purger_loop,
 )
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    Base,
+)
+from openhands.automation.utils import utcnow
+
+
+def _create_junction(source: Path, destination: Path) -> None:
+    """Create a real Windows directory junction; needs no special privileges."""
+    import _winapi
+
+    _winapi.CreateJunction(str(source), str(destination))
 
 
 @pytest.fixture
@@ -161,18 +169,22 @@ class TestCandidateScan:
         assert candidates == {}
         assert marker.exists()
 
-    def test_skips_detected_reparse_point(self, workspace_base, monkeypatch):
-        run_id = _run_id()
+    def test_skips_real_junction_workspace(self, workspace_base, tmp_path):
+        """A reparse-point directory is never scanned as a candidate."""
+        real_workspace = tmp_path / "real-workspace"
+        real_workspace.mkdir()
+        (real_workspace / "data.txt").write_text("keep", encoding="utf-8")
         runs_root = Path(workspace_base) / "automation-runs"
-        path = runs_root / str(run_id)
-        path.mkdir(parents=True)
-        monkeypatch.setattr(
-            cleaner,
-            "_is_link_or_junction",
-            lambda candidate: candidate == path,
-        )
+        runs_root.mkdir(parents=True)
+        try:
+            _create_junction(real_workspace, runs_root / str(_run_id()))
+        except (OSError, ImportError) as exc:
+            pytest.skip(f"directory junctions unavailable: {exc}")
 
-        assert _scan_candidates(runs_root) == {}
+        candidates = _scan_candidates(runs_root)
+
+        assert candidates == {}
+        assert (real_workspace / "data.txt").exists()
 
     def test_bad_dirent_does_not_abort_other_candidates(
         self, workspace_base, monkeypatch
@@ -232,6 +244,24 @@ class TestDirSize:
     def test_missing_dir(self, workspace_base):
         path = _workspace_path(workspace_base, _run_id())
         assert _dir_size(path) == 0
+
+    def test_symlink_target_bytes_are_not_counted(self, workspace_base, tmp_path):
+        """Reclaimed-space accounting must not follow links out of the tree."""
+        target = tmp_path / "outside"
+        target.mkdir()
+        (target / "blob.bin").write_text("z" * 4096, encoding="utf-8")
+        path = _workspace_path(workspace_base, _run_id())
+        path.mkdir(parents=True)
+        (path / "small.txt").write_text("x", encoding="utf-8")
+        try:
+            (path / "linked.bin").symlink_to(target / "blob.bin")
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"file symlinks unavailable: {exc}")
+
+        size = _dir_size(path)
+
+        assert size < 4096
+        assert (target / "blob.bin").exists()
 
 
 class TestDeleteWorkspace:
@@ -305,36 +335,41 @@ class TestDeleteWorkspace:
         assert delete_result.outcome is DeleteOutcome.REFUSED
         assert marker.exists()
 
-    def test_refuses_detected_junction(self, workspace_base, monkeypatch):
+    def test_refuses_real_workspace_root_junction(self, workspace_base, tmp_path):
+        """A junctioned runs root must never be recursively deleted."""
         run_id = _run_id()
-        path = _make_workspace(workspace_base, run_id)
-        monkeypatch.setattr(
-            cleaner,
-            "_is_link_or_junction",
-            lambda candidate: candidate == path,
-        )
+        outside_runs = tmp_path / "outside-runs"
+        workspace = outside_runs / str(run_id)
+        workspace.mkdir(parents=True)
+        marker = workspace / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        try:
+            _create_junction(outside_runs, cleaner._workspace_root(workspace_base))
+        except (OSError, ImportError) as exc:
+            pytest.skip(f"directory junctions unavailable: {exc}")
 
         delete_result = _delete_workspace(workspace_base, run_id)
 
         assert delete_result.outcome is DeleteOutcome.REFUSED
-        assert path.exists()
+        assert marker.exists()
 
-    def test_refuses_detected_workspace_root_junction(
-        self, workspace_base, monkeypatch
-    ):
+    def test_refuses_real_junction_workspace_path(self, workspace_base, tmp_path):
+        """A junctioned workspace candidate is refused instead of followed."""
         run_id = _run_id()
-        path = _make_workspace(workspace_base, run_id)
-        runs_root = cleaner._workspace_root(workspace_base)
-        monkeypatch.setattr(
-            cleaner,
-            "_is_link_or_junction",
-            lambda candidate: candidate == runs_root,
-        )
+        real_workspace = tmp_path / "real-workspace"
+        real_workspace.mkdir()
+        marker = real_workspace / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        link = _workspace_path(workspace_base, run_id)
+        try:
+            _create_junction(real_workspace, link)
+        except (OSError, ImportError) as exc:
+            pytest.skip(f"directory junctions unavailable: {exc}")
 
         delete_result = _delete_workspace(workspace_base, run_id)
 
         assert delete_result.outcome is DeleteOutcome.REFUSED
-        assert path.exists()
+        assert marker.exists()
 
 
 class TestPurgeTerminalWorkspaces:
@@ -652,50 +687,66 @@ class TestPurgeTerminalWorkspaces:
 
         assert result.deleted == 1
 
-    async def test_recent_nested_write_keeps_old_orphan(
-        self, db_session_factory, workspace_base
+    @pytest.mark.parametrize("link_kind", ["symlink", "symlink-broken", "junction"])
+    async def test_internal_link_does_not_immortalize_expired_orphan(
+        self, db_session_factory, workspace_base, tmp_path, link_kind
     ):
-        old_time = utcnow() - timedelta(days=30)
-        path = _make_workspace(workspace_base, _run_id(), mtime=old_time)
-        nested = path / "repo" / "src"
-        nested.mkdir(parents=True)
-        (nested / "active.py").write_text("active", encoding="utf-8")
-        os.utime(path, (old_time.timestamp(), old_time.timestamp()))
+        """A .venv/node_modules-style internal link must not block orphan cleanup."""
+        run_id = _run_id()
+        path = _make_workspace(
+            workspace_base, run_id, mtime=utcnow() - timedelta(days=30)
+        )
+        external_bin = tmp_path / "real-bin"
+        external_bin.mkdir()
+        marker = external_bin / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        bin_dir = path / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        try:
+            if link_kind == "symlink":
+                bin_dir.symlink_to(external_bin, target_is_directory=True)
+            elif link_kind == "symlink-broken":
+                bin_dir.symlink_to(
+                    tmp_path / "missing-target", target_is_directory=True
+                )
+            else:
+                _create_junction(external_bin, bin_dir)
+        except (OSError, NotImplementedError, ImportError) as exc:
+            pytest.skip(f"requested link kind unavailable: {exc}")
 
         result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600
         )
 
-        assert result.deleted == 0
-        assert path.exists()
+        assert result.candidates_found == 1
+        assert result.deleted == 1
+        assert result.errors == 0
+        assert not path.exists()
+        assert marker.exists()
 
-    async def test_unknown_tree_liveness_keeps_old_orphan(
-        self, db_session_factory, workspace_base, monkeypatch
+    async def test_external_symlink_target_is_not_traversed_or_deleted(
+        self, db_session_factory, workspace_base, tmp_path
     ):
-        old_time = utcnow() - timedelta(days=30)
-        path = _make_workspace(workspace_base, _run_id(), mtime=old_time)
-        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: None)
+        """Purging removes the workspace but never touches a linked target tree."""
+        run_id = _run_id()
+        outside = tmp_path / "outside-repo"
+        (outside / "nested").mkdir(parents=True)
+        marker = outside / "nested" / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        path = _make_workspace(workspace_base, run_id)
+        try:
+            (path / "repo-link").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+        old_time = (utcnow() - timedelta(days=30)).timestamp()
+        os.utime(path, (old_time, old_time))
 
         result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600
         )
 
-        assert result.deleted == 0
-        assert path.exists()
-
-    def test_nested_reparse_point_makes_tree_liveness_unknown(
-        self, workspace_base, monkeypatch
-    ):
-        path = _make_workspace(workspace_base, _run_id())
-        nested = path / "nested"
-        nested.mkdir()
-        monkeypatch.setattr(
-            cleaner,
-            "_is_link_or_junction",
-            lambda candidate: candidate == nested,
-        )
-
-        assert cleaner._latest_tree_mtime(path) is None
+        assert result.deleted == 1
+        assert marker.exists()
 
     async def test_failed_deletions_stop_at_attempt_limit(
         self, db_session_factory, workspace_base, monkeypatch
@@ -706,7 +757,6 @@ class TestPurgeTerminalWorkspaces:
             return_value=cleaner.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
         )
         monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
-        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: old)
         monkeypatch.setattr(cleaner, "_delete_workspace", delete)
 
         result = await purge_terminal_workspaces(
@@ -730,7 +780,6 @@ class TestPurgeTerminalWorkspaces:
 
         delete.side_effect = stop_after_first
         monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
-        monkeypatch.setattr(cleaner, "_latest_tree_mtime", lambda _path: old)
         monkeypatch.setattr(cleaner, "_delete_workspace", delete)
 
         await purge_terminal_workspaces(
@@ -1064,19 +1113,51 @@ class TestPurgerLoop:
         mock_purge.assert_not_awaited()
 
 
-class TestPurgeResult:
-    def test_partial_success(self):
-        result = PurgeResult(
-            candidates_found=10,
-            deleted=8,
-            missing=1,
-            refused=1,
-            errors=2,
-            bytes_freed=1024,
+class TestPurgeLogging:
+    async def test_successful_deletion_reports_run_and_bytes_at_info(
+        self, db_session_factory, workspace_base, caplog
+    ):
+        """#271: operators must see what was removed and how much space it freed."""
+        auto_id = uuid.uuid4()
+        await _create_automation(db_session_factory, auto_id)
+        run_id = _run_id()
+        await _create_run(
+            db_session_factory,
+            run_id,
+            auto_id,
+            AutomationRunStatus.COMPLETED,
+            completed_at=utcnow() - timedelta(days=30),
         )
-        assert result.candidates_found == 10
-        assert result.deleted == 8
-        assert result.missing == 1
-        assert result.refused == 1
-        assert result.errors == 2
-        assert result.bytes_freed == 1024
+        path = _make_workspace(workspace_base, run_id, "some data here")
+
+        with caplog.at_level(logging.INFO, logger="automation.cleaner"):
+            result = await purge_terminal_workspaces(
+                db_session_factory, workspace_base, retention_seconds=3600
+            )
+
+        assert result.deleted == 1
+        deletion_logs = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.INFO and str(run_id) in record.getMessage()
+        ]
+        assert any(str(result.bytes_freed) in rec.getMessage() for rec in deletion_logs)
+        assert not path.exists()
+
+    async def test_idle_cycle_does_not_log_info(
+        self, db_session_factory, workspace_base, caplog
+    ):
+        """An hourly no-op cycle must not spam INFO forever."""
+        _make_workspace(workspace_base, _run_id())
+
+        with caplog.at_level(logging.INFO, logger="automation.cleaner"):
+            result = await purge_terminal_workspaces(
+                db_session_factory, workspace_base, retention_seconds=3600
+            )
+
+        assert result.deleted == 0
+        assert not [
+            record
+            for record in caplog.records
+            if record.name == "automation.cleaner" and record.levelno >= logging.INFO
+        ]
