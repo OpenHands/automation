@@ -34,6 +34,15 @@ if [ -z "$SDK_VERSION" ]; then
     exit 1
 fi
 
+# Best-effort progress phase for the dashboard — must never fail the setup.
+PHASE_TOKEN="${AUTOMATION_CALLBACK_API_KEY:-${OPENHANDS_API_KEY:-}}"
+if [ -n "${AUTOMATION_PHASE_URL:-}" ] && [ -n "$PHASE_TOKEN" ]; then
+    curl -sf -m 5 -X POST "$AUTOMATION_PHASE_URL" \
+      -H "Authorization: Bearer $PHASE_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"phase": "Installing dependencies"}' >/dev/null 2>&1 || true
+fi
+
 echo "[setup] Creating isolated virtual environment"
 # Pin >=3.12 so uv doesn't default to an older system Python (e.g. macOS
 # CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.

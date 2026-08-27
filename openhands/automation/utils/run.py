@@ -210,6 +210,7 @@ async def mark_run_status(
     error_detail: str | None = None,
     max_duration: timedelta | None = None,
     status_detail: dict | None = None,
+    current_phase: str | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -224,6 +225,9 @@ async def mark_run_status(
         error_detail: Optional error message (only used for FAILED status)
         max_duration: Maximum run duration for computing timeout_at
         status_detail: Optional structured lifecycle detail to persist
+        current_phase: Optional live progress phase to persist. Unlike
+            status_detail there is no clearing branch — the last phase is
+            kept on terminal transitions by design.
     """
     if max_duration is None:
         max_duration = timedelta(seconds=resolve_automation_timeout_seconds(None))
@@ -255,6 +259,10 @@ async def mark_run_status(
     elif status in (AutomationRunStatus.RUNNING, AutomationRunStatus.COMPLETED):
         values["status_detail"] = None
         run.status_detail = None
+
+    if current_phase is not None:
+        values["current_phase"] = current_phase
+        run.current_phase = current_phase
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
@@ -338,6 +346,33 @@ async def update_run_timeout_at(
             await session.commit()
     except Exception:
         logger.exception("Failed to update timeout_at for run %s", run_id)
+
+
+async def update_run_current_phase(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    phase: str,
+) -> None:
+    """Best-effort write of the live progress phase for an in-flight run.
+
+    Guarded by status IN (PENDING, RUNNING) so a terminal run's final state
+    is never disturbed. Failure is non-fatal — phases are cosmetic.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status.in_(
+                        (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+                    ),
+                )
+                .values(current_phase=phase)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update current_phase for run %s", run_id)
 
 
 async def _record_first_run_outcome_in_session(
