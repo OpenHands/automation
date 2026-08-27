@@ -473,11 +473,14 @@ async def list_automation_runs(
     # Verify the automation exists and belongs to the user
     await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
-    # Count total runs for this automation
+    # Count lifetime runs by status for this automation
     count_result = await session.execute(
-        select(func.count()).where(AutomationRun.automation_id == automation_id)
+        select(AutomationRun.status, func.count())
+        .where(AutomationRun.automation_id == automation_id)
+        .group_by(AutomationRun.status)
     )
-    total = count_result.scalar() or 0
+    status_counts = {run_status.value: count for run_status, count in count_result}
+    total = sum(status_counts.values())
 
     # Fetch paginated runs ordered by latest first
     result = await session.execute(
@@ -492,6 +495,7 @@ async def list_automation_runs(
     return AutomationRunListResponse(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
+        status_counts=status_counts,
     )
 
 
