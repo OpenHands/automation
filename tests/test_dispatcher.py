@@ -4,6 +4,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
 import asyncio
+import logging
 import uuid
 from datetime import timedelta
 from typing import Any, cast
@@ -26,6 +27,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
+    update_run_current_phase,
     update_run_timeout_at,
 )
 from openhands.automation.utils.tarball_validation import is_http_url
@@ -254,6 +256,22 @@ class TestUpdateRunTimeoutAt:
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.timeout_at == original_timeout_at
+
+
+class TestUpdateRunCurrentPhase:
+    """Tests for the best-effort live phase write."""
+
+    async def test_database_failure_is_logged_not_raised(self, caplog):
+        """A failing session is logged and swallowed — phases are cosmetic."""
+        session_factory = MagicMock(side_effect=RuntimeError("db down"))
+
+        with caplog.at_level(logging.ERROR, logger="openhands.automation.utils.run"):
+            await update_run_current_phase(session_factory, uuid.uuid4(), "Cloning")
+
+        assert any(
+            "Failed to update current_phase" in record.message
+            for record in caplog.records
+        )
 
 
 class TestMarkRunTerminalFirstRunOutcome:

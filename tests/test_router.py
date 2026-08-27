@@ -3071,6 +3071,15 @@ class TestReportRunPhase:
 
         assert response.status_code == 422
 
+    async def test_report_phase_for_unknown_run_returns_404(self, async_client):
+        """Reporting a phase on a run that does not exist returns 404."""
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{uuid.uuid4()}/phase",
+            json={"phase": "Ghost"},
+        )
+
+        assert response.status_code == 404
+
     async def test_report_phase_for_other_users_run_returns_403(
         self, async_client, async_session
     ):

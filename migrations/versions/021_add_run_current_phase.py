@@ -1,7 +1,7 @@
 """Add live run progress phase.
 
-Revision ID: 020
-Revises: 019
+Revision ID: 021
+Revises: 020
 Create Date: 2026-08-22
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "020"
-down_revision: str = "019"
+revision: str = "021"
+down_revision: str = "020"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

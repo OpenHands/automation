@@ -130,6 +130,7 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # --- Live phase reporting (best-effort, never fatal) -------------------------
+# Keep this block in sync with presets/plugin/sdk_main.py.
 AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
 _PHASE_TOKEN = (
     os.environ.get("AUTOMATION_CALLBACK_API_KEY")
@@ -171,6 +172,8 @@ def _redact_phase(text: str) -> str:
 
 # Latest pending live phase; a daemon thread posts it at most once per
 # interval so the conversation event thread never blocks on network I/O.
+# Deliberately unlocked: each key is a single reference read/write (atomic
+# under the GIL) and last-writer-wins is acceptable for cosmetic telemetry.
 _live_phase: dict = {"pending": None, "posted": None, "stop": False}
 
 
