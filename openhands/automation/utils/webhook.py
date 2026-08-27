@@ -255,8 +255,7 @@ async def create_automation_run(
                        For GitHub events: model_dump() of parsed Pydantic event
                        For custom webhooks: the raw payload dict
         subject_key: The external subject this run is about, for
-                     `continue_conversation` triggers. Later events on the same
-                     subject find this run's sandbox through it.
+                     `continue_conversation` triggers.
 
     Returns:
         The created AutomationRun instance

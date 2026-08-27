@@ -1,14 +1,8 @@
 """Routing an event to the conversation its subject already has.
 
-There is no mapping table. The conversation id is a documented, deterministic
-function of the subject (`subjects.conversation_id_for`), because the agent
-server accepts a caller-supplied `conversation_id` and attaches to an existing
-conversation instead of erroring.
-
-What still has to be looked up is the *sandbox*: only the server can name it,
-and the conversation lives on its filesystem. `AutomationRun.subject_key`
-records which run was about a subject, so a later event can find the sandbox
-still holding it and deliver a turn there -- costing no run at all.
+No mapping table: the id is derived (`subjects.conversation_id_for`). Only the
+*sandbox* has to be looked up, via `AutomationRun.subject_key` -- a turn sent
+there costs no run at all.
 """
 
 import logging
@@ -104,13 +98,11 @@ async def _lock_subject_run(
 ) -> AutomationRun | None:
     """The most recent run holding this subject's conversation, locked.
 
-    The lock serialises concurrent events for one subject: the second waits and
-    then sees whatever the first left behind. SQLite has no row locks and runs
-    single-process, so it simply reads.
-
-    The automation is eager-loaded because minting a cloud API key reads
-    `run.automation`, and a lazy load there raises MissingGreenlet, which
-    `send_conversation_turn` would swallow into a silent fallback.
+    The lock serialises concurrent events for one subject; SQLite has none and
+    runs single-process, so it simply reads. The automation is eager-loaded
+    because minting a cloud API key reads `run.automation`, and a lazy load
+    there raises MissingGreenlet -- which `send_conversation_turn` would
+    swallow into a silent fallback.
     """
     stmt = (
         select(AutomationRun)
@@ -142,13 +134,11 @@ async def continue_conversation(
     """Deliver this event as another turn on the subject's conversation.
 
     Returns the conversation id when the turn landed, None when the caller
-    should create a run: nothing has run for this subject yet, or the sandbox
-    that held it is gone. Holds the run's row lock until the caller commits.
+    should create a run: nothing has run for this subject yet, or its sandbox
+    is gone. Holds the run's row lock until the caller commits.
 
-    Unlike a stored mapping, the id is known before the first run finishes, so
-    an event arriving mid-run continues that conversation rather than racing a
-    second run against it. The agent server appends the message and runs it
-    only when the loop is not already going.
+    The id is known before the first run finishes, so an event arriving
+    mid-run continues that conversation instead of racing a second run.
     """
     run = await _lock_subject_run(session, automation_id, subject_key)
     if run is None:
@@ -161,10 +151,8 @@ async def continue_conversation(
         compose_turn(source, event_key, event_payload),
     )
     if not delivered:
-        # The sandbox has been reaped. `subject_key` means "this run can still
-        # be reached for that subject", so clearing it is the truth, and it
-        # stops every later event paying the timeout to rediscover the same
-        # dead sandbox. The caller's new run takes the subject over.
+        # Sandbox reaped. Clear it so later events do not pay the timeout to
+        # rediscover it; the caller's new run takes the subject over.
         run.subject_key = None
         return None
 

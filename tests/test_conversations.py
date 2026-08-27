@@ -1,10 +1,8 @@
 """Tests for routing events to an existing conversation.
 
-The conversation id is derived, so these tests never invent one: they assert
-against `conversation_id_for`. What makes a subject continuable is that some
-earlier run for it is on a sandbox.
-
-Sending the turn is stubbed here; `test_conversation_turn.py` covers it.
+The id is derived, so these assert against `conversation_id_for` rather than
+inventing one. A subject is continuable when an earlier run for it has a
+sandbox. Sending the turn is stubbed; `test_conversation_turn.py` covers it.
 """
 
 import asyncio

@@ -131,18 +131,13 @@ class EventTrigger(BaseModel):
 
     ## Conversation reuse
 
-    `destination: continue_conversation` sends events about the same external
-    subject -- one Slack thread, one pull request -- to the conversation the
-    first of them created, instead of starting a run each time. `github`
-    derives the subject from the payload, and `slack` does over Socket Mode;
-    any other source needs `subject_key_expr`.
+    `destination: continue_conversation` sends events about one external
+    subject -- a Slack thread, a pull request -- to the same conversation
+    instead of starting a run each time.
 
     ```json
-    {
-      "source": "slack",
-      "on": "app_mention",
-      "destination": "continue_conversation"
-    }
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation"}
     ```
     """
 
@@ -186,11 +181,10 @@ class EventTrigger(BaseModel):
         default=None,
         description=(
             "JMESPath expression yielding the subject key events are grouped "
-            "by. Needed for any source with no built-in subject. 'github' "
-            "derives one; 'slack' does so only over Socket Mode, so a Slack "
-            "webhook needs join('/', [team_id, event.channel, "
-            "event.thread_ts || event.ts]). Ignored unless destination is "
-            "'continue_conversation'."
+            "by. Needed for any source with no built-in subject: 'github' has "
+            "one, 'slack' only over Socket Mode, so a Slack webhook needs "
+            "join('/', [team_id, event.channel, event.thread_ts || event.ts]). "
+            "Ignored unless destination is 'continue_conversation'."
         ),
     )
 
@@ -209,10 +203,7 @@ class EventTrigger(BaseModel):
     @field_validator("subject_key_expr")
     @classmethod
     def validate_subject_key_expr(cls, v: str | None) -> str | None:
-        """Validate the subject expression at creation time.
-
-        A typo would otherwise look exactly like the feature being switched off.
-        """
+        """Validate at creation: a typo looks exactly like the feature off."""
         if v:
             from openhands.automation.filter_eval import validate_filter
 

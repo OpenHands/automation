@@ -1,9 +1,5 @@
 """Add automation_runs.subject_key: the external subject a run is about.
 
-Not a conversation mapping -- the conversation id is derived from the subject
-(see `subjects.conversation_id_for`). This column is how a later event on the
-same subject finds the run whose sandbox still holds that conversation.
-
 Revision ID: 021
 Revises: 020
 Create Date: 2026-08-27

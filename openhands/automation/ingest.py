@@ -205,8 +205,7 @@ async def accept_event(
                 )
                 continue
 
-        # `subject_key` is what a later event on this subject follows back to
-        # this run's sandbox. The conversation id is derived, not recorded.
+        # How a later event on this subject finds this run's sandbox.
         run = await create_automation_run(
             automation,
             session,

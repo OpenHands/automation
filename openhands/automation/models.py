@@ -193,11 +193,9 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # The external subject this run is about -- a Slack thread, a pull request
-    # -- for `continue_conversation` triggers only. This is not a mapping to a
-    # conversation: the conversation id is derived from the subject and never
-    # stored. It is how a later event finds the sandbox still holding that
-    # conversation, which only the server can name.
+    # The external subject this run is about (a Slack thread, a PR). Not a
+    # mapping: the conversation id is derived, this only finds the sandbox
+    # still holding it.
     subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # The agent-server BashCommand id for this run's dispatched bash chain.
@@ -247,8 +245,7 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
-        # Finds the run holding a subject's conversation. Partial: only
-        # `continue_conversation` runs set a subject.
+        # Partial: only `continue_conversation` runs set a subject.
         Index(
             "ix_automation_runs_subject",
             "automation_id",

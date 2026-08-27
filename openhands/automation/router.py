@@ -655,9 +655,9 @@ async def complete_run(
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
     #
-    # A run that owns an external subject is treated like keep_alive: deleting
-    # its sandbox would destroy the conversation the next event on that subject
-    # is meant to continue. The runtime TTL reaper still collects it.
+    # A run owning a subject is treated like keep_alive: deleting its sandbox
+    # would destroy the conversation the next event continues. The runtime TTL
+    # reaper still collects it.
     if run.sandbox_id and automation.keep_alive is not True and not run.subject_key:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings

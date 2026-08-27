@@ -1,10 +1,8 @@
 """Sending another turn to a conversation the agent server already holds.
 
-`POST .../events` with `run: true` appends the message and starts the agent
-loop only when it is not already running.
-
-Every failure returns False so the caller starts a run instead: the sandbox
-holding the conversation may have been reaped, which is ordinary.
+`run: true` appends the message and starts the loop only if it is not already
+running. Every failure returns False so the caller starts a run instead -- a
+reaped sandbox is ordinary, not an error.
 """
 
 import json
@@ -33,8 +31,8 @@ def compose_turn(
 ) -> str:
     """Render an event as the text of a follow-up turn.
 
-    The payload goes over verbatim: it is the shape the automation's script was
-    handed for the first turn, and on a continue that script does not run.
+    The payload goes over verbatim -- the shape the automation's script got for
+    the first turn, and on a continue that script does not run.
     """
     body = json.dumps(event_payload or {}, indent=2, sort_keys=True, default=str)
     return (

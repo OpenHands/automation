@@ -1,13 +1,7 @@
-"""Subject keys: the identity of the external thing an event is about.
+"""Subject keys, and the rule mapping one to a conversation id.
 
-A leaf module, so `providers`, `streams.slack` and `ingest` can all import
-`EventSubject` without a cycle.
-
-Also holds the rule that turns a subject into a conversation id. The id is
-derived, never stored: the agent server accepts a caller-supplied
-`conversation_id` and attaches to an existing conversation rather than
-erroring, so a documented function of the subject is all the correspondence
-this service needs.
+A leaf module so `providers`, `streams.slack` and `ingest` can all import it
+without a cycle.
 """
 
 import uuid
@@ -15,8 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# Pinned permanently. Changing it re-keys every live thread at once, which
-# reads to users as every conversation losing its memory on deploy.
+# Pinned permanently: changing it makes every live thread lose its memory.
 CONVERSATION_NAMESPACE = uuid.UUID("d7f3a2b1-5c48-4e9a-9b6d-2f1e8c3a7d40")
 
 
@@ -35,9 +28,8 @@ def conversation_id_for(
 ) -> str:
     """The conversation a subject's events belong to.
 
-    `automation_id` is part of the key so that editing an automation re-keys
-    its threads. Without it a thread stays pinned to whatever agent the first
-    event saw, and attaching with a different agent kind raises on the server.
+    Keyed on `automation_id` too, so editing an automation re-keys its threads
+    -- attaching with a different agent kind raises on the server.
     """
     return str(
         uuid.uuid5(
