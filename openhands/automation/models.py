@@ -104,6 +104,11 @@ class Automation(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Pinned timestamp (NULL = not pinned; set to UTC now when pinned)
+    pinned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True

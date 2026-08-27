@@ -411,6 +411,7 @@ class UpdateAutomationRequest(BaseModel):
     )
     keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None
+    pinned: bool | None = None
 
     @field_validator("tarball_path")
     @classmethod
@@ -741,6 +742,7 @@ class AutomationResponse(BaseModel):
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
     disabled_at: UtcDatetime | None = None
+    pinned_at: UtcDatetime | None = None
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime

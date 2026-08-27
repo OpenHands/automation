@@ -226,6 +226,10 @@ async def update_automation(
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
 
     update_data = body.model_dump(exclude_unset=True)
+    # Convert pinned boolean to pinned_at timestamp before writing to the model
+    if "pinned" in update_data:
+        pinned = update_data.pop("pinned")
+        update_data["pinned_at"] = utcnow() if pinned else None
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
