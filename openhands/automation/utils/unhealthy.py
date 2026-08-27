@@ -1,9 +1,5 @@
 """Auto-disable for automations that keep failing.
 
-Deliberately not a circuit breaker: there is no half-open state and no
-automatic recovery. Once an automation is disabled here it stays disabled
-until a person re-enables it.
-
 Two rules, both evaluated from a single fetch of the automation's most recent
 terminal runs:
 
@@ -12,11 +8,8 @@ terminal runs:
 2. The last N runs all failed and nothing has succeeded in the configured
    window.
 
-Rule 2's window is what keeps a provider outage from pausing healthy
-automations: a run count alone cannot tell "broken forever" from "the provider
-was down", because a five-minute cron racks up hundreds of failures during any
-outage. Asking whether anything succeeded recently answers that directly, and
-is indifferent to how often the automation runs.
+A window exists for rule 2 to insulate from automations failing for a legit
+period of time due to outages, etc.
 """
 
 from __future__ import annotations
