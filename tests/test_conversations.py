@@ -35,6 +35,7 @@ from openhands.automation.subjects import (
     slack_subject,
 )
 from openhands.automation.utils.conversation_turn import compose_turn
+from openhands.automation.utils.time import utcnow
 
 
 TEAM = "T06P212QSEA"
@@ -105,10 +106,14 @@ async def subject_runs(session) -> list[AutomationRun]:
     return list(result.scalars().all())
 
 
-async def give_sandbox(session, run_id, sandbox_id: str = "sandbox-1") -> None:
-    """Put a run on a sandbox, which is what makes its subject continuable."""
+async def start_run(session, run_id, sandbox_id: str | None = "sandbox-1") -> None:
+    """Mark a run started, which is what makes its subject continuable.
+
+    `sandbox_id=None` is local mode, where no run ever gets one.
+    """
     run = await session.get(AutomationRun, run_id)
     assert run is not None
+    run.started_at = utcnow()
     run.sandbox_id = sandbox_id
     await session.commit()
 
@@ -368,7 +373,7 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
     opener = slack_envelope(ts="1755000000.000100", text="<@U999> what broke?")
     first = await _mention(async_session, org_id, opener, "Ev1")
     assert len(first.run_ids) == 1
-    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
 
     reply = slack_envelope(
         ts="1755000009.000900",
@@ -413,6 +418,7 @@ async def test_an_event_arriving_mid_run_continues_that_conversation(
     run = await async_session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
     assert run is not None
     run.status = AutomationRunStatus.RUNNING
+    run.started_at = utcnow()
     run.sandbox_id = "sandbox-live"
     await async_session.commit()
 
@@ -452,6 +458,60 @@ async def test_a_subject_with_no_sandbox_yet_falls_back_to_a_run(
 
 
 @pytest.mark.asyncio
+async def test_local_mode_continues_without_a_sandbox_id(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """Local mode never sets `run.sandbox_id`, and must still continue.
+
+    `LocalAgentServerBackend.get_execution_context` returns `sandbox_id=None`
+    and the dispatcher only records one when it is truthy, so gating on it
+    would leave the whole feature dead on a local deployment.
+    """
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]), sandbox_id=None)
+
+    reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+    second = await _mention(async_session, org_id, reply, "Ev2")
+
+    assert second.run_ids == []
+    assert second.conversation_ids == [
+        expected_conversation(org_id, automation.id, f"{TEAM}/C123/1755000000.000100")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_still_running_run_keeps_its_subject_when_unreachable(
+    org_id, async_session, mock_authenticated_user, unreachable_conversations
+):
+    """Clearing it would orphan the subject the run is about to own."""
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    run_id = uuid.UUID(first.run_ids[0])
+    await start_run(async_session, run_id)
+    run = await async_session.get(AutomationRun, run_id)
+    assert run is not None
+    run.status = AutomationRunStatus.RUNNING
+    await async_session.commit()
+
+    reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+    await _mention(async_session, org_id, reply, "Ev2")
+
+    await async_session.refresh(run)
+    assert run.subject_key == f"{TEAM}/C123/1755000000.000100"
+
+
+@pytest.mark.asyncio
 async def test_a_mention_in_another_thread_starts_its_own_run(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
@@ -463,7 +523,7 @@ async def test_a_mention_in_another_thread_starts_its_own_run(
     await async_session.commit()
 
     first = await _mention(async_session, org_id, slack_envelope(ts="1.1"), "Ev1")
-    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
 
     other = await _mention(async_session, org_id, slack_envelope(ts="2.2"), "Ev2")
 
@@ -489,7 +549,7 @@ async def test_an_automation_that_does_not_opt_in_is_untouched(
     await async_session.commit()
 
     first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
-    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
     second = await _mention(async_session, org_id, slack_envelope(), "Ev2")
 
     assert len(first.run_ids) == 1
@@ -512,7 +572,11 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
 
     first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
     dead_run_id = uuid.UUID(first.run_ids[0])
-    await give_sandbox(async_session, dead_run_id, "sandbox-reaped")
+    await start_run(async_session, dead_run_id, "sandbox-reaped")
+    dead = await async_session.get(AutomationRun, dead_run_id)
+    assert dead is not None
+    dead.status = AutomationRunStatus.COMPLETED
+    await async_session.commit()
 
     reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
     second = await _mention(async_session, org_id, reply, "Ev2")
@@ -575,7 +639,7 @@ async def test_two_automations_do_not_share_one_subject(
     first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
     assert len(first.run_ids) == 2
     for run_id in first.run_ids:
-        await give_sandbox(async_session, uuid.UUID(run_id), f"sandbox-{run_id}")
+        await start_run(async_session, uuid.UUID(run_id), f"sandbox-{run_id}")
 
     reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
     second = await _mention(async_session, org_id, reply, "Ev2")
@@ -626,7 +690,7 @@ async def test_github_derives_its_subject_without_the_transport_naming_one(
         )
 
     first = await deliver("Ev1")
-    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
     second = await deliver("Ev2")
 
     assert second.run_ids == []
@@ -789,6 +853,7 @@ async def test_continue_conversation_loads_the_run_s_automation(
             AutomationRun(
                 automation_id=automation.id,
                 status=AutomationRunStatus.COMPLETED,
+                started_at=utcnow(),
                 sandbox_id="sbx-1",
                 subject_key=subject_key,
             )
@@ -852,7 +917,7 @@ async def test_concurrent_follow_ups_all_continue_one_conversation(
 
     first = await deliver("Ev0")
     async with async_session_factory() as session:
-        await give_sandbox(session, uuid.UUID(first.run_ids[0]))
+        await start_run(session, uuid.UUID(first.run_ids[0]))
 
     results = await asyncio.gather(*(deliver(f"Later{n}") for n in range(5)))
 

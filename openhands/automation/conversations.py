@@ -18,7 +18,7 @@ from openhands.automation.filter_eval import (
     FilterEvaluationError,
     evaluate_expression,
 )
-from openhands.automation.models import AutomationRun
+from openhands.automation.models import AutomationRun, AutomationRunStatus
 from openhands.automation.providers import get_provider
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import EventSubject, conversation_id_for
@@ -31,6 +31,13 @@ from openhands.automation.utils.conversation_turn import (
 logger = logging.getLogger("automation.conversations")
 
 CONTINUE_CONVERSATION = "continue_conversation"
+
+_FINISHED = (
+    AutomationRunStatus.COMPLETED,
+    AutomationRunStatus.FAILED,
+    AutomationRunStatus.CANCELLED,
+    AutomationRunStatus.SKIPPED,
+)
 
 # Matches AutomationRun.subject_key. Truncating would merge two subjects.
 MAX_SUBJECT_KEY_LENGTH = 500
@@ -109,7 +116,10 @@ async def _lock_subject_run(
         .where(
             AutomationRun.automation_id == automation_id,
             AutomationRun.subject_key == subject_key,
-            AutomationRun.sandbox_id.isnot(None),
+            # Started, so the script has had a chance to create the
+            # conversation. Not `sandbox_id`: local mode never sets one, and
+            # `_resolve_agent_server` does not need it there.
+            AutomationRun.started_at.isnot(None),
         )
         .order_by(AutomationRun.created_at.desc())
         .limit(1)
@@ -151,9 +161,11 @@ async def continue_conversation(
         compose_turn(source, event_key, event_payload),
     )
     if not delivered:
-        # Sandbox reaped. Clear it so later events do not pay the timeout to
-        # rediscover it; the caller's new run takes the subject over.
-        run.subject_key = None
+        # Unreachable. Only forget a finished run -- one still going may just
+        # not have recorded its sandbox yet, and clearing it would orphan the
+        # subject it is about to own.
+        if run.status in _FINISHED:
+            run.subject_key = None
         return None
 
     return conversation_id
