@@ -6,9 +6,11 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
     AutomationRun,
     TarballUpload,
     UploadStatus,
@@ -918,6 +920,8 @@ class TestDeleteAutomation:
 
     async def test_delete_automation_soft_deletes(self, async_client, async_session):
         """DELETE sets enabled=False and deleted_at."""
+        from openhands.automation.models import AutomationRunStatus
+
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -928,6 +932,12 @@ class TestDeleteAutomation:
             enabled=True,
         )
         async_session.add(automation)
+        await async_session.flush()
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        async_session.add(pending_run)
         await async_session.commit()
         automation_id = automation.id
 
@@ -937,8 +947,39 @@ class TestDeleteAutomation:
 
         # Refresh from DB
         await async_session.refresh(automation)
+        await async_session.refresh(pending_run)
         assert automation.enabled is False
         assert automation.deleted_at is not None
+        assert automation.disabled_reason == "manual_delete"
+        assert automation.disabled_detail == {
+            "reason": "manual_delete",
+            "source": "user",
+        }
+        assert automation.disabled_at == automation.deleted_at
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at == automation.deleted_at
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["detail"] == "Automation deleted by user"
+        assert pending_run.status_detail["disabled_detail"] == {
+            "reason": "manual_delete",
+            "source": "user",
+        }
+
+        events = (
+            (
+                await async_session.execute(
+                    select(AutomationDisableEvent).where(
+                        AutomationDisableEvent.automation_id == automation.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+        assert events[0].reason == "manual_delete"
+        assert events[0].detail == {"reason": "manual_delete", "source": "user"}
+        assert events[0].source == "manual_delete"
 
     async def test_delete_automation_not_found(self, async_client):
         """DELETE on non-existent ID returns 404."""
@@ -1035,6 +1076,8 @@ class TestUpdateAutomation:
 
     async def test_update_automation_disable(self, async_client, async_session):
         """PATCH can disable an automation."""
+        from openhands.automation.models import AutomationRunStatus
+
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -1045,6 +1088,12 @@ class TestUpdateAutomation:
             enabled=True,
         )
         async_session.add(automation)
+        await async_session.flush()
+        pending_run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.PENDING,
+        )
+        async_session.add(pending_run)
         await async_session.commit()
 
         response = await async_client.patch(
@@ -1053,7 +1102,41 @@ class TestUpdateAutomation:
         )
 
         assert response.status_code == 200
-        assert response.json()["enabled"] is False
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["disabled_reason"] == "manual"
+        assert data["disabled_detail"] == {"reason": "manual", "source": "user"}
+        assert data["disabled_at"] is not None
+
+        await async_session.refresh(automation)
+        await async_session.refresh(pending_run)
+        assert automation.disabled_reason == "manual"
+        assert automation.disabled_detail == {"reason": "manual", "source": "user"}
+        assert automation.disabled_at is not None
+        assert pending_run.status == AutomationRunStatus.SKIPPED
+        assert pending_run.completed_at == automation.disabled_at
+        assert pending_run.status_detail is not None
+        assert pending_run.status_detail["detail"] == "Automation disabled by user"
+        assert pending_run.status_detail["disabled_detail"] == {
+            "reason": "manual",
+            "source": "user",
+        }
+
+        events = (
+            (
+                await async_session.execute(
+                    select(AutomationDisableEvent).where(
+                        AutomationDisableEvent.automation_id == automation.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+        assert events[0].reason == "manual"
+        assert events[0].detail == {"reason": "manual", "source": "user"}
+        assert events[0].source == "manual"
 
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""
@@ -1520,6 +1603,34 @@ class TestDispatchAutomation:
 
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
+
+    async def test_dispatch_disabled_automation_returns_reason(
+        self, async_client, async_session
+    ):
+        """Dispatching a disabled automation returns its blocking reason."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Disabled Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=False,
+            disabled_reason="auth: Invalid API key",
+            disabled_detail={"kind": "auth", "threshold": 3},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["message"] == "Automation is disabled"
+        assert detail["disabled_reason"] == "auth: Invalid API key"
+        assert detail["disabled_detail"] == {"kind": "auth", "threshold": 3}
 
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""
@@ -2030,6 +2141,165 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_ignores_task_result_metadata_for_status_detail(
+        self, async_client, async_session
+    ):
+        """Task result metadata is not trusted for automation disablement."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Task Outcome Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "COMPLETED",
+                "blocking_factor": {
+                    "kind": "config",
+                    "reason": "User-defined task outcome",
+                    "source": "task",
+                },
+                "task_outcome": {
+                    "success": False,
+                    "message": "User-defined incomplete state",
+                    "classification": {"kind": "auth", "user_action": "settings"},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "COMPLETED"
+        assert data["status_detail"] is None
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.COMPLETED
+        assert run.status_detail is None
+
+    async def test_failed_complete_run_uses_sdk_callback_error_classification(
+        self, async_client, async_session
+    ):
+        """Only SDK callback errors classify failed callbacks for disablement."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Callback Error Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "error": {
+                    "source": "environment",
+                    "code": "MissingSecret",
+                    "detail": "Missing GitHub token",
+                    "classification": {
+                        "kind": "auth",
+                        "retryable": False,
+                        "user_action": "settings",
+                    },
+                },
+                "task_outcome": {
+                    "success": False,
+                    "classification": {"kind": "quota", "user_action": "settings"},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["status_detail"]["kind"] == "auth"
+        assert data["status_detail"]["source"] == "environment"
+        assert data["status_detail"]["code"] == "MissingSecret"
+        assert data["status_detail"]["user_action"] == "settings"
+        assert "blocking_factor" not in data["status_detail"]
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.status_detail is not None
+        assert run.status_detail["kind"] == "auth"
+        assert run.status_detail["source"] == "environment"
+
+    async def test_failed_complete_run_ignores_task_outcome_without_sdk_error(
+        self, async_client, async_session
+    ):
+        """User-defined task outcomes alone remain generic execution failures."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Generic Failure Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(
+            f"/api/automation/v1/runs/{run.id}/complete",
+            json={
+                "status": "FAILED",
+                "task_outcome": {
+                    "success": False,
+                    "message": "User-defined failed task",
+                    "classification": {"kind": "auth", "user_action": "settings"},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert data["error_detail"] == "Completion callback reported failure"
+        assert data["status_detail"]["kind"] == "execution_error"
+        assert data["status_detail"]["source"] == "sdk_callback"
+        assert "user_action" not in data["status_detail"]
+
+        await async_session.refresh(run)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.status_detail is not None
+        assert run.status_detail["kind"] == "execution_error"
 
     async def test_complete_run_stores_finish_tool_response_metadata(
         self, async_client, async_session, monkeypatch

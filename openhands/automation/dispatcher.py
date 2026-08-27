@@ -66,6 +66,9 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -128,8 +131,13 @@ async def _poll_pending_runs(
     """
     select_query = (
         select(AutomationRun)
+        .join(AutomationRun.automation)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            Automation.enabled.is_(True),
+            Automation.deleted_at.is_(None),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -217,6 +225,22 @@ async def _execute_run(
             error,
             status_detail=status_detail,
         )
+        automation_disabled = disable
+        if disable:
+            automation_disabled = await disable_automation(
+                session_factory,
+                automation.id,
+                error,
+                disabled_detail={"status_detail": status_detail}
+                if status_detail is not None
+                else None,
+                run_id=run.id,
+            )
+        elif status_detail is not None:
+            automation_disabled = await maybe_disable_unhealthy_automation_after_run(
+                session_factory,
+                automation.id,
+            )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -225,11 +249,9 @@ async def _execute_run(
             properties={
                 "trigger_source": "dispatcher",
                 "failure_kind": "dispatch_error",
-                "automation_disabled": disable,
+                "automation_disabled": automation_disabled,
             },
         )
-        if disable:
-            await disable_automation(session_factory, automation.id, error)
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
