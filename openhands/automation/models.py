@@ -97,6 +97,13 @@ class Automation(Base):
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
+    # Current disabled-state metadata. AutomationDisableEvent keeps history.
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -127,6 +134,11 @@ class Automation(Base):
     # Relationship to runs
     runs: Mapped[list["AutomationRun"]] = relationship(
         "AutomationRun", back_populates="automation", cascade="all, delete-orphan"
+    )
+    disable_events: Mapped[list["AutomationDisableEvent"]] = relationship(
+        "AutomationDisableEvent",
+        back_populates="automation",
+        cascade="all, delete-orphan",
     )
 
 
@@ -206,6 +218,7 @@ class AutomationRun(Base):
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -228,6 +241,41 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
     )
+
+
+class AutomationDisableEvent(Base):
+    """Historical record of an automation being disabled."""
+
+    __tablename__ = "automation_disable_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+        index=True,
+    )
+
+    automation: Mapped["Automation"] = relationship(
+        "Automation",
+        back_populates="disable_events",
+    )
+    run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
 
 
 class TarballUpload(Base):

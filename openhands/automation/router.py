@@ -27,6 +27,7 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
     TarballUpload,
@@ -56,7 +57,11 @@ from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run import (
+    create_pending_run,
+    record_first_run_outcome,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
@@ -71,6 +76,7 @@ from openhands.automation.utils.templates import (
     find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 
 
 logger = logging.getLogger(__name__)
@@ -223,6 +229,27 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    disable_event: AutomationDisableEvent | None = None
+    skip_pending_reason: str | None = None
+    if update_data.get("enabled") is True:
+        update_data["disabled_reason"] = None
+        update_data["disabled_detail"] = None
+        update_data["disabled_at"] = None
+    elif update_data.get("enabled") is False:
+        if auto.enabled:
+            skip_pending_reason = "Automation disabled by user"
+            disabled_at = utcnow()
+            disabled_detail = {"reason": "manual", "source": "user"}
+            update_data["disabled_reason"] = "manual"
+            update_data["disabled_detail"] = disabled_detail
+            update_data["disabled_at"] = disabled_at
+            disable_event = AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual",
+                detail=disabled_detail,
+                source="manual",
+            )
+
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
@@ -250,6 +277,17 @@ async def update_automation(
         if auto.preset_metadata is not None:
             auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
+    if skip_pending_reason is not None:
+        await skip_pending_runs_for_disabled_automation(
+            session,
+            auto.id,
+            reason=skip_pending_reason,
+            disabled_detail=auto.disabled_detail,
+            completed_at=auto.disabled_at,
+        )
+    if disable_event is not None:
+        session.add(disable_event)
+
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
@@ -273,8 +311,30 @@ async def delete_automation(
 ) -> None:
     """Soft delete an automation."""
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    was_enabled = auto.enabled
     auto.enabled = False
-    auto.deleted_at = utcnow()
+    deleted_at = utcnow()
+    auto.deleted_at = deleted_at
+    if was_enabled:
+        disabled_detail = {"reason": "manual_delete", "source": "user"}
+        auto.disabled_reason = "manual_delete"
+        auto.disabled_detail = disabled_detail
+        auto.disabled_at = deleted_at
+        session.add(
+            AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual_delete",
+                detail=disabled_detail,
+                source="manual_delete",
+            )
+        )
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation deleted by user",
+        disabled_detail=auto.disabled_detail,
+        completed_at=deleted_at,
+    )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
@@ -368,6 +428,16 @@ async def dispatch_automation(
     picked up by the dispatcher and executed.
     """
     auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    if not auto.enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Automation is disabled",
+                "disabled_reason": auto.disabled_reason,
+                "disabled_detail": auto.disabled_detail,
+            },
+        )
+
     run = await create_pending_run(
         session,
         auto,
@@ -498,6 +568,8 @@ async def complete_run(
             previous=run.status_detail,
         )
     elif body.status == "COMPLETED":
+        # Task outcomes and blocking factors are agent/user-level result metadata;
+        # only SDK callback errors and system dispatch errors feed auto-disablement.
         values["status_detail"] = None
     if body.conversation_id:
         finish_tool_response = await fetch_latest_finish_tool_response_for_run(
@@ -552,12 +624,22 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
+    if new_status == AutomationRunStatus.FAILED:
+        automation_disabled = await maybe_disable_unhealthy_automation(
+            session,
+            automation.id,
+        )
+    else:
+        automation_disabled = False
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
+    if automation_disabled:
+        telemetry_properties["automation_disabled"] = True
+
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED
