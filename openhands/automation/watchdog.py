@@ -728,15 +728,14 @@ async def purge_terminal_workspaces(
     retention_seconds: int,
     batch_size: int = WORKSPACE_PURGE_BATCH_SIZE,
     shutdown_event: asyncio.Event | None = None,
-    failed_last_cycle: set[UUID] | None = None,
+    deferred_last_cycle: set[UUID] | None = None,
 ) -> PurgeResult:
     """Purge expired terminal and inactive orphan workspace directories.
 
     The module batch constant bounds both the successful deletions and the
-    classification candidate set. Failed/refused attempts may use up to three
-    times that budget, so an undeletable directory cannot block newer workspaces
-    indefinitely. The watchdog passes failed_last_cycle to move those entries
-    behind fresh candidates on the next cycle.
+    classification candidate set. Failed/refused attempts and candidates that
+    are not actionable this cycle are remembered and moved behind fresh
+    candidates on the next cycle.
     """
     if retention_seconds < 0:
         raise ValueError("retention_seconds must be non-negative")
@@ -755,11 +754,13 @@ async def purge_terminal_workspaces(
         return _empty_result(len(candidates))
 
     max_attempts = batch_size * DELETE_ATTEMPT_FACTOR
-    previous_failures = failed_last_cycle if failed_last_cycle is not None else set()
+    previous_deferred = (
+        deferred_last_cycle if deferred_last_cycle is not None else set()
+    )
     ordered_candidates = sorted(
         candidates.items(),
         key=lambda item: (
-            item[0] in previous_failures,
+            item[0] in previous_deferred,
             item[1],
             str(item[0]),
         ),
@@ -783,7 +784,7 @@ async def purge_terminal_workspaces(
             )
 
     deleted = missing = refused = errors = bytes_freed = attempts = 0
-    failed_this_cycle: set[UUID] = set()
+    deferred_this_cycle: set[UUID] = set()
     for run_id, root_mtime in ordered_candidates:
         if deleted >= batch_size or attempts >= max_attempts:
             break
@@ -794,6 +795,7 @@ async def purge_terminal_workspaces(
         if row is not None:
             status, completed_at = row
             if not _is_terminal(status):
+                deferred_this_cycle.add(run_id)
                 continue
         else:
             completed_at = None
@@ -803,6 +805,7 @@ async def purge_terminal_workspaces(
         # as their inactivity guard.
         age = completed_at if completed_at is not None else root_mtime
         if not _is_expired(age, cutoff):
+            deferred_this_cycle.add(run_id)
             continue
         if shutdown_event is not None and shutdown_event.is_set():
             break
@@ -816,10 +819,10 @@ async def purge_terminal_workspaces(
                 missing += 1
             case DeleteOutcome.REFUSED:
                 refused += 1
-                failed_this_cycle.add(run_id)
+                deferred_this_cycle.add(run_id)
             case DeleteOutcome.ERROR:
                 errors += 1
-                failed_this_cycle.add(run_id)
+                deferred_this_cycle.add(run_id)
             case DeleteOutcome.DELETED:
                 deleted += 1
                 bytes_freed += delete_result.bytes_freed
@@ -829,9 +832,9 @@ async def purge_terminal_workspaces(
                     delete_result.bytes_freed,
                 )
 
-    if failed_last_cycle is not None:
-        failed_last_cycle.clear()
-        failed_last_cycle.update(failed_this_cycle)
+    if deferred_last_cycle is not None:
+        deferred_last_cycle.clear()
+        deferred_last_cycle.update(deferred_this_cycle)
 
     result = PurgeResult(
         len(candidates), deleted, missing, refused, errors, bytes_freed
@@ -898,7 +901,7 @@ async def watchdog_loop(
         "Watchdog started, scanning every %ds",
         interval,
     )
-    failed_workspace_deletions: set[UUID] = set()
+    deferred_workspace_ids: set[UUID] = set()
 
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
@@ -925,7 +928,7 @@ async def watchdog_loop(
                     session_factory=session_factory,
                     workspace_base=settings.workspace_base,
                     retention_seconds=settings.workspace_retention_seconds,
-                    failed_last_cycle=failed_workspace_deletions,
+                    deferred_last_cycle=deferred_workspace_ids,
                 )
             except Exception:
                 logger.exception("Error purging workspace directories")

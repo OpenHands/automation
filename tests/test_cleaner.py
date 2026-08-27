@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-import openhands.automation.watchdog as cleaner
+import openhands.automation.watchdog as watchdog
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -222,7 +222,7 @@ class TestCandidateScan:
             def __exit__(self, *_args):
                 return False
 
-        monkeypatch.setattr(cleaner.os, "scandir", lambda _path: Entries())
+        monkeypatch.setattr(watchdog.os, "scandir", lambda _path: Entries())
 
         assert set(_scan_candidates(runs_root)) == expected
 
@@ -345,7 +345,7 @@ class TestDeleteWorkspace:
         workspace.mkdir(parents=True)
         marker = workspace / "keep.txt"
         marker.write_text("keep", encoding="utf-8")
-        runs_root = cleaner._workspace_root(workspace_base)
+        runs_root = watchdog._workspace_root(workspace_base)
         runs_root.parent.mkdir(parents=True)
         try:
             runs_root.symlink_to(outside, target_is_directory=True)
@@ -366,7 +366,7 @@ class TestDeleteWorkspace:
         marker = workspace / "keep.txt"
         marker.write_text("keep", encoding="utf-8")
         try:
-            _create_junction(outside_runs, cleaner._workspace_root(workspace_base))
+            _create_junction(outside_runs, watchdog._workspace_root(workspace_base))
         except (OSError, ImportError) as exc:
             pytest.skip(f"directory junctions unavailable: {exc}")
 
@@ -647,7 +647,7 @@ class TestPurgeTerminalWorkspaces:
         candidates = {
             uuid.uuid4(): utcnow().timestamp() for _ in range(candidate_count)
         }
-        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
+        monkeypatch.setattr(watchdog, "_scan_candidates", lambda _root: candidates)
         execute = AsyncSession.execute
         query_sizes = []
 
@@ -663,6 +663,70 @@ class TestPurgeTerminalWorkspaces:
 
         assert query_sizes == [10 * DELETE_ATTEMPT_FACTOR]
         assert query_sizes[0] <= WORKSPACE_PURGE_BATCH_SIZE * DELETE_ATTEMPT_FACTOR
+
+    async def test_non_actionable_prefix_does_not_starve_eligible_workspace(
+        self, db_session_factory, workspace_base
+    ):
+        """Active candidates cannot hide an eligible workspace across cycles."""
+        auto_id = uuid.uuid4()
+        await _create_automation(db_session_factory, auto_id)
+        old_time = utcnow() - timedelta(days=30)
+
+        active_paths = []
+        for index, status in enumerate(
+            (
+                AutomationRunStatus.PENDING,
+                AutomationRunStatus.RUNNING,
+                AutomationRunStatus.PENDING,
+            )
+        ):
+            run_id = _run_id()
+            await _create_run(
+                db_session_factory,
+                run_id,
+                auto_id,
+                status,
+                completed_at=old_time,
+            )
+            active_paths.append(
+                _make_workspace(
+                    workspace_base,
+                    run_id,
+                    mtime=old_time + timedelta(seconds=index),
+                )
+            )
+
+        terminal_id = _run_id()
+        await _create_run(
+            db_session_factory,
+            terminal_id,
+            auto_id,
+            AutomationRunStatus.FAILED,
+            completed_at=old_time,
+        )
+        terminal_path = _make_workspace(
+            workspace_base,
+            terminal_id,
+            mtime=old_time + timedelta(seconds=3),
+        )
+
+        deferred_ids = set()
+        results = []
+        for _ in range(3):
+            results.append(
+                await purge_terminal_workspaces(
+                    db_session_factory,
+                    workspace_base,
+                    retention_seconds=3600,
+                    batch_size=1,
+                    deferred_last_cycle=deferred_ids,
+                )
+            )
+
+        assert results[0].deleted == 0
+        assert any(result.deleted == 1 for result in results[1:])
+        assert not terminal_path.exists()
+        assert all(path.exists() for path in active_paths)
 
     async def test_database_session_closes_before_deletion(
         self, db_session_factory, workspace_base, monkeypatch
@@ -691,13 +755,13 @@ class TestPurgeTerminalWorkspaces:
                 session_closed = True
                 return result
 
-        real_delete = cleaner._delete_workspace
+        real_delete = watchdog._delete_workspace
 
         def assert_closed_then_delete(base, candidate_id):
             assert session_closed
             return real_delete(base, candidate_id)
 
-        monkeypatch.setattr(cleaner, "_delete_workspace", assert_closed_then_delete)
+        monkeypatch.setattr(watchdog, "_delete_workspace", assert_closed_then_delete)
         tracked_factory = cast(
             async_sessionmaker[AsyncSession], lambda: TrackedSession()
         )
@@ -775,10 +839,10 @@ class TestPurgeTerminalWorkspaces:
         old = (utcnow() - timedelta(days=30)).timestamp()
         candidates = {uuid.uuid4(): old for _ in range(200)}
         delete = Mock(
-            return_value=cleaner.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+            return_value=watchdog.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
         )
-        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
-        monkeypatch.setattr(cleaner, "_delete_workspace", delete)
+        monkeypatch.setattr(watchdog, "_scan_candidates", lambda _root: candidates)
+        monkeypatch.setattr(watchdog, "_delete_workspace", delete)
 
         result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=50
@@ -797,11 +861,11 @@ class TestPurgeTerminalWorkspaces:
 
         def stop_after_first(_base, _run_id):
             shutdown_event.set()
-            return cleaner.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+            return watchdog.WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
 
         delete.side_effect = stop_after_first
-        monkeypatch.setattr(cleaner, "_scan_candidates", lambda _root: candidates)
-        monkeypatch.setattr(cleaner, "_delete_workspace", delete)
+        monkeypatch.setattr(watchdog, "_scan_candidates", lambda _root: candidates)
+        monkeypatch.setattr(watchdog, "_delete_workspace", delete)
 
         await purge_terminal_workspaces(
             db_session_factory,
@@ -846,22 +910,22 @@ class TestPurgeTerminalWorkspaces:
             older_id,
             mtime=old_time - timedelta(seconds=1),
         )
-        real_rmtree = cleaner.shutil.rmtree
+        real_rmtree = watchdog.shutil.rmtree
 
         def fail_old(path, *args, **kwargs):
             if Path(path) == older_path:
                 raise PermissionError("locked")
             return real_rmtree(path, *args, **kwargs)
 
-        monkeypatch.setattr(cleaner.shutil, "rmtree", fail_old)
-        failed_ids = set()
+        monkeypatch.setattr(watchdog.shutil, "rmtree", fail_old)
+        deferred_ids = set()
 
         first_result = await purge_terminal_workspaces(
             db_session_factory,
             workspace_base,
             retention_seconds=3600,
             batch_size=1,
-            failed_last_cycle=failed_ids,
+            deferred_last_cycle=deferred_ids,
         )
         newer_id = _run_id()
         await _create_run(
@@ -877,7 +941,7 @@ class TestPurgeTerminalWorkspaces:
             workspace_base,
             retention_seconds=3600,
             batch_size=1,
-            failed_last_cycle=failed_ids,
+            deferred_last_cycle=deferred_ids,
         )
 
         assert first_result.errors == 1
@@ -901,15 +965,15 @@ class TestPurgeTerminalWorkspaces:
             completed_at=utcnow() - timedelta(days=30),
         )
         path = _make_workspace(workspace_base, run_id)
-        real_delete = cleaner._delete_workspace
+        real_delete = watchdog._delete_workspace
 
         def disappear_before_delete(base, candidate_id):
             if path.exists():
-                real_rmtree = cleaner.shutil.rmtree
+                real_rmtree = watchdog.shutil.rmtree
                 real_rmtree(path)
             return real_delete(base, candidate_id)
 
-        monkeypatch.setattr(cleaner, "_delete_workspace", disappear_before_delete)
+        monkeypatch.setattr(watchdog, "_delete_workspace", disappear_before_delete)
 
         result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
@@ -1053,12 +1117,12 @@ class TestPurgeTerminalWorkspaces:
             completed_at=utcnow() - timedelta(days=30),
         )
         path = _make_workspace(workspace_base, run_id)
-        real_rmtree = cleaner.shutil.rmtree
+        real_rmtree = watchdog.shutil.rmtree
 
         def fail_rmtree(_path):
             raise PermissionError("locked")
 
-        monkeypatch.setattr(cleaner.shutil, "rmtree", fail_rmtree)
+        monkeypatch.setattr(watchdog.shutil, "rmtree", fail_rmtree)
 
         first_result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
@@ -1068,7 +1132,7 @@ class TestPurgeTerminalWorkspaces:
         assert first_result.deleted == 0
         assert path.exists()
 
-        monkeypatch.setattr(cleaner.shutil, "rmtree", real_rmtree)
+        monkeypatch.setattr(watchdog.shutil, "rmtree", real_rmtree)
         retry_result = await purge_terminal_workspaces(
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
         )
