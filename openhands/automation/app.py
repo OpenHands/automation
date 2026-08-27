@@ -202,7 +202,7 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    shutdown_tasks: list[tuple[str, asyncio.Task | None]] = [
+    shutdown_tasks: list[tuple[str, asyncio.Task]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
@@ -210,8 +210,6 @@ async def lifespan(app: FastAPI):
     if git_sync_task is not None:
         shutdown_tasks.append(("git_sync", git_sync_task))
     for task_name, task in shutdown_tasks:
-        if task is None:
-            continue
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:

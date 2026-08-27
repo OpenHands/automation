@@ -27,8 +27,8 @@ from openhands.automation.models import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.watchdog import (
-    DELETE_ATTEMPT_FACTOR,
     WORKSPACE_PURGE_BATCH_SIZE,
+    WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR,
     DeleteOutcome,
     PurgeResult,
     _delete_workspace,
@@ -640,7 +640,7 @@ class TestPurgeTerminalWorkspaces:
         assert not terminal_path.exists()
         assert pending_path.exists()
 
-    async def test_classification_is_bounded_by_attempt_cap(
+    async def test_classification_is_bounded_by_candidate_window(
         self, db_session_factory, workspace_base, monkeypatch
     ):
         candidate_count = 32_767
@@ -661,8 +661,11 @@ class TestPurgeTerminalWorkspaces:
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=10
         )
 
-        assert query_sizes == [10 * DELETE_ATTEMPT_FACTOR]
-        assert query_sizes[0] <= WORKSPACE_PURGE_BATCH_SIZE * DELETE_ATTEMPT_FACTOR
+        assert query_sizes == [10 * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR]
+        assert (
+            query_sizes[0]
+            <= WORKSPACE_PURGE_BATCH_SIZE * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
+        )
 
     async def test_non_actionable_prefix_does_not_starve_eligible_workspace(
         self, db_session_factory, workspace_base
@@ -727,6 +730,84 @@ class TestPurgeTerminalWorkspaces:
         assert any(result.deleted == 1 for result in results[1:])
         assert not terminal_path.exists()
         assert all(path.exists() for path in active_paths)
+
+    def test_previous_cycle_replacement_oscillates_between_early_windows(self):
+        """Replacing deferred state cannot advance past the first two windows."""
+        candidates = list(range(1_000))
+        deferred = set()
+        windows = []
+
+        for _ in range(3):
+            window = sorted(candidates, key=lambda run_id: run_id in deferred)[:150]
+            windows.append(window)
+            # Old behavior: clear() + update(deferred_this_cycle).
+            deferred = set(window)
+
+        assert windows[0] == list(range(150))
+        assert windows[1] == list(range(150, 300))
+        assert windows[2] == list(range(150))
+        assert 900 not in {run_id for window in windows for run_id in window}
+
+    async def test_accumulated_deferred_sweep_reaches_later_classification_window(
+        self, db_session_factory, workspace_base, monkeypatch
+    ):
+        """An accumulated stable sweep reaches index 900 within seven windows."""
+        auto_id = uuid.uuid4()
+        await _create_automation(db_session_factory, auto_id)
+        old_timestamp = (utcnow() - timedelta(days=30)).timestamp()
+        candidate_ids = [_run_id() for _ in range(1_000)]
+        candidates = {
+            run_id: old_timestamp + index for index, run_id in enumerate(candidate_ids)
+        }
+        remaining = dict(candidates)
+        eligible_id = candidate_ids[900]
+        batch_size = 50
+        candidate_window_size = (
+            batch_size * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
+        )
+        cycle_bound = -(-len(candidates) // candidate_window_size)
+
+        for run_id in candidate_ids:
+            status = (
+                AutomationRunStatus.COMPLETED
+                if run_id == eligible_id
+                else AutomationRunStatus.PENDING
+            )
+            await _create_run(
+                db_session_factory,
+                run_id,
+                auto_id,
+                status,
+                completed_at=utcnow() - timedelta(days=30),
+            )
+
+        considered: list[uuid.UUID] = []
+
+        def delete_workspace(_base, run_id):
+            considered.append(run_id)
+            remaining.pop(run_id)
+            return watchdog.WorkspaceDeleteResult(watchdog.DeleteOutcome.DELETED, 0)
+
+        monkeypatch.setattr(
+            watchdog, "_scan_candidates", lambda _root: dict(remaining)
+        )
+        monkeypatch.setattr(watchdog, "_delete_workspace", delete_workspace)
+
+        deferred_ids = set()
+        for _ in range(cycle_bound):
+            await purge_terminal_workspaces(
+                db_session_factory,
+                workspace_base,
+                retention_seconds=3600,
+                batch_size=batch_size,
+                deferred_last_cycle=deferred_ids,
+            )
+
+        assert eligible_id in considered
+        assert considered.index(eligible_id) == 0
+        assert all(
+            run_id in remaining for run_id in candidate_ids if run_id != eligible_id
+        )
 
     async def test_database_session_closes_before_deletion(
         self, db_session_factory, workspace_base, monkeypatch
@@ -848,8 +929,8 @@ class TestPurgeTerminalWorkspaces:
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=50
         )
 
-        assert result.errors == 50 * DELETE_ATTEMPT_FACTOR
-        assert delete.call_count == 50 * DELETE_ATTEMPT_FACTOR
+        assert result.errors == 50 * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
+        assert delete.call_count == 50 * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
 
     async def test_shutdown_stops_between_deletions(
         self, db_session_factory, workspace_base, monkeypatch

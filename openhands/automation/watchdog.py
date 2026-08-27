@@ -67,7 +67,7 @@ logger = logging.getLogger("automation.watchdog")
 # backlog drains rather than being dropped.
 PRUNE_BATCH_SIZE = 5000
 WORKSPACE_PURGE_BATCH_SIZE: Final[int] = 50
-DELETE_ATTEMPT_FACTOR: Final[int] = 3
+WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR: Final[int] = 3
 
 
 async def _get_automation_keep_alive(
@@ -585,8 +585,8 @@ def _empty_result(candidates_found: int = 0) -> PurgeResult:
 
 
 def _workspace_root(workspace_base: str | os.PathLike[str] | None) -> Path:
-    """Return the normalized root that owns all automation run directories."""
-    return local_runs_root(workspace_base).resolve(strict=False)
+    """Return the configured root that owns all automation run directories."""
+    return local_runs_root(workspace_base)
 
 
 def _workspace_path(
@@ -734,8 +734,8 @@ async def purge_terminal_workspaces(
 
     The module batch constant bounds both the successful deletions and the
     classification candidate set. Failed/refused attempts and candidates that
-    are not actionable this cycle are remembered and moved behind fresh
-    candidates on the next cycle.
+    are not actionable are remembered for the current sweep and moved behind
+    fresh candidates until every stable candidate has been considered.
     """
     if retention_seconds < 0:
         raise ValueError("retention_seconds must be non-negative")
@@ -753,24 +753,24 @@ async def purge_terminal_workspaces(
     if shutdown_event is not None and shutdown_event.is_set():
         return _empty_result(len(candidates))
 
-    max_attempts = batch_size * DELETE_ATTEMPT_FACTOR
-    previous_deferred = (
+    candidate_window_size = batch_size * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
+    deferred_in_sweep = (
         deferred_last_cycle if deferred_last_cycle is not None else set()
     )
     ordered_candidates = sorted(
         candidates.items(),
         key=lambda item: (
-            item[0] in previous_deferred,
+            item[0] in deferred_in_sweep,
             item[1],
             str(item[0]),
         ),
-    )[:max_attempts]
+    )[:candidate_window_size]
 
     by_id: dict[UUID, tuple[AutomationRunStatus, datetime | None]] = {}
     candidate_ids = [run_id for run_id, _root_mtime in ordered_candidates]
     if candidate_ids:
         # The single query is safe because the candidate list is bounded by
-        # the deletion-attempt budget (150 entries with the default settings).
+        # the classification window (150 entries with the default settings).
         async with session_factory() as session:
             stmt = select(
                 AutomationRun.id,
@@ -783,10 +783,10 @@ async def purge_terminal_workspaces(
                 for run_id, status, completed_at in rows
             )
 
-    deleted = missing = refused = errors = bytes_freed = attempts = 0
+    deleted = missing = refused = errors = bytes_freed = 0
     deferred_this_cycle: set[UUID] = set()
     for run_id, root_mtime in ordered_candidates:
-        if deleted >= batch_size or attempts >= max_attempts:
+        if deleted >= batch_size:
             break
         if shutdown_event is not None and shutdown_event.is_set():
             break
@@ -810,7 +810,6 @@ async def purge_terminal_workspaces(
         if shutdown_event is not None and shutdown_event.is_set():
             break
 
-        attempts += 1
         delete_result = await asyncio.to_thread(
             _delete_workspace, workspace_base, run_id
         )
@@ -833,8 +832,14 @@ async def purge_terminal_workspaces(
                 )
 
     if deferred_last_cycle is not None:
-        deferred_last_cycle.clear()
+        # Keep the sweep state across cycles so a large non-actionable prefix
+        # cannot make the bounded candidate window oscillate forever. Entries
+        # that vanished since the preceding scan are discarded, bounding this
+        # in-memory state by the current candidate set.
+        deferred_last_cycle.intersection_update(candidates)
         deferred_last_cycle.update(deferred_this_cycle)
+        if len(deferred_last_cycle) == len(candidates):
+            deferred_last_cycle.clear()
 
     result = PurgeResult(
         len(candidates), deleted, missing, refused, errors, bytes_freed
