@@ -493,6 +493,8 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
+            auto-disabling an automation (default: 3, <=0 disables auto-disable)
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
@@ -576,6 +578,7 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+    failure_disable_threshold: int = 3
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable

@@ -98,6 +98,16 @@ class TestRunCompleteRequest:
 
         assert request.error == error
 
+    def test_accepts_blocking_factor_metadata(self):
+        blocking_factor = {"kind": "config", "reason": "Missing MCP token"}
+
+        request = RunCompleteRequest(
+            status="COMPLETED",
+            blocking_factor=blocking_factor,
+        )
+
+        assert request.blocking_factor == blocking_factor
+
 
 class TestAutomationRunResponseUtcSerialisation:
     """AutomationRunResponse must include a UTC offset in all datetime fields."""
@@ -195,6 +205,22 @@ class TestAutomationResponseUtcSerialisation:
         automation = self._make_automation()
         data = automation.model_dump(mode="json")
         assert data["created_at"].endswith("+00:00") or data["created_at"].endswith("Z")
+
+    def test_disabled_metadata_serialises_for_api_consumers(self):
+        automation = self._make_automation(
+            enabled=False,
+            disabled_reason="auth: Invalid API key",
+            disabled_detail={"kind": "auth", "threshold": 3},
+            disabled_at=_NAIVE,
+        )
+        data = automation.model_dump(mode="json")
+
+        assert data["enabled"] is False
+        assert data["disabled_reason"] == "auth: Invalid API key"
+        assert data["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert data["disabled_at"].endswith("+00:00") or data["disabled_at"].endswith(
+            "Z"
+        )
 
     def test_naive_last_triggered_at_serialises_with_utc_offset(self):
         automation = self._make_automation()

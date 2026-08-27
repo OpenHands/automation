@@ -789,6 +789,9 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
+    disabled_reason: str | None = None
+    disabled_detail: dict[str, Any] | None = None
+    disabled_at: UtcDatetime | None = None
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -814,6 +817,8 @@ class RunCompleteRequest(BaseModel):
     conversation_id: str | None = None
     error: str | ConversationErrorEvent | dict[str, Any] | None = None
     cost: float | None = None
+    blocking_factor: dict[str, Any] | None = None
+    task_outcome: dict[str, Any] | None = None
 
     @field_validator("error", mode="before")
     @classmethod
@@ -853,6 +858,9 @@ class AutomationRunListResponse(BaseModel):
 
     runs: list[AutomationRunResponse]
     total: int
+    # Lifetime run counts by status, unaffected by pagination. Sparse: only
+    # statuses with at least one run appear, so a missing key means zero.
+    status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
 # --- Capability and Preflight Schemas ---
