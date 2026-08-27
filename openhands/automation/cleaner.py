@@ -121,7 +121,15 @@ def _dir_size(path: Path) -> int:
     """Best-effort reclaimed-space estimate; may undercount on races."""
     total = 0
     with suppress(OSError):
-        for dirpath, _, filenames in os.walk(path, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+            # Unlike symlinks, os.walk descends Windows junctions even with
+            # followlinks=False; prune them so bytes rmtree would never delete
+            # are not reported as reclaimed.
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not _is_link_or_junction(Path(dirpath) / name)
+            ]
             for filename in filenames:
                 # stat(follow_symlinks=False) reads the link itself rather than
                 # the target, so external targets never count as workspace bytes.
@@ -261,10 +269,13 @@ async def purge_terminal_workspaces(
         else:
             completed_at = None
 
-        # A workspace without an AutomationRun row can never belong to a live
-        # run: run directories are only designated for dispatched runs and
-        # dispatch requires a DB row, so the scandir-captured mtime is the
-        # sole guard for orphans (and terminal rows without completed_at).
+        # Service-owned live runs retain an AutomationRun row: run directories
+        # are only designated for dispatched runs, and dispatch requires a DB
+        # row. No separate authoritative live-workspace registry exists, so for
+        # orphans (and terminal rows without completed_at) the scandir-captured
+        # mtime against the retention window is the guard — the maintainer's
+        # chosen design, which also bounds any out-of-band DB reset/repoint
+        # exposure to workspaces idle past the full retention window.
         age = completed_at if completed_at is not None else root_mtime
         if not _is_expired(age, cutoff):
             continue

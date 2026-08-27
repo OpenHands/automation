@@ -263,6 +263,25 @@ class TestDirSize:
         assert size < 4096
         assert (target / "blob.bin").exists()
 
+    def test_junction_target_bytes_are_not_counted(self, workspace_base, tmp_path):
+        """Real junction targets must not inflate reclaimed-byte accounting."""
+        external = tmp_path / "junction-target"
+        external.mkdir()
+        (external / "blob.bin").write_text("z" * 4096, encoding="utf-8")
+        path = _workspace_path(workspace_base, _run_id())
+        path.mkdir(parents=True)
+        local_file = path / "local.txt"
+        local_file.write_text("x" * 8, encoding="utf-8")
+        try:
+            _create_junction(external, path / "linked-dir")
+        except (OSError, ImportError) as exc:
+            pytest.skip(f"directory junctions unavailable: {exc}")
+
+        size = _dir_size(path)
+
+        assert size == local_file.stat().st_size
+        assert (external / "blob.bin").exists()
+
 
 class TestDeleteWorkspace:
     def test_deletes_existing(self, workspace_base):
