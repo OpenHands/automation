@@ -243,6 +243,7 @@ async def create_automation_run(
     automation: Automation,
     session: AsyncSession,
     event_payload: dict[str, Any] | None = None,
+    subject_key: str | None = None,
 ) -> AutomationRun:
     """
     Create a PENDING automation run for an event-triggered automation.
@@ -253,6 +254,9 @@ async def create_automation_run(
         event_payload: The webhook payload that triggered this run (optional)
                        For GitHub events: model_dump() of parsed Pydantic event
                        For custom webhooks: the raw payload dict
+        subject_key: The external subject this run is about, for
+                     `continue_conversation` triggers. Later events on the same
+                     subject find this run's sandbox through it.
 
     Returns:
         The created AutomationRun instance
@@ -263,6 +267,7 @@ async def create_automation_run(
         status=AutomationRunStatus.PENDING,
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
+        subject_key=subject_key,
     )
     session.add(run)
     return run

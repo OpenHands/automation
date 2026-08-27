@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
-from openhands.automation.conversations import attach_run_conversation
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
@@ -550,13 +549,6 @@ async def complete_run(
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
 
-    owns_conversation = False
-    if body.conversation_id:
-        # The only moment the service learns this run's conversation id.
-        owns_conversation = await attach_run_conversation(
-            session, run_id, body.conversation_id
-        )
-
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
     telemetry_properties: dict = {"trigger_source": "callback"}
@@ -577,10 +569,10 @@ async def complete_run(
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
     #
-    # A run owning an external subject's conversation is treated like
-    # keep_alive: deleting its sandbox would destroy the conversation the next
-    # event is meant to continue. The runtime TTL reaper still collects it.
-    if run.sandbox_id and automation.keep_alive is not True and not owns_conversation:
+    # A run that owns an external subject is treated like keep_alive: deleting
+    # its sandbox would destroy the conversation the next event on that subject
+    # is meant to continue. The runtime TTL reaper still collects it.
+    if run.sandbox_id and automation.keep_alive is not True and not run.subject_key:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings
 

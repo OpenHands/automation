@@ -1,5 +1,9 @@
 """Tests for routing events to an existing conversation.
 
+The conversation id is derived, so these tests never invent one: they assert
+against `conversation_id_for`. What makes a subject continuable is that some
+earlier run for it is on a sandbox.
+
 Sending the turn is stubbed here; `test_conversation_turn.py` covers it.
 """
 
@@ -16,7 +20,6 @@ from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.conversations import (
-    attach_run_conversation,
     continue_conversation,
     resolve_subject_key,
 )
@@ -25,11 +28,11 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
-    ExternalConversation,
 )
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import (
     EventSubject,
+    conversation_id_for,
     github_subject,
     slack_subject,
 )
@@ -96,9 +99,24 @@ async def fetch_runs(session) -> list[AutomationRun]:
     return list(result.scalars().all())
 
 
-async def fetch_mappings(session) -> list[ExternalConversation]:
-    result = await session.execute(select(ExternalConversation))
+async def subject_runs(session) -> list[AutomationRun]:
+    """Runs that own a subject -- the only thing this feature stores."""
+    result = await session.execute(
+        select(AutomationRun).where(AutomationRun.subject_key.isnot(None))
+    )
     return list(result.scalars().all())
+
+
+async def give_sandbox(session, run_id, sandbox_id: str = "sandbox-1") -> None:
+    """Put a run on a sandbox, which is what makes its subject continuable."""
+    run = await session.get(AutomationRun, run_id)
+    assert run is not None
+    run.sandbox_id = sandbox_id
+    await session.commit()
+
+
+def expected_conversation(org_id, automation_id, subject_key, source="slack") -> str:
+    return conversation_id_for(org_id, automation_id, source, subject_key)
 
 
 @pytest.fixture
@@ -298,49 +316,51 @@ class TestComposeTurn:
 # ---------------------------------------------------------------------------
 
 
+async def _mention(session, org_id, envelope, event_id: str):
+    return await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=envelope,
+            provider_event_id=event_id,
+            subject=slack_subject(envelope),
+        ),
+        session,
+    )
+
+
 @pytest.mark.asyncio
 async def test_first_event_creates_a_run_and_claims_the_subject(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """Nothing to continue yet: today's behaviour, plus a mapping."""
+    """Nothing to continue yet: today's behaviour, plus the subject on the run."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
     async_session.add(automation)
     await async_session.commit()
 
-    envelope = slack_envelope()
-    result = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=envelope,
-            provider_event_id="Ev1",
-            subject=slack_subject(envelope),
-        ),
-        async_session,
-    )
+    result = await _mention(async_session, org_id, slack_envelope(), "Ev1")
 
     assert result.matched == 1
     assert len(result.run_ids) == 1
     assert result.conversation_ids == []
     assert delivered_turns == []
 
-    mappings = await fetch_mappings(async_session)
-    assert len(mappings) == 1
-    assert mappings[0].subject_key == f"{TEAM}/C123/1755000000.000100"
-    assert mappings[0].automation_id == automation.id
-    assert str(mappings[0].run_id) == result.run_ids[0]
-    # Not known until the run completes and reports one.
-    assert mappings[0].conversation_id is None
+    owners = await subject_runs(async_session)
+    assert len(owners) == 1
+    assert owners[0].subject_key == f"{TEAM}/C123/1755000000.000100"
+    assert str(owners[0].id) == result.run_ids[0]
+    # Nothing records a conversation id: it is derived when needed.
+    assert owners[0].conversation_id is None
 
 
 @pytest.mark.asyncio
 async def test_two_mentions_in_one_thread_reach_the_same_conversation(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """A follow-up lands on the conversation the first event created."""
+    """A follow-up lands on the conversation the first event's run created."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
@@ -348,51 +368,27 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
     await async_session.commit()
 
     opener = slack_envelope(ts="1755000000.000100", text="<@U999> what broke?")
-    first = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=opener,
-            provider_event_id="Ev1",
-            subject=slack_subject(opener),
-        ),
-        async_session,
-    )
+    first = await _mention(async_session, org_id, opener, "Ev1")
     assert len(first.run_ids) == 1
-
-    # The run finishes and reports the conversation it created.
-    attached = await attach_run_conversation(
-        async_session, uuid.UUID(first.run_ids[0]), "conv-thread-1"
-    )
-    assert attached is True
-    await async_session.commit()
+    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
 
     reply = slack_envelope(
         ts="1755000009.000900",
         thread_ts="1755000000.000100",
         text="<@U999> and now?",
     )
-    second = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=reply,
-            provider_event_id="Ev2",
-            subject=slack_subject(reply),
-        ),
-        async_session,
-    )
+    second = await _mention(async_session, org_id, reply, "Ev2")
 
+    derived = expected_conversation(
+        org_id, automation.id, f"{TEAM}/C123/1755000000.000100"
+    )
     assert second.matched == 1
     assert second.run_ids == []
-    assert second.conversation_ids == ["conv-thread-1"]
+    assert second.conversation_ids == [derived]
 
     assert len(delivered_turns) == 1
     conversation_id, text = delivered_turns[0]
-    assert conversation_id == "conv-thread-1"
-    # The turn carries the new event, with the first exchange still in history.
+    assert conversation_id == derived
     assert "and now?" in text
 
     # Still one run in total: the second event started none.
@@ -400,56 +396,92 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
 
 
 @pytest.mark.asyncio
-async def test_a_mention_in_another_thread_starts_its_own_run(
+async def test_an_event_arriving_mid_run_continues_that_conversation(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
+    """A derived id is known before the first run reports anything.
+
+    A stored mapping could not answer here -- the run has not completed, so it
+    has no conversation id to record -- and the event forked a second run
+    against the same thread.
+    """
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
     async_session.add(automation)
     await async_session.commit()
 
-    first_thread = slack_envelope(ts="1755000000.000100")
-    first = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=first_thread,
-            provider_event_id="Ev1",
-            subject=slack_subject(first_thread),
-        ),
-        async_session,
-    )
-    await attach_run_conversation(
-        async_session, uuid.UUID(first.run_ids[0]), "conv-thread-1"
-    )
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    run = await async_session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+    assert run is not None
+    run.status = AutomationRunStatus.RUNNING
+    run.sandbox_id = "sandbox-live"
     await async_session.commit()
 
-    other_thread = slack_envelope(ts="1755000100.000200")
-    second = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=other_thread,
-            provider_event_id="Ev2",
-            subject=slack_subject(other_thread),
-        ),
-        async_session,
+    follow_up = slack_envelope(
+        ts="1755000002.000200", thread_ts="1755000000.000100", text="<@U999> also"
     )
+    second = await _mention(async_session, org_id, follow_up, "Ev2")
 
-    assert second.conversation_ids == []
+    assert second.run_ids == []
+    assert second.conversation_ids == [
+        expected_conversation(org_id, automation.id, f"{TEAM}/C123/1755000000.000100")
+    ]
+    assert len(await fetch_runs(async_session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_subject_with_no_sandbox_yet_falls_back_to_a_run(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """A PENDING run has nothing to talk to, so the event starts its own."""
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    await _mention(async_session, org_id, slack_envelope(), "Ev1")
+
+    follow_up = slack_envelope(
+        ts="1755000002.000200", thread_ts="1755000000.000100", text="<@U999> also"
+    )
+    second = await _mention(async_session, org_id, follow_up, "Ev2")
+
     assert len(second.run_ids) == 1
+    assert second.conversation_ids == []
     assert delivered_turns == []
-    assert len(await fetch_mappings(async_session)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_mention_in_another_thread_starts_its_own_run(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """Two threads share no context."""
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(ts="1.1"), "Ev1")
+    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+
+    other = await _mention(async_session, org_id, slack_envelope(ts="2.2"), "Ev2")
+
+    assert len(other.run_ids) == 1
+    assert other.conversation_ids == []
+    assert delivered_turns == []
+
+    keys = {run.subject_key for run in await subject_runs(async_session)}
+    assert keys == {f"{TEAM}/C123/1.1", f"{TEAM}/C123/2.2"}
 
 
 @pytest.mark.asyncio
 async def test_an_automation_that_does_not_opt_in_is_untouched(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """No `destination`: no mapping, no lookup, no turn."""
+    """Every event starts a run, and nothing records a subject."""
     automation = make_automation(
         org_id,
         mock_authenticated_user.user_id,
@@ -458,311 +490,173 @@ async def test_an_automation_that_does_not_opt_in_is_untouched(
     async_session.add(automation)
     await async_session.commit()
 
-    for index, ts in enumerate(("1755000000.000100", "1755000009.000900")):
-        envelope = slack_envelope(ts=ts, thread_ts="1755000000.000100")
-        result = await accept_event(
-            org_id,
-            AcceptedEvent(
-                source="slack",
-                event_key="app_mention",
-                payload=envelope,
-                provider_event_id=f"Ev{index}",
-                subject=slack_subject(envelope),
-            ),
-            async_session,
-        )
-        assert len(result.run_ids) == 1
-        assert result.conversation_ids == []
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    second = await _mention(async_session, org_id, slack_envelope(), "Ev2")
 
-    assert len(await fetch_runs(async_session)) == 2
-    assert await fetch_mappings(async_session) == []
+    assert len(first.run_ids) == 1
+    assert len(second.run_ids) == 1
+    assert second.conversation_ids == []
     assert delivered_turns == []
+    assert await subject_runs(async_session) == []
 
 
 @pytest.mark.asyncio
 async def test_an_unreachable_conversation_degrades_to_a_run(
     org_id, async_session, mock_authenticated_user, unreachable_conversations
 ):
-    """A reaped sandbox degrades to a run rather than erroring."""
+    """A reaped sandbox is ordinary; the event must not error or vanish."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
     async_session.add(automation)
     await async_session.commit()
 
-    opener = slack_envelope(ts="1755000000.000100")
-    first = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=opener,
-            provider_event_id="Ev1",
-            subject=slack_subject(opener),
-        ),
-        async_session,
-    )
-    await attach_run_conversation(
-        async_session, uuid.UUID(first.run_ids[0]), "conv-gone"
-    )
-    await async_session.commit()
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    dead_run_id = uuid.UUID(first.run_ids[0])
+    await give_sandbox(async_session, dead_run_id, "sandbox-reaped")
 
     reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
-    second = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=reply,
-            provider_event_id="Ev2",
-            subject=slack_subject(reply),
-        ),
-        async_session,
-    )
+    second = await _mention(async_session, org_id, reply, "Ev2")
 
-    assert unreachable_conversations == ["conv-gone"]
-    assert second.conversation_ids == []
+    assert unreachable_conversations == [
+        expected_conversation(org_id, automation.id, f"{TEAM}/C123/1755000000.000100")
+    ]
     assert len(second.run_ids) == 1
+    assert second.conversation_ids == []
 
-    # The dead conversation is forgotten; the new run owns the subject.
-    mappings = await fetch_mappings(async_session)
-    assert len(mappings) == 1
-    assert mappings[0].conversation_id is None
-    assert str(mappings[0].run_id) == second.run_ids[0]
-
-
-@pytest.mark.asyncio
-async def test_a_run_still_in_flight_does_not_hold_up_the_next_event(
-    org_id, async_session, mock_authenticated_user, delivered_turns
-):
-    """No conversation reported yet, and no queue: the event gets its own run."""
-    automation = make_automation(
-        org_id, mock_authenticated_user.user_id, continuing_trigger()
-    )
-    async_session.add(automation)
-    await async_session.commit()
-
-    for index, (ts, thread) in enumerate(
-        ((("1755000000.000100"), None), ("1755000009.000900", "1755000000.000100"))
-    ):
-        envelope = slack_envelope(ts=ts, thread_ts=thread)
-        result = await accept_event(
-            org_id,
-            AcceptedEvent(
-                source="slack",
-                event_key="app_mention",
-                payload=envelope,
-                provider_event_id=f"Ev{index}",
-                subject=slack_subject(envelope),
-            ),
-            async_session,
-        )
-        assert len(result.run_ids) == 1
-
-    assert delivered_turns == []
-    assert len(await fetch_runs(async_session)) == 2
-    # One subject, one mapping, now pointing at the newer run.
-    assert len(await fetch_mappings(async_session)) == 1
+    # The dead run no longer answers for the subject, so later events do not
+    # pay the timeout to rediscover it. The new run owns it instead.
+    dead_run = await async_session.get(AutomationRun, dead_run_id)
+    assert dead_run is not None and dead_run.subject_key is None
+    owners = await subject_runs(async_session)
+    assert [str(run.id) for run in owners] == second.run_ids
 
 
 @pytest.mark.asyncio
 async def test_an_event_without_a_subject_falls_back_to_a_run(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """A GitHub push has no numbered thing to be about."""
-    automation = make_automation(
-        org_id,
-        mock_authenticated_user.user_id,
-        {
-            "type": "event",
-            "source": "github",
-            "on": "push",
-            "destination": "continue_conversation",
-        },
-    )
-    async_session.add(automation)
-    await async_session.commit()
-
-    result = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="github",
-            event_key="push",
-            payload={
-                "ref": "refs/heads/main",
-                "repository": {"full_name": "org/repo"},
-            },
-            provider_event_id="d-1",
-        ),
-        async_session,
-    )
-
-    assert len(result.run_ids) == 1
-    assert await fetch_mappings(async_session) == []
-    assert delivered_turns == []
-
-
-@pytest.mark.asyncio
-async def test_github_derives_its_subject_without_the_transport_naming_one(
-    org_id, async_session, mock_authenticated_user, delivered_turns
-):
-    """The webhook path passes no subject; the descriptor supplies it."""
-    automation = make_automation(
-        org_id,
-        mock_authenticated_user.user_id,
-        {
-            "type": "event",
-            "source": "github",
-            "on": "issue_comment.created",
-            "destination": "continue_conversation",
-        },
-    )
-    async_session.add(automation)
-    await async_session.commit()
-
-    await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="github",
-            event_key="issue_comment.created",
-            payload={
-                "repository": {"full_name": "org/repo"},
-                "issue": {"number": 12},
-            },
-            provider_event_id="d-1",
-        ),
-        async_session,
-    )
-
-    mappings = await fetch_mappings(async_session)
-    assert [m.subject_key for m in mappings] == ["org/repo#12"]
-
-
-@pytest.mark.asyncio
-async def test_two_automations_do_not_share_one_subject(
-    org_id, async_session, mock_authenticated_user, delivered_turns
-):
-    """A conversation belongs to the automation whose script created it."""
-    for name in ("Triage", "Summarise"):
-        async_session.add(
-            make_automation(
-                org_id, mock_authenticated_user.user_id, continuing_trigger(), name
-            )
-        )
-    await async_session.commit()
-
-    envelope = slack_envelope()
-    result = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source="slack",
-            event_key="app_mention",
-            payload=envelope,
-            provider_event_id="Ev1",
-            subject=slack_subject(envelope),
-        ),
-        async_session,
-    )
-
-    assert result.matched == 2
-    assert len(result.run_ids) == 2
-
-    mappings = await fetch_mappings(async_session)
-    assert len(mappings) == 2
-    assert {m.subject_key for m in mappings} == {f"{TEAM}/C123/1755000000.000100"}
-    assert len({m.automation_id for m in mappings}) == 2
-
-
-@pytest.mark.asyncio
-async def test_concurrent_events_for_one_subject_yield_one_mapping(
-    org_id, async_session_factory, mock_authenticated_user, monkeypatch
-):
-    """Two workers, one brand-new subject: the unique index picks a winner.
-
-    Both events still run -- there was nothing to continue -- but only one owns
-    the subject, so later events do not split across two conversations.
-    """
-
-    async def fake_send(run, conversation_id, text):
-        return True
-
-    monkeypatch.setattr(
-        "openhands.automation.conversations.send_conversation_turn", fake_send
-    )
-
-    async with async_session_factory() as setup:
-        automation = make_automation(
-            org_id, mock_authenticated_user.user_id, continuing_trigger()
-        )
-        setup.add(automation)
-        await setup.commit()
-
-    envelope = slack_envelope()
-
-    async def deliver(event_id: str) -> None:
-        async with async_session_factory() as session:
-            await accept_event(
-                org_id,
-                AcceptedEvent(
-                    source="slack",
-                    event_key="app_mention",
-                    payload=envelope,
-                    provider_event_id=event_id,
-                    subject=slack_subject(envelope),
-                ),
-                session,
-            )
-
-    await asyncio.gather(deliver("Ev1"), deliver("Ev2"))
-
-    async with async_session_factory() as session:
-        mappings = await fetch_mappings(session)
-        runs = await fetch_runs(session)
-
-    assert len(mappings) == 1
-    assert len(runs) == 2
-    # Whichever won, the mapping points at a real run.
-    assert str(mappings[0].run_id) in {str(run.id) for run in runs}
-
-
-@pytest.mark.asyncio
-async def test_attach_run_conversation_reports_whether_a_subject_was_waiting(
-    org_id, async_session, mock_authenticated_user
-):
-    """The return value tells the callback whether to keep the sandbox."""
+    """No subject, nothing to group by."""
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
     async_session.add(automation)
     await async_session.commit()
 
-    run = AutomationRun(automation_id=automation.id, status=AutomationRunStatus.RUNNING)
-    async_session.add(run)
-    await async_session.commit()
-
-    assert await attach_run_conversation(async_session, run.id, "conv-1") is False
-
-    async_session.add(
-        ExternalConversation(
-            org_id=org_id,
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
             source="slack",
-            subject_key=f"{TEAM}/C123/1.1",
-            automation_id=automation.id,
-            run_id=run.id,
-        )
+            event_key="app_mention",
+            payload={"type": "event_callback", "team_id": TEAM},
+            provider_event_id="Ev1",
+        ),
+        async_session,
     )
+
+    assert len(result.run_ids) == 1
+    assert result.conversation_ids == []
+    assert await subject_runs(async_session) == []
+
+
+@pytest.mark.asyncio
+async def test_two_automations_do_not_share_one_subject(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """`automation_id` is in the key, so each gets its own conversation."""
+    alpha = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger(), "Alpha"
+    )
+    bravo = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger(), "Bravo"
+    )
+    async_session.add_all([alpha, bravo])
     await async_session.commit()
 
-    assert await attach_run_conversation(async_session, run.id, "conv-1") is True
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    assert len(first.run_ids) == 2
+    for run_id in first.run_ids:
+        await give_sandbox(async_session, uuid.UUID(run_id), f"sandbox-{run_id}")
+
+    reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
+    second = await _mention(async_session, org_id, reply, "Ev2")
+
+    key = f"{TEAM}/C123/1755000000.000100"
+    assert sorted(second.conversation_ids) == sorted(
+        [
+            expected_conversation(org_id, alpha.id, key),
+            expected_conversation(org_id, bravo.id, key),
+        ]
+    )
+    assert len(set(second.conversation_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_github_derives_its_subject_without_the_transport_naming_one(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """The provider's extractor runs when the transport supplied no subject."""
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment",
+            "destination": "continue_conversation",
+        },
+    )
+    async_session.add(automation)
     await async_session.commit()
 
-    mappings = await fetch_mappings(async_session)
-    assert mappings[0].conversation_id == "conv-1"
+    payload = {
+        "repository": {"full_name": "OpenHands/automation"},
+        "issue": {"number": 362},
+    }
+
+    async def deliver(event_id: str):
+        return await accept_event(
+            org_id,
+            AcceptedEvent(
+                source="github",
+                event_key="issue_comment",
+                payload=payload,
+                provider_event_id=event_id,
+            ),
+            async_session,
+        )
+
+    first = await deliver("Ev1")
+    await give_sandbox(async_session, uuid.UUID(first.run_ids[0]))
+    second = await deliver("Ev2")
+
+    assert second.run_ids == []
+    assert second.conversation_ids == [
+        conversation_id_for(org_id, automation.id, "github", "OpenHands/automation#362")
+    ]
 
 
 # ---------------------------------------------------------------------------
 # The completion callback
 # ---------------------------------------------------------------------------
+
+
+async def _complete(async_client, run_id, conversation_id: str = "conv-x"):
+    with patch(
+        "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+    ) as mock_cleanup:
+        with patch(
+            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run_id}/complete",
+                json={"status": "COMPLETED", "conversation_id": conversation_id},
+            )
+        await asyncio.sleep(0)
+    return response, mock_cleanup
 
 
 @pytest.mark.asyncio
@@ -782,40 +676,15 @@ async def test_completing_a_subject_owning_run_keeps_its_sandbox(
         automation_id=automation.id,
         status=AutomationRunStatus.RUNNING,
         sandbox_id="sandbox-threaded",
+        subject_key=f"{TEAM}/C123/1.1",
     )
     async_session.add(run)
     await async_session.commit()
 
-    async_session.add(
-        ExternalConversation(
-            org_id=mock_authenticated_user.org_id,
-            source="slack",
-            subject_key=f"{TEAM}/C123/1.1",
-            automation_id=automation.id,
-            run_id=run.id,
-        )
-    )
-    await async_session.commit()
-
-    with patch(
-        "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
-    ) as mock_cleanup:
-        with patch(
-            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            response = await async_client.post(
-                f"/api/automation/v1/runs/{run.id}/complete",
-                json={"status": "COMPLETED", "conversation_id": "conv-kept"},
-            )
-        await asyncio.sleep(0)
+    response, mock_cleanup = await _complete(async_client, run.id)
 
     assert response.status_code == 200
     mock_cleanup.assert_not_awaited()
-
-    mappings = await fetch_mappings(async_session)
-    assert mappings[0].conversation_id == "conv-kept"
 
 
 @pytest.mark.asyncio
@@ -839,22 +708,15 @@ async def test_completing_an_ordinary_run_still_cleans_up(
     async_session.add(run)
     await async_session.commit()
 
-    with patch(
-        "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
-    ) as mock_cleanup:
-        with patch(
-            "openhands.automation.router.fetch_latest_finish_tool_response_for_run",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            response = await async_client.post(
-                f"/api/automation/v1/runs/{run.id}/complete",
-                json={"status": "COMPLETED", "conversation_id": "conv-ordinary"},
-            )
-        await asyncio.sleep(0)
+    response, mock_cleanup = await _complete(async_client, run.id)
 
     assert response.status_code == 200
     mock_cleanup.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Reaching the sandbox
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -918,27 +780,19 @@ async def test_continue_conversation_loads_the_run_s_automation(
         SimpleNamespace(AsyncClient=client_factory),
     )
 
+    subject_key = f"{TEAM}/C123/1.1"
     async with async_session_factory() as setup:
         automation = make_automation(
             org_id, mock_authenticated_user.user_id, continuing_trigger()
         )
         setup.add(automation)
         await setup.commit()
-        run = AutomationRun(
-            automation_id=automation.id,
-            status=AutomationRunStatus.COMPLETED,
-            sandbox_id="sbx-1",
-        )
-        setup.add(run)
-        await setup.commit()
         setup.add(
-            ExternalConversation(
-                org_id=org_id,
-                source="slack",
-                subject_key=f"{TEAM}/C123/1.1",
+            AutomationRun(
                 automation_id=automation.id,
-                conversation_id="conv-cloud",
-                run_id=run.id,
+                status=AutomationRunStatus.COMPLETED,
+                sandbox_id="sbx-1",
+                subject_key=subject_key,
             )
         )
         await setup.commit()
@@ -950,16 +804,22 @@ async def test_continue_conversation_loads_the_run_s_automation(
             session,
             org_id=org_id,
             source="slack",
-            subject_key=f"{TEAM}/C123/1.1",
+            subject_key=subject_key,
             automation_id=automation_id,
             event_key="app_mention",
             event_payload={"hello": "world"},
         )
         await session.commit()
 
-    assert result == "conv-cloud"
+    derived = conversation_id_for(org_id, automation_id, "slack", subject_key)
+    assert result == derived
     assert key_urls, "the API key was never minted, so run.automation failed"
-    assert posted == ["/api/conversations/conv-cloud/events"]
+    assert posted == [f"/api/conversations/{derived}/events"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -979,38 +839,30 @@ async def test_concurrent_follow_ups_all_continue_one_conversation(
     )
 
     async with async_session_factory() as setup:
-        setup.add(
-            make_automation(
-                org_id, mock_authenticated_user.user_id, continuing_trigger()
-            )
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
         )
+        setup.add(automation)
         await setup.commit()
+        automation_id = automation.id
 
     envelope = slack_envelope()
 
     async def deliver(event_id: str):
         async with async_session_factory() as session:
-            return await accept_event(
-                org_id,
-                AcceptedEvent(
-                    source="slack",
-                    event_key="app_mention",
-                    payload=envelope,
-                    provider_event_id=event_id,
-                    subject=slack_subject(envelope),
-                ),
-                session,
-            )
+            return await _mention(session, org_id, envelope, event_id)
 
     first = await deliver("Ev0")
     async with async_session_factory() as session:
-        await attach_run_conversation(session, uuid.UUID(first.run_ids[0]), "conv-1")
-        await session.commit()
+        await give_sandbox(session, uuid.UUID(first.run_ids[0]))
 
     results = await asyncio.gather(*(deliver(f"Later{n}") for n in range(5)))
 
-    assert sent == ["conv-1"] * 5
-    assert all(r.conversation_ids == ["conv-1"] for r in results)
+    derived = conversation_id_for(
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+    )
+    assert sent == [derived] * 5
+    assert all(r.conversation_ids == [derived] for r in results)
     assert all(r.run_ids == [] for r in results)
 
     async with async_session_factory() as session:
@@ -1024,7 +876,7 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
     """Why `get_event_automations` orders by id.
 
     Without a stable lock order, two events on one subject can take the same
-    mapping rows in opposite orders and deadlock.
+    run rows in opposite orders and deadlock.
     """
 
     async def fake_send(run, conversation_id, text):
@@ -1052,17 +904,7 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
     async def deliver(event_id: str) -> None:
         try:
             async with async_session_factory() as session:
-                await accept_event(
-                    org_id,
-                    AcceptedEvent(
-                        source="slack",
-                        event_key="app_mention",
-                        payload=envelope,
-                        provider_event_id=event_id,
-                        subject=slack_subject(envelope),
-                    ),
-                    session,
-                )
+                await _mention(session, org_id, envelope, event_id)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -1070,6 +912,5 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
 
     assert errors == []
     async with async_session_factory() as session:
-        mappings = await fetch_mappings(session)
-    assert len(mappings) == 3
-    assert len({m.automation_id for m in mappings}) == 3
+        owners = await subject_runs(session)
+    assert len({run.automation_id for run in owners}) == 3

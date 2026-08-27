@@ -181,6 +181,13 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # The external subject this run is about -- a Slack thread, a pull request
+    # -- for `continue_conversation` triggers only. This is not a mapping to a
+    # conversation: the conversation id is derived from the subject and never
+    # stored. It is how a later event finds the sandbox still holding that
+    # conversation, which only the server can name.
+    subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
@@ -227,6 +234,15 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        # Finds the run holding a subject's conversation. Partial: only
+        # `continue_conversation` runs set a subject.
+        Index(
+            "ix_automation_runs_subject",
+            "automation_id",
+            "subject_key",
+            "created_at",
+            postgresql_where=(subject_key.isnot(None)),
+        ),
     )
 
 
@@ -430,75 +446,6 @@ class IntegrationEvent(Base):
         ),
         # Drives pruning, which is the only query this phase issues.
         Index("ix_integration_events_received_at", "received_at"),
-    )
-
-
-class ExternalConversation(Base):
-    """The correspondence between an external subject and one conversation.
-
-    The service owns this mapping; the agent server owns the conversation.
-
-    `conversation_id` is nullable because the service does not learn it until
-    the run that created it completes. A row with a run but no conversation
-    means a run is in flight and has not reported one yet.
-    """
-
-    __tablename__ = "external_conversations"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-
-    # Provider slug, matching the trigger's source.
-    source: Mapped[str] = mapped_column(String(255), nullable=False)
-
-    # "T123/C456/1755000000.000100" for a Slack thread, "owner/repo#12" for a PR.
-    subject_key: Mapped[str] = mapped_column(String(500), nullable=False)
-
-    # Scoped per automation, unlike the sketch in #362: a conversation belongs
-    # to the automation whose script created it, so two automations watching
-    # one channel must not share a row.
-    automation_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        ForeignKey("automations.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-
-    conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-
-    # The run that owns the conversation; its sandbox is where it lives.
-    run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid,
-        ForeignKey("automation_runs.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        onupdate=utcnow,
-        nullable=False,
-    )
-    # Last event routed to this subject. For a future expiry policy.
-    last_event_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    __table_args__ = (
-        # Arbitrates concurrent events that both miss the lookup.
-        Index(
-            "ix_external_conversations_subject",
-            "org_id",
-            "source",
-            "subject_key",
-            "automation_id",
-            unique=True,
-        ),
-        Index("ix_external_conversations_run_id", "run_id"),
     )
 
 

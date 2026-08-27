@@ -20,7 +20,6 @@ from openhands.automation.conversations import (
     CONTINUE_CONVERSATION,
     continue_conversation,
     event_subject,
-    record_subject_run,
     resolve_subject_key,
 )
 from openhands.automation.models import Automation, IntegrationEvent
@@ -206,20 +205,15 @@ async def accept_event(
                 )
                 continue
 
+        # `subject_key` is what a later event on this subject follows back to
+        # this run's sandbox. The conversation id is derived, not recorded.
         run = await create_automation_run(
-            automation, session, event_payload=event_payload
+            automation,
+            session,
+            event_payload=event_payload,
+            subject_key=subject_key,
         )
         run_ids.append(str(run.id))
-        if subject_key is not None:
-            # The conversation id follows later, on this run's completion.
-            await record_subject_run(
-                session,
-                org_id=org_id,
-                source=source,
-                subject_key=subject_key,
-                automation_id=automation.id,
-                run=run,
-            )
         run_properties = {
             "trigger_source": "event",
             "event_source": source,
