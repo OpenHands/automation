@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
-from openhands.automation.cleaner import purger_loop
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
@@ -40,10 +39,6 @@ from openhands.automation.webhook_router import router as webhook_router
 
 
 logger = logging.getLogger("automation.app")
-
-
-def _workspace_purger_enabled(settings) -> bool:
-    return settings.is_local_mode and settings.workspace_retention_seconds > 0
 
 
 @asynccontextmanager
@@ -156,7 +151,7 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
-    # Watchdog: marks stale RUNNING runs as FAILED
+    # Watchdog: marks stale RUNNING runs as FAILED and runs periodic janitors
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
@@ -166,24 +161,6 @@ async def lifespan(app: FastAPI):
     )
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
-
-    # Purger: removes old workspace directories in local mode only
-    purger_task: asyncio.Task | None = None
-    if _workspace_purger_enabled(settings):
-        purger_task = asyncio.create_task(
-            purger_loop(
-                app.state.session_factory,
-                workspace_base=settings.workspace_base,
-                retention_seconds=settings.workspace_retention_seconds,
-                interval_seconds=settings.purger_interval_seconds,
-                batch_size=settings.purger_batch_size,
-                shutdown_event=shutdown_event,
-            )
-        )
-        app.state.purger_task = purger_task
-        logger.info("Background workspace purger started")
-    elif settings.is_local_mode:
-        logger.info("Background workspace purger disabled: retention is 0")
 
     # Git sync: mirrors automations to/from a git repo. Local mode only.
     git_sync_task = None
@@ -229,7 +206,6 @@ async def lifespan(app: FastAPI):
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-        ("purger", purger_task),
     ]
     if git_sync_task is not None:
         shutdown_tasks.append(("git_sync", git_sync_task))

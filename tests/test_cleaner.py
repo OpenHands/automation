@@ -3,12 +3,13 @@
 import asyncio
 import logging
 import os
+import sys
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy.ext.asyncio import (
@@ -17,19 +18,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-import openhands.automation.cleaner as cleaner
-from openhands.automation.cleaner import (
-    DB_CLASSIFICATION_CHUNK_SIZE,
-    DELETE_ATTEMPT_FACTOR,
-    DeleteOutcome,
-    PurgeResult,
-    _delete_workspace,
-    _dir_size,
-    _scan_candidates,
-    _workspace_path,
-    purge_terminal_workspaces,
-    purger_loop,
-)
+import openhands.automation.watchdog as cleaner
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -37,13 +26,27 @@ from openhands.automation.models import (
     Base,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.watchdog import (
+    DELETE_ATTEMPT_FACTOR,
+    WORKSPACE_PURGE_BATCH_SIZE,
+    DeleteOutcome,
+    PurgeResult,
+    _delete_workspace,
+    _dir_size,
+    _scan_candidates,
+    _workspace_path,
+    purge_terminal_workspaces,
+)
 
 
 def _create_junction(source: Path, destination: Path) -> None:
     """Create a real Windows directory junction; needs no special privileges."""
+    if sys.platform != "win32":
+        raise OSError("directory junctions are only supported on Windows")
+
     import _winapi
 
-    _winapi.CreateJunction(str(source), str(destination))
+    getattr(_winapi, "CreateJunction")(str(source), str(destination))
 
 
 @pytest.fixture
@@ -637,7 +640,7 @@ class TestPurgeTerminalWorkspaces:
         assert not terminal_path.exists()
         assert pending_path.exists()
 
-    async def test_classification_queries_are_bounded_above_backend_ceiling(
+    async def test_classification_is_bounded_by_attempt_cap(
         self, db_session_factory, workspace_base, monkeypatch
     ):
         candidate_count = 32_767
@@ -658,9 +661,8 @@ class TestPurgeTerminalWorkspaces:
             db_session_factory, workspace_base, retention_seconds=3600, batch_size=10
         )
 
-        assert len(query_sizes) > 1
-        assert sum(query_sizes) == candidate_count
-        assert max(query_sizes) <= DB_CLASSIFICATION_CHUNK_SIZE
+        assert query_sizes == [10 * DELETE_ATTEMPT_FACTOR]
+        assert query_sizes[0] <= WORKSPACE_PURGE_BATCH_SIZE * DELETE_ATTEMPT_FACTOR
 
     async def test_database_session_closes_before_deletion(
         self, db_session_factory, workspace_base, monkeypatch
@@ -832,7 +834,6 @@ class TestPurgeTerminalWorkspaces:
         await _create_automation(db_session_factory, auto_id)
         old_time = utcnow() - timedelta(days=30)
         older_id = _run_id()
-        newer_id = _run_id()
         await _create_run(
             db_session_factory,
             older_id,
@@ -840,19 +841,11 @@ class TestPurgeTerminalWorkspaces:
             AutomationRunStatus.COMPLETED,
             completed_at=old_time - timedelta(seconds=1),
         )
-        await _create_run(
-            db_session_factory,
-            newer_id,
-            auto_id,
-            AutomationRunStatus.COMPLETED,
-            completed_at=old_time,
-        )
         older_path = _make_workspace(
             workspace_base,
             older_id,
             mtime=old_time - timedelta(seconds=1),
         )
-        newer_path = _make_workspace(workspace_base, newer_id, mtime=old_time)
         real_rmtree = cleaner.shutil.rmtree
 
         def fail_old(path, *args, **kwargs):
@@ -861,18 +854,36 @@ class TestPurgeTerminalWorkspaces:
             return real_rmtree(path, *args, **kwargs)
 
         monkeypatch.setattr(cleaner.shutil, "rmtree", fail_old)
+        failed_ids = set()
 
         first_result = await purge_terminal_workspaces(
-            db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
+            db_session_factory,
+            workspace_base,
+            retention_seconds=3600,
+            batch_size=1,
+            failed_last_cycle=failed_ids,
         )
+        newer_id = _run_id()
+        await _create_run(
+            db_session_factory,
+            newer_id,
+            auto_id,
+            AutomationRunStatus.COMPLETED,
+            completed_at=old_time,
+        )
+        newer_path = _make_workspace(workspace_base, newer_id, mtime=old_time)
         second_result = await purge_terminal_workspaces(
-            db_session_factory, workspace_base, retention_seconds=3600, batch_size=1
+            db_session_factory,
+            workspace_base,
+            retention_seconds=3600,
+            batch_size=1,
+            failed_last_cycle=failed_ids,
         )
 
         assert first_result.errors == 1
-        assert first_result.deleted == 1
-        assert second_result.errors == 1
-        assert second_result.deleted == 0
+        assert first_result.deleted == 0
+        assert second_result.errors == 0
+        assert second_result.deleted == 1
         assert older_path.exists()
         assert not newer_path.exists()
 
@@ -1087,51 +1098,6 @@ class TestPurgeTerminalWorkspaces:
             )
 
 
-class TestPurgerLoop:
-    async def test_runs_immediately_then_stops_on_shutdown(self, monkeypatch):
-        shutdown_event = cleaner.asyncio.Event()
-
-        async def purge_once(**_kwargs):
-            shutdown_event.set()
-            return PurgeResult(0, 0, 0, 0, 0, 0)
-
-        mock_purge = AsyncMock(side_effect=purge_once)
-        monkeypatch.setattr(cleaner, "purge_terminal_workspaces", mock_purge)
-
-        await purger_loop(
-            session_factory=AsyncMock(),
-            workspace_base="/workspace",
-            retention_seconds=60,
-            interval_seconds=3600,
-            batch_size=10,
-            shutdown_event=shutdown_event,
-        )
-
-        mock_purge.assert_awaited_once()
-
-    async def test_rejects_non_positive_interval(self):
-        with pytest.raises(ValueError, match="interval_seconds"):
-            await purger_loop(
-                session_factory=AsyncMock(),
-                workspace_base="/workspace",
-                retention_seconds=60,
-                interval_seconds=0,
-            )
-
-    async def test_zero_retention_returns_without_purge(self, monkeypatch):
-        mock_purge = AsyncMock()
-        monkeypatch.setattr(cleaner, "purge_terminal_workspaces", mock_purge)
-
-        await purger_loop(
-            session_factory=AsyncMock(),
-            workspace_base="/workspace",
-            retention_seconds=0,
-            interval_seconds=3600,
-        )
-
-        mock_purge.assert_not_awaited()
-
-
 class TestPurgeLogging:
     async def test_successful_deletion_reports_run_and_bytes_at_info(
         self, db_session_factory, workspace_base, caplog
@@ -1149,7 +1115,7 @@ class TestPurgeLogging:
         )
         path = _make_workspace(workspace_base, run_id, "some data here")
 
-        with caplog.at_level(logging.INFO, logger="automation.cleaner"):
+        with caplog.at_level(logging.INFO, logger="automation.watchdog"):
             result = await purge_terminal_workspaces(
                 db_session_factory, workspace_base, retention_seconds=3600
             )
@@ -1166,10 +1132,10 @@ class TestPurgeLogging:
     async def test_idle_cycle_does_not_log_info(
         self, db_session_factory, workspace_base, caplog
     ):
-        """An hourly no-op cycle must not spam INFO forever."""
+        """A no-op watchdog cycle must not spam INFO forever."""
         _make_workspace(workspace_base, _run_id())
 
-        with caplog.at_level(logging.INFO, logger="automation.cleaner"):
+        with caplog.at_level(logging.INFO, logger="automation.watchdog"):
             result = await purge_terminal_workspaces(
                 db_session_factory, workspace_base, retention_seconds=3600
             )
@@ -1178,5 +1144,5 @@ class TestPurgeLogging:
         assert not [
             record
             for record in caplog.records
-            if record.name == "automation.cleaner" and record.levelno >= logging.INFO
+            if record.name == "automation.watchdog" and record.levelno >= logging.INFO
         ]

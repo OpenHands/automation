@@ -4,6 +4,7 @@ The watchdog processes stale runs (RUNNING but past timeout_at) and marks them
 with appropriate status based on sandbox verification results.
 """
 
+import asyncio
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _verify_and_mark_run,
     prune_integration_events,
+    watchdog_loop,
 )
 
 
@@ -664,3 +666,42 @@ class TestPruneIntegrationEvents:
     def test_batch_size_is_bounded(self):
         """An unbounded default is the bug this guards."""
         assert 0 < PRUNE_BATCH_SIZE <= 10_000
+
+
+@pytest.mark.asyncio
+async def test_watchdog_runs_local_workspace_purge_in_same_cycle(monkeypatch):
+    """The watchdog owns workspace purge instead of starting another loop."""
+    shutdown_event = asyncio.Event()
+    calls = []
+
+    async def mark_stale(*_args):
+        calls.append("stale")
+        return 0
+
+    async def prune_events(*_args):
+        calls.append("events")
+        return 0
+
+    async def purge_workspaces(*_args, **kwargs):
+        calls.append("workspaces")
+        assert kwargs["failed_last_cycle"] == set()
+        shutdown_event.set()
+        return None
+
+    monkeypatch.setattr("openhands.automation.watchdog.mark_stale_runs", mark_stale)
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.prune_integration_events", prune_events
+    )
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.purge_terminal_workspaces", purge_workspaces
+    )
+
+    settings = Settings(
+        agent_server_url="http://localhost:3000",
+        watchdog_interval_seconds=60,
+        workspace_retention_seconds=3600,
+        workspace_base="/workspace",
+    )
+    await watchdog_loop(AsyncMock(), settings, shutdown_event)
+
+    assert calls == ["stale", "events", "workspaces"]

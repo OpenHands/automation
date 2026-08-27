@@ -13,7 +13,10 @@ from openhands.automation.backends import (
     get_backend,
 )
 from openhands.automation.backends.cloud import _concurrency_limit_detail
-from openhands.automation.backends.local import resolve_local_workspace_base
+from openhands.automation.backends.local import (
+    local_runs_root,
+    resolve_local_workspace_base,
+)
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 
 
@@ -234,6 +237,7 @@ class TestLocalAgentServerBackend:
 
         for configured, expected in cases:
             assert Path(resolve_local_workspace_base(configured)) == expected
+            assert local_runs_root(configured) == expected / "automation-runs"
             backend = LocalAgentServerBackend(
                 agent_server_url="http://localhost:3000",
                 api_key="test-key",

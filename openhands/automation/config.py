@@ -451,9 +451,6 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
             auto-disabling an automation (default: 3, <=0 disables auto-disable)
-        AUTOMATION_PURGER_INTERVAL_SECONDS: Workspace purger interval
-            (local mode only, default: 3600 — 1 hour)
-        AUTOMATION_PURGER_BATCH_SIZE: Max workspaces to purge per cycle (default: 50)
 
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
@@ -542,8 +539,6 @@ class ServiceSettings(BaseSettings):
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
     failure_disable_threshold: int = 3
-    purger_interval_seconds: int = Field(default=3600, gt=0)  # 1 hour
-    purger_batch_size: int = Field(default=50, gt=0)
 
     # Workspace retention for local mode
     # Set to 0 to disable workspace purging.

@@ -321,12 +321,10 @@ class TestLocalModeSettings:
         assert settings.workspace_base == "/my/workspace"
         assert settings.db_url == "sqlite+aiosqlite:////data/automations.db"
 
-    def test_workspace_purger_defaults(self):
+    def test_workspace_retention_default(self):
         settings = Settings()
 
         assert settings.workspace_retention_seconds == 7 * 24 * 60 * 60
-        assert settings.purger_interval_seconds == 60 * 60
-        assert settings.purger_batch_size == 50
 
     def test_zero_workspace_retention_is_disabled_value(self):
         settings = Settings(workspace_retention_seconds=0)
@@ -337,11 +335,9 @@ class TestLocalModeSettings:
         ("field", "value"),
         [
             ("workspace_retention_seconds", -1),
-            ("purger_interval_seconds", 0),
-            ("purger_batch_size", 0),
         ],
     )
-    def test_workspace_purger_rejects_invalid_limits(self, field, value):
+    def test_workspace_retention_rejects_invalid_limits(self, field, value):
         with pytest.raises(ValueError):
             Settings(**{field: value})
 

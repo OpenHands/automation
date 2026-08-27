@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -43,6 +44,11 @@ def resolve_local_workspace_base(
 ) -> str:
     """Resolve the workspace base used by every local backend consumer."""
     return os.path.expanduser(os.fspath(workspace_base or DEFAULT_LOCAL_WORKSPACE_BASE))
+
+
+def local_runs_root(workspace_base: str | os.PathLike[str] | None) -> Path:
+    """Return the workspace root that contains isolated automation runs."""
+    return Path(resolve_local_workspace_base(workspace_base)) / "automation-runs"
 
 
 class LocalAgentServerBackend(ExecutionBackend):
@@ -204,7 +210,6 @@ class LocalAgentServerBackend(ExecutionBackend):
         Returns:
             Path like ~/.openhands/workspaces/automation-runs/{run_id}/
         """
-        base = resolve_local_workspace_base(self.workspace_base)
-        work_dir = os.path.join(base, "automation-runs", run_id)
+        work_dir = local_runs_root(self.workspace_base) / run_id
         logger.debug(f"Local mode work directory: {work_dir}")
-        return work_dir
+        return os.fspath(work_dir)
