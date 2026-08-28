@@ -114,7 +114,7 @@ async def create_automation(
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -174,9 +174,8 @@ async def list_automations(
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the authenticated user (excludes soft-deleted)."""
+    """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
-        Automation.user_id == user.user_id,
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
@@ -204,7 +203,7 @@ async def get_automation(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     return AutomationResponse.model_validate(auto)
 
 
@@ -223,7 +222,7 @@ async def update_automation(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     update_data = body.model_dump(exclude_unset=True)
     # Handle trigger field mapping (only if trigger has a real value)
@@ -311,7 +310,7 @@ async def delete_automation(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft delete an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     was_enabled = auto.enabled
     auto.enabled = False
     deleted_at = utcnow()
@@ -361,7 +360,7 @@ async def download_automation_tarball(
     - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
     - 404 if the automation has no accessible tarball.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -428,7 +427,7 @@ async def dispatch_automation(
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     if not auto.enabled:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -471,8 +470,8 @@ async def list_automation_runs(
 
     Returns runs ordered by creation time (latest first), with pagination.
     """
-    # Verify the automation exists and belongs to the user
-    await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    # Verify the automation exists and belongs to the caller's org
+    await _get_org_automation(session, automation_id, user.org_id)
 
     # Count lifetime runs by status for this automation
     count_result = await session.execute(
@@ -766,7 +765,7 @@ async def cancel_run(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     automation = run.automation
-    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+    if automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
 
     # Only PENDING and RUNNING runs can be cancelled
@@ -847,17 +846,15 @@ async def cancel_run(
 # --- Helpers ---
 
 
-async def _get_user_automation(
+async def _get_org_automation(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
 ) -> Automation:
-    """Fetch a non-deleted automation, ensuring it belongs to the given user and org."""
+    """Fetch a non-deleted automation in the caller's org."""
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
-            Automation.user_id == user_id,
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
         )
