@@ -74,6 +74,11 @@ def _make_header_getter(headers_dict: dict[str, str]):
     return _get
 
 
+def _set_mock_headers(request, headers_dict: dict[str, str]):
+    request.headers.get.side_effect = _make_header_getter(headers_dict)
+    request.headers.__contains__.side_effect = lambda name: name in headers_dict
+
+
 class TestAuthentication:
     """Tests for authenticate_request function with API key auth.
 
@@ -104,6 +109,67 @@ class TestAuthentication:
         ]
         assert result.auth_method == AuthMethod.API_KEY
         assert result.api_key == "valid-api-key"
+
+    async def test_authenticate_forwards_x_org_id_with_api_key(
+        self, mock_request, mock_http_client
+    ):
+        """Bearer auth forwards the selected org scope to OpenHands /users/me."""
+        _set_mock_headers(
+            mock_request,
+            {
+                "Authorization": "Bearer valid-api-key",
+                "X-Org-Id": str(TEST_ORG_ID),
+            },
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.org_id == TEST_ORG_ID
+        headers = mock_http_client.get.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer valid-api-key"
+        assert headers["X-Org-Id"] == str(TEST_ORG_ID)
+
+    async def test_authenticate_forwards_x_org_id_with_cookie(
+        self, mock_request, mock_http_client
+    ):
+        """Cookie auth forwards the selected org scope to OpenHands /users/me."""
+        _set_mock_headers(mock_request, {"X-Org-Id": str(TEST_ORG_ID)})
+        mock_request.cookies = {"keycloak_auth": "valid-cookie-value"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.org_id == TEST_ORG_ID
+        headers = mock_http_client.get.call_args[1]["headers"]
+        assert headers["Cookie"] == "keycloak_auth=valid-cookie-value"
+        assert headers["X-Org-Id"] == str(TEST_ORG_ID)
+
+    async def test_authenticate_rejects_invalid_x_org_id(
+        self, mock_request, mock_http_client
+    ):
+        """Invalid org scope headers fail as client errors before auth forwarding."""
+        _set_mock_headers(
+            mock_request,
+            {
+                "Authorization": "Bearer valid-api-key",
+                "X-Org-Id": "not-a-uuid",
+            },
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert exc_info.value.status_code == 400
+        mock_http_client.get.assert_not_called()
 
     async def test_authenticate_extracts_model_profile_metadata(
         self, mock_request, mock_http_client
@@ -779,7 +845,6 @@ class TestAuthCache:
             "role": "member",
             "permissions": [],
         }
-
         mock_http_client.get = AsyncMock(side_effect=[mock_response1, mock_response2])
 
         # First key
@@ -793,6 +858,53 @@ class TestAuthCache:
         assert mock_http_client.get.call_count == 2
         assert result1.user_id == TEST_USER_ID
         assert result2.user_id == user2_id
+
+    async def test_auth_cache_is_scoped_by_x_org_id(
+        self, mock_request, mock_http_client
+    ):
+        """The same credential can authenticate separately for different orgs."""
+        other_org_id = uuid.UUID("99999999-9999-4999-8999-999999999999")
+
+        response_for_default_org = MagicMock()
+        response_for_default_org.status_code = 200
+        response_for_default_org.json.return_value = MOCK_USERS_ME_RESPONSE
+
+        response_for_other_org = MagicMock()
+        response_for_other_org.status_code = 200
+        response_for_other_org.json.return_value = {
+            **MOCK_USERS_ME_RESPONSE,
+            "org_id": str(other_org_id),
+        }
+        mock_http_client.get = AsyncMock(
+            side_effect=[response_for_default_org, response_for_other_org]
+        )
+
+        _set_mock_headers(
+            mock_request,
+            {
+                "Authorization": "Bearer shared-key",
+                "X-Org-Id": str(TEST_ORG_ID),
+            },
+        )
+        result1 = await authenticate_request(mock_request, client=mock_http_client)
+
+        _set_mock_headers(
+            mock_request,
+            {
+                "Authorization": "Bearer shared-key",
+                "X-Org-Id": str(other_org_id),
+            },
+        )
+        result2 = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert mock_http_client.get.call_count == 2
+        assert result1.org_id == TEST_ORG_ID
+        assert result2.org_id == other_org_id
+        forwarded_orgs = [
+            call[1]["headers"]["X-Org-Id"]
+            for call in mock_http_client.get.call_args_list
+        ]
+        assert forwarded_orgs == [str(TEST_ORG_ID), str(other_org_id)]
 
     async def test_cookie_and_api_key_cached_separately(
         self, mock_request, mock_http_client
