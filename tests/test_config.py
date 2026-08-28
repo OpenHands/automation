@@ -6,6 +6,7 @@ from openhands.automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
+    ServiceSettings,
     Settings,
     clear_config_cache,
     get_config,
@@ -55,6 +56,18 @@ class TestAutomationTimeouts:
 
         max_duration = get_config().sandbox.max_run_duration
         assert resolve_automation_timeout_seconds(max_duration + 600) == max_duration
+
+
+class TestServiceSettings:
+    """Tests for service-level configuration."""
+
+    def test_failure_disable_threshold_uses_documented_env_var(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_FAILURE_DISABLE_THRESHOLD", "0")
+        monkeypatch.setenv("AUTOMATION_AUTOMATION_FAILURE_DISABLE_THRESHOLD", "7")
+
+        settings = ServiceSettings()
+
+        assert settings.failure_disable_threshold == 0
 
 
 class TestBasePath:

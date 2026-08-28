@@ -37,6 +37,9 @@ _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
 # Path traversal pattern
 _PATH_TRAVERSAL_RE = re.compile(r"(^|/)\.\.(/|$)")
 
+# Control characters (including newlines) collapsed out of run phase messages
+_PHASE_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
 
 class CronTrigger(BaseModel):
     """Cron-based trigger configuration."""
@@ -735,6 +738,9 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
+    disabled_reason: str | None = None
+    disabled_detail: dict[str, Any] | None = None
+    disabled_at: UtcDatetime | None = None
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -760,6 +766,8 @@ class RunCompleteRequest(BaseModel):
     conversation_id: str | None = None
     error: str | ConversationErrorEvent | dict[str, Any] | None = None
     cost: float | None = None
+    blocking_factor: dict[str, Any] | None = None
+    task_outcome: dict[str, Any] | None = None
 
     @field_validator("error", mode="before")
     @classmethod
@@ -773,6 +781,22 @@ class RunCompleteRequest(BaseModel):
             return value
 
 
+class RunPhaseRequest(BaseModel):
+    """Live progress phase reported by the automation entrypoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("phase", mode="before")
+    @classmethod
+    def normalize_phase(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        # Collapse control chars/newlines and runs of whitespace; strip ends.
+        return " ".join(_PHASE_CONTROL_CHARS_RE.sub(" ", v).split())
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 
@@ -781,6 +805,7 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
+    current_phase: str | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None

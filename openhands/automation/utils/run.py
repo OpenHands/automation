@@ -8,7 +8,13 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.git_sync import mark_git_sync_dirty
+from openhands.automation.models import (
+    Automation,
+    AutomationDisableEvent,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
@@ -28,6 +34,10 @@ async def disable_automation(
     session_factory: async_sessionmaker[AsyncSession],
     automation_id: uuid.UUID,
     reason: str,
+    *,
+    disabled_detail: dict | None = None,
+    run_id: uuid.UUID | None = None,
+    source: str = "permanent_dispatch_failure",
 ) -> bool:
     """Disable an automation due to a permanent configuration error.
 
@@ -50,6 +60,7 @@ async def disable_automation(
 
     try:
         async with session_factory() as session:
+            disabled_at = utcnow()
             # Use optimistic locking: only update if currently enabled
             result: CursorResult = await session.execute(  # type: ignore[assignment]
                 update(Automation)
@@ -57,7 +68,12 @@ async def disable_automation(
                     Automation.id == automation_id,
                     Automation.enabled == True,  # noqa: E712
                 )
-                .values(enabled=False)
+                .values(
+                    enabled=False,
+                    disabled_reason=reason,
+                    disabled_detail=disabled_detail,
+                    disabled_at=disabled_at,
+                )
             )
 
             if result.rowcount == 0:
@@ -71,6 +87,27 @@ async def disable_automation(
                     logger.info("Automation already disabled", extra=extra)
                 return False
 
+            await skip_pending_runs_for_disabled_automation(
+                session,
+                automation_id,
+                reason=reason,
+                disabled_detail=disabled_detail,
+                completed_at=disabled_at,
+            )
+
+            automation = await session.get(Automation, automation_id)
+            if automation is not None:
+                await mark_git_sync_dirty(session, automation)
+
+            session.add(
+                AutomationDisableEvent(
+                    automation_id=automation_id,
+                    run_id=run_id,
+                    reason=reason,
+                    detail=disabled_detail,
+                    source=source,
+                )
+            )
             await session.commit()
 
             logger.warning(
@@ -83,6 +120,44 @@ async def disable_automation(
     except Exception:
         logger.exception("Failed to disable automation", extra=extra)
         return False
+
+
+async def skip_pending_runs_for_disabled_automation(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    *,
+    reason: str,
+    disabled_detail: dict | None = None,
+    completed_at: datetime | None = None,
+) -> int:
+    """Mark accepted-but-not-dispatched runs terminal when automation is disabled."""
+    completed_at = completed_at or utcnow()
+    status_detail: dict = {
+        "phase": "dispatch",
+        "kind": "blocked",
+        "detail": reason,
+        "transient": False,
+        "source": "automation_service",
+        "operation": "automation_disabled",
+        "user_action": "settings",
+    }
+    if disabled_detail is not None:
+        status_detail["disabled_detail"] = disabled_detail
+
+    result: CursorResult = await session.execute(  # type: ignore[assignment]
+        update(AutomationRun)
+        .where(
+            AutomationRun.automation_id == automation_id,
+            AutomationRun.status == AutomationRunStatus.PENDING,
+        )
+        .values(
+            status=AutomationRunStatus.SKIPPED,
+            completed_at=completed_at,
+            error_detail="Automation disabled",
+            status_detail=status_detail,
+        )
+    )
+    return result.rowcount or 0
 
 
 async def create_pending_run(
@@ -135,6 +210,7 @@ async def mark_run_status(
     error_detail: str | None = None,
     max_duration: timedelta | None = None,
     status_detail: dict | None = None,
+    current_phase: str | None = None,
 ) -> None:
     """Update a run's status and set the appropriate timestamp.
 
@@ -149,6 +225,9 @@ async def mark_run_status(
         error_detail: Optional error message (only used for FAILED status)
         max_duration: Maximum run duration for computing timeout_at
         status_detail: Optional structured lifecycle detail to persist
+        current_phase: Optional live progress phase to persist. Unlike
+            status_detail there is no clearing branch — the last phase is
+            kept on terminal transitions by design.
     """
     if max_duration is None:
         max_duration = timedelta(seconds=resolve_automation_timeout_seconds(None))
@@ -180,6 +259,10 @@ async def mark_run_status(
     elif status in (AutomationRunStatus.RUNNING, AutomationRunStatus.COMPLETED):
         values["status_detail"] = None
         run.status_detail = None
+
+    if current_phase is not None:
+        values["current_phase"] = current_phase
+        run.current_phase = current_phase
 
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
@@ -263,6 +346,33 @@ async def update_run_timeout_at(
             await session.commit()
     except Exception:
         logger.exception("Failed to update timeout_at for run %s", run_id)
+
+
+async def update_run_current_phase(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    phase: str,
+) -> None:
+    """Best-effort write of the live progress phase for an in-flight run.
+
+    Guarded by status IN (PENDING, RUNNING) so a terminal run's final state
+    is never disturbed. Failure is non-fatal — phases are cosmetic.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run_id,
+                    AutomationRun.status.in_(
+                        (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+                    ),
+                )
+                .values(current_phase=phase)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update current_phase for run %s", run_id)
 
 
 async def _record_first_run_outcome_in_session(

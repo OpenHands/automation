@@ -464,7 +464,7 @@ async def create_automation_from_prompt(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -871,7 +871,7 @@ async def create_automation_from_plugin(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
