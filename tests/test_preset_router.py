@@ -184,12 +184,22 @@ class TestPresetFileSyntax:
             "from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher"
             in content
         )
-        assert "def _finish_tool_required_hook_config() -> HookConfig:" in content
+        assert "def _finish_tool_marker_path(script_dir: str) -> str:" in content
+        assert '".openhands_automation_runtime"' in content
+        assert (
+            "def _finish_tool_required_hook_config(script_dir: str) -> HookConfig:"
+            in content
+        )
         assert "session_start=[" in content
         assert "post_tool_use=[" in content
         assert 'matcher="/(?:finish|FinishTool)/"' in content
         assert "stop=[" in content
-        assert '"hook_config": _finish_tool_required_hook_config(),' in content
+        assert "session_end=[" in content
+        assert "shutil.rmtree" in content
+        assert (
+            '"hook_config": _finish_tool_required_hook_config(SCRIPT_DIR),'
+            in content
+        )
         assert "Please call the finish tool now" in content
 
 

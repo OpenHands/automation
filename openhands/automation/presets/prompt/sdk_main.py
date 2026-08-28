@@ -226,20 +226,26 @@ FINISH_TOOL_REQUIRED_MESSAGE = (
 )
 
 
-def _finish_tool_marker_name() -> str:
+def _finish_tool_marker_path(script_dir: str) -> str:
     run_id = os.environ.get("AUTOMATION_RUN_ID") or "current"
     safe_run_id = "".join(
         ch if ch.isalnum() or ch in "-_" else "_" for ch in run_id
     )
-    return f".openhands_automation_finish_tool_used_{safe_run_id}"
+    return os.path.join(
+        os.path.abspath(script_dir),
+        ".openhands_automation_runtime",
+        safe_run_id,
+        "finish_tool_used",
+    )
 
 
 def _python_hook_command(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
-def _finish_tool_required_hook_config() -> HookConfig:
-    marker_name = _finish_tool_marker_name()
+def _finish_tool_required_hook_config(script_dir: str) -> HookConfig:
+    marker_path = _finish_tool_marker_path(script_dir)
+    runtime_dir = os.path.dirname(marker_path)
     deny_payload = {
         "decision": "deny",
         "reason": "finish tool was not used",
@@ -254,7 +260,9 @@ def _finish_tool_required_hook_config() -> HookConfig:
                         name="reset-finish-tool-marker",
                         command=_python_hook_command(
                             "from pathlib import Path\n"
-                            f"Path({marker_name!r}).unlink(missing_ok=True)\n"
+                            f"path = Path({marker_path!r})\n"
+                            "path.parent.mkdir(parents=True, exist_ok=True)\n"
+                            "path.unlink(missing_ok=True)\n"
                         ),
                         timeout=5,
                     )
@@ -269,7 +277,9 @@ def _finish_tool_required_hook_config() -> HookConfig:
                         name="mark-finish-tool-used",
                         command=_python_hook_command(
                             "from pathlib import Path\n"
-                            f"Path({marker_name!r}).write_text('finish\\n')\n"
+                            f"path = Path({marker_path!r})\n"
+                            "path.parent.mkdir(parents=True, exist_ok=True)\n"
+                            "path.write_text('finish\\n')\n"
                         ),
                         timeout=5,
                     )
@@ -285,10 +295,25 @@ def _finish_tool_required_hook_config() -> HookConfig:
                             "import json\n"
                             "import sys\n"
                             "from pathlib import Path\n"
-                            f"if Path({marker_name!r}).is_file():\n"
+                            f"if Path({marker_path!r}).is_file():\n"
                             "    sys.exit(0)\n"
                             f"print(json.dumps({deny_payload!r}))\n"
                             "sys.exit(2)\n"
+                        ),
+                        timeout=5,
+                    )
+                ],
+            )
+        ],
+        session_end=[
+            HookMatcher(
+                hooks=[
+                    HookDefinition(
+                        name="cleanup-finish-tool-marker",
+                        command=_python_hook_command(
+                            "import shutil\n"
+                            "from pathlib import Path\n"
+                            f"shutil.rmtree(Path({runtime_dir!r}), ignore_errors=True)\n"
                         ),
                         timeout=5,
                     )
@@ -560,7 +585,7 @@ This automation was triggered by a webhook event:
         "agent": agent,
         "workspace": workspace,
         "callbacks": [event_callback],
-        "hook_config": _finish_tool_required_hook_config(),
+        "hook_config": _finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags or None,
     }
