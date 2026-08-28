@@ -40,6 +40,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunPhaseRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -683,6 +684,59 @@ async def complete_run(
                 )
             )
 
+    return AutomationRunResponse.model_validate(run)
+
+
+# --- Run phase reporting ---
+
+
+@router.post("/runs/{run_id}/phase")
+async def report_run_phase(
+    run_id: uuid.UUID,
+    body: RunPhaseRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Record a live progress phase reported from inside the sandbox.
+
+    Best-effort telemetry for the dashboard: authenticated with the same
+    credentials injected into the sandbox (see ``complete_run``), the caller
+    must own the run's parent automation, and the write only lands while the
+    run is still PENDING or RUNNING (409 once terminal).
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+            ),
+        )
+        .values(current_phase=body.phase)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+    if db_result.rowcount == 0:
+        await session.refresh(run)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected PENDING or RUNNING",
+        )
+
+    await session.refresh(run)
     return AutomationRunResponse.model_validate(run)
 
 
