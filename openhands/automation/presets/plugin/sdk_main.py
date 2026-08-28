@@ -68,6 +68,7 @@ import inspect
 import json
 import os
 import random
+import shlex
 import sys
 import threading
 import time
@@ -184,6 +185,7 @@ def _phase_poster() -> None:
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -213,6 +215,84 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
+
+FINISH_TOOL_REQUIRED_MESSAGE = (
+    "The task appears complete, but automation runs must end by calling the "
+    "finish tool. Please call the finish tool now with the final task outcome."
+)
+
+
+def _finish_tool_marker_name() -> str:
+    run_id = os.environ.get("AUTOMATION_RUN_ID") or "current"
+    safe_run_id = "".join(
+        ch if ch.isalnum() or ch in "-_" else "_" for ch in run_id
+    )
+    return f".openhands_automation_finish_tool_used_{safe_run_id}"
+
+
+def _python_hook_command(code: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
+def _finish_tool_required_hook_config() -> HookConfig:
+    marker_name = _finish_tool_marker_name()
+    deny_payload = {
+        "decision": "deny",
+        "reason": "finish tool was not used",
+        "additionalContext": FINISH_TOOL_REQUIRED_MESSAGE,
+    }
+
+    return HookConfig(
+        session_start=[
+            HookMatcher(
+                hooks=[
+                    HookDefinition(
+                        name="reset-finish-tool-marker",
+                        command=_python_hook_command(
+                            "from pathlib import Path\n"
+                            f"Path({marker_name!r}).unlink(missing_ok=True)\n"
+                        ),
+                        timeout=5,
+                    )
+                ],
+            )
+        ],
+        post_tool_use=[
+            HookMatcher(
+                matcher="/(?:finish|FinishTool)/",
+                hooks=[
+                    HookDefinition(
+                        name="mark-finish-tool-used",
+                        command=_python_hook_command(
+                            "from pathlib import Path\n"
+                            f"Path({marker_name!r}).write_text('finish\\n')\n"
+                        ),
+                        timeout=5,
+                    )
+                ],
+            )
+        ],
+        stop=[
+            HookMatcher(
+                hooks=[
+                    HookDefinition(
+                        name="require-finish-tool",
+                        command=_python_hook_command(
+                            "import json\n"
+                            "import sys\n"
+                            "from pathlib import Path\n"
+                            f"if Path({marker_name!r}).is_file():\n"
+                            "    sys.exit(0)\n"
+                            f"print(json.dumps({deny_payload!r}))\n"
+                            "sys.exit(2)\n"
+                        ),
+                        timeout=5,
+                    )
+                ],
+            )
+        ],
+    )
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -527,6 +607,7 @@ This automation was triggered by a webhook event:
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
         "callbacks": [event_callback],
+        "hook_config": _finish_tool_required_hook_config(),
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags,
     }

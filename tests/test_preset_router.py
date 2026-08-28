@@ -174,6 +174,24 @@ class TestPresetFileSyntax:
         assert "finish_tool_response_schema=TaskOutcome" in content
         assert 'Tool(name="FinishTool"' not in content
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_requires_finish_tool_via_stop_hook(self, preset_name):
+        """Preset conversations nudge text-only endings to call FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        assert (
+            "from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher"
+            in content
+        )
+        assert "def _finish_tool_required_hook_config() -> HookConfig:" in content
+        assert "session_start=[" in content
+        assert "post_tool_use=[" in content
+        assert 'matcher="/(?:finish|FinishTool)/"' in content
+        assert "stop=[" in content
+        assert '"hook_config": _finish_tool_required_hook_config(),' in content
+        assert "Please call the finish tool now" in content
+
 
 class TestPresetEntrypoint:
     def test_get_preset_entrypoint_posix(self, monkeypatch):
