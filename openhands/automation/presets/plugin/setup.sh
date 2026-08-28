@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the OpenHands SDK from PyPI into an isolated virtual environment.
+# Install the OpenHands SDK into an isolated virtual environment.
 #
 # Each automation run gets its own venv in its work directory, ensuring:
 # - No conflicts between concurrent automation runs
@@ -8,30 +8,34 @@
 #
 # Note: Repository cloning is handled by the SDK's workspace methods inside main.py.
 #
-# The SDK version is fetched from the automation service API on every run so
-# that deploying a new service version is the only step required to roll out a
-# new SDK — no tarball re-generation or hardcoded version pins needed.
+# The SDK version is normally fetched from the automation service API on every
+# run. This testing branch pins software-agent-sdk to the SDK PR SHA below so
+# preset automation sandboxes can exercise unreleased SDK fixes.
 set -e
 
-echo "[setup] Fetching SDK version from automation service"
-PYTHON_JSON=python3
-if ! command -v python3 >/dev/null 2>&1; then
-    if command -v python >/dev/null 2>&1; then
-        PYTHON_JSON=python
-    elif command -v py >/dev/null 2>&1; then
-        PYTHON_JSON='py -3'
-    else
-        echo "[setup] ERROR: python3, python, or py is required to parse SDK version" >&2
+SOFTWARE_AGENT_SDK_REF="da3389c8b4864316152f06fef6fbe193ffd95492"
+
+if [ -z "$SOFTWARE_AGENT_SDK_REF" ]; then
+    echo "[setup] Fetching SDK version from automation service"
+    PYTHON_JSON=python3
+    if ! command -v python3 >/dev/null 2>&1; then
+        if command -v python >/dev/null 2>&1; then
+            PYTHON_JSON=python
+        elif command -v py >/dev/null 2>&1; then
+            PYTHON_JSON='py -3'
+        else
+            echo "[setup] ERROR: python3, python, or py is required to parse SDK version" >&2
+            exit 1
+        fi
+    fi
+    set +e
+    SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
+      | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+    set -e
+    if [ -z "$SDK_VERSION" ]; then
+        echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
         exit 1
     fi
-fi
-set +e
-SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
-  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
-set -e
-if [ -z "$SDK_VERSION" ]; then
-    echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
-    exit 1
 fi
 
 # Best-effort progress phase for the dashboard — must never fail the setup.
@@ -48,10 +52,19 @@ echo "[setup] Creating isolated virtual environment"
 # CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.
 uv venv .venv --python '>=3.12' --quiet
 
-echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
-uv pip install --quiet \
-  "openhands-sdk==${SDK_VERSION}" \
-  "openhands-tools==${SDK_VERSION}" \
-  "openhands-workspace==${SDK_VERSION}"
+if [ -n "$SOFTWARE_AGENT_SDK_REF" ]; then
+    SDK_GIT_URL="git+https://github.com/OpenHands/software-agent-sdk.git@${SOFTWARE_AGENT_SDK_REF}"
+    echo "[setup] Installing OpenHands SDK from GitHub SHA: $SOFTWARE_AGENT_SDK_REF"
+    uv pip install --quiet \
+      "openhands-sdk @ ${SDK_GIT_URL}#subdirectory=openhands-sdk" \
+      "openhands-tools @ ${SDK_GIT_URL}#subdirectory=openhands-tools" \
+      "openhands-workspace @ ${SDK_GIT_URL}#subdirectory=openhands-workspace"
+else
+    echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+    uv pip install --quiet \
+      "openhands-sdk==${SDK_VERSION}" \
+      "openhands-tools==${SDK_VERSION}" \
+      "openhands-workspace==${SDK_VERSION}"
+fi
 
 echo "[setup] Done"
