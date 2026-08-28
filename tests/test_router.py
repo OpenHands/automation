@@ -739,6 +739,28 @@ class TestListAutomations:
         assert data["total"] == 1
         assert data["automations"][0]["name"] == "Test Automation"
 
+    async def test_list_automations_includes_other_org_members(
+        self, async_client, async_session
+    ):
+        """Automations owned by another member of the caller's org are listed."""
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["automations"][0]["name"] == "Teammate Automation"
+
     async def test_list_automations_excludes_deleted(self, async_client, async_session):
         """Soft-deleted automations are not returned."""
         # Create a deleted automation
@@ -917,6 +939,29 @@ class TestGetAutomation:
 
 class TestDeleteAutomation:
     """Tests for DELETE /v1/{id} endpoint."""
+
+    async def test_delete_other_org_members_automation(
+        self, async_client, async_session
+    ):
+        """A member can delete an automation owned by another member of their org."""
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 204
+        await async_session.refresh(automation)
+        assert automation.enabled is False
+        assert automation.deleted_at is not None
 
     async def test_delete_automation_soft_deletes(self, async_client, async_session):
         """DELETE sets enabled=False and deleted_at."""
