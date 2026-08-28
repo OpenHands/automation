@@ -1,7 +1,7 @@
 """Add automation_runs.subject_key: the external subject a run is about.
 
-Revision ID: 021
-Revises: 020
+Revision ID: 022
+Revises: 021
 Create Date: 2026-08-27
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "021"
-down_revision: str = "020"
+revision: str = "022"
+down_revision: str = "021"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
