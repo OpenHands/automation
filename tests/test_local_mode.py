@@ -4,6 +4,7 @@ import pytest
 
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
+    VerificationOutcome,
     VerificationResult,
     get_last_bash_command_result,
     verify_run_on_agent_server,
@@ -59,6 +60,7 @@ class TestVerificationResult:
     def test_not_verified(self):
         """VerificationResult when verification failed."""
         result = VerificationResult(verified=False, error="Sandbox not available")
+        assert result.outcome == VerificationOutcome.ENVIRONMENT_UNAVAILABLE
         assert result.verified is False
         assert result.success is None
         assert result.error == "Sandbox not available"
@@ -111,6 +113,32 @@ class TestGetLastBashCommandResult:
 
         assert result.found is False
         assert result.error is not None and "Not found" in result.error
+
+    @pytest.mark.asyncio
+    async def test_handles_transient_rate_limit(self):
+        """Returns structured transient info for retryable agent-server errors."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        mock_client = MagicMock(spec=httpx.AsyncClient)
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Rate limited", request=MagicMock(), response=MagicMock(status_code=429)
+        )
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        result = await get_last_bash_command_result(
+            mock_client, "http://localhost:3000", "test-key"
+        )
+
+        assert result.found is False
+        assert result.error is not None and "HTTP 429" in result.error
+        assert result.error_info is not None
+        assert (
+            result.error_info.fingerprint
+            == "agent_server:bash_events_search:rate_limited:429"
+        )
 
     @pytest.mark.asyncio
     async def test_handles_empty_response(self):

@@ -18,9 +18,11 @@ from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
     CronTrigger,
+    RunCompleteRequest,
     RunStatus,
 )
 from openhands.automation.utils.time import ensure_utc
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
 
 _NAIVE = datetime(2026, 3, 23, 9, 0, 0)  # no tzinfo — simulates SQLite output
@@ -66,6 +68,47 @@ class TestCronTriggerValidation:
             CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
 
 
+class TestRunCompleteRequest:
+    def test_accepts_legacy_string_error(self):
+        request = RunCompleteRequest(status="FAILED", error="script crashed")
+
+        assert request.error == "script crashed"
+
+    def test_parses_structured_sdk_error(self):
+        error = {
+            "source": "environment",
+            "code": "RuntimeError",
+            "detail": "script crashed",
+            "classification": {"kind": "unknown", "retryable": False},
+        }
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+        assert isinstance(request.error, ConversationErrorEvent)
+
+        assert request.error.code == "RuntimeError"
+        assert request.error.detail == "script crashed"
+        assert request.error.classification is not None
+
+        assert request.error.classification.kind.value == "unknown"
+
+    def test_preserves_legacy_structured_error(self):
+        error = {"detail": "bad config"}
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+
+        assert request.error == error
+
+    def test_accepts_blocking_factor_metadata(self):
+        blocking_factor = {"kind": "config", "reason": "Missing MCP token"}
+
+        request = RunCompleteRequest(
+            status="COMPLETED",
+            blocking_factor=blocking_factor,
+        )
+
+        assert request.blocking_factor == blocking_factor
+
+
 class TestAutomationRunResponseUtcSerialisation:
     """AutomationRunResponse must include a UTC offset in all datetime fields."""
 
@@ -79,6 +122,7 @@ class TestAutomationRunResponseUtcSerialisation:
             timeout_at=None,
             sandbox_id=None,
             bash_command_id=None,
+            run_metadata=None,
             created_at=_NAIVE,
             started_at=_NAIVE,
             completed_at=_NAIVE,
@@ -95,6 +139,22 @@ class TestAutomationRunResponseUtcSerialisation:
         run = self._make_run()
         data = run.model_dump(mode="json")
         assert data["started_at"].endswith("+00:00") or data["started_at"].endswith("Z")
+
+    def test_status_detail_serialises_as_json_object(self):
+        run = self._make_run(
+            status_detail={
+                "phase": "verification",
+                "kind": "rate_limited",
+                "transient": True,
+            }
+        )
+        data = run.model_dump(mode="json")
+
+        assert data["status_detail"] == {
+            "phase": "verification",
+            "kind": "rate_limited",
+            "transient": True,
+        }
 
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
@@ -145,6 +205,22 @@ class TestAutomationResponseUtcSerialisation:
         automation = self._make_automation()
         data = automation.model_dump(mode="json")
         assert data["created_at"].endswith("+00:00") or data["created_at"].endswith("Z")
+
+    def test_disabled_metadata_serialises_for_api_consumers(self):
+        automation = self._make_automation(
+            enabled=False,
+            disabled_reason="auth: Invalid API key",
+            disabled_detail={"kind": "auth", "threshold": 3},
+            disabled_at=_NAIVE,
+        )
+        data = automation.model_dump(mode="json")
+
+        assert data["enabled"] is False
+        assert data["disabled_reason"] == "auth: Invalid API key"
+        assert data["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert data["disabled_at"].endswith("+00:00") or data["disabled_at"].endswith(
+            "Z"
+        )
 
     def test_naive_last_triggered_at_serialises_with_utc_offset(self):
         automation = self._make_automation()
