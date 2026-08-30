@@ -1558,6 +1558,112 @@ class TestUpdateAutomation:
 
         assert response.status_code == 422
 
+    async def test_pin_automation(self, async_client, async_session):
+        """PATCH pinned:true sets pinned_at to a UTC timestamp."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"pinned": True},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["pinned_at"] is not None
+        # Response must be timezone-aware (ends with Z or +00:00)
+        assert data["pinned_at"].endswith("Z") or "+00:00" in data["pinned_at"]
+
+    async def test_unpin_automation(self, async_client, async_session):
+        """PATCH pinned:false clears pinned_at."""
+        from datetime import UTC, datetime
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            pinned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"pinned": False},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["pinned_at"] is None
+
+    async def test_pin_automation_does_not_affect_other_fields(
+        self, async_client, async_session
+    ):
+        """PATCH pinned:true leaves all other fields unchanged."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="My Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"pinned": True},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "My Automation"
+        assert data["enabled"] is True
+        assert data["pinned_at"] is not None
+
+    async def test_omitting_pinned_leaves_pinned_at_unchanged(
+        self, async_client, async_session
+    ):
+        """PATCH without pinned field does not touch pinned_at."""
+        from datetime import UTC, datetime
+
+        original_ts = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            pinned_at=original_ts,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Renamed"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Renamed"
+        # pinned_at must still reflect the original pin time
+        assert data["pinned_at"] is not None
+        assert "2026-06-15" in data["pinned_at"]
+
 
 class TestDispatchAutomation:
     """Tests for POST /v1/{id}/dispatch endpoint."""
