@@ -76,6 +76,34 @@ def _load_preset_mcp_normalizer(
     return cast(Callable[[Any], Any], namespace["_normalize_mcp_config"])
 
 
+def _load_preset_workspace_mcp_loader(preset_name: str) -> Callable[[Any], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_nodes = {
+        node.name: node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_normalize_mcp_config", "_get_workspace_mcp_config"}
+    }
+    assert "_get_workspace_mcp_config" in function_nodes, (
+        f"{preset_name} preset must recover MCP config from ACP settings"
+    )
+    namespace: dict[str, Any] = {"_coerce_mcp_config": coerce_mcp_config}
+    selected_nodes: list[ast.stmt] = [
+        function_nodes["_normalize_mcp_config"],
+        function_nodes["_get_workspace_mcp_config"],
+    ]
+    for node in selected_nodes:
+        ast.fix_missing_locations(node)
+    exec(
+        compile(
+            ast.Module(body=selected_nodes, type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any], Any], namespace["_get_workspace_mcp_config"])
+
+
 def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     source_path = PRESETS_DIR / preset_name / "sdk_main.py"
     module = ast.parse(source_path.read_text(), filename=str(source_path))
@@ -236,6 +264,22 @@ def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
     assert normalize(wrapped_config) == native_config
     assert normalize(native_config) == native_config
     assert normalize(None) == {}
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_recovers_mcp_config_from_acp_settings(preset_name):
+    load_mcp_config = _load_preset_workspace_mcp_loader(preset_name)
+    workspace = MagicMock()
+    workspace.get_mcp_config.return_value = {}
+    workspace._fetch_agent_settings.return_value.mcp_config = {
+        "Plane": {"command": "uvx", "args": ["plane-mcp-server", "stdio"]}
+    }
+
+    mcp_config = load_mcp_config(workspace)
+
+    assert list(mcp_config) == ["Plane"]
+    workspace.get_mcp_config.assert_called_once_with()
+    workspace._fetch_agent_settings.assert_called_once_with()
 
 
 _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
