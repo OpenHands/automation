@@ -50,6 +50,7 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_current_phase,
     update_run_timeout_at,
     update_sandbox_id,
 )
@@ -65,6 +66,9 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -127,8 +131,13 @@ async def _poll_pending_runs(
     """
     select_query = (
         select(AutomationRun)
+        .join(AutomationRun.automation)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            Automation.enabled.is_(True),
+            Automation.deleted_at.is_(None),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -216,6 +225,22 @@ async def _execute_run(
             error,
             status_detail=status_detail,
         )
+        automation_disabled = disable
+        if disable:
+            automation_disabled = await disable_automation(
+                session_factory,
+                automation.id,
+                error,
+                disabled_detail={"status_detail": status_detail}
+                if status_detail is not None
+                else None,
+                run_id=run.id,
+            )
+        elif status_detail is not None:
+            automation_disabled = await maybe_disable_unhealthy_automation_after_run(
+                session_factory,
+                automation.id,
+            )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -224,11 +249,9 @@ async def _execute_run(
             properties={
                 "trigger_source": "dispatcher",
                 "failure_kind": "dispatch_error",
-                "automation_disabled": disable,
+                "automation_disabled": automation_disabled,
             },
         )
-        if disable:
-            await disable_automation(session_factory, automation.id, error)
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
@@ -293,6 +316,9 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_PHASE_URL"] = (
+        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+    )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -438,6 +464,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
@@ -535,6 +562,7 @@ async def dispatch_pending_runs(
                     run,
                     AutomationRunStatus.RUNNING,
                     max_duration=timedelta(seconds=provisioning_deadline),
+                    current_phase="Preparing environment",
                 )
                 dispatched_runs.append(run)
             except Exception:

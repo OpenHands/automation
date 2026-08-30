@@ -162,6 +162,18 @@ class TestPresetFileSyntax:
             "— do not hardcode the version"
         )
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_finish_tool_uses_task_outcome_schema(self, preset_name):
+        """Preset agents attach TaskOutcome structured output to FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        assert "from openhands.sdk import Conversation, RemoteConversation" in content
+        assert "from openhands.tools.preset import TaskOutcome" in content
+        assert "class TaskOutcome" not in content
+        assert "finish_tool_response_schema=TaskOutcome" in content
+        assert 'Tool(name="FinishTool"' not in content
+
 
 class TestPresetEntrypoint:
     def test_get_preset_entrypoint_posix(self, monkeypatch):
@@ -431,7 +443,7 @@ class TestReplacePromptInTarball:
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
-        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
+        # Arrange — a plugin preset tarball carries generated code, prompt,
         # plugins_config.json and repos_config.json; all but the prompt must survive.
         original = _generate_plugin_tarball(
             [PluginSource(source="github:owner/repo")],
@@ -460,7 +472,12 @@ class TestReplacePromptInTarball:
         new_files, new_setup_mode = _read(updated)
 
         assert new_files["prompt.txt"].decode() == "New prompt"
-        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+        for name in (
+            "main.py",
+            "setup.sh",
+            "plugins_config.json",
+            "repos_config.json",
+        ):
             assert new_files[name] == old_files[name]
         assert new_setup_mode & 0o100  # setup.sh stays executable
 

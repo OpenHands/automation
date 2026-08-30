@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     Uuid,
@@ -20,6 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from openhands.automation.providers import DEFAULT_VERIFIER as DEFAULT_SIGNATURE_SCHEME
 from openhands.automation.utils import utcnow
 
 
@@ -95,6 +97,13 @@ class Automation(Base):
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
+    # Current disabled-state metadata. AutomationDisableEvent keeps history.
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -125,6 +134,11 @@ class Automation(Base):
     # Relationship to runs
     runs: Mapped[list["AutomationRun"]] = relationship(
         "AutomationRun", back_populates="automation", cascade="all, delete-orphan"
+    )
+    disable_events: Mapped[list["AutomationDisableEvent"]] = relationship(
+        "AutomationDisableEvent",
+        back_populates="automation",
+        cascade="all, delete-orphan",
     )
 
 
@@ -162,6 +176,13 @@ class AutomationRun(Base):
     # remains PENDING/RUNNING.
     status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Human-readable live progress phase ("Cloning repositories", tool-call
+    # summaries, ...) written by the dispatcher and by the run's entrypoint
+    # via POST /v1/runs/{id}/phase. Only written while PENDING/RUNNING, and
+    # deliberately never cleared on completion (unlike status_detail) — the
+    # UI renders it only for in-flight runs.
+    current_phase: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -193,12 +214,18 @@ class AutomationRun(Base):
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Additional metadata captured during run execution.
+    # For preset automations this may include the semantic task outcome parsed
+    # from the final conversation action.
+    run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -221,6 +248,41 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
     )
+
+
+class AutomationDisableEvent(Base):
+    """Historical record of an automation being disabled."""
+
+    __tablename__ = "automation_disable_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+        index=True,
+    )
+
+    automation: Mapped["Automation"] = relationship(
+        "Automation",
+        back_populates="disable_events",
+    )
+    run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
 
 
 class TarballUpload(Base):
@@ -332,6 +394,15 @@ class CustomWebhook(Base):
         String(100), nullable=False, default="X-Signature-256"
     )
 
+    # Names a verifier in `providers.VERIFIERS`. Nullable because a PATCH may
+    # clear it; NULL reads as the default.
+    signature_scheme: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        default=DEFAULT_SIGNATURE_SCHEME,
+        server_default=DEFAULT_SIGNATURE_SCHEME,
+    )
+
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -349,6 +420,71 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class IntegrationEvent(Base):
+    """One accepted delivery, written in the same transaction as its runs.
+
+    The dedupe key for redeliveries, and the only trace an event that matched
+    nothing leaves.
+    """
+
+    __tablename__ = "integration_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    # Provider slug, matching AutomationRun's trigger source: "github" for a
+    # builtin, or the custom webhook's own source name.
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The provider's id for this delivery, when the transport can supply one:
+    # GitHub's X-GitHub-Delivery, Slack's envelope event_id. NULL for providers
+    # and custom webhooks that send none -- those events are still recorded,
+    # they are just not deduplicated. See the partial index below.
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    event_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The payload trigger filters ran against, kept verbatim so a mismatched
+    # JMESPath filter can be evaluated against the real thing after the fact.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    # How many automations this event started a run for. Zero is the
+    # interesting value: the event arrived and matched nothing.
+    matched_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Deduplication key. Partial, because a NULL provider_event_id means
+        # "this provider does not identify its deliveries" rather than "the id
+        # is unknown" -- under a plain unique index every such event past the
+        # first would collide with the others.
+        #
+        # Scoped by org, unlike the sketch in #361: `source` is only unique per
+        # org for custom webhooks (see ix_custom_webhooks_org_source), so two
+        # orgs each running a webhook they both call "ci" would deduplicate
+        # against each other's ids. No provider is weakened by the extra
+        # column, since a delivery belongs to exactly one org either way.
+        Index(
+            "ix_integration_events_dedupe",
+            "org_id",
+            "source",
+            "provider_event_id",
+            unique=True,
+            postgresql_where=text("provider_event_id IS NOT NULL"),
+            sqlite_where=text("provider_event_id IS NOT NULL"),
+        ),
+        # Drives pruning, which is the only query this phase issues.
+        Index("ix_integration_events_received_at", "received_at"),
     )
 
 

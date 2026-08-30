@@ -41,6 +41,10 @@ automation/
 │       │   ├── router.py       # Git sync status/trigger API
 │       │   ├── schemas.py      # Git sync request/response schemas
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
+│       ├── streams/            # Stream sources (Slack Socket Mode, see below)
+│       │   ├── base.py         # StreamProvider protocol, per-source health
+│       │   ├── slack.py        # Slack Socket Mode provider
+│       │   └── supervisor.py   # Source registry, supervised task per source
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
 │       │   └── google_cloud.py # GCS implementation
@@ -389,6 +393,41 @@ agent server, which doesn't make sense for the multi-tenant SaaS deployment.
   `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
   when one is already running — that cycle covers everything the new one
   would, and the lock would only queue it behind anyway.
+
+## Stream Sources
+
+Events that arrive over a connection this service holds open instead of an
+inbound HTTP request — today only Slack Socket Mode. Past `emit()` nothing is
+special: the event goes through `accept_event()` like any webhook, so it
+matches **unmodified automation definitions** and is deduplicated on the
+provider's delivery id.
+
+- **Configuring an app is the switch**: the supervisor starts when
+  `AUTOMATION_SLACK_APPS` is non-empty, so a deployment that configures none is
+  unchanged and there is no second var to flip. `AUTOMATION_STREAMS_ENABLED`
+  defaults on and exists only as a kill switch. Self-hosted only: Slack does
+  not allow Socket Mode apps in its public Marketplace, and a pinned connection
+  does not fit a stateless autoscaled tier.
+- **Configured from the environment**, not a table — `AUTOMATION_SLACK_APPS`,
+  a JSON list of `{org_id, app_token, bot_token, team_id, bot_user_id}`. Per-org
+  socket configuration is a multi-tenant requirement; taking it now would cost
+  a migration and a credential-encryption surface first. See `StreamSettings`.
+- **A provider owns its loop.** `run(emit, shutdown)` holds the connection and
+  pushes events out; it is not polled, because `slack_sdk` already reconnects
+  correctly and a `receive()` shape would reimplement that badly.
+- **The supervisor catches per source**, restarting with exponential backoff,
+  so one bad provider cannot take down the others or any other loop. A
+  `StreamConfigError` is terminal — nothing a restart can fix.
+- **Slack rules**: ack before any other work (unacked envelopes are
+  redelivered), drop the bot's own messages (`bot_id`/`subtype`), check
+  `team_id` on every envelope, and assert `team_id` *and* `bot_user_id` against
+  `auth.test` before connecting, so a mis-pasted token fails loudly instead of
+  bridging the wrong workspace.
+- **Health** is process-local (`stream_health()`): `last_connected_at`,
+  `last_event_at`, `consecutive_failures`. Nothing renders it yet.
+- Slack distributes payloads across up to 10 connections per app, so this one
+  provider is safe active-active — a Slack guarantee, not a general one, hence
+  `Capabilities.tolerates_multiple_connections` in `providers.py`.
 
 ## Release Procedure
 

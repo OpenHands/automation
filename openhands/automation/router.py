@@ -27,6 +27,7 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
     TarballUpload,
@@ -39,6 +40,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunPhaseRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -52,8 +54,15 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
+from openhands.automation.utils.conversation_outcome import (
+    fetch_latest_finish_tool_response_for_run,
+)
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.run import (
+    create_pending_run,
+    record_first_run_outcome,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
@@ -68,6 +77,7 @@ from openhands.automation.utils.templates import (
     find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 
 
 logger = logging.getLogger(__name__)
@@ -104,7 +114,7 @@ async def create_automation(
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -164,9 +174,8 @@ async def list_automations(
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the authenticated user (excludes soft-deleted)."""
+    """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
-        Automation.user_id == user.user_id,
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
@@ -194,7 +203,7 @@ async def get_automation(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     return AutomationResponse.model_validate(auto)
 
 
@@ -213,12 +222,33 @@ async def update_automation(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     update_data = body.model_dump(exclude_unset=True)
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
+
+    disable_event: AutomationDisableEvent | None = None
+    skip_pending_reason: str | None = None
+    if update_data.get("enabled") is True:
+        update_data["disabled_reason"] = None
+        update_data["disabled_detail"] = None
+        update_data["disabled_at"] = None
+    elif update_data.get("enabled") is False:
+        if auto.enabled:
+            skip_pending_reason = "Automation disabled by user"
+            disabled_at = utcnow()
+            disabled_detail = {"reason": "manual", "source": "user"}
+            update_data["disabled_reason"] = "manual"
+            update_data["disabled_detail"] = disabled_detail
+            update_data["disabled_at"] = disabled_at
+            disable_event = AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual",
+                detail=disabled_detail,
+                source="manual",
+            )
 
     if "model" in update_data:
         update_data["model"] = resolve_model_profile_for_user(body.model, user)
@@ -247,6 +277,17 @@ async def update_automation(
         if auto.preset_metadata is not None:
             auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
+    if skip_pending_reason is not None:
+        await skip_pending_runs_for_disabled_automation(
+            session,
+            auto.id,
+            reason=skip_pending_reason,
+            disabled_detail=auto.disabled_detail,
+            completed_at=auto.disabled_at,
+        )
+    if disable_event is not None:
+        session.add(disable_event)
+
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
@@ -269,9 +310,31 @@ async def delete_automation(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft delete an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    was_enabled = auto.enabled
     auto.enabled = False
-    auto.deleted_at = utcnow()
+    deleted_at = utcnow()
+    auto.deleted_at = deleted_at
+    if was_enabled:
+        disabled_detail = {"reason": "manual_delete", "source": "user"}
+        auto.disabled_reason = "manual_delete"
+        auto.disabled_detail = disabled_detail
+        auto.disabled_at = deleted_at
+        session.add(
+            AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual_delete",
+                detail=disabled_detail,
+                source="manual_delete",
+            )
+        )
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation deleted by user",
+        disabled_detail=auto.disabled_detail,
+        completed_at=deleted_at,
+    )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
@@ -297,7 +360,7 @@ async def download_automation_tarball(
     - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
     - 404 if the automation has no accessible tarball.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -364,7 +427,17 @@ async def dispatch_automation(
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    if not auto.enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Automation is disabled",
+                "disabled_reason": auto.disabled_reason,
+                "disabled_detail": auto.disabled_detail,
+            },
+        )
+
     run = await create_pending_run(
         session,
         auto,
@@ -397,14 +470,17 @@ async def list_automation_runs(
 
     Returns runs ordered by creation time (latest first), with pagination.
     """
-    # Verify the automation exists and belongs to the user
-    await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    # Verify the automation exists and belongs to the caller's org
+    await _get_org_automation(session, automation_id, user.org_id)
 
-    # Count total runs for this automation
+    # Count lifetime runs by status for this automation
     count_result = await session.execute(
-        select(func.count()).where(AutomationRun.automation_id == automation_id)
+        select(AutomationRun.status, func.count())
+        .where(AutomationRun.automation_id == automation_id)
+        .group_by(AutomationRun.status)
     )
-    total = count_result.scalar() or 0
+    status_counts = {run_status.value: count for run_status, count in count_result}
+    total = sum(status_counts.values())
 
     # Fetch paginated runs ordered by latest first
     result = await session.execute(
@@ -419,6 +495,7 @@ async def list_automation_runs(
     return AutomationRunListResponse(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
+        status_counts=status_counts,
     )
 
 
@@ -491,7 +568,18 @@ async def complete_run(
             previous=run.status_detail,
         )
     elif body.status == "COMPLETED":
+        # Task outcomes and blocking factors are agent/user-level result metadata;
+        # only SDK callback errors and system dispatch errors feed auto-disablement.
         values["status_detail"] = None
+    if body.conversation_id:
+        finish_tool_response = await fetch_latest_finish_tool_response_for_run(
+            run, body.conversation_id
+        )
+        if finish_tool_response is not None:
+            values["run_metadata"] = {
+                **(run.run_metadata or {}),
+                "finish_tool_response": finish_tool_response,
+            }
 
     stmt = (
         update(AutomationRun)
@@ -536,12 +624,22 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
+    if new_status == AutomationRunStatus.FAILED:
+        automation_disabled = await maybe_disable_unhealthy_automation(
+            session,
+            automation.id,
+        )
+    else:
+        automation_disabled = False
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
+    if automation_disabled:
+        telemetry_properties["automation_disabled"] = True
+
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED
@@ -588,6 +686,59 @@ async def complete_run(
     return AutomationRunResponse.model_validate(run)
 
 
+# --- Run phase reporting ---
+
+
+@router.post("/runs/{run_id}/phase")
+async def report_run_phase(
+    run_id: uuid.UUID,
+    body: RunPhaseRequest,
+    user: AuthenticatedUser = Depends(_require_manage_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Record a live progress phase reported from inside the sandbox.
+
+    Best-effort telemetry for the dashboard: authenticated with the same
+    credentials injected into the sandbox (see ``complete_run``), the caller
+    must own the run's parent automation, and the write only lands while the
+    run is still PENDING or RUNNING (409 once terminal).
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+            ),
+        )
+        .values(current_phase=body.phase)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+    if db_result.rowcount == 0:
+        await session.refresh(run)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected PENDING or RUNNING",
+        )
+
+    await session.refresh(run)
+    return AutomationRunResponse.model_validate(run)
+
+
 # --- Run cancellation ---
 
 
@@ -614,7 +765,7 @@ async def cancel_run(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     automation = run.automation
-    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+    if automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
 
     # Only PENDING and RUNNING runs can be cancelled
@@ -695,17 +846,15 @@ async def cancel_run(
 # --- Helpers ---
 
 
-async def _get_user_automation(
+async def _get_org_automation(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
 ) -> Automation:
-    """Fetch a non-deleted automation, ensuring it belongs to the given user and org."""
+    """Fetch a non-deleted automation in the caller's org."""
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
-            Automation.user_id == user_id,
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
         )
