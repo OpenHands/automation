@@ -194,18 +194,8 @@ def _credential_cache_key(
     return hashlib.sha256(cache_material.encode()).hexdigest()
 
 
-def _request_has_header(request: Request, name: str) -> bool:
-    try:
-        return name in request.headers
-    except TypeError:
-        return False
-
-
 def _extract_x_org_id(request: Request) -> str | None:
     """Extract and normalize the optional organization scope header."""
-    if not _request_has_header(request, X_ORG_ID_HEADER):
-        return None
-
     header_value = request.headers.get(X_ORG_ID_HEADER, "").strip()
     if not header_value:
         return None
