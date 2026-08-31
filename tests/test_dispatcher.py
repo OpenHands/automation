@@ -23,6 +23,7 @@ from openhands.automation.dispatcher import (
 )
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
     mark_run_status,
@@ -1243,3 +1244,112 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["source"] == "sandbox_api"
             assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.status_detail["transient"] is False
+
+
+class TestExecuteRunDerivedConversationId:
+    """A subject-owning run creates its conversation under the derived id."""
+
+    async def _dispatch(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        *,
+        trigger: dict,
+        subject_key: str | None,
+    ):
+        """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Mention Responder",
+                trigger=trigger,
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+            org_id = automation.org_id
+
+            run = AutomationRun(
+                automation_id=automation_id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                subject_key=subject_key,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        return mock_execute.await_args.kwargs["env_vars"], org_id, automation_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_subject_run_gets_the_id_continue_will_address(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The env id is exactly what `continue_conversation` derives later.
+
+        These two drifting apart is the whole failure: the script mints a
+        random conversation, the follow-up turn POSTs to an id that does not
+        exist, and `send_conversation_turn` swallows the 404 as an ordinary
+        reaped sandbox -- so the thread silently restarts on every mention.
+        """
+        env_vars, org_id, automation_id = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "event", "source": "github-events", "on": "*"},
+            subject_key="OpenHands/OpenHands/16997",
+        )
+
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997"
+        )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_without_a_subject_gets_no_id(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Cron runs keep a server-generated id; nothing continues them."""
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+        )
+
+        assert "AUTOMATION_CONVERSATION_ID" not in env_vars

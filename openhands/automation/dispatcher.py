@@ -41,6 +41,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     TarballUpload,
 )
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -326,6 +327,21 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    # A subject-owning run has to create its conversation under the very id
+    # `continue_conversation` will address later. Derive it here rather than
+    # letting the script mint a random one: otherwise every follow-up event
+    # POSTs to an id that does not exist, `send_conversation_turn` swallows
+    # the 404 as an ordinary reaped sandbox, and the thread silently starts a
+    # fresh conversation on every turn.
+    if run.subject_key:
+        trigger_source = (automation.trigger or {}).get("source")
+        if trigger_source:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = conversation_id_for(
+                automation.org_id,
+                automation.id,
+                trigger_source,
+                run.subject_key,
+            )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
