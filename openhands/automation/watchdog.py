@@ -148,8 +148,14 @@ def _loaded_automation(run: AutomationRun) -> Automation | None:
 def _should_cleanup_sandbox_after_terminal(
     run: AutomationRun, keep_alive: bool | None
 ) -> bool:
-    """Return whether watchdog should explicitly delete this run's sandbox."""
-    return bool(run.sandbox_id) and keep_alive is not True
+    """Return whether watchdog should explicitly delete this run's sandbox.
+
+    A run owning a subject is held like `keep_alive`, exactly as `complete_run`
+    holds it: the sandbox carries the conversation the next event continues,
+    and a lost callback is the ordinary reason we get here. The runtime TTL
+    reaper still collects it.
+    """
+    return bool(run.sandbox_id) and keep_alive is not True and not run.subject_key
 
 
 async def _verify_and_mark_run(

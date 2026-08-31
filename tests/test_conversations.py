@@ -1063,3 +1063,33 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
     async with async_session_factory() as session:
         owners = await subject_runs(session)
     assert len({run.automation_id for run in owners}) == 3
+
+
+def test_a_provider_key_too_long_for_the_column_is_refused():
+    """String(500): an over-long key is a failed INSERT, not a long key.
+
+    `_key_from_expression` has always guarded this; a provider extractor reads
+    a payload we do not control and needs the same guard, or one oversized
+    Slack channel rolls back the whole delivery for every matched automation.
+    """
+    trigger = EventTrigger.model_validate(continuing_trigger())
+    oversized = EventSubject(key="x" * 501)
+    assert resolve_subject_key(trigger, {}, oversized) is None
+
+    fits = EventSubject(key="x" * 500)
+    assert resolve_subject_key(trigger, {}, fits) == "x" * 500
+
+
+def test_a_blank_provider_key_is_refused():
+    trigger = EventTrigger.model_validate(continuing_trigger())
+    assert resolve_subject_key(trigger, {}, EventSubject(key="   ")) is None
+
+
+def test_a_boolean_turn_text_expr_falls_back_rather_than_sending_true():
+    """`comment.body != null` is an easy thing to write next to `filter`."""
+    trigger = EventTrigger.model_validate(
+        continuing_trigger(turn_text_expr="comment.body != null")
+    )
+    payload = {"comment": {"body": "the real message"}}
+
+    assert resolve_turn_text(trigger, payload) is None

@@ -13,7 +13,10 @@ import pytest
 
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils import conversation_turn as turn_module
-from openhands.automation.utils.conversation_turn import send_conversation_turn
+from openhands.automation.utils.conversation_turn import (
+    compose_turn,
+    send_conversation_turn,
+)
 
 
 def fake_httpx(handler) -> SimpleNamespace:
@@ -214,3 +217,61 @@ async def test_a_transport_failure_is_a_false(monkeypatch):
     monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
 
     assert await send_conversation_turn(make_run(), "conv-1", "hi") is False
+
+
+def test_a_specific_nested_path_beats_a_generic_top_level_one():
+    """`_BODY_PATHS` is ordered most-specific-first, and the order must win.
+
+    A custom webhook wrapping the real event under `payload` also carries a
+    top-level `text`; rooting the search first would return that instead.
+    """
+    turn = compose_turn(
+        "custom",
+        "thing.happened",
+        {"text": "ok", "payload": {"comment": {"body": "the real message"}}},
+    )
+
+    assert "the real message" in turn
+    assert "ok" not in turn
+
+
+def test_a_pull_request_is_not_described_as_a_comment():
+    """`pull_request.body` matches the body paths, but nobody commented."""
+    turn = compose_turn(
+        "github",
+        "pull_request.opened",
+        {
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {
+                "number": 5,
+                "body": "please review",
+                "user": {"login": "alice"},
+            },
+        },
+    )
+
+    assert "commented on" not in turn
+    assert "pull_request.opened" in turn
+    assert "org/repo#5" in turn
+    assert "please review" in turn
+
+
+def test_a_comment_still_reads_as_a_comment():
+    turn = compose_turn(
+        "github",
+        "issue_comment.created",
+        {
+            "repository": {"full_name": "org/repo"},
+            "issue": {"number": 5},
+            "comment": {
+                "body": "what about the tests?",
+                "user": {"login": "alice"},
+                "html_url": "https://github.com/org/repo/issues/5#issuecomment-1",
+            },
+        },
+    )
+
+    assert "@alice commented on org/repo#5" in turn
+    assert "what about the tests?" in turn
+    # The link survives now that the schema keeps html_url.
+    assert "https://github.com/org/repo/issues/5#issuecomment-1" in turn

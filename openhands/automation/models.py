@@ -258,6 +258,7 @@ class AutomationRun(Base):
             "subject_key",
             "created_at",
             postgresql_where=(subject_key.isnot(None)),
+            sqlite_where=(subject_key.isnot(None)),
         ),
     )
 

@@ -40,6 +40,8 @@ RESUME_POLL_SECONDS: Final[int] = 2
 # first. A custom webhook resolves no provider descriptor, so there is nothing
 # to ask; probing keeps the common sources readable without teaching the
 # service every payload shape, and `turn_text_expr` covers the rest.
+# The subset of _BODY_PATHS that really is somebody commenting.
+_COMMENT_BODY_PATHS = ("comment.body", "review.body")
 _BODY_PATHS = (
     "comment.body",
     "review.body",
@@ -77,25 +79,36 @@ def _dig(node: Any, path: str) -> Any:
     return node
 
 
-def _first(payload: dict[str, Any], paths: tuple[str, ...]) -> Any:
-    """First non-empty hit, tried at the root and one level into `payload`.
+def _first_hit(
+    payload: dict[str, Any], paths: tuple[str, ...]
+) -> tuple[Any, str | None]:
+    """First non-empty hit and the path that produced it.
 
     Typed sources (GitHub) reach here wrapped as {"event_key", "payload"};
     Slack arrives as the bare envelope. Probing both spares the caller the
     difference.
+
+    Paths drive the outer loop: `paths` is ordered most-specific-first, and
+    that ordering is the point. Rooting the outer loop instead would let a
+    generic key at the top level beat the specific one nested under `payload`.
     """
     roots = [payload]
     inner = payload.get("payload")
     if isinstance(inner, dict):
         roots.append(inner)
-    for root in roots:
-        for path in paths:
+    for path in paths:
+        for root in roots:
             value = _dig(root, path)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return value.strip(), path
             if isinstance(value, int) and not isinstance(value, bool):
-                return value
-    return None
+                return value, path
+    return None, None
+
+
+def _first(payload: dict[str, Any], paths: tuple[str, ...]) -> Any:
+    """`_first_hit` for callers that do not care which path matched."""
+    return _first_hit(payload, paths)[0]
 
 
 def _render_message(
@@ -104,7 +117,7 @@ def _render_message(
     payload: dict[str, Any],
 ) -> str | None:
     """The event as the message a human wrote, or None if none is recognisable."""
-    body = _first(payload, _BODY_PATHS)
+    body, body_path = _first_hit(payload, _BODY_PATHS)
     if not isinstance(body, str):
         return None
 
@@ -114,10 +127,14 @@ def _render_message(
     url = _first(payload, _URL_PATHS)
 
     who = f"@{author}" if author else "Someone"
+    # Only a comment was commented. Anything else keeps its event key, which is
+    # the one word that says what actually happened -- an opened pull request
+    # announced as a comment misleads the agent about what it is answering.
+    what = "commented on" if body_path in _COMMENT_BODY_PATHS else f"(`{event_key}`) on"
     if repo and number:
-        header = f"{who} commented on {repo}#{number}"
+        header = f"{who} {what} {repo}#{number}"
     elif repo:
-        header = f"{who} commented on {repo}"
+        header = f"{who} {what} {repo}"
     else:
         header = f"{who} sent a new `{source}` message (`{event_key}`)"
 

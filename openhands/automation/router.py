@@ -817,8 +817,15 @@ async def cancel_run(
         properties={"trigger_source": "manual"},
     )
 
-    # Clean up sandbox for runs that were RUNNING
+    # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
+    # unlike `complete_run` the sandbox goes even when the run owns a subject
+    # -- but the subject goes with it, or the next event would pick this run
+    # and pay a lookup for a sandbox we just deleted.
     if run.sandbox_id:
+        if run.subject_key:
+            run.subject_key = None
+            await session.commit()
+
         from openhands.automation.config import get_settings
 
         settings = get_settings()

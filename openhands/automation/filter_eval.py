@@ -152,21 +152,15 @@ def evaluate_filter(expression: str, payload: dict[str, Any]) -> bool:
         >>> evaluate_filter("icontains(comment.body, '@openhands')", payload)
         True
     """
-    try:
-        result = jmespath.search(expression, payload, options=_FILTER_OPTIONS)
-        # Convert result to boolean
-        return bool(result)
-    except jmespath_exceptions.JMESPathError as e:
-        raise FilterEvaluationError(f"Invalid filter expression: {e}") from e
-    except Exception as e:
-        raise FilterEvaluationError(f"Filter evaluation failed: {e}") from e
+    return bool(evaluate_expression(expression, payload))
 
 
 def evaluate_expression(expression: str, payload: dict[str, Any]) -> Any:
     """Evaluate a JMESPath expression and return its raw result.
 
-    As `evaluate_filter`, without the coercion to bool: used where the value
-    itself is the answer, not whether it is truthy.
+    The one place an expression is evaluated; `evaluate_filter` is this plus a
+    coercion to bool. Used where the value itself is the answer, not whether it
+    is truthy.
 
     Raises:
         FilterEvaluationError: If the expression is invalid or evaluation fails

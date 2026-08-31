@@ -6,7 +6,15 @@ import uuid
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    ValidationInfo,
+    field_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
@@ -201,40 +209,25 @@ class EventTrigger(BaseModel):
         ),
     )
 
-    @field_validator("filter")
+    @field_validator("filter", "subject_key_expr", "turn_text_expr")
     @classmethod
-    def validate_filter_expression(cls, v: str | None) -> str | None:
-        """Validate JMESPath filter expression at creation time."""
+    def validate_jmespath_expression(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        """Validate every JMESPath field at creation time.
+
+        One validator over all of them, so a fourth cannot be added without
+        validation. It matters more here than for most fields: an unchecked
+        typo is indistinguishable from the feature being switched off --
+        `subject_key_expr` silently stops threading, `turn_text_expr` silently
+        falls back to the built-in rendering.
+        """
         if v:
             from openhands.automation.filter_eval import validate_filter
 
             is_valid, error = validate_filter(v)
             if not is_valid:
-                raise ValueError(f"Invalid filter expression: {error}")
-        return v
-
-    @field_validator("subject_key_expr")
-    @classmethod
-    def validate_subject_key_expr(cls, v: str | None) -> str | None:
-        """Validate at creation: a typo looks exactly like the feature off."""
-        if v:
-            from openhands.automation.filter_eval import validate_filter
-
-            is_valid, error = validate_filter(v)
-            if not is_valid:
-                raise ValueError(f"Invalid subject_key_expr expression: {error}")
-        return v
-
-    @field_validator("turn_text_expr")
-    @classmethod
-    def validate_turn_text_expr(cls, v: str | None) -> str | None:
-        """Validate at creation: a typo silently falls back to the default."""
-        if v:
-            from openhands.automation.filter_eval import validate_filter
-
-            is_valid, error = validate_filter(v)
-            if not is_valid:
-                raise ValueError(f"Invalid turn_text_expr expression: {error}")
+                raise ValueError(f"Invalid {info.field_name} expression: {error}")
         return v
 
     @property

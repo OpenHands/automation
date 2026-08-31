@@ -66,7 +66,7 @@ def resolve_subject_key(
     """
     if trigger.subject_key_expr:
         return _key_from_expression(trigger.subject_key_expr, payload)
-    return subject.key if subject is not None else None
+    return _clean_key(subject.key, "provider") if subject is not None else None
 
 
 def resolve_turn_text(
@@ -87,7 +87,9 @@ def resolve_turn_text(
         return None
     if value is None:
         return None
-    if not isinstance(value, (str, int, float, bool)):
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        # `true` is what a comparison expression yields; sending "True" as the
+        # whole turn is worse than falling back to the built-in rendering.
         logger.warning(
             "turn_text_expr %r yielded a non-scalar (%s); ignoring it",
             trigger.turn_text_expr,
@@ -115,13 +117,20 @@ def _key_from_expression(expression: str, payload: dict[str, Any]) -> str | None
         )
         return None
 
-    key = str(value).strip()
+    return _clean_key(str(value), f"subject_key_expr {expression!r}")
+
+
+def _clean_key(value: str, origin: str) -> str | None:
+    """A key the column can actually hold, or None.
+
+    `AutomationRun.subject_key` is String(500): an over-long key is a failed
+    INSERT that rolls back the whole delivery, and truncating it would merge
+    two subjects instead. Provider extractors go through here too -- they read
+    a payload we do not control.
+    """
+    key = value.strip()
     if not key or len(key) > MAX_SUBJECT_KEY_LENGTH:
-        logger.warning(
-            "subject_key_expr %r yielded an unusable key of length %d",
-            expression,
-            len(key),
-        )
+        logger.warning("%s yielded an unusable key of length %d", origin, len(key))
         return None
     return key
 
@@ -190,9 +199,9 @@ async def continue_conversation(
         compose_turn(source, event_key, event_payload, override=turn_text),
     )
     if not delivered:
-        # Unreachable. Only forget a finished run -- one still going may just
-        # not have recorded its sandbox yet, and clearing it would orphan the
-        # subject it is about to own.
+        # The conversation could not be reached. Only forget a finished run --
+        # one still going may just not have recorded its sandbox yet, and
+        # clearing it would orphan the subject it is about to own.
         if run.status in _FINISHED:
             run.subject_key = None
         return None

@@ -29,6 +29,7 @@ def upgrade() -> None:
         ["automation_id", "subject_key", "created_at"],
         unique=False,
         postgresql_where=sa.text("subject_key IS NOT NULL"),
+        sqlite_where=sa.text("subject_key IS NOT NULL"),
     )
 
 

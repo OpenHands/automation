@@ -22,6 +22,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
+    _should_cleanup_sandbox_after_terminal,
     _verify_and_mark_run,
     prune_integration_events,
 )
@@ -664,3 +665,56 @@ class TestPruneIntegrationEvents:
     def test_batch_size_is_bounded(self):
         """An unbounded default is the bug this guards."""
         assert 0 < PRUNE_BATCH_SIZE <= 10_000
+
+
+class TestSubjectOwningRunsKeepTheirSandbox:
+    """A `continue_conversation` run's sandbox holds the live conversation.
+
+    `complete_run` already refuses to delete it. The watchdog is the other way
+    a run reaches a terminal state -- a lost completion callback is the
+    ordinary reason -- and deleting it there loses the thread just as
+    thoroughly.
+    """
+
+    def test_the_helper_holds_a_subject_owning_sandbox(self):
+        run = MagicMock(spec=AutomationRun)
+        run.sandbox_id = "sbx-1"
+        run.subject_key = "T06P212QSEA/C123/1755000000.000100"
+        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is False
+
+    def test_an_ordinary_run_is_still_cleaned_up(self):
+        run = MagicMock(spec=AutomationRun)
+        run.sandbox_id = "sbx-1"
+        run.subject_key = None
+        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is True
+
+    @pytest.mark.asyncio
+    async def test_watchdog_does_not_delete_the_conversations_sandbox(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """The whole feature depends on that sandbox outliving the run."""
+        run_id = automation_with_run["run_id"]
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.subject_key = "T06P212QSEA/C123/1755000000.000100"
+            await session.commit()
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(
+                verified=True, success=True, exit_code=0, stdout="ok", stderr=""
+            )
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                await _verify_and_mark_run(session, run, mock_settings)
+                await session.commit()
+
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+            assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
