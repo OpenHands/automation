@@ -423,26 +423,28 @@ class SlackAppSettings(BaseModel):
 class StreamSettings(BaseSettings):
     """Stream sources: long-lived inbound connections, supervised in-process.
 
-    Off by default, and a self-hosted capability for two independent reasons:
-    Slack does not allow Socket Mode apps in the public Marketplace, and
-    connection-scoped state does not fit a stateless autoscaled tier. Webhooks
-    remain the cloud path.
+    Configuring an app is what turns this on: `enabled` needs a source too, so
+    a deployment that sets no `AUTOMATION_SLACK_APPS` starts nothing either
+    way. Still self-hosted only, for two independent reasons: Slack does not
+    allow Socket Mode apps in the public Marketplace, and connection-scoped
+    state does not fit a stateless autoscaled tier. Webhooks remain the cloud
+    path.
 
     Environment variables (AUTOMATION_ prefix):
-        AUTOMATION_STREAMS_ENABLED: Master switch (default: false). With it
-            off the supervisor never starts and nothing else changes.
+        AUTOMATION_STREAMS_ENABLED: Kill switch (default: true). Set it false
+            to keep the supervisor down while the apps stay configured.
         AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
             {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
     """
 
-    streams_enabled: bool = False
+    streams_enabled: bool = True
     slack_apps: list[SlackAppSettings] = Field(default_factory=list)
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
     @property
     def enabled(self) -> bool:
-        """Whether to start the supervisor: switched on, and something to run."""
+        """Whether to start the supervisor: a source is configured, not killed."""
         return bool(self.streams_enabled and self.slack_apps)
 
 

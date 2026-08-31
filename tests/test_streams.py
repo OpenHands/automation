@@ -142,10 +142,10 @@ def test_recording_health_replaces_the_record():
 # ---------------------------------------------------------------------------
 
 
-def test_streams_are_off_by_default():
-    """The default deployment behaves exactly as it does today."""
+def test_streams_are_off_until_an_app_is_configured():
+    """Configuring nothing behaves exactly as it does today, switch or no."""
     settings = StreamSettings()
-    assert settings.streams_enabled is False
+    assert settings.streams_enabled is True
     assert settings.enabled is False
     assert build_stream_providers(settings) == []
 
@@ -153,7 +153,6 @@ def test_streams_are_off_by_default():
 def test_slack_apps_come_from_the_environment(monkeypatch: pytest.MonkeyPatch):
     """One provider per configured app, no table involved."""
     org_id = uuid.uuid4()
-    monkeypatch.setenv("AUTOMATION_STREAMS_ENABLED", "true")
     monkeypatch.setenv(
         "AUTOMATION_SLACK_APPS",
         f'[{{"org_id": "{org_id}", "app_token": "xapp-1", '
@@ -174,12 +173,20 @@ def test_slack_apps_come_from_the_environment(monkeypatch: pytest.MonkeyPatch):
         clear_config_cache()
 
 
-def test_enabled_needs_a_configured_source(monkeypatch: pytest.MonkeyPatch):
-    """The switch alone starts nothing."""
-    monkeypatch.setenv("AUTOMATION_STREAMS_ENABLED", "true")
+def test_the_switch_kills_configured_apps(monkeypatch: pytest.MonkeyPatch):
+    """Turning it off holds the sockets down without unsetting credentials."""
+    monkeypatch.setenv("AUTOMATION_STREAMS_ENABLED", "false")
+    monkeypatch.setenv(
+        "AUTOMATION_SLACK_APPS",
+        f'[{{"org_id": "{uuid.uuid4()}", "app_token": "xapp-1", '
+        f'"bot_token": "xoxb-1", "team_id": "{TEAM_ID}", '
+        f'"bot_user_id": "{BOT_USER_ID}"}}]',
+    )
     clear_config_cache()
     try:
-        assert get_config().streams.enabled is False
+        settings = get_config().streams
+        assert settings.slack_apps
+        assert settings.enabled is False
     finally:
         clear_config_cache()
 
