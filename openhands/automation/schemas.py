@@ -190,6 +190,16 @@ class EventTrigger(BaseModel):
             "Ignored unless destination is 'continue_conversation'."
         ),
     )
+    turn_text_expr: str | None = Field(
+        default=None,
+        description=(
+            "JMESPath expression rendering an event as the text of the "
+            "follow-up turn, e.g. comment.body. Overrides the built-in "
+            "rendering, which is only a best guess at where the message sits. "
+            "Evaluated against the raw payload, like 'filter'. "
+            "Ignored unless destination is 'continue_conversation'."
+        ),
+    )
 
     @field_validator("filter")
     @classmethod
@@ -213,6 +223,18 @@ class EventTrigger(BaseModel):
             is_valid, error = validate_filter(v)
             if not is_valid:
                 raise ValueError(f"Invalid subject_key_expr expression: {error}")
+        return v
+
+    @field_validator("turn_text_expr")
+    @classmethod
+    def validate_turn_text_expr(cls, v: str | None) -> str | None:
+        """Validate at creation: a typo silently falls back to the default."""
+        if v:
+            from openhands.automation.filter_eval import validate_filter
+
+            is_valid, error = validate_filter(v)
+            if not is_valid:
+                raise ValueError(f"Invalid turn_text_expr expression: {error}")
         return v
 
     @property

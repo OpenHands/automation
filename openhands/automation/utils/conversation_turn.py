@@ -3,6 +3,10 @@
 `run: true` appends the message and starts the loop only if it is not already
 running. Every failure returns False so the caller starts a run instead -- a
 reaped sandbox is ordinary, not an error.
+
+A continue does not run the automation's script, so `compose_turn` is the only
+thing the agent sees of the event. It renders the message a human actually
+wrote; the verbatim payload is the last resort, not the default.
 """
 
 import asyncio
@@ -32,16 +36,117 @@ RESUME_WAIT_SECONDS: Final[int] = 20
 RESUME_POLL_SECONDS: Final[int] = 2
 
 
+# Where a human-authored message sits in a webhook payload, most specific
+# first. A custom webhook resolves no provider descriptor, so there is nothing
+# to ask; probing keeps the common sources readable without teaching the
+# service every payload shape, and `turn_text_expr` covers the rest.
+_BODY_PATHS = (
+    "comment.body",
+    "review.body",
+    "issue.body",
+    "pull_request.body",
+    "discussion.body",
+    "event.text",
+    "message.text",
+    "text",
+)
+_AUTHOR_PATHS = (
+    "comment.user.login",
+    "review.user.login",
+    "sender.login",
+    "issue.user.login",
+    "pull_request.user.login",
+    "event.user",
+    "user",
+)
+_URL_PATHS = (
+    "comment.html_url",
+    "review.html_url",
+    "issue.html_url",
+    "pull_request.html_url",
+    "discussion.html_url",
+)
+_NUMBER_PATHS = ("issue.number", "pull_request.number", "discussion.number")
+
+
+def _dig(node: Any, path: str) -> Any:
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _first(payload: dict[str, Any], paths: tuple[str, ...]) -> Any:
+    """First non-empty hit, tried at the root and one level into `payload`.
+
+    Typed sources (GitHub) reach here wrapped as {"event_key", "payload"};
+    Slack arrives as the bare envelope. Probing both spares the caller the
+    difference.
+    """
+    roots = [payload]
+    inner = payload.get("payload")
+    if isinstance(inner, dict):
+        roots.append(inner)
+    for root in roots:
+        for path in paths:
+            value = _dig(root, path)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
+
+
+def _render_message(
+    source: str,
+    event_key: str,
+    payload: dict[str, Any],
+) -> str | None:
+    """The event as the message a human wrote, or None if none is recognisable."""
+    body = _first(payload, _BODY_PATHS)
+    if not isinstance(body, str):
+        return None
+
+    author = _first(payload, _AUTHOR_PATHS)
+    repo = _first(payload, ("repository.full_name",))
+    number = _first(payload, _NUMBER_PATHS)
+    url = _first(payload, _URL_PATHS)
+
+    who = f"@{author}" if author else "Someone"
+    if repo and number:
+        header = f"{who} commented on {repo}#{number}"
+    elif repo:
+        header = f"{who} commented on {repo}"
+    else:
+        header = f"{who} sent a new `{source}` message (`{event_key}`)"
+
+    parts = [f"{header}:", "", body]
+    if url:
+        parts += ["", str(url)]
+    return "\n".join(parts)
+
+
 def compose_turn(
     source: str,
     event_key: str,
     event_payload: dict[str, Any] | None,
+    *,
+    override: str | None = None,
 ) -> str:
     """Render an event as the text of a follow-up turn.
 
-    The payload goes over verbatim -- the shape the automation's script got for
-    the first turn, and on a continue that script does not run.
+    The trigger's own `turn_text_expr` wins; then the message the payload
+    obviously carries; and only a shape nothing recognises falls back to the
+    verbatim JSON. Dumping the payload unconditionally buried the one line a
+    human wrote under ~15 KB of webhook metadata, every turn.
     """
+    if override:
+        return override
+    if event_payload:
+        rendered = _render_message(source, event_key, event_payload)
+        if rendered is not None:
+            return rendered
     body = json.dumps(event_payload or {}, indent=2, sort_keys=True, default=str)
     return (
         f"A new `{source}` event (`{event_key}`) arrived on the same subject as "

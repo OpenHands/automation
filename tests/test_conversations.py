@@ -20,6 +20,7 @@ from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.conversations import (
     continue_conversation,
     resolve_subject_key,
+    resolve_turn_text,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.models import (
@@ -298,15 +299,100 @@ class TestTriggerValidation:
         with pytest.raises(ValueError, match="subject_key_expr"):
             EventTrigger.model_validate(continuing_trigger(subject_key_expr="((("))
 
+    def test_a_broken_turn_text_expression_is_refused_at_creation(self):
+        """A typo would otherwise silently fall back to the built-in guess."""
+        with pytest.raises(ValueError, match="turn_text_expr"):
+            EventTrigger.model_validate(continuing_trigger(turn_text_expr="((("))
+
+
+class TestResolveTurnText:
+    def test_it_renders_through_the_expression(self):
+        trigger = EventTrigger.model_validate(
+            continuing_trigger(turn_text_expr="event.text")
+        )
+        assert resolve_turn_text(trigger, slack_envelope(text="ping")) == "ping"
+
+    def test_no_expression_defers_to_the_built_in_rendering(self):
+        trigger = EventTrigger.model_validate(continuing_trigger())
+        assert resolve_turn_text(trigger, slack_envelope()) is None
+
+    def test_a_missing_field_defers_rather_than_sending_nothing(self):
+        """An expression that finds nothing must not blank out the turn."""
+        trigger = EventTrigger.model_validate(
+            continuing_trigger(turn_text_expr="event.nope")
+        )
+        assert resolve_turn_text(trigger, slack_envelope()) is None
+
+    def test_a_non_scalar_result_is_ignored(self):
+        """A dict would reach the agent as a Python repr; fall back instead."""
+        trigger = EventTrigger.model_validate(
+            continuing_trigger(turn_text_expr="event")
+        )
+        assert resolve_turn_text(trigger, slack_envelope()) is None
+
+
+def github_comment_payload(
+    body: str = "@all-hands-bot what did I ask you to remember?",
+) -> dict[str, Any]:
+    """A typed GitHub event as it reaches compose_turn: wrapped, not bare."""
+    return {
+        "event_key": "created",
+        "payload": {
+            "action": "created",
+            "comment": {
+                "body": body,
+                "html_url": (
+                    "https://github.com/OpenHands/OpenHands/issues/16997"
+                    "#issuecomment-5475788441"
+                ),
+                "user": {"login": "VascoSch92"},
+            },
+            "issue": {"number": 16997, "title": "test"},
+            "repository": {"full_name": "OpenHands/OpenHands"},
+            "sender": {"login": "VascoSch92"},
+        },
+    }
+
 
 class TestComposeTurn:
-    def test_the_payload_travels_verbatim(self):
-        """The payload goes over verbatim."""
+    def test_a_github_comment_renders_as_the_message(self):
+        """Author, where, body and link -- not 15 KB of webhook metadata.
+
+        A continue does not run the script, so this text is the whole of what
+        the agent sees of the event.
+        """
+        text = compose_turn("github-events", "created", github_comment_payload())
+
+        assert "@VascoSch92 commented on OpenHands/OpenHands#16997" in text
+        assert "@all-hands-bot what did I ask you to remember?" in text
+        assert "#issuecomment-5475788441" in text
+        assert "```json" not in text
+        # The verbatim dump of this payload is two orders of magnitude bigger.
+        assert len(text) < 400
+
+    def test_a_slack_envelope_renders_its_text(self):
+        """The bare envelope shape resolves too, not just the wrapped one."""
         text = compose_turn("slack", "app_mention", slack_envelope(text="ping"))
-        assert "app_mention" in text
+
         assert "ping" in text
+        assert "@U456" in text
+        assert "```json" not in text
+
+    def test_turn_text_expr_output_wins(self):
+        """An explicit rendering beats the built-in guess."""
+        text = compose_turn(
+            "github-events",
+            "created",
+            github_comment_payload(),
+            override="just this",
+        )
+        assert text == "just this"
+
+    def test_an_unrecognised_shape_still_travels_verbatim(self):
+        """No message to find means the payload is all there is to send."""
+        text = compose_turn("weird", "thing", {"a": {"b": 1}})
         body = text.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
-        assert json.loads(body)["team_id"] == TEAM
+        assert json.loads(body) == {"a": {"b": 1}}
 
     def test_an_empty_payload_is_still_valid_json(self):
         text = compose_turn("slack", "app_mention", None)

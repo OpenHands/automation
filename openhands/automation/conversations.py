@@ -69,6 +69,34 @@ def resolve_subject_key(
     return subject.key if subject is not None else None
 
 
+def resolve_turn_text(
+    trigger: EventTrigger,
+    payload: dict[str, Any],
+) -> str | None:
+    """The trigger's own rendering of this event, if it declares one.
+
+    None means fall back to `compose_turn`'s built-in rendering. Evaluated
+    against the raw payload, like `filter` and `subject_key_expr`.
+    """
+    if not trigger.turn_text_expr:
+        return None
+    try:
+        value = evaluate_expression(trigger.turn_text_expr, payload)
+    except FilterEvaluationError as exc:
+        logger.warning("turn_text_expr %r failed: %s", trigger.turn_text_expr, exc)
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, (str, int, float, bool)):
+        logger.warning(
+            "turn_text_expr %r yielded a non-scalar (%s); ignoring it",
+            trigger.turn_text_expr,
+            type(value).__name__,
+        )
+        return None
+    return str(value).strip() or None
+
+
 def _key_from_expression(expression: str, payload: dict[str, Any]) -> str | None:
     try:
         value = evaluate_expression(expression, payload)
@@ -140,6 +168,7 @@ async def continue_conversation(
     automation_id: uuid.UUID,
     event_key: str,
     event_payload: dict[str, Any] | None,
+    turn_text: str | None = None,
 ) -> str | None:
     """Deliver this event as another turn on the subject's conversation.
 
@@ -158,7 +187,7 @@ async def continue_conversation(
     delivered = await send_conversation_turn(
         run,
         conversation_id,
-        compose_turn(source, event_key, event_payload),
+        compose_turn(source, event_key, event_payload, override=turn_text),
     )
     if not delivered:
         # Unreachable. Only forget a finished run -- one still going may just

@@ -21,6 +21,7 @@ from openhands.automation.conversations import (
     continue_conversation,
     event_subject,
     resolve_subject_key,
+    resolve_turn_text,
 )
 from openhands.automation.models import Automation, IntegrationEvent
 from openhands.automation.schemas import EventTrigger
@@ -189,6 +190,7 @@ async def accept_event(
                 automation_id=automation.id,
                 event_key=event.event_key,
                 event_payload=event_payload,
+                turn_text=resolve_turn_text(trigger, webhook_payload),
             )
             if conversation_id is not None:
                 conversation_ids.append(conversation_id)
