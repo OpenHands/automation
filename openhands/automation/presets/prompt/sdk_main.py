@@ -74,6 +74,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 # Detect execution mode based on AGENT_SERVER_URL presence
@@ -485,6 +486,15 @@ This automation was triggered by a webhook event:
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
+    # Set by the service for a `continue_conversation` run: the conversation
+    # must carry the derived id so a later event on the same subject reaches
+    # it. RemoteConversation attaches if it exists and creates it with this id
+    # if it does not.
+    automation_conversation_id = os.environ.get("AUTOMATION_CONVERSATION_ID")
+    if automation_conversation_id:
+        conversation_kwargs["conversation_id"] = uuid.UUID(
+            automation_conversation_id
+        )
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")

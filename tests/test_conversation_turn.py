@@ -119,11 +119,77 @@ async def test_a_reaped_sandbox_is_a_false_not_an_exception(monkeypatch):
     async def fake_get_sandbox_agent_url(client, api_url, api_key, sandbox_id):
         return None
 
+    async def fake_resume_sandbox(client, api_url, api_key, sandbox_id):
+        # 404 from the resume: the sandbox is gone, not merely paused.
+        return False
+
     monkeypatch.setattr(turn_module, "get_backend", lambda run: cloud_backend())
     monkeypatch.setattr(
         turn_module, "get_sandbox_agent_url", fake_get_sandbox_agent_url
     )
+    monkeypatch.setattr(turn_module, "resume_sandbox", fake_resume_sandbox)
     monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+
+    assert await send_conversation_turn(make_run("sbx-1"), "conv-1", "hi") is False
+
+
+@pytest.mark.asyncio
+async def test_a_paused_sandbox_is_resumed_rather_than_abandoned(monkeypatch):
+    """An idle sandbox is paused, not deleted -- the conversation survives it.
+
+    Falling straight back to a run here would start a second conversation and
+    the thread would silently lose its memory every time it went idle.
+    """
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"success": True})
+
+    async def fake_get_sandbox_agent_url(client, api_url, api_key, sandbox_id):
+        # Paused on the first look, RUNNING once the resume has landed.
+        if "resumed" in calls:
+            return "https://agent.example.com", "sk-1"
+        return None
+
+    async def fake_resume_sandbox(client, api_url, api_key, sandbox_id):
+        calls.append("resumed")
+        return True
+
+    monkeypatch.setattr(turn_module, "get_backend", lambda run: cloud_backend())
+    monkeypatch.setattr(
+        turn_module, "get_sandbox_agent_url", fake_get_sandbox_agent_url
+    )
+    monkeypatch.setattr(turn_module, "resume_sandbox", fake_resume_sandbox)
+    monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+    monkeypatch.setattr(turn_module, "RESUME_POLL_SECONDS", 0)
+
+    assert await send_conversation_turn(make_run("sbx-1"), "conv-1", "hi") is True
+    assert "resumed" in calls
+    assert "/api/conversations/conv-1/events" in calls
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_never_comes_back_gives_up(monkeypatch):
+    """Past the budget the caller starts a run, as it did before."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("should not have been called")
+
+    async def fake_get_sandbox_agent_url(client, api_url, api_key, sandbox_id):
+        return None
+
+    async def fake_resume_sandbox(client, api_url, api_key, sandbox_id):
+        return True
+
+    monkeypatch.setattr(turn_module, "get_backend", lambda run: cloud_backend())
+    monkeypatch.setattr(
+        turn_module, "get_sandbox_agent_url", fake_get_sandbox_agent_url
+    )
+    monkeypatch.setattr(turn_module, "resume_sandbox", fake_resume_sandbox)
+    monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+    monkeypatch.setattr(turn_module, "RESUME_POLL_SECONDS", 0)
+    monkeypatch.setattr(turn_module, "RESUME_WAIT_SECONDS", 0)
 
     assert await send_conversation_turn(make_run("sbx-1"), "conv-1", "hi") is False
 

@@ -5,8 +5,10 @@ running. Every failure returns False so the caller starts a run instead -- a
 reaped sandbox is ordinary, not an error.
 """
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -15,13 +17,19 @@ from openhands.automation.backends import get_backend
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.log_context import log_extra
-from openhands.automation.utils.sandbox import get_sandbox_agent_url
+from openhands.automation.utils.sandbox import get_sandbox_agent_url, resume_sandbox
 
 
 logger = logging.getLogger("automation.conversation_turn")
 
 # Short: the caller holds the subject's row lock for the length of this call.
 TURN_TIMEOUT_SECONDS = 15.0
+
+# An idle sandbox is paused, not deleted, so the conversation is still there.
+# Waiting for it costs lock time; losing the thread's memory costs the user
+# more. Past the budget we give up and the caller starts a run, as before.
+RESUME_WAIT_SECONDS = 20.0
+RESUME_POLL_SECONDS = 2.0
 
 
 def compose_turn(
@@ -55,12 +63,39 @@ async def _resolve_agent_server(
     if not run.sandbox_id:
         return None
     api_key = await backend.get_api_key()
-    return await get_sandbox_agent_url(
-        client,
-        get_config().service.openhands_api_base_url,
-        api_key,
-        run.sandbox_id,
-    )
+    api_url = get_config().service.openhands_api_base_url
+    resolved = await get_sandbox_agent_url(client, api_url, api_key, run.sandbox_id)
+    if resolved is not None:
+        return resolved
+    # Not RUNNING. It may be paused rather than gone, in which case the
+    # conversation survives and only the sandbox has to come back.
+    return await _resume_and_wait(client, api_url, api_key, run.sandbox_id)
+
+
+async def _resume_and_wait(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+) -> tuple[str, str] | None:
+    """Resume a paused sandbox and wait for its agent server, within a budget."""
+    if not await resume_sandbox(client, api_url, api_key, sandbox_id):
+        return None
+
+    deadline = time.monotonic() + RESUME_WAIT_SECONDS
+    while True:
+        resolved = await get_sandbox_agent_url(client, api_url, api_key, sandbox_id)
+        if resolved is not None:
+            logger.info("Resumed sandbox %s to continue its conversation", sandbox_id)
+            return resolved
+        if time.monotonic() >= deadline:
+            logger.info(
+                "Sandbox %s did not come back within %.0fs; falling back to a run",
+                sandbox_id,
+                RESUME_WAIT_SECONDS,
+            )
+            return None
+        await asyncio.sleep(RESUME_POLL_SECONDS)
 
 
 async def send_conversation_turn(
