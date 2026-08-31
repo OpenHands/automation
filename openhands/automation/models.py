@@ -200,9 +200,8 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # The external subject this run is about (a Slack thread, a PR). Not a
-    # mapping: the conversation id is derived, this only finds the sandbox
-    # still holding it.
+    # The external subject this run is about (a Slack thread, a PR). Finds the
+    # sandbox holding the conversation; the conversation id itself is derived.
     subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # The agent-server BashCommand id for this run's dispatched bash chain.

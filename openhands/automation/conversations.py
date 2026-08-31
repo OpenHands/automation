@@ -7,7 +7,7 @@ there costs no run at all.
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +30,7 @@ from openhands.automation.utils.conversation_turn import (
 
 logger = logging.getLogger("automation.conversations")
 
-CONTINUE_CONVERSATION = "continue_conversation"
+CONTINUE_CONVERSATION: Final[str] = "continue_conversation"
 
 _FINISHED = (
     AutomationRunStatus.COMPLETED,
@@ -40,7 +40,7 @@ _FINISHED = (
 )
 
 # Matches AutomationRun.subject_key. Truncating would merge two subjects.
-MAX_SUBJECT_KEY_LENGTH = 500
+MAX_SUBJECT_KEY_LENGTH: Final[int] = 500
 
 
 def event_subject(source: str, payload: dict[str, Any]) -> EventSubject | None:

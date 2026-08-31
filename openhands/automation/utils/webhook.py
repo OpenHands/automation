@@ -153,9 +153,8 @@ async def get_event_automations(
             Automation.trigger.op("->>")("source") == literal(source),
         )
 
-    # Ordered so an event matching several automations locks their subject
-    # mappings in the same order in every worker, which would otherwise
-    # deadlock. See `conversations._lock_mapping`.
+    # Ordered so an event matching several automations locks their runs in the
+    # same order in every worker; otherwise two events on one subject deadlock.
     result = await session.execute(
         select(Automation).where(*base_filters, trigger_filter).order_by(Automation.id)
     )

@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
@@ -23,13 +23,13 @@ from openhands.automation.utils.sandbox import get_sandbox_agent_url, resume_san
 logger = logging.getLogger("automation.conversation_turn")
 
 # Short: the caller holds the subject's row lock for the length of this call.
-TURN_TIMEOUT_SECONDS = 15.0
+TURN_TIMEOUT_SECONDS: Final[int] = 15
 
 # An idle sandbox is paused, not deleted, so the conversation is still there.
 # Waiting for it costs lock time; losing the thread's memory costs the user
 # more. Past the budget we give up and the caller starts a run, as before.
-RESUME_WAIT_SECONDS = 20.0
-RESUME_POLL_SECONDS = 2.0
+RESUME_WAIT_SECONDS: Final[int] = 20
+RESUME_POLL_SECONDS: Final[int] = 2
 
 
 def compose_turn(

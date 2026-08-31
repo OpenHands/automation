@@ -327,12 +327,9 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
-    # A subject-owning run has to create its conversation under the very id
-    # `continue_conversation` will address later. Derive it here rather than
-    # letting the script mint a random one: otherwise every follow-up event
-    # POSTs to an id that does not exist, `send_conversation_turn` swallows
-    # the 404 as an ordinary reaped sandbox, and the thread silently starts a
-    # fresh conversation on every turn.
+    # A subject-owning run must create its conversation under the id
+    # `continue_conversation` addresses later, or every follow-up 404s and
+    # silently starts a fresh thread.
     if run.subject_key:
         trigger_source = (automation.trigger or {}).get("source")
         if trigger_source:
