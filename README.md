@@ -11,6 +11,12 @@ Scheduled and event-driven automation execution for OpenHands Cloud. This servic
 - **API Key Management**: Per-user API keys for secure automation access
 - **Run History**: Track automation runs with status and results
 
+## Repository boundaries
+
+The Automation Service owns automation definitions, cron scheduling, webhooks, run history, dispatch, and sandbox lifecycle orchestration. It manages when work runs; the Agent Server and [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk) execute the agent conversations and own agent/tool behavior, workspaces, events, and API endpoints.
+
+[`OpenHands/typescript-client`](https://github.com/OpenHands/typescript-client) provides typed browser access to the Agent Server API, while [`OpenHands/OpenHands`](https://github.com/OpenHands/OpenHands) owns Agent Canvas UI and frontend integration. If a change belongs in one of those repositories, open the PR there rather than duplicating the logic here.
+
 ## Development
 
 ### Prerequisites
