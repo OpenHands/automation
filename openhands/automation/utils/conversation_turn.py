@@ -1,8 +1,10 @@
 """Sending another turn to a conversation the agent server already holds.
 
-`run: true` appends the message and starts the loop only if it is not already
-running. Every failure returns False so the caller starts a run instead -- a
-reaped sandbox is ordinary, not an error.
+`run` appends the message and, when true, starts the loop if it is not already
+running. A trigger can set it false to leave the turn unanswered, making the
+conversation an ordered, durable buffer the script drains on its own terms.
+Every failure returns False so the caller starts a run instead -- a reaped
+sandbox is ordinary, not an error.
 
 A continue does not run the automation's script, so `compose_turn` is the only
 thing the agent sees of the event. It renders the message a human actually
@@ -224,10 +226,14 @@ async def send_conversation_turn(
     run: AutomationRun,
     conversation_id: str,
     text: str,
+    *,
+    wake_agent: bool = True,
 ) -> bool:
-    """Append a user message to an existing conversation and let it run.
+    """Append a user message to an existing conversation.
 
-    True only when the agent server accepted the turn.
+    True only when the agent server accepted the turn. `wake_agent` decides
+    whether the message is also acted on now; False still costs a resume,
+    because appending at all needs the agent server up.
     """
     extra = log_extra(run_id=str(run.id), sandbox_id=run.sandbox_id)
     try:
@@ -247,8 +253,9 @@ async def send_conversation_turn(
                 json={
                     "role": "user",
                     "content": [{"type": "text", "text": text}],
-                    # Without this the message lands in history unanswered.
-                    "run": True,
+                    # False leaves the message in history unanswered. It does
+                    # not stop a loop that is already running from reading it.
+                    "run": wake_agent,
                 },
                 headers={"X-Session-API-Key": session_key},
             )
@@ -262,5 +269,10 @@ async def send_conversation_turn(
         )
         return False
 
-    logger.info("Sent a turn to conversation %s", conversation_id, extra=extra)
+    logger.info(
+        "Sent a turn to conversation %s (wake_agent=%s)",
+        conversation_id,
+        wake_agent,
+        extra=extra,
+    )
     return True

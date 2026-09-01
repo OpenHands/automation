@@ -150,6 +150,15 @@ class EventTrigger(BaseModel):
     {"source": "slack", "on": "app_mention",
      "destination": "continue_conversation"}
     ```
+
+    By default a delivered turn also wakes the agent. `wake_agent: false`
+    appends it to the conversation and leaves it there, so the script decides
+    when to act on what has accumulated.
+
+    ```json
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation", "wake_agent": false}
+    ```
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -205,6 +214,19 @@ class EventTrigger(BaseModel):
             "follow-up turn, e.g. comment.body. Overrides the built-in "
             "rendering, which is only a best guess at where the message sits. "
             "Evaluated against the raw payload, like 'filter'. "
+            "Ignored unless destination is 'continue_conversation'."
+        ),
+    )
+
+    wake_agent: bool = Field(
+        default=True,
+        description=(
+            "Whether a delivered turn also starts the agent loop. False "
+            "appends the message to the conversation and leaves it unanswered "
+            "-- the conversation itself is then the ordered, durable buffer, "
+            "and the script decides when to act on it. Note that reaching a "
+            "paused sandbox still resumes it, and a loop already running will "
+            "pick the message up regardless. "
             "Ignored unless destination is 'continue_conversation'."
         ),
     )

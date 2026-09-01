@@ -77,6 +77,32 @@ async def test_a_turn_is_a_user_message_that_starts_the_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wake_agent_false_appends_without_starting_the_loop(monkeypatch):
+    """A trigger that buffers rather than interrupts.
+
+    The turn still has to reach the agent server -- the conversation is what
+    holds it, in order, until the script decides to act. Only `run` changes.
+    """
+    seen: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.read()
+        return httpx.Response(200, json={"success": True})
+
+    monkeypatch.setattr(turn_module, "get_backend", lambda run: local_backend())
+    monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+
+    delivered = await send_conversation_turn(
+        make_run(), "conv-1", "for later", wake_agent=False
+    )
+
+    assert delivered is True
+    body = json.loads(seen["body"])
+    assert body["run"] is False
+    assert body["content"] == [{"type": "text", "text": "for later"}]
+
+
+@pytest.mark.asyncio
 async def test_a_cloud_run_is_reached_through_its_sandbox(monkeypatch):
     seen: dict = {}
 
