@@ -38,10 +38,8 @@ RESUME_WAIT_SECONDS: Final[int] = 20
 RESUME_POLL_SECONDS: Final[int] = 2
 
 
-# Where a human-authored message sits in a webhook payload, most specific
-# first. A custom webhook resolves no provider descriptor, so there is nothing
-# to ask; probing keeps the common sources readable without teaching the
-# service every payload shape, and `turn_text_expr` covers the rest.
+# Where a human-authored message sits in a payload, most specific first.
+# `turn_text_expr` covers whatever these miss.
 # The subset of _BODY_PATHS that really is somebody commenting.
 _COMMENT_BODY_PATHS = ("comment.body", "review.body")
 _BODY_PATHS = (

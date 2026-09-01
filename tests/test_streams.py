@@ -246,8 +246,7 @@ def test_an_accepted_event_names_its_thread(provider):
     )
 
     assert opener is not None and reply is not None
-    assert opener.subject is not None
-    assert opener.subject.key == f"{TEAM_ID}/C123/1755000000.000100"
+    assert opener.subject == f"{TEAM_ID}/C123/1755000000.000100"
     # The opening mention and a reply to it are one subject.
     assert reply.subject == opener.subject
 

@@ -18,7 +18,6 @@ from openhands.automation.event_schemas import parse_event
 from openhands.automation.ingest import (
     AcceptedEvent,
     AcceptResult,
-    EventSubject,
     accept_event,
 )
 from openhands.automation.models import (
@@ -498,7 +497,7 @@ async def test_accept_event_ignores_a_subject_nobody_opted_into(
             event_key="app_mention",
             payload=slack_payload,
             provider_event_id="Ev123456",
-            subject=EventSubject(key="T06P212QSEA/C123/1755000000.000100"),
+            subject="T06P212QSEA/C123/1755000000.000100",
             occurred_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
         ),
         async_session,
@@ -602,7 +601,7 @@ def test_dataclasses_are_frozen():
     """The ingest dataclasses are immutable."""
     event = AcceptedEvent(source="slack", event_key="app_mention")
     result = AcceptResult(matched=0, run_ids=[])
-    subject = EventSubject(key="T1/C1/1.0")
+    subject = "T1/C1/1.0"
 
     for obj, attr, value in (
         (event, "source", "github"),
@@ -618,7 +617,6 @@ def test_dataclasses_use_slots():
     for obj in (
         AcceptedEvent(source="slack", event_key="app_mention"),
         AcceptResult(matched=0, run_ids=[]),
-        EventSubject(key="T1/C1/1.0"),
     ):
         assert hasattr(type(obj), "__slots__")
         assert not hasattr(obj, "__dict__")

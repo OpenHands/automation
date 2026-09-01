@@ -5,19 +5,17 @@ without a cycle.
 """
 
 import uuid
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 
 # Pinned permanently: changing it makes every live thread lose its memory.
-CONVERSATION_NAMESPACE = uuid.UUID("d7f3a2b1-5c48-4e9a-9b6d-2f1e8c3a7d40")
+CONVERSATION_NAMESPACE: Final[uuid.UUID] = uuid.UUID(
+    "d7f3a2b1-5c48-4e9a-9b6d-2f1e8c3a7d40"
+)
 
-
-@dataclass(frozen=True, slots=True)
-class EventSubject:
-    """The external thing an event is about."""
-
-    key: str
+# The external thing an event is about, named by its key. Every other layer
+# already passes the key as a bare string, so there is nothing to wrap.
+type EventSubject = str
 
 
 def conversation_id_for(
@@ -56,7 +54,7 @@ def slack_subject(envelope: dict[str, Any]) -> EventSubject | None:
     thread = event.get("thread_ts") or event.get("ts")
     if not team or not channel or not thread:
         return None
-    return EventSubject(key=f"{team}/{channel}/{thread}")
+    return f"{team}/{channel}/{thread}"
 
 
 def github_subject(payload: dict[str, Any]) -> EventSubject | None:
@@ -73,9 +71,9 @@ def github_subject(payload: dict[str, Any]) -> EventSubject | None:
     for field in ("pull_request", "issue"):
         node = payload.get(field)
         if isinstance(node, dict) and node.get("number") is not None:
-            return EventSubject(key=f"{repo}#{node['number']}")
+            return f"{repo}#{node['number']}"
 
     number = payload.get("number")
     if number is not None:
-        return EventSubject(key=f"{repo}#{number}")
+        return f"{repo}#{number}"
     return None

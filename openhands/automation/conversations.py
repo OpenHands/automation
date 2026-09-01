@@ -93,7 +93,7 @@ def resolve_subject_key(
     """
     if trigger.subject_key_expr:
         return _key_from_expression(trigger.subject_key_expr, payload)
-    return _clean_key(subject.key, "provider") if subject is not None else None
+    return _clean_key(subject, "provider") if subject is not None else None
 
 
 def resolve_turn_text(
@@ -170,22 +170,18 @@ async def _take_subject_lock(
     """Serialise every event for one subject, including those finding no run.
 
     `SELECT ... FOR UPDATE` only locks rows it returns, so it cannot order two
-    events that both find nothing -- and that is exactly the burst that ends
-    with two runs claiming one subject, and so two sandboxes claiming the one
-    derived conversation id. An advisory lock keys on the subject itself,
-    which exists whether or not a row does.
+    events that both find nothing -- the burst that leaves one subject with
+    two runs, and so two sandboxes claiming one derived conversation id.
 
-    Transaction-scoped, so the caller's commit releases it and it still covers
-    the run this event goes on to create. Taken in the caller's automation
-    order, which is why `get_event_automations` orders by id: two events on
-    one subject must take these in the same order or they deadlock.
-
-    SQLite has no advisory locks and runs single-process, so it skips this.
+    Transaction-scoped: the caller's commit releases it, so it also covers the
+    run this event goes on to create. Taken in automation order, which is why
+    `get_event_automations` orders by id -- otherwise two events on one
+    subject deadlock. SQLite runs single-process and skips it.
     """
     if using_sqlite():
         return
-    # Hashed in Python rather than with `hashtextextended`, so the key does not
-    # depend on a server-side hash function staying stable across versions.
+    # Hashed here, not with `hashtextextended`, so the key does not depend on
+    # a server-side hash staying stable across versions.
     digest = hashlib.blake2b(
         f"{automation_id}/{subject_key}".encode(), digest_size=8
     ).digest()
@@ -203,16 +199,13 @@ async def _lock_subject_run(
 ) -> AutomationRun | None:
     """The most recent run holding this subject, started or not, locked.
 
-    A run that has not started is deliberately included. It has no agent
-    server to talk to, but it already owns the subject and will open the
-    derived conversation when it starts, so a second run here would be the
-    duplicate. `continue_conversation` folds the turn into it instead.
+    A run that has not started is included on purpose: it already owns the
+    subject and will open the derived conversation, so a second run here
+    would be the duplicate.
 
-    The row lock orders events that find the same run; `_take_subject_lock`
-    orders the ones that find none. The automation is eager-loaded because
-    minting a cloud API key reads `run.automation`, and a lazy load there
-    raises MissingGreenlet -- which `send_conversation_turn` would swallow
-    into a silent fallback.
+    Eager-loads the automation because minting a cloud API key reads
+    `run.automation`, and a lazy load raises MissingGreenlet -- which
+    `send_conversation_turn` swallows into a silent fallback.
     """
     stmt = (
         select(AutomationRun)
@@ -286,10 +279,8 @@ async def continue_conversation(
     turn = compose_turn(source, event_key, event_payload, override=turn_text)
 
     if run.started_at is None:
-        # Queued, not gone: there is no agent server yet, but this run already
-        # owns the subject and will create the conversation under the same
-        # derived id. It has not read its payload either, so the event still
-        # reaches the agent -- in the message the run opens with.
+        # No agent server yet, but this run opens the same derived
+        # conversation and has not read its payload, so the turn rides along.
         _coalesce_turn(run, turn)
         logger.info(
             "Folded a turn into queued run %s for conversation %s",
@@ -302,9 +293,8 @@ async def continue_conversation(
         run, conversation_id, turn, wake_agent=wake_agent
     )
     if not delivered:
-        # The conversation could not be reached. Only forget a finished run --
-        # one still going may just not have recorded its sandbox yet, and
-        # clearing it would orphan the subject it is about to own.
+        # Only forget a finished run: one still going may not have recorded
+        # its sandbox yet, and clearing it would orphan the subject.
         if run.status in _FINISHED:
             run.subject_key = None
         return ContinueResult()

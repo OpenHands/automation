@@ -193,41 +193,33 @@ class EventTrigger(BaseModel):
         description=(
             "Where a matching event goes. 'dispatch_run' starts a fresh run. "
             "'continue_conversation' sends it as another turn on the "
-            "conversation for the event's subject, falling back to a run when "
-            "there is none."
+            "subject's conversation, falling back to a run when there is none."
         ),
     )
     subject_key_expr: str | None = Field(
         default=None,
         description=(
             "JMESPath expression yielding the subject key events are grouped "
-            "by. Needed for any source with no built-in subject: 'github' has "
-            "one, 'slack' only over Socket Mode, so a Slack webhook needs "
-            "join('/', [team_id, event.channel, event.thread_ts || event.ts]). "
+            "by. Required for sources with no built-in subject, e.g. a Slack "
+            "webhook: join('/', [team_id, event.channel, event.thread_ts || "
+            "event.ts]). "
             "Ignored unless destination is 'continue_conversation'."
         ),
     )
     turn_text_expr: str | None = Field(
         default=None,
         description=(
-            "JMESPath expression rendering an event as the text of the "
-            "follow-up turn, e.g. comment.body. Overrides the built-in "
-            "rendering, which is only a best guess at where the message sits. "
-            "Evaluated against the raw payload, like 'filter'. "
+            "JMESPath expression rendering the event as the follow-up turn's "
+            "text, e.g. comment.body, overriding the built-in rendering. "
             "Ignored unless destination is 'continue_conversation'."
         ),
     )
-
     wake_agent: bool = Field(
         default=True,
         description=(
-            "Whether a delivered turn also starts the agent loop. False "
-            "appends the message to the conversation and leaves it unanswered "
-            "-- the conversation itself is then the ordered, durable buffer, "
-            "and the script decides when to act on it. Note that reaching a "
-            "paused sandbox still resumes it, and a loop already running will "
-            "pick the message up regardless. "
-            "Ignored unless destination is 'continue_conversation'."
+            "Whether a delivered turn also starts the agent loop. False leaves "
+            "it unanswered, making the conversation the buffer the script "
+            "drains. Ignored unless destination is 'continue_conversation'."
         ),
     )
 

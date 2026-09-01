@@ -34,7 +34,6 @@ from openhands.automation.models import (
 )
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import (
-    EventSubject,
     conversation_id_for,
     github_subject,
     slack_subject,
@@ -174,7 +173,7 @@ class TestSlackSubject:
         subject = slack_subject(
             slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
         )
-        assert subject == EventSubject(key=f"{TEAM}/C123/1755000000.000100")
+        assert subject == f"{TEAM}/C123/1755000000.000100"
 
     def test_an_opening_mention_keys_on_its_own_ts(self):
         """The mention that starts a thread is the same subject as its replies."""
@@ -208,7 +207,7 @@ class TestGithubSubject:
         subject = github_subject(
             {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 12}}
         )
-        assert subject == EventSubject(key="org/repo#12")
+        assert subject == "org/repo#12"
 
     def test_an_issue_comment_on_a_pr_is_the_same_subject(self):
         """GitHub numbers issues and pull requests from one sequence."""
@@ -224,7 +223,7 @@ class TestGithubSubject:
         subject = github_subject(
             {"repository": {"full_name": "org/repo"}, "number": 12}
         )
-        assert subject == EventSubject(key="org/repo#12")
+        assert subject == "org/repo#12"
 
     def test_a_push_has_no_subject(self):
         """Nothing numbered, so nothing to continue."""
@@ -242,7 +241,7 @@ class TestGithubSubject:
 class TestResolveSubjectKey:
     def test_the_provider_subject_is_the_default(self):
         trigger = EventTrigger.model_validate(continuing_trigger())
-        subject = EventSubject(key=f"{TEAM}/C123/1.1")
+        subject = f"{TEAM}/C123/1.1"
         assert resolve_subject_key(trigger, {}, subject) == f"{TEAM}/C123/1.1"
 
     def test_a_trigger_expression_overrides_the_provider(self):
@@ -250,9 +249,7 @@ class TestResolveSubjectKey:
         trigger = EventTrigger.model_validate(
             continuing_trigger(subject_key_expr="event.channel")
         )
-        key = resolve_subject_key(
-            trigger, slack_envelope(), EventSubject(key="ignored")
-        )
+        key = resolve_subject_key(trigger, slack_envelope(), "ignored")
         assert key == "C123"
 
     def test_no_expression_and_no_provider_subject_is_no_key(self):
@@ -1303,16 +1300,16 @@ def test_a_provider_key_too_long_for_the_column_is_refused():
     Slack channel rolls back the whole delivery for every matched automation.
     """
     trigger = EventTrigger.model_validate(continuing_trigger())
-    oversized = EventSubject(key="x" * 501)
+    oversized = "x" * 501
     assert resolve_subject_key(trigger, {}, oversized) is None
 
-    fits = EventSubject(key="x" * 500)
+    fits = "x" * 500
     assert resolve_subject_key(trigger, {}, fits) == "x" * 500
 
 
 def test_a_blank_provider_key_is_refused():
     trigger = EventTrigger.model_validate(continuing_trigger())
-    assert resolve_subject_key(trigger, {}, EventSubject(key="   ")) is None
+    assert resolve_subject_key(trigger, {}, "   ") is None
 
 
 def test_a_boolean_turn_text_expr_falls_back_rather_than_sending_true():
