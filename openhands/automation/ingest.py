@@ -84,8 +84,10 @@ async def accept_event(
 
     A matched automation whose trigger sets `destination` to
     `continue_conversation` first tries to deliver the event as another turn on
-    its subject's conversation, creating no run. Anything else -- no subject,
-    no conversation yet, one that has gone -- falls back to creating a run.
+    its subject's conversation, creating no run. A subject whose run is still
+    queued has the turn folded into that run instead, so a burst cannot leave
+    one subject with two runs. Anything else -- no subject, no run holding it,
+    one whose sandbox has gone -- falls back to creating a run.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -182,7 +184,7 @@ async def accept_event(
         )
 
         if subject_key is not None:
-            conversation_id = await continue_conversation(
+            outcome = await continue_conversation(
                 session,
                 org_id=org_id,
                 source=source,
@@ -191,9 +193,11 @@ async def accept_event(
                 event_key=event.event_key,
                 event_payload=event_payload,
                 turn_text=resolve_turn_text(trigger, webhook_payload),
+                wake_agent=trigger.wake_agent,
             )
-            if conversation_id is not None:
-                conversation_ids.append(conversation_id)
+            if not outcome.needs_run:
+                assert outcome.conversation_id is not None
+                conversation_ids.append(outcome.conversation_id)
                 await capture_automation_event(
                     "automation_conversation_continued",
                     request=request,
@@ -203,6 +207,9 @@ async def accept_event(
                         "event_source": source,
                         "event_key": event.event_key,
                         "org_id": str(org_id),
+                        # Folded into a run that had not started, rather than
+                        # posted to a live agent server.
+                        "coalesced": outcome.coalesced,
                     },
                 )
                 continue

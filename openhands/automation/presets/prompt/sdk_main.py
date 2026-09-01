@@ -373,6 +373,19 @@ This automation was triggered by a webhook event:
 {event_json}
 ```""")
 
+    # More events landed on the same subject before this run got a sandbox, so
+    # the service could not deliver them as turns. They open the conversation
+    # with this one instead of each starting a run of its own.
+    if event_context and event_context.get("follow_up_turns"):
+        follow_ups = "\n\n".join(
+            str(turn) for turn in event_context["follow_up_turns"]
+        )
+        context_sections.append(f"""## Follow-up messages
+
+More activity arrived on the same subject while this run was queued:
+
+{follow_ups}""")
+
     # Prepend context sections to the user prompt
     if context_sections:
         context_block = "\n\n".join(context_sections)

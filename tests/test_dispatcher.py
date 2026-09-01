@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.config import get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
@@ -1002,6 +1003,37 @@ class TestBuildEventPayload:
             status=AutomationRunStatus.PENDING,
             **kw,
         )
+
+    def test_turns_parked_on_a_queued_run_are_lifted_out_of_the_event(self):
+        """The script reads the provider's payload exactly as it arrived.
+
+        Events that landed while the run was queued are stored on the same
+        JSON column, so they have to come back out -- otherwise a webhook
+        payload reaches the automation with a key the provider never sent.
+        """
+        automation = self._make_automation({"type": "event", "source": "slack"})
+        run = self._make_run(
+            automation,
+            event_payload={
+                "action": "opened",
+                COALESCED_TURNS_KEY: ["@bob commented on org/repo#1"],
+            },
+        )
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["event"] == {"action": "opened"}
+        assert payload["follow_up_turns"] == ["@bob commented on org/repo#1"]
+
+    def test_a_run_carrying_only_parked_turns_has_no_event(self):
+        """Lifting the key must not leave an empty dict behind as the event."""
+        automation = self._make_automation({"type": "event", "source": "slack"})
+        run = self._make_run(automation, event_payload={COALESCED_TURNS_KEY: ["ping"]})
+
+        payload = _build_event_payload(automation, run)
+
+        assert "event" not in payload
+        assert payload["follow_up_turns"] == ["ping"]
 
     def test_cron_trigger_uses_type_string(self):
         """Cron trigger → payload['trigger'] == 'cron' (not the full dict)."""

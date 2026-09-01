@@ -18,10 +18,14 @@ from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.conversations import (
+    COALESCED_TURNS_KEY,
+    MAX_COALESCED_TURNS,
+    _take_subject_lock,
     continue_conversation,
     resolve_subject_key,
     resolve_turn_text,
 )
+from openhands.automation.db import using_sqlite
 from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.models import (
     Automation,
@@ -107,6 +111,13 @@ async def subject_runs(session) -> list[AutomationRun]:
     return list(result.scalars().all())
 
 
+def parked_turns(run: AutomationRun) -> list[str]:
+    """The turns folded into a run that had not started yet."""
+    payload = run.event_payload
+    assert payload is not None
+    return payload[COALESCED_TURNS_KEY]
+
+
 async def start_run(session, run_id, sandbox_id: str | None = "sandbox-1") -> None:
     """Mark a run started, which is what makes its subject continuable.
 
@@ -128,7 +139,7 @@ def delivered_turns(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Accept every turn, recording (conversation_id, text)."""
     sent: list[tuple[str, str]] = []
 
-    async def fake_send(run, conversation_id, text):
+    async def fake_send(run, conversation_id, text, *, wake_agent=True):
         sent.append((conversation_id, text))
         return True
 
@@ -143,7 +154,7 @@ def unreachable_conversations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Refuse every turn, as a reaped sandbox would."""
     attempted: list[str] = []
 
-    async def fake_send(run, conversation_id, text):
+    async def fake_send(run, conversation_id, text, *, wake_agent=True):
         attempted.append(conversation_id)
         return False
 
@@ -521,26 +532,45 @@ async def test_an_event_arriving_mid_run_continues_that_conversation(
 
 
 @pytest.mark.asyncio
-async def test_a_subject_with_no_sandbox_yet_falls_back_to_a_run(
+async def test_an_event_on_a_queued_run_is_folded_into_it(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """A PENDING run has nothing to talk to, so the event starts its own."""
+    """The burst case: a second event before the first run has a sandbox.
+
+    There is nothing to post to yet, but the run that is queued already owns
+    the subject and will open the derived conversation, so starting a second
+    run would leave two sandboxes claiming one conversation id. The turn rides
+    along on the message the queued run opens with instead.
+    """
     automation = make_automation(
         org_id, mock_authenticated_user.user_id, continuing_trigger()
     )
     async_session.add(automation)
     await async_session.commit()
 
-    await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    assert len(first.run_ids) == 1
 
     follow_up = slack_envelope(
         ts="1755000002.000200", thread_ts="1755000000.000100", text="<@U999> also"
     )
     second = await _mention(async_session, org_id, follow_up, "Ev2")
 
-    assert len(second.run_ids) == 1
-    assert second.conversation_ids == []
+    derived = expected_conversation(
+        org_id, automation.id, f"{TEAM}/C123/1755000000.000100"
+    )
+    assert second.run_ids == []
+    assert second.conversation_ids == [derived]
+    # Nothing was posted: there is no agent server behind a queued run.
     assert delivered_turns == []
+    assert len(await fetch_runs(async_session)) == 1
+
+    run = await async_session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+    assert run is not None
+    await async_session.refresh(run)
+    parked = parked_turns(run)
+    assert len(parked) == 1
+    assert "also" in parked[0]
 
 
 @pytest.mark.asyncio
@@ -961,7 +991,8 @@ async def test_continue_conversation_loads_the_run_s_automation(
         await session.commit()
 
     derived = conversation_id_for(org_id, automation_id, "slack", subject_key)
-    assert result == derived
+    assert result.conversation_id == derived
+    assert result.coalesced is False
     assert key_urls, "the API key was never minted, so run.automation failed"
     assert posted == [f"/api/conversations/{derived}/events"]
 
@@ -978,7 +1009,7 @@ async def test_concurrent_follow_ups_all_continue_one_conversation(
     """The row lock serialises them; none forks off a run of its own."""
     sent: list[str] = []
 
-    async def fake_send(run, conversation_id, text):
+    async def fake_send(run, conversation_id, text, *, wake_agent=True):
         sent.append(conversation_id)
         await asyncio.sleep(0.01)  # hold the lock across an await
         return True
@@ -1028,7 +1059,7 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
     run rows in opposite orders and deadlock.
     """
 
-    async def fake_send(run, conversation_id, text):
+    async def fake_send(run, conversation_id, text, *, wake_agent=True):
         return True
 
     monkeypatch.setattr(
@@ -1063,6 +1094,205 @@ async def test_no_deadlock_across_several_automations_on_one_subject(
     async with async_session_factory() as session:
         owners = await subject_runs(session)
     assert len({run.automation_id for run in owners}) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_burst_on_one_subject_creates_exactly_one_run(
+    org_id, async_session_factory, mock_authenticated_user, delivered_turns
+):
+    """A burst on one subject leaves one run, not five.
+
+    End to end: each event after the first finds a run that owns the subject
+    but has not started, and folds into it. Mutual exclusion between events
+    that find *no* run is the lock's job, covered separately below -- one
+    event loop against one Postgres does not reproduce that interleaving.
+    """
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        automation_id = automation.id
+
+    envelope = slack_envelope()
+
+    async def deliver(event_id: str):
+        async with async_session_factory() as session:
+            return await _mention(session, org_id, envelope, event_id)
+
+    results = await asyncio.gather(*(deliver(f"Ev{n}") for n in range(5)))
+
+    derived = conversation_id_for(
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+    )
+    assert [run_id for r in results for run_id in r.run_ids] != []
+    assert sum(len(r.run_ids) for r in results) == 1
+    # Every loser reports the conversation its turn is waiting in.
+    assert all(r.conversation_ids == [derived] for r in results if not r.run_ids)
+    # Nothing was posted: a queued run has no agent server behind it.
+    assert delivered_turns == []
+
+    async with async_session_factory() as session:
+        runs = await fetch_runs(session)
+        assert len(runs) == 1
+        assert len(parked_turns(runs[0])) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_subject_lock_orders_events_that_find_no_run(
+    org_id, async_session_factory, mock_authenticated_user
+):
+    """What `SELECT ... FOR UPDATE` cannot do.
+
+    A row lock only locks rows it returns, so two events that both find no run
+    for a subject are not ordered by it at all -- each goes on to create one,
+    and both runs derive the same conversation id. This is the lock that does
+    order them, so it has to exclude across sessions even with no row to hold.
+    """
+    if using_sqlite():
+        pytest.skip("advisory locks are Postgres-only; SQLite runs single-process")
+
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        automation_id = automation.id
+
+    order: list[str] = []
+
+    async def hold(name: str, work: float) -> None:
+        async with async_session_factory() as session:
+            await _take_subject_lock(session, automation_id, "T1/C1/1.1")
+            order.append(f"{name} in")
+            await asyncio.sleep(work)
+            order.append(f"{name} out")
+            # Transaction-scoped: this is what releases it.
+            await session.commit()
+
+    await asyncio.gather(hold("first", 0.2), hold("second", 0.0))
+
+    assert order == ["first in", "first out", "second in", "second out"]
+
+
+@pytest.mark.asyncio
+async def test_a_different_subject_is_not_blocked_by_a_held_lock(
+    org_id, async_session_factory, mock_authenticated_user
+):
+    """The lock is per subject, not per automation.
+
+    One slow thread must not stall every other thread's events -- the turn it
+    is holding the lock for can take a sandbox resume to deliver.
+    """
+    if using_sqlite():
+        pytest.skip("advisory locks are Postgres-only; SQLite runs single-process")
+
+    async with async_session_factory() as setup:
+        automation = make_automation(
+            org_id, mock_authenticated_user.user_id, continuing_trigger()
+        )
+        setup.add(automation)
+        await setup.commit()
+        automation_id = automation.id
+
+    order: list[str] = []
+
+    async def hold(name: str, subject_key: str, work: float) -> None:
+        async with async_session_factory() as session:
+            await _take_subject_lock(session, automation_id, subject_key)
+            order.append(f"{name} in")
+            await asyncio.sleep(work)
+            order.append(f"{name} out")
+            await session.commit()
+
+    await asyncio.gather(
+        hold("slow", "T1/C1/1.1", 0.2), hold("other", "T1/C1/2.2", 0.0)
+    )
+
+    # The second subject went through while the first still held its lock.
+    assert order.index("other out") < order.index("slow out")
+
+
+@pytest.mark.asyncio
+async def test_turns_parked_on_a_queued_run_are_capped(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """A queued run is not a mailbox.
+
+    A subject that keeps producing events while its run waits would otherwise
+    grow one JSON column without limit.
+    """
+    automation = make_automation(
+        org_id, mock_authenticated_user.user_id, continuing_trigger()
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    for n in range(MAX_COALESCED_TURNS + 3):
+        await _mention(
+            async_session,
+            org_id,
+            slack_envelope(ts=f"17550001{n:02d}.000200", thread_ts="1755000000.000100"),
+            f"Later{n}",
+        )
+
+    assert len(await fetch_runs(async_session)) == 1
+    run = await async_session.get(AutomationRun, uuid.UUID(first.run_ids[0]))
+    assert run is not None
+    await async_session.refresh(run)
+    assert len(parked_turns(run)) == MAX_COALESCED_TURNS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "wakes"),
+    [({}, True), ({"wake_agent": False}, False)],
+)
+async def test_the_trigger_decides_whether_a_turn_wakes_the_agent(
+    org_id,
+    async_session,
+    mock_authenticated_user,
+    monkeypatch,
+    overrides,
+    wakes,
+):
+    """`wake_agent: false` buffers the turn instead of acting on it.
+
+    The message still lands in the conversation, which is what makes the
+    conversation itself the ordered, durable queue -- the script decides when
+    to read it.
+    """
+    woken: list[bool] = []
+
+    async def fake_send(run, conversation_id, text, *, wake_agent=True):
+        woken.append(wake_agent)
+        return True
+
+    monkeypatch.setattr(
+        "openhands.automation.conversations.send_conversation_turn", fake_send
+    )
+
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(**overrides),
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
+    await _mention(
+        async_session,
+        org_id,
+        slack_envelope(ts="1755000002.000200", thread_ts="1755000000.000100"),
+        "Ev2",
+    )
+
+    assert woken == [wakes]
 
 
 def test_a_provider_key_too_long_for_the_column_is_refused():
