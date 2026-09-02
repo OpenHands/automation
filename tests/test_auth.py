@@ -33,7 +33,12 @@ MOCK_USERS_ME_RESPONSE = {
     "org_id": str(TEST_ORG_ID),
     "email": "test@example.com",
     "role": "owner",
-    "permissions": ["view_org_settings", "manage_api_keys", "manage_automations"],
+    "permissions": [
+        "view_org_settings",
+        "manage_api_keys",
+        "view_automations",
+        "manage_automations",
+    ],
 }
 
 
@@ -92,6 +97,7 @@ class TestAuthentication:
         assert result.permissions == [
             "view_org_settings",
             "manage_api_keys",
+            "view_automations",
             "manage_automations",
         ]
         assert result.auth_method == AuthMethod.API_KEY
@@ -1171,6 +1177,7 @@ class TestLocalApiKeyAuthentication:
             assert user.email == "local@localhost"
             assert user.role == "admin"
             assert "manage_automations" in user.permissions
+            assert "view_automations" in user.permissions
             assert user.auth_method == AuthMethod.LOCAL_API_KEY
             # Verify deterministic UUIDs
             expected_user_id = uuid.uuid5(uuid.NAMESPACE_DNS, "openhands-local-user")
@@ -1252,7 +1259,7 @@ class TestLocalApiKeyAuthentication:
         assert isinstance(user, AuthenticatedUser)
         assert user.email == "local@localhost"
         assert user.role == "admin"
-        assert user.permissions == ["manage_automations"]
+        assert user.permissions == ["view_automations", "manage_automations"]
         assert user.auth_method == AuthMethod.LOCAL_API_KEY
         assert user.api_key is None
 

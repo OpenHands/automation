@@ -7,7 +7,10 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    require_permission,
+)
 from openhands.automation.db import get_session
 from openhands.automation.logger import automation_logger
 from openhands.automation.models import TarballUpload, UploadStatus
@@ -20,6 +23,9 @@ from openhands.automation.utils import utcnow
 
 
 router = APIRouter(prefix="/v1/uploads", tags=["Uploads"])
+
+_require_view_automations = require_permission("view_automations")
+_require_manage_automations = require_permission("manage_automations")
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
@@ -111,7 +117,7 @@ async def create_upload(
     request: Request,
     name: str = Query(..., min_length=1, max_length=255),
     description: str | None = Query(default=None, max_length=2000),
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> UploadResponse:
@@ -220,7 +226,7 @@ async def list_uploads(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     status_filter: UploadStatus | None = Query(default=None, alias="status"),
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> UploadListResponse:
     """List uploads for the authenticated user.
@@ -257,7 +263,7 @@ async def list_uploads(
 @router.get("/{upload_id}")
 async def get_upload(
     upload_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> UploadResponse:
     """Get a single upload by ID."""
@@ -268,7 +274,7 @@ async def get_upload(
 @router.delete("/{upload_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_upload(
     upload_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> None:

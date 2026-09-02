@@ -136,14 +136,22 @@ def _automation_for_permission_tests(async_session):
 
 
 class TestPermissionEnforcement:
-    """Tests for require_permission on mutating endpoints."""
+    """Tests for permission enforcement on mutating endpoints.
+
+    With the split permission model, write endpoints on a specific automation
+    require either ``manage_automations`` (admins/owners) OR that the caller is
+    the automation's creator.  The ``readonly_client`` fixture is a member with
+    ``view_automations`` only, so it must be the *non-creator* to get a 403.
+    """
+
+    _OTHER_USER_ID = uuid.UUID("99999999-9999-9999-9999-999999999999")
 
     async def test_update_without_permission_returns_403(
         self, readonly_client, async_session
     ):
-        """PATCH returns 403 when user lacks manage_automations permission."""
+        """PATCH returns 403 when a non-creator member tries to update."""
         automation = Automation(
-            user_id=TEST_USER_ID,
+            user_id=self._OTHER_USER_ID,
             org_id=TEST_ORG_ID,
             name="Test",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
@@ -159,12 +167,51 @@ class TestPermissionEnforcement:
         )
 
         assert response.status_code == 403
-        assert "manage_automations" in response.json()["detail"]
+        assert "manage_automations" not in response.json()["detail"]
 
     async def test_delete_without_permission_returns_403(
         self, readonly_client, async_session
     ):
-        """DELETE returns 403 when user lacks manage_automations permission."""
+        """DELETE returns 403 when a non-creator member tries to delete."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 403
+        assert "manage_automations" not in response.json()["detail"]
+
+    async def test_update_as_creator_succeeds(self, readonly_client, async_session):
+        """A member who is the automation creator can update their own automation."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Updated by creator"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "Updated by creator"
+
+    async def test_delete_as_creator_succeeds(self, readonly_client, async_session):
+        """A member who is the automation creator can delete their own automation."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -178,8 +225,7 @@ class TestPermissionEnforcement:
 
         response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
 
-        assert response.status_code == 403
-        assert "manage_automations" in response.json()["detail"]
+        assert response.status_code == 204
 
 
 class TestCreateAutomation:
