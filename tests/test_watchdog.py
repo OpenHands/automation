@@ -708,6 +708,42 @@ async def test_watchdog_runs_local_workspace_purge_in_same_cycle(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_watchdog_forwards_shutdown_event_to_workspace_purge(monkeypatch):
+    """Without this the purge's own shutdown checks can never fire."""
+    shutdown_event = asyncio.Event()
+    seen = []
+
+    async def mark_stale(*_args):
+        return 0
+
+    async def prune_events(*_args):
+        return 0
+
+    async def purge_workspaces(*_args, **kwargs):
+        seen.append(kwargs.get("shutdown_event"))
+        shutdown_event.set()
+        return None
+
+    monkeypatch.setattr("openhands.automation.watchdog.mark_stale_runs", mark_stale)
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.prune_integration_events", prune_events
+    )
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.purge_terminal_workspaces", purge_workspaces
+    )
+
+    settings = Settings(
+        agent_server_url="http://localhost:3000",
+        watchdog_interval_seconds=60,
+        workspace_retention_seconds=3600,
+        workspace_base="/workspace",
+    )
+    await watchdog_loop(AsyncMock(), settings, shutdown_event)
+
+    assert seen == [shutdown_event]
+
+
+@pytest.mark.asyncio
 async def test_watchdog_carries_workspace_deferred_state_between_cycles(monkeypatch):
     """Workspace ordering state survives from one janitor cycle to the next."""
     shutdown_event = asyncio.Event()

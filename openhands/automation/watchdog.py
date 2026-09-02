@@ -69,6 +69,9 @@ PRUNE_BATCH_SIZE = 5000
 WORKSPACE_PURGE_BATCH_SIZE: Final[int] = 50
 WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR: Final[int] = 3
 
+# Roots already reported as missing, so the warning does not repeat every scan.
+_missing_root_warned: set[str] = set()
+
 
 async def _get_automation_keep_alive(
     session: AsyncSession, run: AutomationRun
@@ -604,26 +607,36 @@ def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
 
     try:
         if not runs_root.is_dir():
+            if str(runs_root) not in _missing_root_warned:
+                _missing_root_warned.add(str(runs_root))
+                # Silence here reads as "nothing to purge". When the agent
+                # server runs in its own container, workspace_base names a
+                # path this process cannot see and the purge never acts.
+                logger.warning(
+                    "Workspace retention is enabled but the configured root "
+                    "%s does not exist on this host; no workspace will be "
+                    "purged.",
+                    runs_root,
+                )
             return {}
-        resolved_root = runs_root.resolve(strict=True)
+        _missing_root_warned.discard(str(runs_root))
         candidates: list[tuple[UUID, float]] = []
         with os.scandir(runs_root) as entries:
             for entry in entries:
                 with suppress(OSError, ValueError):
-                    candidate_path = Path(entry.path)
-                    if entry.is_symlink() or _is_link_or_junction(candidate_path):
-                        continue
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
+                    # The name test costs no syscall, so it goes first: a root
+                    # holding a backlog is walked in full on every sweep.
                     run_id = UUID(entry.name)
                     if str(run_id) != entry.name:
                         continue
-                    resolved_path = candidate_path.resolve(strict=True)
-                    if (
-                        resolved_path.parent != resolved_root
-                        or not resolved_path.is_dir()
-                    ):
+                    if entry.is_symlink() or Path(entry.path).is_junction():
                         continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # No resolve() here. A non-link direct child of the root
+                    # always resolves back under it, and _delete_workspace
+                    # re-checks containment anyway, which is what closes the
+                    # scan-to-delete window.
                     mtime = entry.stat(follow_symlinks=False).st_mtime
                     candidates.append((run_id, mtime))
     except FileNotFoundError:
@@ -785,6 +798,7 @@ async def purge_terminal_workspaces(
 
     deleted = missing = refused = errors = bytes_freed = 0
     deferred_this_cycle: set[UUID] = set()
+    failed_this_cycle: set[UUID] = set()
     for run_id, root_mtime in ordered_candidates:
         if deleted >= batch_size:
             break
@@ -819,9 +833,11 @@ async def purge_terminal_workspaces(
             case DeleteOutcome.REFUSED:
                 refused += 1
                 deferred_this_cycle.add(run_id)
+                failed_this_cycle.add(run_id)
             case DeleteOutcome.ERROR:
                 errors += 1
                 deferred_this_cycle.add(run_id)
+                failed_this_cycle.add(run_id)
             case DeleteOutcome.DELETED:
                 deleted += 1
                 bytes_freed += delete_result.bytes_freed
@@ -839,7 +855,12 @@ async def purge_terminal_workspaces(
         deferred_last_cycle.intersection_update(candidates)
         deferred_last_cycle.update(deferred_this_cycle)
         if len(deferred_last_cycle) == len(candidates):
+            # A completed sweep restarts, but a workspace whose deletion just
+            # failed stays behind the fresh candidates. Promoting it back to
+            # the front would spend the next cycle re-attempting a directory
+            # that is already known to be undeletable.
             deferred_last_cycle.clear()
+            deferred_last_cycle.update(failed_this_cycle)
 
     result = PurgeResult(
         len(candidates), deleted, missing, refused, errors, bytes_freed
@@ -933,6 +954,7 @@ async def watchdog_loop(
                     session_factory=session_factory,
                     workspace_base=settings.workspace_base,
                     retention_seconds=settings.workspace_retention_seconds,
+                    shutdown_event=shutdown_event,
                     deferred_last_cycle=deferred_workspace_ids,
                 )
             except Exception:

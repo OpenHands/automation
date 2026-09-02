@@ -762,9 +762,7 @@ class TestPurgeTerminalWorkspaces:
         remaining = dict(candidates)
         eligible_id = candidate_ids[900]
         batch_size = 50
-        candidate_window_size = (
-            batch_size * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
-        )
+        candidate_window_size = batch_size * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
         cycle_bound = -(-len(candidates) // candidate_window_size)
 
         for run_id in candidate_ids:
@@ -788,9 +786,7 @@ class TestPurgeTerminalWorkspaces:
             remaining.pop(run_id)
             return watchdog.WorkspaceDeleteResult(watchdog.DeleteOutcome.DELETED, 0)
 
-        monkeypatch.setattr(
-            watchdog, "_scan_candidates", lambda _root: dict(remaining)
-        )
+        monkeypatch.setattr(watchdog, "_scan_candidates", lambda _root: dict(remaining))
         monkeypatch.setattr(watchdog, "_delete_workspace", delete_workspace)
 
         deferred_ids = set()
@@ -1291,3 +1287,36 @@ class TestPurgeLogging:
             for record in caplog.records
             if record.name == "automation.watchdog" and record.levelno >= logging.INFO
         ]
+
+
+def test_scan_warns_once_when_workspace_root_is_absent(tmp_path, caplog):
+    """A root this process cannot see must not fail silently every minute."""
+    missing_root = tmp_path / "automation-runs"
+    watchdog._missing_root_warned.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="automation.watchdog"):
+            assert _scan_candidates(missing_root) == {}
+            assert _scan_candidates(missing_root) == {}
+
+            warnings = [
+                record
+                for record in caplog.records
+                if "does not exist on this host" in record.getMessage()
+            ]
+            assert len(warnings) == 1
+            assert str(missing_root) in warnings[0].getMessage()
+
+            # A root that appears and disappears again is worth a fresh warning.
+            missing_root.mkdir()
+            assert _scan_candidates(missing_root) == {}
+            missing_root.rmdir()
+            assert _scan_candidates(missing_root) == {}
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "does not exist on this host" in record.getMessage()
+        ]
+        assert len(warnings) == 2
+    finally:
+        watchdog._missing_root_warned.clear()
