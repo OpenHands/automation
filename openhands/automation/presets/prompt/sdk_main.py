@@ -72,6 +72,7 @@ import inspect
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -128,8 +129,66 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
+# --- Live phase reporting (best-effort, never fatal) -------------------------
+# Keep this block in sync with presets/plugin/sdk_main.py.
+AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
+_PHASE_TOKEN = (
+    os.environ.get("AUTOMATION_CALLBACK_API_KEY")
+    or os.environ.get("OPENHANDS_API_KEY")
+    or ""
+)
+PHASE_POST_INTERVAL_SECONDS = 4.0
+
+
+def report_phase(message: str) -> None:
+    """POST a short progress phase to the automation service. Never raises."""
+    if not AUTOMATION_PHASE_URL or not _PHASE_TOKEN or not message:
+        return
+    try:
+        import httpx  # installed alongside the SDK by setup.sh
+
+        httpx.post(
+            AUTOMATION_PHASE_URL,
+            json={"phase": message[:200]},
+            headers={"Authorization": f"Bearer {_PHASE_TOKEN}"},
+            timeout=5.0,
+        )
+    except Exception:
+        pass  # phases are cosmetic; the run must never fail because of them
+
+
+def _redact_phase(text: str) -> str:
+    """Redact secrets from a phase; drop it entirely if redaction is missing."""
+    try:
+        from openhands.sdk.utils.redact import (
+            redact_api_key_literals,
+            redact_text_secrets,
+        )
+
+        return redact_api_key_literals(redact_text_secrets(text))
+    except Exception:
+        return ""
+
+
+# Latest pending live phase; a daemon thread posts it at most once per
+# interval so the conversation event thread never blocks on network I/O.
+# Deliberately unlocked: each key is a single reference read/write (atomic
+# under the GIL) and last-writer-wins is acceptable for cosmetic telemetry.
+_live_phase: dict = {"pending": None, "posted": None, "stop": False}
+
+
+def _phase_poster() -> None:
+    while not _live_phase["stop"]:
+        time.sleep(PHASE_POST_INTERVAL_SECONDS)
+        message = _live_phase["pending"]
+        if message and message != _live_phase["posted"]:
+            _live_phase["posted"] = message
+            report_phase(message)
+
+
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from finish_tool_hook import finish_tool_required_hook_config
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -158,6 +217,7 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -246,6 +306,7 @@ else:
 with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
+    report_phase("Setting up workspace")
 
     # Parse event payload if present (for event-triggered automations)
     event_context = None
@@ -268,6 +329,7 @@ with workspace_ctx as workspace:
         with open(REPOS_CONFIG_FILE) as f:
             repos_config = json.load(f)
         if repos_config:
+            report_phase("Cloning repositories")
             clone_result = workspace.clone_repos(repos_config)
             print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
             if clone_result.failed_repos:
@@ -278,6 +340,7 @@ with workspace_ctx as workspace:
     # Load ALL skills via workspace.load_skills_from_agent_server()
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
+    report_phase("Loading skills")
     loaded_skills, agent_context = workspace.load_skills_from_agent_server(
         project_dirs=repo_dirs if repo_dirs else None
     )
@@ -361,6 +424,7 @@ This automation was triggered by a webhook event:
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
+    report_phase("Configuring agent")
     # Keep finish-tool schema wiring in sync with presets/plugin/sdk_main.py.
     agent = get_default_agent(
         llm=llm,
@@ -391,6 +455,14 @@ This automation was triggered by a webhook event:
     def event_callback(event) -> None:
         received_events.append(event)
         last_event_time["ts"] = time.time()
+        # Surface the LLM-authored ~10-word action summary as a live phase.
+        # Name-based check keeps this resilient across SDK versions.
+        if type(event).__name__ == "ActionEvent":
+            summary = getattr(event, "summary", None)
+            if isinstance(summary, str) and summary.strip():
+                redacted = _redact_phase(" ".join(summary.split()))
+                if redacted:
+                    _live_phase["pending"] = redacted[:200]
 
     # Cloud workspaces supply richer automation tags (for example, whether the
     # trigger was cron or webhook). Only add fallback tags in local mode.
@@ -410,6 +482,7 @@ This automation was triggered by a webhook event:
         "agent": agent,
         "workspace": workspace,
         "callbacks": [event_callback],
+        "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags or None,
     }
@@ -447,6 +520,9 @@ This automation was triggered by a webhook event:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
+    report_phase("Agent is working on the task")
+    threading.Thread(target=_phase_poster, name="phase-poster", daemon=True).start()
+
     cost = None
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
@@ -471,6 +547,7 @@ This automation was triggered by a webhook event:
         print(f"  cost: {cost}")
         print(f"  events received: {len(received_events)}")
     finally:
+        _live_phase["stop"] = True
         try:
             conversation.close()
         except Exception as e:

@@ -144,6 +144,14 @@ class TestPresetFileSyntax:
             "setup.sh doesn't look like a valid shell script"
         )
 
+    def test_shared_finish_tool_hook_syntax(self):
+        """Verify shared finish-tool hook helper has valid Python syntax."""
+        helper_path = PRESETS_DIR / "finish_tool_hook.py"
+        assert helper_path.exists(), f"Preset file not found: {helper_path}"
+
+        source = helper_path.read_text()
+        compile(source, str(helper_path), "exec")
+
     def test_prompt_setup_sh_fetches_sdk_version_from_api(self):
         """Prompt setup.sh fetches SDK version from the automation service API."""
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
@@ -173,6 +181,32 @@ class TestPresetFileSyntax:
         assert "class TaskOutcome" not in content
         assert "finish_tool_response_schema=TaskOutcome" in content
         assert 'Tool(name="FinishTool"' not in content
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_requires_finish_tool_via_stop_hook(self, preset_name):
+        """Preset conversations nudge text-only endings to call FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        helper_content = (PRESETS_DIR / "finish_tool_hook.py").read_text()
+
+        assert (
+            "from finish_tool_hook import finish_tool_required_hook_config" in content
+        )
+        assert "def _finish_tool_marker_path(script_dir: str) -> str:" not in content
+        assert (
+            "def finish_tool_required_hook_config(script_dir: str) -> HookConfig:"
+            in helper_content
+        )
+        assert '".openhands_automation_runtime"' in helper_content
+        assert "session_start=[" in helper_content
+        assert "post_tool_use=[" in helper_content
+        assert 'matcher="/(?:finish|FinishTool)/"' in helper_content
+        assert "stop=[" in helper_content
+        assert "session_end=[" in helper_content
+        assert "shutil.rmtree" in helper_content
+        assert '"hook_config": finish_tool_required_hook_config(SCRIPT_DIR),' in content
+        assert "Please call the finish tool now" in helper_content
 
 
 class TestPresetEntrypoint:
@@ -350,6 +384,7 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -474,6 +509,7 @@ class TestReplacePromptInTarball:
         assert new_files["prompt.txt"].decode() == "New prompt"
         for name in (
             "main.py",
+            "finish_tool_hook.py",
             "setup.sh",
             "plugins_config.json",
             "repos_config.json",
@@ -676,6 +712,7 @@ class TestCreateAutomationFromPrompt:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
             assert "automation_model.py" not in tar.getnames()
@@ -1210,6 +1247,7 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -1661,6 +1699,7 @@ class TestExperimentTarball:
             assert "experiment_config.json" in names
             assert "plugins_config.json" not in names
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 
@@ -1799,6 +1838,7 @@ class TestCreateAutomationFromPlugin:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "plugins_config.json" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
