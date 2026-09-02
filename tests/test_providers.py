@@ -49,7 +49,6 @@ from openhands.automation.schemas import (
     CustomWebhookCreate,
     CustomWebhookUpdate,
 )
-from openhands.automation.subjects import github_subject
 from openhands.automation.utils.webhook import get_webhook_config
 
 
@@ -578,17 +577,6 @@ class TestProviderDescriptors:
             provider = get_provider(source)
             assert provider is not None
             assert provider.handshake is None
-
-    def test_only_github_names_a_subject(self):
-        """The others are not shut out; their triggers use `subject_key_expr`."""
-        github = get_provider("github")
-        assert github is not None
-        assert github.subject is github_subject
-
-        for source in sorted(BUILTIN_PROVIDER_SOURCES - {"github"}):
-            provider = get_provider(source)
-            assert provider is not None
-            assert provider.subject is None
 
     def test_descriptors_are_frozen(self):
         provider = get_provider("github")

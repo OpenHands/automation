@@ -36,7 +36,6 @@ from openhands.automation.models import (
 from openhands.automation.schemas import CreateAutomationRequest, EventTrigger
 from openhands.automation.subjects import (
     conversation_id_for,
-    github_subject,
     slack_subject,
 )
 from openhands.automation.utils.conversation_turn import compose_turn
@@ -101,6 +100,15 @@ def continuing_trigger(**overrides: Any) -> dict:
     }
     trigger.update(overrides)
     return trigger
+
+
+# What the schema tells a GitHub trigger to write. Asserted against the field
+# description below, so the two cannot drift apart.
+GITHUB_SUBJECT_EXPR = (
+    "(pull_request.number || issue.number || number) && "
+    "join('', [repository.full_name, '#', "
+    "to_string(pull_request.number || issue.number || number)])"
+)
 
 
 async def fetch_runs(session) -> list[AutomationRun]:
@@ -215,40 +223,58 @@ class TestSlackSubject:
         assert slack_subject(envelope) is None
 
 
-class TestGithubSubject:
-    def test_a_pull_request_keys_on_its_number(self):
-        subject = github_subject(
-            {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 12}}
+class TestDocumentedGithubExpression:
+    """GitHub has no built-in extractor; the docs carry the expression instead.
+
+    So the expression itself is what needs guarding. The `||` chain is the
+    fragile part: without it a pull request and the comments on it become two
+    subjects, and the only symptom is a thread that never continues.
+    """
+
+    def _key(self, payload: dict) -> str | None:
+        trigger = EventTrigger.model_validate(
+            continuing_trigger(source="github", on="issue_comment.created")
+            | {"subject_key_expr": GITHUB_SUBJECT_EXPR}
         )
-        assert subject == "org/repo#12"
+        return resolve_subject_key(trigger, payload, None)
+
+    def test_the_expression_is_the_one_we_document(self):
+        """A field description nobody can paste is worse than none."""
+        described = EventTrigger.model_fields["subject_key_expr"].description
+        assert described is not None
+        assert GITHUB_SUBJECT_EXPR in described
+
+    def test_a_pull_request_keys_on_its_number(self):
+        payload = {
+            "repository": {"full_name": "org/repo"},
+            "pull_request": {"number": 12},
+        }
+        assert self._key(payload) == "org/repo#12"
 
     def test_an_issue_comment_on_a_pr_is_the_same_subject(self):
         """GitHub numbers issues and pull requests from one sequence."""
-        review = github_subject(
-            {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 12}}
+        review = self._key(
+            {
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"number": 12},
+            }
         )
-        comment = github_subject(
+        comment = self._key(
             {"repository": {"full_name": "org/repo"}, "issue": {"number": 12}}
         )
-        assert review == comment
+        assert review == comment == "org/repo#12"
 
     def test_a_top_level_number_is_read(self):
-        subject = github_subject(
-            {"repository": {"full_name": "org/repo"}, "number": 12}
-        )
-        assert subject == "org/repo#12"
+        payload = {"repository": {"full_name": "org/repo"}, "number": 12}
+        assert self._key(payload) == "org/repo#12"
 
     def test_a_push_has_no_subject(self):
         """Nothing numbered, so nothing to continue."""
-        assert (
-            github_subject(
-                {"repository": {"full_name": "org/repo"}, "ref": "refs/heads/main"}
-            )
-            is None
-        )
-
-    def test_without_a_repository_there_is_no_subject(self):
-        assert github_subject({"issue": {"number": 12}}) is None
+        payload = {
+            "repository": {"full_name": "org/repo"},
+            "ref": "refs/heads/main",
+        }
+        assert self._key(payload) is None
 
 
 class TestResolveSubjectKey:
@@ -784,10 +810,65 @@ async def test_two_automations_do_not_share_one_subject(
 
 
 @pytest.mark.asyncio
-async def test_github_derives_its_subject_without_the_transport_naming_one(
+async def test_github_threads_on_the_documented_expression(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """The provider's extractor runs when the transport supplied no subject."""
+    """End to end on exactly the expression the schema tells people to write.
+
+    GitHub has no transport-supplied subject and no built-in extractor, so
+    this expression is the whole of its threading contract.
+    """
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment",
+            "destination": "continue_conversation",
+            "subject_key_expr": GITHUB_SUBJECT_EXPR,
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    payload = {
+        "repository": {"full_name": "OpenHands/automation"},
+        "issue": {"number": 362},
+    }
+
+    async def deliver(event_id: str):
+        return await accept_event(
+            org_id,
+            AcceptedEvent(
+                source="github",
+                event_key="issue_comment",
+                payload=payload,
+                provider_event_id=event_id,
+            ),
+            async_session,
+        )
+
+    first = await deliver("Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
+    second = await deliver("Ev2")
+
+    assert second.run_ids == []
+    assert second.conversation_ids == [
+        conversation_id_for(org_id, automation.id, "github", "OpenHands/automation#362")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_github_without_an_expression_does_not_thread(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """The cost of dropping the built-in extractor, pinned deliberately.
+
+    Nothing names a subject for GitHub any more, so a trigger that omits the
+    expression starts a run per event. That is a silent outcome, which is why
+    the expression is spelled out in the field description.
+    """
     automation = make_automation(
         org_id,
         mock_authenticated_user.user_id,
@@ -822,10 +903,9 @@ async def test_github_derives_its_subject_without_the_transport_naming_one(
     await start_run(async_session, uuid.UUID(first.run_ids[0]))
     second = await deliver("Ev2")
 
-    assert second.run_ids == []
-    assert second.conversation_ids == [
-        conversation_id_for(org_id, automation.id, "github", "OpenHands/automation#362")
-    ]
+    assert len(second.run_ids) == 1
+    assert second.conversation_ids == []
+    assert await subject_runs(async_session) == []
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,6 @@ from openhands.automation.filter_eval import (
     evaluate_expression,
 )
 from openhands.automation.models import AutomationRun, AutomationRunStatus
-from openhands.automation.providers import get_provider
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import EventSubject, conversation_id_for
 from openhands.automation.utils import utcnow
@@ -71,18 +70,6 @@ class ContinueResult:
         return self.conversation_id is None
 
 
-def event_subject(source: str, payload: dict[str, Any]) -> EventSubject | None:
-    """The subject a provider derives from a payload, if it has an extractor."""
-    provider = get_provider(source)
-    if provider is None or provider.subject is None:
-        return None
-    try:
-        return provider.subject(payload)
-    except Exception as exc:
-        logger.warning("Subject extractor for %s failed: %s", source, exc)
-        return None
-
-
 def resolve_subject_key(
     trigger: EventTrigger,
     payload: dict[str, Any],
@@ -90,11 +77,12 @@ def resolve_subject_key(
 ) -> str | None:
     """The key this event's siblings are grouped by, or None for a plain run.
 
-    A trigger's `subject_key_expr` wins over the provider's extractor.
+    A trigger's `subject_key_expr` wins over whatever the transport named,
+    which today is only the Slack socket reading its own envelope.
     """
     if trigger.subject_key_expr:
         return _key_from_expression(trigger.subject_key_expr, payload)
-    return _clean_key(subject, "provider") if subject is not None else None
+    return _clean_key(subject, "transport") if subject is not None else None
 
 
 def resolve_turn_text(

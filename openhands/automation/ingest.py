@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from openhands.automation.conversations import (
     CONTINUE_CONVERSATION,
     continue_conversation,
-    event_subject,
     resolve_subject_key,
     resolve_turn_text,
 )
@@ -168,11 +167,9 @@ async def accept_event(
     continuing = any(
         trigger.destination == CONTINUE_CONVERSATION for _, trigger in matched
     )
-    provider_subject = (
-        (event.subject or event_subject(source, webhook_payload))
-        if continuing
-        else None
-    )
+    # Only the transport can name a subject now; a trigger that wants one from
+    # any other source supplies `subject_key_expr`.
+    provider_subject = event.subject if continuing else None
 
     run_ids: list[str] = []
     conversation_ids: list[str] = []

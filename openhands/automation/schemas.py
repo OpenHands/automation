@@ -152,6 +152,19 @@ class EventTrigger(BaseModel):
      "destination": "continue_conversation"}
     ```
 
+    `subject_key_expr` names that subject. The Slack socket transport is the
+    only one that names it for you, because it reads the envelope itself;
+    every other source spells the expression out.
+
+    ```json
+    {"source": "github", "on": "issue_comment.created",
+     "destination": "continue_conversation",
+     "subject_key_expr":
+       "(pull_request.number || issue.number || number) && join('',
+          [repository.full_name, '#', to_string(
+            pull_request.number || issue.number || number)])"}
+    ```
+
     By default a delivered turn also wakes the agent. `wake_agent: false`
     appends it to the conversation and leaves it there, so the script decides
     when to act on what has accumulated.
@@ -201,9 +214,14 @@ class EventTrigger(BaseModel):
         default=None,
         description=(
             "JMESPath expression yielding the subject key events are grouped "
-            "by. Required for sources with no built-in subject, e.g. a Slack "
-            "webhook: join('/', [team_id, event.channel, event.thread_ts || "
-            "event.ts]). "
+            "by. Required unless the transport names the subject itself, "
+            "which only the Slack socket does. For GitHub: "
+            "(pull_request.number || issue.number || number) && join('', "
+            "[repository.full_name, '#', to_string(pull_request.number || "
+            "issue.number || number)]). "
+            "The fallback chain keeps a pull request and its comments on one "
+            "subject; the leading guard keeps an event with no number, such "
+            "as a push, from becoming the subject '<repo>#null'. "
             "Ignored unless destination is 'continue_conversation'."
         ),
     )

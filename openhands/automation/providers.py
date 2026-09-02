@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from openhands.automation.config import Settings
 from openhands.automation.event_schemas import WebhookEvent
-from openhands.automation.subjects import EventSubject, github_subject
 
 
 if TYPE_CHECKING:
@@ -36,7 +35,6 @@ SLACK_TIMESTAMP_HEADER: Final[str] = "X-Slack-Request-Timestamp"
 
 ParseFunc = Callable[[dict[str, Any]], WebhookEvent]
 SecretFunc = Callable[[Settings], str | None]
-SubjectFunc = Callable[[dict[str, Any]], EventSubject | None]
 HandshakeFunc = Callable[["Request"], "Response | None"]
 
 
@@ -81,10 +79,6 @@ class Provider:
     # None means the provider does not identify deliveries, so its events are
     # recorded but never deduplicated.
     event_id_header: str | None = None
-    # Names the external thing an event is about, for a
-    # `continue_conversation` trigger. None means such a trigger must supply
-    # its own `subject_key_expr`.
-    subject: SubjectFunc | None = None
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
     # HTTP handshake, and Socket Mode is our Slack path.
     handshake: HandshakeFunc | None = None
@@ -293,12 +287,11 @@ def _register_builtin_providers() -> None:
 
     # All forwarded by the OpenHands server, which signs with the single shared
     # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated. Only
-    # GitHub has a subject extractor; the others use `subject_key_expr`.
-    for source, parse, event_id_header, subject in (
-        ("bitbucket_data_center", parse_bitbucket_data_center_event, None, None),
-        ("github", parse_github_event_auto, "X-GitHub-Delivery", github_subject),
-        ("jira_dc", parse_jira_dc_event, None, None),
+    # deliveries; the other two are recorded without being deduplicated.
+    for source, parse, event_id_header in (
+        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
+        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
+        ("jira_dc", parse_jira_dc_event, None),
     ):
         register_provider(
             Provider(
@@ -306,7 +299,6 @@ def _register_builtin_providers() -> None:
                 parse=parse,
                 secret_from_settings=lambda s: s.webhook_secret or None,
                 event_id_header=event_id_header,
-                subject=subject,
             )
         )
 
