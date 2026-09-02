@@ -24,6 +24,7 @@ from openhands.automation.models import AutomationRun, AutomationRunStatus
 from openhands.automation.providers import get_provider
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import EventSubject, conversation_id_for
+from openhands.automation.utils import utcnow
 from openhands.automation.utils.conversation_turn import (
     compose_turn,
     send_conversation_turn,
@@ -201,7 +202,8 @@ async def _lock_subject_run(
 
     A run that has not started is included on purpose: it already owns the
     subject and will open the derived conversation, so a second run here
-    would be the duplicate.
+    would be the duplicate. A released run is excluded: it keeps its
+    `subject_key` for the record but no longer routes.
 
     Eager-loads the automation because minting a cloud API key reads
     `run.automation`, and a lazy load raises MissingGreenlet -- which
@@ -212,6 +214,7 @@ async def _lock_subject_run(
         .where(
             AutomationRun.automation_id == automation_id,
             AutomationRun.subject_key == subject_key,
+            AutomationRun.subject_released_at.is_(None),
         )
         .order_by(AutomationRun.created_at.desc())
         .limit(1)
@@ -293,10 +296,10 @@ async def continue_conversation(
         run, conversation_id, turn, wake_agent=wake_agent
     )
     if not delivered:
-        # Only forget a finished run: one still going may not have recorded
-        # its sandbox yet, and clearing it would orphan the subject.
+        # Only release a finished run: one still going may not have recorded
+        # its sandbox yet, and releasing it would orphan the subject.
         if run.status in _FINISHED:
-            run.subject_key = None
+            run.subject_released_at = utcnow()
         return ContinueResult()
 
     return ContinueResult(conversation_id=conversation_id)

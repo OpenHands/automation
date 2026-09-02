@@ -37,6 +37,13 @@ TURN_TIMEOUT_SECONDS: Final[int] = 15
 RESUME_WAIT_SECONDS: Final[int] = 20
 RESUME_POLL_SECONDS: Final[int] = 2
 
+# The sandbox answers before the script has opened the derived conversation, so
+# an append landing in that gap 404s. Waiting it out is what stops a follow-up
+# arriving mid-startup from forking a second run. Only a run that has not
+# finished can still be opening it.
+CONVERSATION_WAIT_SECONDS: Final[int] = 10
+CONVERSATION_POLL_SECONDS: Final[int] = 2
+
 
 # Where a human-authored message sits in a payload, most specific first.
 # `turn_text_expr` covers whatever these miss.
@@ -246,17 +253,30 @@ async def send_conversation_turn(
                 return False
 
             agent_url, session_key = resolved
-            response = await client.post(
-                f"{agent_url.rstrip('/')}/api/conversations/{conversation_id}/events",
-                json={
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                    # False leaves the message in history unanswered. It does
-                    # not stop a loop that is already running from reading it.
-                    "run": wake_agent,
-                },
-                headers={"X-Session-API-Key": session_key},
+            deadline = time.monotonic() + (
+                CONVERSATION_WAIT_SECONDS if run.completed_at is None else 0
             )
+            while True:
+                response = await client.post(
+                    f"{agent_url.rstrip('/')}/api/conversations/"
+                    f"{conversation_id}/events",
+                    json={
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}],
+                        # False leaves the message in history unanswered. It
+                        # does not stop a loop already running from reading it.
+                        "run": wake_agent,
+                    },
+                    headers={"X-Session-API-Key": session_key},
+                )
+                if response.status_code != 404 or time.monotonic() >= deadline:
+                    break
+                logger.info(
+                    "Conversation %s is not open yet; waiting for it",
+                    conversation_id,
+                    extra=extra,
+                )
+                await asyncio.sleep(CONVERSATION_POLL_SECONDS)
             response.raise_for_status()
     except Exception as exc:
         logger.info(

@@ -14,6 +14,7 @@ from pydantic import (
     Tag,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -451,6 +452,28 @@ class CreateAutomationRequest(BaseModel):
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
+
+    @model_validator(mode="after")
+    def keep_alive_for_continued_conversations(self) -> "CreateAutomationRequest":
+        """A continued conversation outlives its run, so its sandbox must too.
+
+        Settling this at creation keeps the cleanup paths checking `keep_alive`
+        alone, rather than every deletion site re-deriving that a run holding a
+        subject is implicitly kept.
+        """
+        trigger = self.trigger
+        if not isinstance(trigger, EventTrigger):
+            return self
+        if trigger.destination != "continue_conversation":
+            return self
+        if self.keep_alive is False:
+            raise ValueError(
+                "keep_alive cannot be false when destination is "
+                "'continue_conversation': deleting the sandbox would destroy "
+                "the conversation the next event continues"
+            )
+        self.keep_alive = True
+        return self
 
 
 class UpdateAutomationRequest(BaseModel):

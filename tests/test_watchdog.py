@@ -670,17 +670,17 @@ class TestPruneIntegrationEvents:
 class TestSubjectOwningRunsKeepTheirSandbox:
     """A `continue_conversation` run's sandbox holds the live conversation.
 
-    `complete_run` already refuses to delete it. The watchdog is the other way
-    a run reaches a terminal state -- a lost completion callback is the
-    ordinary reason -- and deleting it there loses the thread just as
-    thoroughly.
+    Creation forces `keep_alive` on such an automation, so the hold is the
+    ordinary keep_alive one. The watchdog is the other way a run reaches a
+    terminal state -- a lost completion callback is the ordinary reason -- and
+    deleting the sandbox there loses the thread just as thoroughly.
     """
 
-    def test_the_helper_holds_a_subject_owning_sandbox(self):
+    def test_the_helper_holds_a_kept_sandbox(self):
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = "T06P212QSEA/C123/1755000000.000100"
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is False
+        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=True) is False
 
     def test_an_ordinary_run_is_still_cleaned_up(self):
         run = MagicMock(spec=AutomationRun)
@@ -697,6 +697,8 @@ class TestSubjectOwningRunsKeepTheirSandbox:
         async with async_session_factory() as session:
             run = await session.get(AutomationRun, run_id)
             run.subject_key = "T06P212QSEA/C123/1755000000.000100"
+            automation = await session.get(Automation, run.automation_id)
+            automation.keep_alive = True
             await session.commit()
 
         mock_backend = _create_mock_backend(
@@ -717,4 +719,7 @@ class TestSubjectOwningRunsKeepTheirSandbox:
         async with async_session_factory() as session:
             run = await session.get(AutomationRun, run_id)
             assert run.status == AutomationRunStatus.COMPLETED
+            # The key stays on the row: it is the record of what this run was
+            # about, and nothing has released it.
             assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
+            assert run.subject_released_at is None

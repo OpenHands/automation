@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
@@ -32,7 +33,7 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
 )
-from openhands.automation.schemas import EventTrigger
+from openhands.automation.schemas import CreateAutomationRequest, EventTrigger
 from openhands.automation.subjects import (
     conversation_id_for,
     github_subject,
@@ -83,6 +84,11 @@ def make_automation(
         trigger=trigger,
         tarball_path="s3://bucket/code.tar.gz",
         entrypoint="uv run script.py",
+        # What CreateAutomationRequest forces for a continuing trigger, so the
+        # rows here match the ones the API can actually produce.
+        keep_alive=(
+            True if trigger.get("destination") == "continue_conversation" else None
+        ),
     )
 
 
@@ -103,9 +109,16 @@ async def fetch_runs(session) -> list[AutomationRun]:
 
 
 async def subject_runs(session) -> list[AutomationRun]:
-    """Runs that own a subject -- the only thing this feature stores."""
+    """Runs still routing for a subject -- the only thing this feature stores.
+
+    A released run keeps its key for the record, so it is excluded here for
+    the same reason the lookup excludes it.
+    """
     result = await session.execute(
-        select(AutomationRun).where(AutomationRun.subject_key.isnot(None))
+        select(AutomationRun).where(
+            AutomationRun.subject_key.isnot(None),
+            AutomationRun.subject_released_at.is_(None),
+        )
     )
     return list(result.scalars().all())
 
@@ -701,9 +714,12 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
     assert second.conversation_ids == []
 
     # The dead run no longer answers for the subject, so later events do not
-    # pay the timeout to rediscover it. The new run owns it instead.
+    # pay the timeout to rediscover it. The new run owns it instead. Its key
+    # survives as the record of what it was about.
     dead_run = await async_session.get(AutomationRun, dead_run_id)
-    assert dead_run is not None and dead_run.subject_key is None
+    assert dead_run is not None
+    assert dead_run.subject_key == f"{TEAM}/C123/1755000000.000100"
+    assert dead_run.subject_released_at is not None
     owners = await subject_runs(async_session)
     assert [str(run.id) for run in owners] == second.run_ids
 
@@ -1320,3 +1336,58 @@ def test_a_boolean_turn_text_expr_falls_back_rather_than_sending_true():
     payload = {"comment": {"body": "the real message"}}
 
     assert resolve_turn_text(trigger, payload) is None
+
+
+def _create_body(**overrides: Any) -> dict:
+    body = {
+        "name": "Threaded",
+        "trigger": continuing_trigger(),
+        "tarball_path": "s3://bucket/code.tar.gz",
+        "entrypoint": "uv run script.py",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_a_continuing_automation_cannot_opt_out_of_keep_alive():
+    """Deleting the sandbox would destroy the conversation it continues."""
+    with pytest.raises(ValidationError) as caught:
+        CreateAutomationRequest(**_create_body(keep_alive=False))
+
+    assert "continue_conversation" in str(caught.value)
+
+
+def test_a_continuing_automation_is_kept_alive_by_default():
+    """Settled once, at creation, so the cleanup paths read `keep_alive` alone."""
+    assert CreateAutomationRequest(**_create_body()).keep_alive is True
+
+
+def test_an_ordinary_automation_keeps_its_own_keep_alive():
+    """The rule is scoped to triggers that continue a conversation."""
+    body = _create_body(
+        trigger={"type": "event", "source": "slack", "on": "app_mention"},
+        keep_alive=False,
+    )
+    assert CreateAutomationRequest(**body).keep_alive is False
+
+
+@pytest.mark.asyncio
+async def test_an_update_cannot_opt_a_continuing_automation_out(
+    async_client, async_session, mock_authenticated_user
+):
+    """Either half of the pair can arrive alone, so the merged view decides."""
+    automation = make_automation(
+        mock_authenticated_user.org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(),
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{automation.id}",
+        json={"keep_alive": False},
+    )
+
+    assert response.status_code == 400
+    assert "continue_conversation" in response.json()["detail"]

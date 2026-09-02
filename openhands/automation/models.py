@@ -204,6 +204,13 @@ class AutomationRun(Base):
     # sandbox holding the conversation; the conversation id itself is derived.
     subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # When this run stopped being the subject's routing target -- its sandbox
+    # was deleted, or a turn could not reach it. The key itself stays for the
+    # historical record, so lookups filter on this instead of on its absence.
+    subject_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
@@ -251,14 +258,16 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
-        # Partial: only `continue_conversation` runs set a subject.
+        # Partial: only live subjects are ever looked up, and only
+        # `continue_conversation` runs set one.
         Index(
             "ix_automation_runs_subject",
             "automation_id",
             "subject_key",
             "created_at",
-            postgresql_where=(subject_key.isnot(None)),
-            sqlite_where=(subject_key.isnot(None)),
+            postgresql_where=(subject_key.isnot(None))
+            & (subject_released_at.is_(None)),
+            sqlite_where=(subject_key.isnot(None)) & (subject_released_at.is_(None)),
         ),
     )
 

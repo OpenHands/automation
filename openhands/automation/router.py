@@ -229,6 +229,23 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    # Same rule CreateAutomationRequest enforces, applied to the merged view:
+    # either half of the pair can arrive alone in a partial update.
+    trigger = update_data.get("trigger") or auto.trigger or {}
+    if trigger.get("destination") == "continue_conversation":
+        keep_alive = update_data.get("keep_alive", auto.keep_alive)
+        if keep_alive is False:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "keep_alive cannot be false when destination is "
+                    "'continue_conversation': deleting the sandbox would "
+                    "destroy the conversation the next event continues"
+                ),
+            )
+        if keep_alive is not True:
+            update_data["keep_alive"] = True
+
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
     if update_data.get("enabled") is True:
@@ -655,10 +672,10 @@ async def complete_run(
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
     #
-    # A run owning a subject is treated like keep_alive: deleting its sandbox
-    # would destroy the conversation the next event continues. The runtime TTL
-    # reaper still collects it.
-    if run.sandbox_id and automation.keep_alive is not True and not run.subject_key:
+    # A `continue_conversation` automation is forced keep_alive at creation, so
+    # deleting the sandbox out from under its conversation is already excluded
+    # here without a second condition.
+    if run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
         from openhands.automation.config import get_settings
 
@@ -819,11 +836,12 @@ async def cancel_run(
 
     # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
     # unlike `complete_run` the sandbox goes even when the run owns a subject
-    # -- but the subject goes with it, or the next event would pick this run
-    # and pay a lookup for a sandbox we just deleted.
+    # -- but the subject is released with it, or the next event would pick this
+    # run and pay a lookup for a sandbox we just deleted. The key stays on the
+    # row as the record of what this run was about.
     if run.sandbox_id:
-        if run.subject_key:
-            run.subject_key = None
+        if run.subject_key and run.subject_released_at is None:
+            run.subject_released_at = utcnow()
             await session.commit()
 
         from openhands.automation.config import get_settings

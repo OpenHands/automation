@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from openhands.automation.models import AutomationRun
-from openhands.automation.utils import conversation_turn as turn_module
+from openhands.automation.utils import conversation_turn as turn_module, utcnow
 from openhands.automation.utils.conversation_turn import (
     compose_turn,
     send_conversation_turn,
@@ -48,8 +48,15 @@ def cloud_backend():
     return FakeBackend()
 
 
-def make_run(sandbox_id: str | None = None) -> AutomationRun:
-    return cast(AutomationRun, SimpleNamespace(id="run-1", sandbox_id=sandbox_id))
+def make_run(sandbox_id: str | None = None, *, finished: bool = False) -> AutomationRun:
+    return cast(
+        AutomationRun,
+        SimpleNamespace(
+            id="run-1",
+            sandbox_id=sandbox_id,
+            completed_at=utcnow() if finished else None,
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -225,13 +232,59 @@ async def test_a_resume_that_never_comes_back_gives_up(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_missing_conversation_is_a_false(monkeypatch):
+    """A finished run's conversation is gone for good; do not wait on it."""
+    calls = 0
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(404, json={"detail": "Item not found"})
 
     monkeypatch.setattr(turn_module, "get_backend", lambda run: local_backend())
     monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
 
-    assert await send_conversation_turn(make_run(), "conv-gone", "hi") is False
+    run = make_run(finished=True)
+    assert await send_conversation_turn(run, "conv-gone", "hi") is False
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_still_opening_is_waited_for(monkeypatch):
+    """The sandbox answers before the script has opened the conversation.
+
+    Giving up on that 404 is what forked a second run for an event arriving
+    mid-startup, so the append is retried while the run is still going.
+    """
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(404, json={"detail": "Item not found"})
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(turn_module, "get_backend", lambda run: local_backend())
+    monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+    monkeypatch.setattr(turn_module, "CONVERSATION_POLL_SECONDS", 0)
+
+    assert await send_conversation_turn(make_run(), "conv-1", "hi") is True
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_a_conversation_is_bounded(monkeypatch):
+    """A conversation that never opens still degrades to a run."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Item not found"})
+
+    monkeypatch.setattr(turn_module, "get_backend", lambda run: local_backend())
+    monkeypatch.setattr(turn_module, "httpx", fake_httpx(handler))
+    monkeypatch.setattr(turn_module, "CONVERSATION_POLL_SECONDS", 0)
+    monkeypatch.setattr(turn_module, "CONVERSATION_WAIT_SECONDS", 0)
+
+    assert await send_conversation_turn(make_run(), "conv-1", "hi") is False
 
 
 @pytest.mark.asyncio
