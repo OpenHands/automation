@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
-    # Watchdog: marks stale RUNNING runs as FAILED
+    # Watchdog: marks stale RUNNING runs as FAILED and runs periodic janitors
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
@@ -216,17 +216,17 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    background_tasks = [
+    shutdown_tasks: list[tuple[str, asyncio.Task]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
     ]
     if git_sync_task is not None:
-        background_tasks.append(("git_sync", git_sync_task))
+        shutdown_tasks.append(("git_sync", git_sync_task))
     if streams_task is not None:
-        background_tasks.append(("streams", streams_task))
+        shutdown_tasks.append(("streams", streams_task))
 
-    for task_name, task in background_tasks:
+    for task_name, task in shutdown_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
