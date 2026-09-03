@@ -423,7 +423,7 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
             org_id=uuid.uuid4(),
             email="local@example.com",
             role="admin",
-            permissions=["manage_automations"],
+            permissions=["view_automations", "manage_automations"],
             auth_method=AuthMethod.LOCAL_API_KEY,
         )
 
@@ -472,7 +472,7 @@ async def test_telemetry_consent_route_rejects_cloud_mode(monkeypatch):
             org_id=uuid.uuid4(),
             email="cloud@example.com",
             role="admin",
-            permissions=["manage_automations"],
+            permissions=["view_automations", "manage_automations"],
             auth_method=AuthMethod.API_KEY,
         )
 
@@ -590,7 +590,7 @@ async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
         org_id=uuid.uuid4(),
         email="user@example.com",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.API_KEY,
     )
     request.state.authenticated_user = user
@@ -650,7 +650,7 @@ async def test_capture_api_route_event_in_local_mode_omits_cloud_identity(
         org_id=uuid.uuid4(),
         email="local@example.com",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.LOCAL_API_KEY,
     )
 

@@ -84,7 +84,31 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
+_require_view_automations = require_permission("view_automations")
 _require_manage_automations = require_permission("manage_automations")
+
+
+async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
+    """Authorize a write operation on a specific automation.
+
+    Admins and owners carry ``manage_automations`` and are always allowed.
+    A member (view-only) is allowed only when they are the creator of the
+    automation being modified — the ticket calls this the "creator escape
+    hatch."  ``require_permission`` can't express this because it has no
+    access to the automation row, so the check lives here in the handler
+    path instead of in the dependency.
+
+    Callers must have already passed a ``view_automations`` dependency so
+    the user is at least a member of the org.
+    """
+    if "manage_automations" in user.permissions:
+        return
+    if automation.user_id == user.user_id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only admins, owners, or the automation creator can modify it",
+    )
 
 
 # --- CRUD ---
@@ -114,7 +138,7 @@ async def create_automation(
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
@@ -171,12 +195,11 @@ async def create_automation(
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the authenticated user (excludes soft-deleted)."""
+    """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
-        Automation.user_id == user.user_id,
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
@@ -200,11 +223,11 @@ async def list_automations(
 @router.get("/{automation_id}")
 async def get_automation(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     return AutomationResponse.model_validate(auto)
 
 
@@ -214,7 +237,7 @@ async def update_automation(
     body: UpdateAutomationRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     # Function scope commits the session when the handler returns, BEFORE the
     # response is sent and its background tasks run. With the default request
     # scope the deferred tarball delete would run before the commit, and a
@@ -223,7 +246,8 @@ async def update_automation(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
     # Handle trigger field mapping (only if trigger has a real value)
@@ -307,11 +331,12 @@ async def update_automation(
 async def delete_automation(
     automation_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft delete an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
     deleted_at = utcnow()
@@ -349,7 +374,7 @@ async def delete_automation(
 @router.get("/{automation_id}/tarball")
 async def download_automation_tarball(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> Response:
@@ -361,7 +386,7 @@ async def download_automation_tarball(
     - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
     - 404 if the automation has no accessible tarball.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -420,7 +445,7 @@ async def download_automation_tarball(
 async def dispatch_automation(
     automation_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Manually dispatch an automation run.
@@ -428,7 +453,8 @@ async def dispatch_automation(
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
     if not auto.enabled:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -464,15 +490,15 @@ async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
     Returns runs ordered by creation time (latest first), with pagination.
     """
-    # Verify the automation exists and belongs to the user
-    await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    # Verify the automation exists and belongs to the caller's org
+    await _get_org_automation(session, automation_id, user.org_id)
 
     # Count lifetime runs by status for this automation
     count_result = await session.execute(
@@ -508,7 +534,7 @@ async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
@@ -694,7 +720,7 @@ async def complete_run(
 async def report_run_phase(
     run_id: uuid.UUID,
     body: RunPhaseRequest,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Record a live progress phase reported from inside the sandbox.
@@ -747,7 +773,7 @@ async def report_run_phase(
 async def cancel_run(
     run_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Cancel a pending or running automation run.
@@ -766,8 +792,9 @@ async def cancel_run(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     automation = run.automation
-    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+    if automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+    await _assert_can_manage(automation, user)
 
     # Only PENDING and RUNNING runs can be cancelled
     if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
@@ -847,17 +874,15 @@ async def cancel_run(
 # --- Helpers ---
 
 
-async def _get_user_automation(
+async def _get_org_automation(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
 ) -> Automation:
-    """Fetch a non-deleted automation, ensuring it belongs to the given user and org."""
+    """Fetch a non-deleted automation in the caller's org."""
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
-            Automation.user_id == user_id,
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
         )

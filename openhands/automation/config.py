@@ -43,13 +43,14 @@ different values, use monkeypatching or reload the affected modules.
 """
 
 import os
+import uuid
 import warnings
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -402,6 +403,51 @@ class GitSyncSettings(BaseSettings):
         return bool(self.git_sync_repo_url and self.git_sync_enabled)
 
 
+class SlackAppSettings(BaseModel):
+    """One Slack app this deployment holds a Socket Mode connection for.
+
+    `team_id` and `bot_user_id` are asserted against `auth.test` before the
+    socket opens, so a mis-pasted token fails loudly instead of silently
+    bridging the wrong workspace into this organization.
+    """
+
+    org_id: uuid.UUID
+    # App-level token (xapp-), which opens the socket.
+    app_token: str
+    # Bot token (xoxb-), used only to assert identity at startup.
+    bot_token: str
+    team_id: str
+    bot_user_id: str
+
+
+class StreamSettings(BaseSettings):
+    """Stream sources: long-lived inbound connections, supervised in-process.
+
+    Configuring an app is what turns this on: `enabled` needs a source too, so
+    a deployment that sets no `AUTOMATION_SLACK_APPS` starts nothing either
+    way. Still self-hosted only, for two independent reasons: Slack does not
+    allow Socket Mode apps in the public Marketplace, and connection-scoped
+    state does not fit a stateless autoscaled tier. Webhooks remain the cloud
+    path.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_STREAMS_ENABLED: Kill switch (default: true). Set it false
+            to keep the supervisor down while the apps stay configured.
+        AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
+            {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
+    """
+
+    streams_enabled: bool = True
+    slack_apps: list[SlackAppSettings] = Field(default_factory=list)
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether to start the supervisor: a source is configured, not killed."""
+        return bool(self.streams_enabled and self.slack_apps)
+
+
 # ---------------------------------------------------------------------------
 # ServiceSettings - Core service configuration (formerly "Settings")
 # ---------------------------------------------------------------------------
@@ -457,6 +503,10 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_WINDOW_HOURS: The rule only fires
             if nothing has succeeded in this many hours, which is what makes it
             ignore provider outages shorter than the window (default: 24)
+
+        # Workspace retention (local mode only)
+        AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
+            for terminal runs older than this (default: 604800 — 7 days).
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
@@ -553,6 +603,10 @@ class ServiceSettings(BaseSettings):
     # exceed any outage you would rather ride out than pause for.
     consecutive_failure_disable_threshold: int | None = None
     consecutive_failure_disable_window_hours: float = 24.0
+
+    # Workspace retention for local mode
+    # Set to 0 to disable workspace purging.
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable
@@ -661,6 +715,7 @@ class AppConfig:
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
         git_sync: Git sync settings (repo, branch, credentials)
+        streams: Stream source settings (Slack Socket Mode)
 
     Example:
         config = get_config()
@@ -705,6 +760,11 @@ class AppConfig:
     def git_sync(self) -> GitSyncSettings:
         """Git sync configuration (AUTOMATION_ prefix)."""
         return GitSyncSettings()
+
+    @cached_property
+    def streams(self) -> StreamSettings:
+        """Stream source configuration (AUTOMATION_ prefix)."""
+        return StreamSettings()
 
 
 @lru_cache

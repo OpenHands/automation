@@ -184,6 +184,7 @@ def _phase_poster() -> None:
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from finish_tool_hook import finish_tool_required_hook_config
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -213,6 +214,7 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -527,6 +529,7 @@ This automation was triggered by a webhook event:
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
         "callbacks": [event_callback],
+        "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags,
     }

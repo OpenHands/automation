@@ -31,6 +31,7 @@ from openhands.automation.middleware import (
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
@@ -151,7 +152,7 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
-    # Watchdog: marks stale RUNNING runs as FAILED
+    # Watchdog: marks stale RUNNING runs as FAILED and runs periodic janitors
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
@@ -195,6 +196,19 @@ async def lifespan(app: FastAPI):
         app.state.git_sync_task = git_sync_task
         logger.info("Background git sync started")
 
+    # Stream sources: long-lived inbound connections (Slack Socket Mode),
+    # one supervised task each. Starts only once an app is configured.
+    streams_task = None
+    if config.streams.enabled:
+        streams_task = asyncio.create_task(
+            stream_supervisor_loop(
+                app.state.session_factory,
+                shutdown_event=shutdown_event,
+            )
+        )
+        app.state.streams_task = streams_task
+        logger.info("Background stream supervisor started")
+
     yield
 
     # Shutdown
@@ -202,15 +216,17 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    background_tasks = [
+    shutdown_tasks: list[tuple[str, asyncio.Task]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
     ]
     if git_sync_task is not None:
-        background_tasks.append(("git_sync", git_sync_task))
+        shutdown_tasks.append(("git_sync", git_sync_task))
+    if streams_task is not None:
+        shutdown_tasks.append(("streams", streams_task))
 
-    for task_name, task in background_tasks:
+    for task_name, task in shutdown_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
@@ -245,7 +261,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.9.0",  # x-release-please-version
+        version="1.10.0",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",

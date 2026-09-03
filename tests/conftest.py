@@ -99,7 +99,7 @@ def mock_authenticated_user():
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
         email="test@example.com",
         role="owner",
-        permissions=["view_org_settings", "manage_automations"],
+        permissions=["view_org_settings", "view_automations", "manage_automations"],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )
@@ -115,7 +115,7 @@ def mock_readonly_user():
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
         email="test@example.com",
         role="member",
-        permissions=["view_org_settings"],
+        permissions=["view_org_settings", "view_automations"],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )

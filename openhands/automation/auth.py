@@ -39,6 +39,7 @@ logger = logging.getLogger("automation.auth")
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
 SESSION_COOKIE_NAME = "keycloak_auth"
+X_ORG_ID_HEADER = "X-Org-Id"
 # Keep parity with OpenHands' cookie chunking helper: 8 * 3000 bytes is
 # comfortably above expected session token sizes while staying bounded.
 MAX_SESSION_COOKIE_CHUNKS = 8
@@ -185,9 +186,27 @@ def clear_auth_cache() -> None:
     _get_auth_cache().clear()
 
 
-def _credential_cache_key(credential: str) -> str:
-    """Hash a credential for use as a cache key (never store raw credential)."""
-    return hashlib.sha256(credential.encode()).hexdigest()
+def _credential_cache_key(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> str:
+    """Hash auth scope for use as a cache key (never store raw credentials)."""
+    cache_material = "\0".join((auth_method.value, x_org_id or "", credential))
+    return hashlib.sha256(cache_material.encode()).hexdigest()
+
+
+def _extract_x_org_id(request: Request) -> str | None:
+    """Extract and normalize the optional organization scope header."""
+    header_value = request.headers.get(X_ORG_ID_HEADER, "").strip()
+    if not header_value:
+        return None
+
+    try:
+        return str(uuid.UUID(header_value))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Org-Id header (must be a UUID)",
+        ) from exc
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
@@ -276,7 +295,7 @@ def _get_local_user() -> AuthenticatedUser:
         org_id=local_org_id,
         email="local@localhost",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.LOCAL_API_KEY,
         api_key=None,
     )
@@ -446,9 +465,10 @@ async def authenticate_request(
 
     # --- Resolve credential (API key or cookie) ---
     credential, auth_method = _extract_credential(request)
+    x_org_id = _extract_x_org_id(request)
 
     # --- Cache lookup ---
-    cache_key = _credential_cache_key(credential)
+    cache_key = _credential_cache_key(credential, auth_method, x_org_id)
     auth_cache = _get_auth_cache()
     cached_user = auth_cache.get(cache_key)
     if cached_user is not None:
@@ -462,6 +482,8 @@ async def authenticate_request(
         if auth_method == AuthMethod.API_KEY
         else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
     )
+    if x_org_id:
+        outbound_headers[X_ORG_ID_HEADER] = x_org_id
 
     try:
         resp = await _make_auth_request_with_retry(

@@ -2,6 +2,8 @@
 
 import warnings
 
+import pytest
+
 from openhands.automation.config import (
     HttpSettings,
     LogSettings,
@@ -318,6 +320,26 @@ class TestLocalModeSettings:
         assert settings.agent_server_api_key == "local-key"
         assert settings.workspace_base == "/my/workspace"
         assert settings.db_url == "sqlite+aiosqlite:////data/automations.db"
+
+    def test_workspace_retention_default(self):
+        settings = Settings()
+
+        assert settings.workspace_retention_seconds == 7 * 24 * 60 * 60
+
+    def test_zero_workspace_retention_is_disabled_value(self):
+        settings = Settings(workspace_retention_seconds=0)
+
+        assert settings.workspace_retention_seconds == 0
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("workspace_retention_seconds", -1),
+        ],
+    )
+    def test_workspace_retention_rejects_invalid_limits(self, field, value):
+        with pytest.raises(ValueError):
+            Settings(**{field: value})
 
     def test_local_mode_from_env(self, monkeypatch):
         """Local mode settings are loaded from environment variables."""
