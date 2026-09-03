@@ -498,6 +498,10 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
             auto-disabling an automation (default: 3, <=0 disables auto-disable)
 
+        # Workspace retention (local mode only)
+        AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
+            for terminal runs older than this (default: 604800 — 7 days).
+
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
         AUTOMATION_API_MAX_PAGE_SIZE: Max page size (default: 100)
@@ -581,6 +585,10 @@ class ServiceSettings(BaseSettings):
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
     failure_disable_threshold: int = 3
+
+    # Workspace retention for local mode
+    # Set to 0 to disable workspace purging.
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable
