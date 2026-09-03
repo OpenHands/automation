@@ -207,6 +207,37 @@ def _conversation_supports_user_id() -> bool:
         return False
 
 
+def _conversation_supports_observability() -> bool:
+    try:
+        params = inspect.signature(Conversation.__new__).parameters
+        return "observability_metadata" in params and "observability_tags" in params
+    except (TypeError, ValueError):
+        return False
+
+
+def _build_observability_context(event_context, automation_run_id):
+    """Trace metadata and span tags marking this conversation as automation-run.
+
+    Uses the same ``trigger`` metadata key and ``trigger:<value>`` tag as the
+    app-server's observability context so Laminar queries can split automation
+    vs. UI-driven conversations uniformly.
+    """
+    metadata = {"trigger": "automation"}
+    tags = ["trigger:automation"]
+    if isinstance(event_context, dict):
+        trigger_type = event_context.get("trigger")
+        if trigger_type:
+            metadata["automation_trigger"] = trigger_type
+            tags.append(f"automation_trigger:{trigger_type}")
+        for key in ("automation_id", "automation_name"):
+            value = event_context.get(key)
+            if value:
+                metadata[key] = value
+    if automation_run_id:
+        metadata["automation_run_id"] = automation_run_id
+    return metadata, tags
+
+
 def _normalize_mcp_config(raw_mcp_config):
     if not raw_mcp_config:
         return {}
@@ -488,6 +519,12 @@ This automation was triggered by a webhook event:
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
+    if _conversation_supports_observability():
+        obs_metadata, obs_tags = _build_observability_context(
+            event_context, automation_run_id
+        )
+        conversation_kwargs["observability_metadata"] = obs_metadata
+        conversation_kwargs["observability_tags"] = obs_tags
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
