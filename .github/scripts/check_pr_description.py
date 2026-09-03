@@ -38,7 +38,7 @@ HEADING_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
 ISSUE_REF_RE = re.compile(r"(?i)\b(?:fix|clos|resolv)(?:e?(?:s|d)?|ing)?\s+#(\d+)")
 BARE_ISSUE_REF_RE = re.compile(r"(?<!\w)#(\d+)")
 READY_FOR_DEV_LABEL = "ready-for-dev"
-READY_FOR_DEV_ROLLOUT_ISO = "2026-08-26"
+READY_FOR_DEV_ROLLOUT_ISO = "2026-09-04"
 
 
 def extract_sections(body: str) -> dict[str, str]:
@@ -99,16 +99,16 @@ def validate_linked_issue_ready(
     if not repo or not token:
         return []
 
-    checked: list[int] = []
+    missing: list[int] = []
     not_ready_new: list[int] = []
     for number in numbers:
         try:
             labels, created_at = fetch_issue_details(repo, number, token)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
+                missing.append(number)
                 continue
             raise
-        checked.append(number)
         if READY_FOR_DEV_LABEL in (label.lower() for label in labels):
             continue
         if created_at[:10] < READY_FOR_DEV_ROLLOUT_ISO:
@@ -116,17 +116,20 @@ def validate_linked_issue_ready(
             continue
         not_ready_new.append(number)
 
-    if not checked:
-        refs = ", ".join(f"#{number}" for number in numbers)
-        return [f"Referenced issue(s) {refs} could not be found in this repository."]
+    errors: list[str] = []
+    if missing:
+        refs = ", ".join(f"#{number}" for number in missing)
+        errors.append(
+            f"Referenced issue(s) {refs} could not be found in this repository."
+        )
     if not_ready_new:
         refs = ", ".join(f"#{number}" for number in not_ready_new)
-        return [
+        errors.append(
             f"Linked issue(s) ({refs}) carry neither `ready-for-dev` nor a "
             "pre-rollout creation date. Newly referenced issues must meet the "
             "readiness criteria before a PR can be opened."
-        ]
-    return []
+        )
+    return errors
 
 
 def body_from_event(event_path: Path) -> tuple[str, str | None]:
