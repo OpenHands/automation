@@ -38,9 +38,10 @@ class TestGitSyncStatus:
         assert body["last_synced_commit"] is None
         assert body["last_synced_at"] is None
 
-    async def test_requires_manage_automations_permission(self, readonly_client):
+    async def test_view_permission_suffices(self, readonly_client):
+        """GET /status only requires view_automations, which members have."""
         response = await readonly_client.get("/api/automation/v1/git-sync/status")
-        assert response.status_code == 403
+        assert response.status_code == 200
 
     async def test_reflects_configured_repo(self, async_client, monkeypatch):
         monkeypatch.setenv(

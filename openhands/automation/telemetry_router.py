@@ -24,14 +24,14 @@ CLOUD_MODE_CONSENT_ERROR = (
 )
 
 
-_require_manage_automations = require_permission("manage_automations")
+_require_view_automations = require_permission("view_automations")
 
 
 @router.post("/consent")
 async def set_telemetry_consent(
     body: TelemetryConsentRequest,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> TelemetryConsentResponse:
     """Persist frontend telemetry consent for local backend capture decisions."""
