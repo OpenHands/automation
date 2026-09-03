@@ -36,7 +36,6 @@ from openhands.automation.models import (
 from openhands.automation.schemas import CreateAutomationRequest, EventTrigger
 from openhands.automation.subjects import (
     conversation_id_for,
-    slack_subject,
 )
 from openhands.automation.utils.conversation_turn import compose_turn
 from openhands.automation.utils.time import utcnow
@@ -91,12 +90,18 @@ def make_automation(
     )
 
 
+# What the schema tells a Slack trigger to write, asserted against the field
+# description below so the two cannot drift apart.
+SLACK_SUBJECT_EXPR = "join('/', [team_id, event.channel, event.thread_ts || event.ts])"
+
+
 def continuing_trigger(**overrides: Any) -> dict:
     trigger = {
         "type": "event",
         "source": "slack",
         "on": "app_mention",
         "destination": "continue_conversation",
+        "subject_key_expr": SLACK_SUBJECT_EXPR,
     }
     trigger.update(overrides)
     return trigger
@@ -189,23 +194,40 @@ def unreachable_conversations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-class TestSlackSubject:
+class TestDocumentedSlackExpression:
+    """Slack has no built-in extractor; the docs carry the expression instead.
+
+    The `|| event.ts` fallback is the fragile part: the mention that opens a
+    thread carries no `thread_ts`, so without it the opener and its first
+    reply are two subjects and the thread never continues.
+    """
+
+    def _key(self, envelope: dict) -> str | None:
+        trigger = EventTrigger.model_validate(continuing_trigger())
+        return resolve_subject_key(trigger, envelope)
+
+    def test_the_expression_is_the_one_we_document(self):
+        """A field description nobody can paste is worse than none."""
+        described = EventTrigger.model_fields["subject_key_expr"].description
+        assert described is not None
+        assert SLACK_SUBJECT_EXPR in described
+
     def test_a_threaded_reply_keys_on_the_thread(self):
-        subject = slack_subject(
+        key = self._key(
             slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
         )
-        assert subject == f"{TEAM}/C123/1755000000.000100"
+        assert key == f"{TEAM}/C123/1755000000.000100"
 
     def test_an_opening_mention_keys_on_its_own_ts(self):
         """The mention that starts a thread is the same subject as its replies."""
-        opener = slack_subject(slack_envelope(ts="1755000000.000100"))
-        reply = slack_subject(
+        opener = self._key(slack_envelope(ts="1755000000.000100"))
+        reply = self._key(
             slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
         )
         assert opener == reply
 
     def test_different_channels_are_different_subjects(self):
-        assert slack_subject(slack_envelope(channel="C1")) != slack_subject(
+        assert self._key(slack_envelope(channel="C1")) != self._key(
             slack_envelope(channel="C2")
         )
 
@@ -220,7 +242,8 @@ class TestSlackSubject:
         ],
     )
     def test_an_incomplete_envelope_has_no_subject(self, envelope):
-        assert slack_subject(envelope) is None
+        """`join` refuses a null element, and the event falls through to a run."""
+        assert self._key(envelope) is None
 
 
 class TestDocumentedGithubExpression:
@@ -236,7 +259,7 @@ class TestDocumentedGithubExpression:
             continuing_trigger(source="github", on="issue_comment.created")
             | {"subject_key_expr": GITHUB_SUBJECT_EXPR}
         )
-        return resolve_subject_key(trigger, payload, None)
+        return resolve_subject_key(trigger, payload)
 
     def test_the_expression_is_the_one_we_document(self):
         """A field description nobody can paste is worse than none."""
@@ -278,28 +301,22 @@ class TestDocumentedGithubExpression:
 
 
 class TestResolveSubjectKey:
-    def test_the_provider_subject_is_the_default(self):
-        trigger = EventTrigger.model_validate(continuing_trigger())
-        subject = f"{TEAM}/C123/1.1"
-        assert resolve_subject_key(trigger, {}, subject) == f"{TEAM}/C123/1.1"
-
-    def test_a_trigger_expression_overrides_the_provider(self):
-        """The trigger's expression wins over the provider's extractor."""
+    def test_the_trigger_expression_names_the_subject(self):
         trigger = EventTrigger.model_validate(
             continuing_trigger(subject_key_expr="event.channel")
         )
-        key = resolve_subject_key(trigger, slack_envelope(), "ignored")
-        assert key == "C123"
+        assert resolve_subject_key(trigger, slack_envelope()) == "C123"
 
-    def test_no_expression_and_no_provider_subject_is_no_key(self):
-        trigger = EventTrigger.model_validate(continuing_trigger())
-        assert resolve_subject_key(trigger, {}, None) is None
+    def test_no_expression_is_no_key(self):
+        """Without one there is no subject, so the event starts a run."""
+        trigger = EventTrigger.model_validate(continuing_trigger(subject_key_expr=None))
+        assert resolve_subject_key(trigger, slack_envelope()) is None
 
     def test_a_number_is_an_acceptable_key(self):
         trigger = EventTrigger.model_validate(
             continuing_trigger(source="linear", subject_key_expr="data.number")
         )
-        assert resolve_subject_key(trigger, {"data": {"number": 42}}, None) == "42"
+        assert resolve_subject_key(trigger, {"data": {"number": 42}}) == "42"
 
     @pytest.mark.parametrize(
         "payload",
@@ -313,20 +330,20 @@ class TestResolveSubjectKey:
         trigger = EventTrigger.model_validate(
             continuing_trigger(source="linear", subject_key_expr="data.*|[0]")
         )
-        assert resolve_subject_key(trigger, payload, None) is None
+        assert resolve_subject_key(trigger, payload) is None
 
     def test_an_oversized_key_is_rejected(self):
         """Longer than the column: a broken extractor, not a long thread."""
         trigger = EventTrigger.model_validate(
             continuing_trigger(source="linear", subject_key_expr="id")
         )
-        assert resolve_subject_key(trigger, {"id": "x" * 501}, None) is None
+        assert resolve_subject_key(trigger, {"id": "x" * 501}) is None
 
     def test_an_expression_matching_nothing_is_no_key(self):
         trigger = EventTrigger.model_validate(
             continuing_trigger(source="linear", subject_key_expr="nope.missing")
         )
-        assert resolve_subject_key(trigger, {"id": "x"}, None) is None
+        assert resolve_subject_key(trigger, {"id": "x"}) is None
 
 
 class TestTriggerValidation:
@@ -460,7 +477,6 @@ async def _mention(session, org_id, envelope, event_id: str):
             event_key="app_mention",
             payload=envelope,
             provider_event_id=event_id,
-            subject=slack_subject(envelope),
         ),
         session,
     )
@@ -1388,24 +1404,21 @@ async def test_the_trigger_decides_whether_a_turn_wakes_the_agent(
     assert woken == [wakes]
 
 
-def test_a_provider_key_too_long_for_the_column_is_refused():
+def test_a_key_too_long_for_the_column_is_refused():
     """String(500): an over-long key is a failed INSERT, not a long key.
 
-    `_key_from_expression` has always guarded this; a provider extractor reads
-    a payload we do not control and needs the same guard, or one oversized
-    Slack channel rolls back the whole delivery for every matched automation.
+    The expression reads a payload we do not control, so one oversized Slack
+    channel would otherwise roll back the whole delivery for every matched
+    automation.
     """
-    trigger = EventTrigger.model_validate(continuing_trigger())
-    oversized = "x" * 501
-    assert resolve_subject_key(trigger, {}, oversized) is None
-
-    fits = "x" * 500
-    assert resolve_subject_key(trigger, {}, fits) == "x" * 500
+    trigger = EventTrigger.model_validate(continuing_trigger(subject_key_expr="id"))
+    assert resolve_subject_key(trigger, {"id": "x" * 501}) is None
+    assert resolve_subject_key(trigger, {"id": "x" * 500}) == "x" * 500
 
 
-def test_a_blank_provider_key_is_refused():
-    trigger = EventTrigger.model_validate(continuing_trigger())
-    assert resolve_subject_key(trigger, {}, "   ") is None
+def test_a_blank_key_is_refused():
+    trigger = EventTrigger.model_validate(continuing_trigger(subject_key_expr="id"))
+    assert resolve_subject_key(trigger, {"id": "   "}) is None
 
 
 def test_a_boolean_turn_text_expr_falls_back_rather_than_sending_true():

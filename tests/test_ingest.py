@@ -480,7 +480,7 @@ async def test_accept_event_ignores_a_subject_nobody_opted_into(
     slack_payload: dict,
     mock_authenticated_user,
 ):
-    """Without `destination`, `subject` is never read. Nor is `occurred_at`."""
+    """Without `destination`, no subject is derived. Nor is `occurred_at` read."""
     async_session.add(
         make_automation(
             org_id,
@@ -497,7 +497,6 @@ async def test_accept_event_ignores_a_subject_nobody_opted_into(
             event_key="app_mention",
             payload=slack_payload,
             provider_event_id="Ev123456",
-            subject="T06P212QSEA/C123/1755000000.000100",
             occurred_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
         ),
         async_session,
@@ -592,7 +591,6 @@ async def test_accepted_event_defaults():
 
     assert event.payload == {}
     assert event.provider_event_id is None
-    assert event.subject is None
     assert event.occurred_at is None
     assert event.parsed_event is None
 

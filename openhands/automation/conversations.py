@@ -22,7 +22,7 @@ from openhands.automation.filter_eval import (
 )
 from openhands.automation.models import AutomationRun, AutomationRunStatus
 from openhands.automation.schemas import EventTrigger
-from openhands.automation.subjects import EventSubject, conversation_id_for
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.conversation_turn import (
     compose_turn,
@@ -73,16 +73,14 @@ class ContinueResult:
 def resolve_subject_key(
     trigger: EventTrigger,
     payload: dict[str, Any],
-    subject: EventSubject | None,
 ) -> str | None:
     """The key this event's siblings are grouped by, or None for a plain run.
 
-    A trigger's `subject_key_expr` wins over whatever the transport named,
-    which today is only the Slack socket reading its own envelope.
+    `subject_key_expr` is the only way to name one, for every source alike.
     """
-    if trigger.subject_key_expr:
-        return _key_from_expression(trigger.subject_key_expr, payload)
-    return _clean_key(subject, "transport") if subject is not None else None
+    if not trigger.subject_key_expr:
+        return None
+    return _key_from_expression(trigger.subject_key_expr, payload)
 
 
 def resolve_turn_text(

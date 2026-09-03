@@ -27,7 +27,6 @@ from openhands.automation.streams.base import (
     StreamConfigError,
     record_health,
 )
-from openhands.automation.subjects import slack_subject
 from openhands.automation.utils.time import utcnow
 
 
@@ -155,9 +154,6 @@ class SlackStreamProvider:
             # Slack's own delivery id. `accept_event()` deduplicates on it, so
             # a redelivered envelope creates no second run.
             provider_event_id=envelope.get("event_id"),
-            # The thread this mention belongs to; read only by a
-            # `continue_conversation` trigger.
-            subject=slack_subject(envelope),
             # What the *run* is handed, which is not the same thing as what
             # trigger filters read. The HTTP path parses a custom webhook into
             # a CustomWebhookEvent, and `accept_event()` persists that model

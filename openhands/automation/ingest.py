@@ -24,7 +24,6 @@ from openhands.automation.conversations import (
 )
 from openhands.automation.models import Automation, IntegrationEvent
 from openhands.automation.schemas import EventTrigger
-from openhands.automation.subjects import EventSubject
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -35,8 +34,7 @@ from openhands.automation.utils.webhook import (
 
 logger = logging.getLogger("automation.ingest")
 
-# `EventSubject` moved to the leaf module `subjects`; re-exported for callers.
-__all__ = ["AcceptResult", "AcceptedEvent", "EventSubject", "accept_event"]
+__all__ = ["AcceptResult", "AcceptedEvent", "accept_event"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +46,6 @@ class AcceptedEvent:
     # Raw provider payload; JMESPath trigger filters run on this.
     payload: dict[str, Any] = field(default_factory=dict)
     provider_event_id: str | None = None
-    # What the event is about, when the transport could name it.
-    subject: EventSubject | None = None
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
@@ -163,19 +159,11 @@ async def accept_event(
         else webhook_payload
     )
 
-    # Derived once, and only when a matched trigger will read it.
-    continuing = any(
-        trigger.destination == CONTINUE_CONVERSATION for _, trigger in matched
-    )
-    # Only the transport can name a subject now; a trigger that wants one from
-    # any other source supplies `subject_key_expr`.
-    provider_subject = event.subject if continuing else None
-
     run_ids: list[str] = []
     conversation_ids: list[str] = []
     for automation, trigger in matched:
         subject_key = (
-            resolve_subject_key(trigger, webhook_payload, provider_subject)
+            resolve_subject_key(trigger, webhook_payload)
             if trigger.destination == CONTINUE_CONVERSATION
             else None
         )

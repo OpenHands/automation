@@ -152,9 +152,7 @@ class EventTrigger(BaseModel):
      "destination": "continue_conversation"}
     ```
 
-    `subject_key_expr` names that subject. The Slack socket transport is the
-    only one that names it for you, because it reads the envelope itself;
-    every other source spells the expression out.
+    `subject_key_expr` names that subject, for every source alike.
 
     ```json
     {"source": "github", "on": "issue_comment.created",
@@ -164,6 +162,20 @@ class EventTrigger(BaseModel):
           [repository.full_name, '#', to_string(
             pull_request.number || issue.number || number)])"}
     ```
+
+    For Slack over the socket transport, where the payload is the raw envelope:
+
+    ```json
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation",
+     "subject_key_expr":
+       "join('/', [team_id, event.channel, event.thread_ts || event.ts])"}
+    ```
+
+    The `|| event.ts` half is load-bearing: the mention that opens a thread
+    carries no `thread_ts`, and its own `ts` is what becomes the thread id once
+    somebody replies. Without it the opener and its first reply are two
+    subjects.
 
     By default a delivered turn also wakes the agent. `wake_agent: false`
     appends it to the conversation and leaves it there, so the script decides
@@ -214,14 +226,16 @@ class EventTrigger(BaseModel):
         default=None,
         description=(
             "JMESPath expression yielding the subject key events are grouped "
-            "by. Required unless the transport names the subject itself, "
-            "which only the Slack socket does. For GitHub: "
+            "by. Required for 'continue_conversation'; without it the event "
+            "starts a run as usual. For GitHub: "
             "(pull_request.number || issue.number || number) && join('', "
             "[repository.full_name, '#', to_string(pull_request.number || "
             "issue.number || number)]). "
             "The fallback chain keeps a pull request and its comments on one "
             "subject; the leading guard keeps an event with no number, such "
             "as a push, from becoming the subject '<repo>#null'. "
+            "For Slack: join('/', [team_id, event.channel, event.thread_ts "
+            "|| event.ts]). "
             "Ignored unless destination is 'continue_conversation'."
         ),
     )
