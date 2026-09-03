@@ -28,18 +28,18 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
-    AutomationLifecycleStatus as ModelAutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState as ModelAutomationState,
     TarballUpload,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
-    AutomationLifecycleStatus,
     AutomationListResponse,
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
+    AutomationState,
     CreateAutomationRequest,
     RunCompleteRequest,
     RunPhaseRequest,
@@ -87,22 +87,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
 
-def _model_lifecycle_status(
-    lifecycle_status: AutomationLifecycleStatus | str | None, enabled: bool
-) -> ModelAutomationLifecycleStatus:
+def _model_automation_state(
+    lifecycle_status: AutomationState | str | None, enabled: bool
+) -> ModelAutomationState:
     if lifecycle_status is not None:
-        return ModelAutomationLifecycleStatus(str(lifecycle_status))
-    return (
-        ModelAutomationLifecycleStatus.ACTIVE
-        if enabled
-        else ModelAutomationLifecycleStatus.INACTIVE
-    )
+        return ModelAutomationState(str(lifecycle_status))
+    return ModelAutomationState.ACTIVE if enabled else ModelAutomationState.INACTIVE
 
 
-def _lifecycle_enabled(
-    lifecycle_status: ModelAutomationLifecycleStatus,
+def _automation_state_enabled(
+    lifecycle_status: ModelAutomationState,
 ) -> bool:
-    return lifecycle_status == ModelAutomationLifecycleStatus.ACTIVE
+    return lifecycle_status == ModelAutomationState.ACTIVE
 
 
 _require_view_automations = require_permission("view_automations")
@@ -178,7 +174,7 @@ async def create_automation(
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
-    lifecycle_status = _model_lifecycle_status(body.lifecycle_status, body.enabled)
+    lifecycle_status = _model_automation_state(body.lifecycle_status, body.enabled)
 
     auto = Automation(
         user_id=user.user_id,
@@ -192,7 +188,7 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
-        enabled=_lifecycle_enabled(lifecycle_status),
+        enabled=_automation_state_enabled(lifecycle_status),
         lifecycle_status=lifecycle_status,
         telemetry_distinct_id=get_request_telemetry_context(
             request
@@ -281,13 +277,13 @@ async def update_automation(
 
     requested_lifecycle = update_data.pop("lifecycle_status", None)
     if requested_lifecycle is not None:
-        lifecycle_status = _model_lifecycle_status(
+        lifecycle_status = _model_automation_state(
             requested_lifecycle, update_data.get("enabled", auto.enabled)
         )
         update_data["lifecycle_status"] = lifecycle_status
-        update_data["enabled"] = _lifecycle_enabled(lifecycle_status)
+        update_data["enabled"] = _automation_state_enabled(lifecycle_status)
     elif "enabled" in update_data:
-        update_data["lifecycle_status"] = _model_lifecycle_status(
+        update_data["lifecycle_status"] = _model_automation_state(
             None, update_data["enabled"]
         )
 
@@ -299,16 +295,13 @@ async def update_automation(
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
         lifecycle_status = update_data.get("lifecycle_status")
-        is_manual_inactive = (
-            lifecycle_status == ModelAutomationLifecycleStatus.INACTIVE
-            or (
-                lifecycle_status is None
-                and auto.lifecycle_status != ModelAutomationLifecycleStatus.DRAFT
-            )
+        is_manual_inactive = lifecycle_status == ModelAutomationState.INACTIVE or (
+            lifecycle_status is None
+            and auto.lifecycle_status != ModelAutomationState.DRAFT
         )
         skip_pending_reason = (
             "Automation moved to draft by user"
-            if lifecycle_status == ModelAutomationLifecycleStatus.DRAFT
+            if lifecycle_status == ModelAutomationState.DRAFT
             else "Automation disabled by user"
         )
         if auto.enabled and is_manual_inactive:
@@ -388,7 +381,7 @@ async def delete_automation(
     await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
-    auto.lifecycle_status = ModelAutomationLifecycleStatus.INACTIVE
+    auto.lifecycle_status = ModelAutomationState.INACTIVE
     deleted_at = utcnow()
     auto.deleted_at = deleted_at
     if was_enabled:

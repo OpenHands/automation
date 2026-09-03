@@ -49,8 +49,8 @@ class AutomationRunStatus(enum.Enum):
     SKIPPED = "SKIPPED"
 
 
-class AutomationLifecycleStatus(enum.Enum):
-    """Lifecycle state of an automation definition."""
+class AutomationState(enum.Enum):
+    """State of an automation definition."""
 
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
@@ -104,15 +104,16 @@ class Automation(Base):
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
     # Whether the automation is enabled (can be triggered automatically).
-    # Kept for backwards compatibility; lifecycle_status is the first-class
-    # active/inactive/draft state. Only ACTIVE rows should have enabled=True.
+    # Kept for backwards compatibility; lifecycle_status stores the
+    # active/inactive/draft automation state. Only ACTIVE rows should have
+    # enabled=True.
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
-    lifecycle_status: Mapped[AutomationLifecycleStatus] = mapped_column(
-        Enum(AutomationLifecycleStatus, native_enum=False, length=20),
+    lifecycle_status: Mapped[AutomationState] = mapped_column(
+        Enum(AutomationState, native_enum=False, length=20),
         nullable=False,
-        default=AutomationLifecycleStatus.ACTIVE,
-        server_default=AutomationLifecycleStatus.ACTIVE.value,
+        default=AutomationState.ACTIVE,
+        server_default=AutomationState.ACTIVE.value,
         index=True,
     )
 

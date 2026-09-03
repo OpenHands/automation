@@ -21,8 +21,8 @@ from openhands.automation.db import using_sqlite
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
-    AutomationLifecycleStatus,
     AutomationRun,
+    AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
@@ -62,7 +62,7 @@ def _disable_invalid_cron_automation(
     error: BaseException,
 ) -> None:
     automation.enabled = False
-    automation.lifecycle_status = AutomationLifecycleStatus.INACTIVE
+    automation.lifecycle_status = AutomationState.INACTIVE
     logger.error(
         "Disabling automation with invalid cron trigger: %s",
         reason,
@@ -132,7 +132,7 @@ async def _fetch_enabled_automations(
         select(Automation)
         .where(
             Automation.enabled.is_(True),
-            Automation.lifecycle_status == AutomationLifecycleStatus.ACTIVE,
+            Automation.lifecycle_status == AutomationState.ACTIVE,
             Automation.deleted_at.is_(None),
             (Automation.last_polled_at.is_(None))
             | (Automation.last_polled_at < poll_threshold),

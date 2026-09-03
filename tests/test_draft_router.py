@@ -10,8 +10,8 @@ from openhands.automation.app import app
 from openhands.automation.models import (
     Automation,
     AutomationDraft,
-    AutomationLifecycleStatus,
     AutomationRun,
+    AutomationState,
 )
 from openhands.automation.storage import get_file_store
 
@@ -152,7 +152,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     automation = await async_session.get(Automation, draft.materialized_automation_id)
     assert automation is not None
     assert automation.enabled is False
-    assert automation.lifecycle_status == AutomationLifecycleStatus.DRAFT
+    assert automation.lifecycle_status == AutomationState.DRAFT
     assert automation.prompt == "Write a short greeting."
     assert automation.tarball_path.startswith("oh-internal://uploads/")
 

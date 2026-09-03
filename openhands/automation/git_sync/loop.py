@@ -54,7 +54,7 @@ from openhands.automation.git_sync.serializer import (
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncState,
-    AutomationLifecycleStatus,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -477,15 +477,11 @@ async def _validate_and_resolve_fields(
 
     enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
     lifecycle_status = fields.get("lifecycle_status")
-    if lifecycle_status == AutomationLifecycleStatus.DRAFT.value:
-        lifecycle = AutomationLifecycleStatus.DRAFT
+    if lifecycle_status == AutomationState.DRAFT.value:
+        lifecycle = AutomationState.DRAFT
         enabled = False
     else:
-        lifecycle = (
-            AutomationLifecycleStatus.ACTIVE
-            if enabled
-            else AutomationLifecycleStatus.INACTIVE
-        )
+        lifecycle = AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
 
     return {
         "name": name,
@@ -729,7 +725,7 @@ async def _import_from_git(
         automation = await session.get(Automation, state.automation_id)
         if automation is not None and automation.deleted_at is None:
             automation.enabled = False
-            automation.lifecycle_status = AutomationLifecycleStatus.INACTIVE
+            automation.lifecycle_status = AutomationState.INACTIVE
             automation.deleted_at = utcnow()
             result.deleted_in_db += 1
             logger.info("Soft-deleted automation %s (removed from git)", automation.id)

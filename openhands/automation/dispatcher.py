@@ -37,9 +37,9 @@ from openhands.automation.exceptions import (
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import (
     Automation,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     TarballUpload,
 )
 from openhands.automation.telemetry import capture_automation_event
@@ -141,7 +141,7 @@ async def _poll_pending_runs(
                 AutomationRun.trigger_source == "manual",
                 and_(
                     Automation.enabled.is_(True),
-                    Automation.lifecycle_status == AutomationLifecycleStatus.ACTIVE,
+                    Automation.lifecycle_status == AutomationState.ACTIVE,
                 ),
             ),
         )

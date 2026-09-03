@@ -61,9 +61,7 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=500), nullable=True),
         sa.Column("draft_body", sa.JSON(), nullable=False),
         sa.Column("validation_errors", sa.JSON(), nullable=True),
-        sa.Column(
-            "dispatchable", sa.Boolean(), nullable=False, server_default="false"
-        ),
+        sa.Column("dispatchable", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("source_automation_id", sa.Uuid(), nullable=True),
         sa.Column("materialized_automation_id", sa.Uuid(), nullable=True),
         sa.Column("last_test_run_id", sa.Uuid(), nullable=True),
@@ -127,7 +125,7 @@ def upgrade() -> None:
 
     op.execute(
         "COMMENT ON COLUMN automations.lifecycle_status IS "
-        "'First-class lifecycle state: ACTIVE, INACTIVE, or DRAFT.'"
+        "'Automation state: ACTIVE, INACTIVE, or DRAFT.'"
     )
     op.execute(
         "COMMENT ON COLUMN automation_runs.trigger_source IS "

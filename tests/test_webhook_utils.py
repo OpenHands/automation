@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode
-from openhands.automation.models import Automation, AutomationLifecycleStatus, Base
+from openhands.automation.models import Automation, AutomationState, Base
 from openhands.automation.utils.webhook import get_event_automations, verify_signature
 
 
@@ -293,7 +293,7 @@ class TestGetEventAutomationsSqliteJsonFiltering:
                 tarball_path="test.tar.gz",
                 entrypoint="main.py",
                 enabled=True,
-                lifecycle_status=AutomationLifecycleStatus.ACTIVE,
+                lifecycle_status=AutomationState.ACTIVE,
             )
             draft = Automation(
                 id=uuid.uuid4(),
@@ -304,7 +304,7 @@ class TestGetEventAutomationsSqliteJsonFiltering:
                 tarball_path="test.tar.gz",
                 entrypoint="main.py",
                 enabled=True,
-                lifecycle_status=AutomationLifecycleStatus.DRAFT,
+                lifecycle_status=AutomationState.DRAFT,
             )
 
             sqlite_session.add_all([active, draft])

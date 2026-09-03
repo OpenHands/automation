@@ -17,9 +17,9 @@ from openhands.automation.config import get_settings
 from openhands.automation.db import using_sqlite
 from openhands.automation.models import (
     Automation,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     CustomWebhook,
 )
 from openhands.automation.providers import (
@@ -135,7 +135,7 @@ async def get_event_automations(
     base_filters = [
         Automation.org_id == org_id,
         Automation.enabled == True,  # noqa: E712
-        Automation.lifecycle_status == AutomationLifecycleStatus.ACTIVE,
+        Automation.lifecycle_status == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -197,7 +197,7 @@ async def get_requested_event_types(
 
     base_filters = [
         Automation.enabled == True,  # noqa: E712
-        Automation.lifecycle_status == AutomationLifecycleStatus.ACTIVE,
+        Automation.lifecycle_status == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 

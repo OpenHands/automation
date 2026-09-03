@@ -29,9 +29,9 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.utils.run import skip_pending_runs_for_disabled_automation
 from openhands.automation.utils.time import ensure_utc, utcnow
@@ -241,7 +241,7 @@ async def _apply_disable(
         )
         .values(
             enabled=False,
-            lifecycle_status=AutomationLifecycleStatus.INACTIVE,
+            lifecycle_status=AutomationState.INACTIVE,
             disabled_reason=cause.reason,
             disabled_detail=disabled_detail,
             disabled_at=disabled_at,

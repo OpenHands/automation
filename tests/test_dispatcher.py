@@ -24,9 +24,9 @@ from openhands.automation.dispatcher import (
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
 from openhands.automation.models import (
     Automation,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
@@ -567,7 +567,7 @@ class TestDispatchPendingRuns:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=False,
-                lifecycle_status=AutomationLifecycleStatus.INACTIVE,
+                lifecycle_status=AutomationState.INACTIVE,
             )
             session.add(automation)
             await session.commit()

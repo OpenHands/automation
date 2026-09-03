@@ -34,7 +34,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDraft,
-    AutomationLifecycleStatus,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -408,7 +408,7 @@ async def _materialize_draft(
     values.update(
         {
             "enabled": False,
-            "lifecycle_status": AutomationLifecycleStatus.DRAFT,
+            "lifecycle_status": AutomationState.DRAFT,
             "disabled_reason": None,
             "disabled_detail": None,
             "disabled_at": None,

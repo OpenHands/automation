@@ -228,8 +228,8 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-class AutomationLifecycleStatus(StrEnum):
-    """Lifecycle status of an automation definition."""
+class AutomationState(StrEnum):
+    """State of an automation definition."""
 
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
@@ -239,21 +239,21 @@ class AutomationLifecycleStatus(StrEnum):
 DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
 
 
-def lifecycle_enabled(status: AutomationLifecycleStatus | str | None) -> bool:
+def automation_state_enabled(status: AutomationState | str | None) -> bool:
     if status is None:
         return True
-    return AutomationLifecycleStatus(status) == AutomationLifecycleStatus.ACTIVE
+    return AutomationState(status) == AutomationState.ACTIVE
 
 
-def normalize_lifecycle_enabled(data: Any) -> Any:
-    """Keep lifecycle_status and enabled compatible in request bodies."""
+def normalize_automation_state_enabled(data: Any) -> Any:
+    """Keep automation state and enabled compatible in request bodies."""
     if not isinstance(data, dict):
         return data
     lifecycle = data.get("lifecycle_status")
     if lifecycle is None:
         return data
     try:
-        expected_enabled = lifecycle_enabled(lifecycle)
+        expected_enabled = automation_state_enabled(lifecycle)
     except ValueError:
         return data
     if "enabled" in data and bool(data["enabled"]) != expected_enabled:
@@ -395,10 +395,10 @@ class CreateAutomationRequest(BaseModel):
             "lifecycle_status is DRAFT."
         ),
     )
-    lifecycle_status: AutomationLifecycleStatus | None = Field(
+    lifecycle_status: AutomationState | None = Field(
         default=None,
         description=(
-            "First-class lifecycle state. DRAFT/INACTIVE rows are not "
+            "First-class automation state. DRAFT/INACTIVE rows are not "
             "triggered automatically."
         ),
     )
@@ -413,8 +413,8 @@ class CreateAutomationRequest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_lifecycle_enabled(cls, data: Any) -> Any:
-        return normalize_lifecycle_enabled(data)
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -473,12 +473,12 @@ class UpdateAutomationRequest(BaseModel):
     )
     keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None
-    lifecycle_status: AutomationLifecycleStatus | None = None
+    lifecycle_status: AutomationState | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def validate_lifecycle_enabled(cls, data: Any) -> Any:
-        return normalize_lifecycle_enabled(data)
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -806,7 +806,7 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
-    lifecycle_status: AutomationLifecycleStatus = AutomationLifecycleStatus.ACTIVE
+    lifecycle_status: AutomationState = AutomationState.ACTIVE
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
     disabled_at: UtcDatetime | None = None

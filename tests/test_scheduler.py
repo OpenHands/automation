@@ -9,9 +9,9 @@ from sqlalchemy import func, select
 
 from openhands.automation.models import (
     Automation,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
@@ -491,7 +491,7 @@ class TestPollAndSchedule:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=True,
-                lifecycle_status=AutomationLifecycleStatus.DRAFT,
+                lifecycle_status=AutomationState.DRAFT,
             )
             session.add(automation)
             await session.commit()

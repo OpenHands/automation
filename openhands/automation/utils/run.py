@@ -12,9 +12,9 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
-    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.time import utcnow
@@ -71,7 +71,7 @@ async def disable_automation(
                 )
                 .values(
                     enabled=False,
-                    lifecycle_status=AutomationLifecycleStatus.INACTIVE,
+                    lifecycle_status=AutomationState.INACTIVE,
                     disabled_reason=reason,
                     disabled_detail=disabled_detail,
                     disabled_at=disabled_at,
