@@ -30,6 +30,7 @@ from openhands.automation.models import (
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState as ModelAutomationState,
     TarballUpload,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
@@ -38,6 +39,7 @@ from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
+    AutomationState,
     CreateAutomationRequest,
     RunCompleteRequest,
     RunPhaseRequest,
@@ -83,6 +85,21 @@ from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automat
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
+
+
+def _model_automation_state(
+    lifecycle_status: AutomationState | str | None, enabled: bool
+) -> ModelAutomationState:
+    if lifecycle_status is not None:
+        return ModelAutomationState(str(lifecycle_status))
+    return ModelAutomationState.ACTIVE if enabled else ModelAutomationState.INACTIVE
+
+
+def _automation_state_enabled(
+    lifecycle_status: ModelAutomationState,
+) -> bool:
+    return lifecycle_status == ModelAutomationState.ACTIVE
+
 
 _require_view_automations = require_permission("view_automations")
 _require_manage_automations = require_permission("manage_automations")
@@ -157,6 +174,8 @@ async def create_automation(
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
+    lifecycle_status = _model_automation_state(body.lifecycle_status, body.enabled)
+
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
@@ -169,6 +188,8 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
+        enabled=_automation_state_enabled(lifecycle_status),
+        lifecycle_status=lifecycle_status,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
@@ -254,6 +275,18 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
+    requested_lifecycle = update_data.pop("lifecycle_status", None)
+    if requested_lifecycle is not None:
+        lifecycle_status = _model_automation_state(
+            requested_lifecycle, update_data.get("enabled", auto.enabled)
+        )
+        update_data["lifecycle_status"] = lifecycle_status
+        update_data["enabled"] = _automation_state_enabled(lifecycle_status)
+    elif "enabled" in update_data:
+        update_data["lifecycle_status"] = _model_automation_state(
+            None, update_data["enabled"]
+        )
+
     disable_event: AutomationDisableEvent | None = None
     skip_pending_reason: str | None = None
     if update_data.get("enabled") is True:
@@ -261,8 +294,17 @@ async def update_automation(
         update_data["disabled_detail"] = None
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
-        if auto.enabled:
-            skip_pending_reason = "Automation disabled by user"
+        lifecycle_status = update_data.get("lifecycle_status")
+        is_manual_inactive = lifecycle_status == ModelAutomationState.INACTIVE or (
+            lifecycle_status is None
+            and auto.lifecycle_status != ModelAutomationState.DRAFT
+        )
+        skip_pending_reason = (
+            "Automation moved to draft by user"
+            if lifecycle_status == ModelAutomationState.DRAFT
+            else "Automation disabled by user"
+        )
+        if auto.enabled and is_manual_inactive:
             disabled_at = utcnow()
             disabled_detail = {"reason": "manual", "source": "user"}
             update_data["disabled_reason"] = "manual"
@@ -339,6 +381,7 @@ async def delete_automation(
     await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
+    auto.lifecycle_status = ModelAutomationState.INACTIVE
     deleted_at = utcnow()
     auto.deleted_at = deleted_at
     if was_enabled:
@@ -360,6 +403,7 @@ async def delete_automation(
         reason="Automation deleted by user",
         disabled_detail=auto.disabled_detail,
         completed_at=deleted_at,
+        include_manual=True,
     )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
@@ -455,22 +499,13 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
-    if not auto.enabled:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Automation is disabled",
-                "disabled_reason": auto.disabled_reason,
-                "disabled_detail": auto.disabled_detail,
-            },
-        )
-
     run = await create_pending_run(
         session,
         auto,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
+        trigger_source="manual",
     )
     await session.flush()
     await session.refresh(run)

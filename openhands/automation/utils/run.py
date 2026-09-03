@@ -14,6 +14,7 @@ from openhands.automation.models import (
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.time import utcnow
@@ -70,6 +71,7 @@ async def disable_automation(
                 )
                 .values(
                     enabled=False,
+                    lifecycle_status=AutomationState.INACTIVE,
                     disabled_reason=reason,
                     disabled_detail=disabled_detail,
                     disabled_at=disabled_at,
@@ -129,6 +131,7 @@ async def skip_pending_runs_for_disabled_automation(
     reason: str,
     disabled_detail: dict | None = None,
     completed_at: datetime | None = None,
+    include_manual: bool = False,
 ) -> int:
     """Mark accepted-but-not-dispatched runs terminal when automation is disabled."""
     completed_at = completed_at or utcnow()
@@ -144,12 +147,19 @@ async def skip_pending_runs_for_disabled_automation(
     if disabled_detail is not None:
         status_detail["disabled_detail"] = disabled_detail
 
+    filters = [
+        AutomationRun.automation_id == automation_id,
+        AutomationRun.status == AutomationRunStatus.PENDING,
+    ]
+    if not include_manual:
+        filters.append(
+            (AutomationRun.trigger_source.is_(None))
+            | (AutomationRun.trigger_source != "manual")
+        )
+
     result: CursorResult = await session.execute(  # type: ignore[assignment]
         update(AutomationRun)
-        .where(
-            AutomationRun.automation_id == automation_id,
-            AutomationRun.status == AutomationRunStatus.PENDING,
-        )
+        .where(*filters)
         .values(
             status=AutomationRunStatus.SKIPPED,
             completed_at=completed_at,
@@ -165,6 +175,7 @@ async def create_pending_run(
     automation: Automation,
     *,
     telemetry_distinct_id: str | None = None,
+    trigger_source: str | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -184,6 +195,7 @@ async def create_pending_run(
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
+        trigger_source=trigger_source,
         telemetry_distinct_id=(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),

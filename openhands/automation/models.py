@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -46,6 +47,14 @@ class AutomationRunStatus(enum.Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     SKIPPED = "SKIPPED"
+
+
+class AutomationState(enum.Enum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
 
 
 class Automation(Base):
@@ -94,8 +103,19 @@ class Automation(Base):
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
-    # Whether the automation is enabled (can be triggered)
+    # Whether the automation is enabled (can be triggered automatically).
+    # Kept for backwards compatibility; lifecycle_status stores the
+    # active/inactive/draft automation state. Only ACTIVE rows should have
+    # enabled=True.
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    lifecycle_status: Mapped[AutomationState] = mapped_column(
+        Enum(AutomationState, native_enum=False, length=20),
+        nullable=False,
+        default=AutomationState.ACTIVE,
+        server_default=AutomationState.ACTIVE.value,
+        index=True,
+    )
 
     # Current disabled-state metadata. AutomationDisableEvent keeps history.
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -207,6 +227,11 @@ class AutomationRun(Base):
     # local mode). Set immediately after `_start_bash` returns.
     bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # How this run was created: manual, cron, event, or null for legacy rows.
+    trigger_source: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
@@ -247,6 +272,69 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
+    )
+
+
+class AutomationDraft(Base):
+    """Editable automation setup state, including incomplete form drafts."""
+
+    __tablename__ = "automation_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Creation endpoint this draft body targets: /v1, /v1/preset/prompt, etc.
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Partial request body owned by the setup UI. It may be incomplete and is
+    # only promoted to an Automation after full endpoint-schema validation.
+    draft_body: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    dispatchable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    source_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    materialized_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    last_test_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_automation_drafts_org_updated_at", "org_id", "updated_at"),
+        Index("ix_automation_drafts_org_deleted_at", "org_id", "deleted_at"),
+        Index("ix_automation_drafts_source_automation_id", "source_automation_id"),
+        Index(
+            "ix_automation_drafts_materialized_automation_id",
+            "materialized_automation_id",
+        ),
+        Index("ix_automation_drafts_last_test_run_id", "last_test_run_id"),
     )
 
 

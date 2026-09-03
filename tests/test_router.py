@@ -1695,10 +1695,10 @@ class TestDispatchAutomation:
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
 
-    async def test_dispatch_disabled_automation_returns_reason(
+    async def test_dispatch_disabled_automation_creates_manual_run(
         self, async_client, async_session
     ):
-        """Dispatching a disabled automation returns its blocking reason."""
+        """Manual dispatch is allowed for inactive automations."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -1717,11 +1717,11 @@ class TestDispatchAutomation:
             f"/api/automation/v1/{automation.id}/dispatch"
         )
 
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert detail["message"] == "Automation is disabled"
-        assert detail["disabled_reason"] == "auth: Invalid API key"
-        assert detail["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert response.status_code == 201
+        data = response.json()
+        assert data["automation_id"] == str(automation.id)
+        assert data["status"] == "PENDING"
+        assert data["trigger_source"] == "manual"
 
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""
