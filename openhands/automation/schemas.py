@@ -10,6 +10,12 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_val
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.providers import (
+    DEFAULT_VERIFIER,
+    is_builtin_source,
+    reserved_sources,
+    verifier_schemes,
+)
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -30,6 +36,9 @@ _SHELL_META_RE = re.compile(r"[;&|`$(){}<>!\\\n\r]")
 
 # Path traversal pattern
 _PATH_TRAVERSAL_RE = re.compile(r"(^|/)\.\.(/|$)")
+
+# Control characters (including newlines) collapsed out of run phase messages
+_PHASE_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 class CronTrigger(BaseModel):
@@ -440,6 +449,7 @@ class WebhookConfig(BaseModel):
     is_builtin: bool = False  # True for built-in OpenHands-forwarded sources
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
+    signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
 
 
 class EventResponse(BaseModel):
@@ -468,12 +478,24 @@ class RequestedEventTypesResponse(BaseModel):
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
 _SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]$")
 
-# Reserved source names (built-in integrations)
-RESERVED_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+# Snapshot for introspection; validation calls `is_builtin_source()` so a
+# provider registered after import time is still protected.
+RESERVED_SOURCES = reserved_sources()
 
 
 # Valid HTTP header name pattern
 _HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,98}[A-Za-z0-9]$|^[A-Za-z]$")
+
+
+def _validate_signature_scheme(v: str) -> str:
+    """Reject a scheme with no verifier behind it."""
+    schemes = verifier_schemes()
+    if v not in schemes:
+        raise ValueError(
+            f"Invalid signature_scheme '{v}'. Must be one of: "
+            f"{', '.join(sorted(schemes))}"
+        )
+    return v
 
 
 class CustomWebhookCreate(BaseModel):
@@ -512,6 +534,20 @@ class CustomWebhookCreate(BaseModel):
             "Examples: 'X-Signature-256', 'Stripe-Signature', 'X-Slack-Signature'"
         ),
     )
+    signature_scheme: str = Field(
+        default=DEFAULT_VERIFIER,
+        max_length=50,
+        description=(
+            "How the value in `signature_header` is computed. "
+            "'hmac_sha256_hex' (default) is a hex digest over the raw body "
+            "(GitHub, Linear). 'standard_webhooks' follows "
+            "standardwebhooks.com (GitLab 19.1+ signing tokens, Svix) and also "
+            "reads the webhook-id and webhook-timestamp headers. 'slack_v0' is "
+            "the Slack Events API scheme and also reads "
+            "X-Slack-Request-Timestamp. The timestamped schemes reject "
+            "deliveries outside a 5-minute replay window."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -527,7 +563,7 @@ class CustomWebhookCreate(BaseModel):
     def validate_source_name(cls, v: str) -> str:
         """Validate source name format and check for reserved names."""
         v_lower = v.lower()
-        if v_lower in RESERVED_SOURCES:
+        if is_builtin_source(v_lower):
             raise ValueError(
                 f"'{v}' is a reserved source name. "
                 "Use the built-in integration instead."
@@ -538,6 +574,12 @@ class CustomWebhookCreate(BaseModel):
                 "starting and ending with alphanumeric"
             )
         return v_lower
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str) -> str:
+        """Validate the scheme names a registered verifier."""
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -572,7 +614,16 @@ class CustomWebhookUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
+    signature_scheme: str | None = Field(default=None, max_length=50)
     enabled: bool | None = None
+
+    @field_validator("signature_scheme")
+    @classmethod
+    def validate_signature_scheme(cls, v: str | None) -> str | None:
+        """Validate the scheme names a registered verifier, if provided."""
+        if v is None:
+            return v
+        return _validate_signature_scheme(v)
 
     @field_validator("event_key_expr")
     @classmethod
@@ -613,6 +664,7 @@ class CustomWebhookResponse(BaseModel):
     webhook_url: str
     event_key_expr: str
     signature_header: str
+    signature_scheme: str
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -686,6 +738,9 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
+    disabled_reason: str | None = None
+    disabled_detail: dict[str, Any] | None = None
+    disabled_at: UtcDatetime | None = None
     last_triggered_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -711,6 +766,8 @@ class RunCompleteRequest(BaseModel):
     conversation_id: str | None = None
     error: str | ConversationErrorEvent | dict[str, Any] | None = None
     cost: float | None = None
+    blocking_factor: dict[str, Any] | None = None
+    task_outcome: dict[str, Any] | None = None
 
     @field_validator("error", mode="before")
     @classmethod
@@ -724,6 +781,22 @@ class RunCompleteRequest(BaseModel):
             return value
 
 
+class RunPhaseRequest(BaseModel):
+    """Live progress phase reported by the automation entrypoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("phase", mode="before")
+    @classmethod
+    def normalize_phase(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        # Collapse control chars/newlines and runs of whitespace; strip ends.
+        return " ".join(_PHASE_CONTROL_CHARS_RE.sub(" ", v).split())
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 
@@ -732,11 +805,13 @@ class AutomationRunResponse(BaseModel):
     status: RunStatus
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
+    current_phase: str | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
@@ -749,6 +824,9 @@ class AutomationRunListResponse(BaseModel):
 
     runs: list[AutomationRunResponse]
     total: int
+    # Lifetime run counts by status, unaffected by pagination. Sparse: only
+    # statuses with at least one run appear, so a missing key means zero.
+    status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
 # --- Capability and Preflight Schemas ---

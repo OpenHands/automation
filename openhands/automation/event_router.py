@@ -22,11 +22,17 @@ Authentication Model:
     Webhooks are authenticated by verifying the signature against a shared secret.
     This is standard practice for webhook receivers (GitHub, Stripe, etc.).
 
+    The scheme is per-source, resolved from `providers.VERIFIERS`. Built-in
+    sources use hex HMAC-SHA256 over the raw body; a custom webhook picks one
+    with its `signature_scheme`.
+
     Replay Attack Considerations:
-    - Old valid payloads could be replayed since signatures don't expire
-    - GitHub includes delivery IDs for deduplication; consider tracking these
-    - For high-security scenarios, add timestamp validation (X-GitHub-Timestamp)
-    - Current risk is acceptable: replay triggers same automation again (idempotent)
+    - Under `hmac_sha256_hex` old valid payloads could be replayed, since
+      nothing in the signed content expires
+    - `standard_webhooks` and `slack_v0` sign a timestamp and reject
+      deliveries outside a 5-minute window, so they are not replayable
+    - Events are deduplicated by the provider's delivery id, which is not
+      itself signed: that stops a verbatim replay, not a crafted one
 """
 
 import json
@@ -43,25 +49,49 @@ from openhands.automation.event_schemas.github import (
     get_event_detection_rules,
     get_supported_event_types,
 )
+from openhands.automation.ingest import AcceptedEvent, accept_event
+from openhands.automation.providers import (
+    WebhookVerifier,
+    get_header,
+    get_provider,
+    get_verifier,
+)
 from openhands.automation.schemas import (
     EventDetectionRule,
     EventResponse,
     RequestedEventTypesResponse,
+    WebhookConfig,
 )
 from openhands.automation.telemetry import capture_automation_event
-from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
-    create_automation_run,
-    get_event_automations,
     get_requested_event_types,
     get_webhook_config,
-    verify_signature,
 )
 
 
 logger = logging.getLogger("automation.event_router")
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
+
+
+def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
+    """Resolve the configured scheme, refusing one this build cannot verify.
+
+    Falling back would reject every genuine delivery as a bad signature, hiding
+    a misconfiguration behind a 401.
+    """
+    verifier = get_verifier(config.signature_scheme)
+    if verifier is None:
+        logger.error(
+            "Unknown signature scheme '%s' configured for source=%s",
+            config.signature_scheme,
+            source,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook signature scheme is not supported by this deployment",
+        )
+    return verifier
 
 
 @router.get("/{source}/requested-types", response_model=RequestedEventTypesResponse)
@@ -89,7 +119,14 @@ async def requested_event_types(
             status_code=401,
             detail=f"Missing signature header: {config.signature_header}",
         )
-    if not verify_signature(source.encode("utf-8"), signature, config.secret):
+    # Signed content is the source string: this is a read, so there is no body.
+    verifier = _resolve_verifier(config, source)
+    if not verifier.verify(
+        body=source.encode("utf-8"),
+        headers=request.headers,
+        secret=config.secret,
+        signature_header=config.signature_header,
+    ):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     if source == "github":
@@ -166,9 +203,16 @@ async def receive_event(
             detail=f"Missing signature header: {config.signature_header}",
         )
 
-    if not verify_signature(body, signature, config.secret):
+    verifier = _resolve_verifier(config, source)
+    if not verifier.verify(
+        body=body,
+        headers=request.headers,
+        secret=config.secret,
+        signature_header=config.signature_header,
+    ):
         logger.warning(
-            "Invalid signature for event from source=%s org_id=%s",
+            "Invalid signature (scheme=%s) for event from source=%s org_id=%s",
+            config.signature_scheme,
             source,
             org_id,
         )
@@ -243,72 +287,33 @@ async def receive_event(
         },
     )
 
-    # 6. Find matching automations
-    automations = await get_event_automations(org_id, source, session)
-    matched_automations = []
-
-    for automation, trigger in automations:
-        # Match trigger against webhook payload using JMESPath filter
-        if matches_trigger(trigger, source, event.event_key, webhook_payload):
-            matched_automations.append(automation)
-
-    logger.info(
-        "Event matched %d/%d automations for org=%s",
-        len(matched_automations),
-        len(automations),
+    # 6. Record, match triggers and create runs (transport-neutral)
+    #
+    # The delivery id is where HTTP has to do the looking: `accept_event()`
+    # deduplicates on whatever the transport hands it, and for a webhook that
+    # is a header. A provider that names no header, and every custom webhook,
+    # yields None -- recorded, routed, not deduplicated.
+    provider = get_provider(source)
+    provider_event_id = (
+        get_header(request.headers, provider.event_id_header)
+        if provider is not None and provider.event_id_header
+        else None
+    )
+    result = await accept_event(
         org_id,
-    )
-    await capture_automation_event(
-        "automation_event_matched",
+        AcceptedEvent(
+            source=source,
+            event_key=event.event_key,
+            payload=webhook_payload,
+            provider_event_id=provider_event_id,
+            parsed_event=event if isinstance(event, BaseModel) else None,
+        ),
+        session,
         request=request,
-        properties={
-            "event_source": source,
-            "event_key": event.event_key,
-            "org_id": str(org_id),
-            "candidate_count": len(automations),
-            "matched_count": len(matched_automations),
-        },
     )
-
-    # 7. Create PENDING runs for matched automations
-    # For Pydantic-parsed events (GitHub), use model_dump() for typed fields
-    # For custom webhooks, use the webhook payload directly
-    event_payload = (
-        event.model_dump(mode="json")
-        if isinstance(event, BaseModel)
-        else webhook_payload
-    )
-
-    run_ids: list[str] = []
-    for automation in matched_automations:
-        run = await create_automation_run(
-            automation, session, event_payload=event_payload
-        )
-        run_ids.append(str(run.id))
-        run_properties = {
-            "trigger_source": "event",
-            "event_source": source,
-            "event_key": event.event_key,
-        }
-        await capture_automation_event(
-            "automation_run_scheduled",
-            request=request,
-            automation=automation,
-            run=run,
-            properties=run_properties,
-        )
-        await capture_automation_event(
-            "automation_run_created",
-            request=request,
-            automation=automation,
-            run=run,
-            properties=run_properties,
-        )
-
-    await session.commit()
 
     return EventResponse(
         received=True,
-        matched=len(matched_automations),
-        runs_created=run_ids,
+        matched=result.matched,
+        runs_created=result.run_ids,
     )

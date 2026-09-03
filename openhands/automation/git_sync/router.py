@@ -43,6 +43,7 @@ logger = logging.getLogger("automation.git_sync")
 
 router = APIRouter(prefix="/v1/git-sync", tags=["Git Sync"])
 
+_require_view_automations = require_permission("view_automations")
 _require_manage_automations = require_permission("manage_automations")
 
 # Strong references to in-flight manual-trigger tasks: asyncio holds only weak
@@ -106,7 +107,7 @@ async def _build_status_response(
 
 @router.get("/status")
 async def get_git_sync_status(
-    _user: AuthenticatedUser = Depends(_require_manage_automations),
+    _user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> GitSyncStatusResponse:
     """Report git sync configuration and last-sync state."""
