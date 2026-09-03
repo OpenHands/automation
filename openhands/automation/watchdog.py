@@ -58,6 +58,9 @@ from openhands.automation.utils.run_status_detail import (
 )
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.watchdog")
@@ -545,6 +548,12 @@ async def mark_stale_runs(
                 await session.commit()
                 if terminal:
                     marked += 1
+                    # Watchdog-authored timeouts never reached the auto-disable
+                    # before, so automations that only ever time out ran
+                    # forever.
+                    await maybe_disable_unhealthy_automation_after_run(
+                        session_factory, run.automation_id
+                    )
                 else:
                     logger.info(
                         "Run not terminal (completed concurrently or deferred)",

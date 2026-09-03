@@ -497,6 +497,12 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
             auto-disabling an automation (default: 3, <=0 disables auto-disable)
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD: Consecutive failures
+            before auto-disabling. Unset (the default) turns the rule off;
+            setting a number turns it on and uses that number.
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_WINDOW_HOURS: The rule only fires
+            if nothing has succeeded in this many hours, which is what makes it
+            ignore provider outages shorter than the window (default: 24)
 
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
@@ -584,7 +590,19 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+
+    # Auto-disable rules. `failure_disable_threshold` is the fast path for
+    # unambiguous config faults (bad key, revoked token) and needs no time
+    # guard. The two rules below catch automations that merely fail forever;
+    # their span/window guards are what keep a provider outage from pausing
+    # healthy automations en masse, so both must exceed any tolerable outage.
     failure_disable_threshold: int = 3
+
+    # Setting a threshold at all is what turns the consecutive rule on; it is
+    # off by default. The window only applies once the rule is on, and must
+    # exceed any outage you would rather ride out than pause for.
+    consecutive_failure_disable_threshold: int | None = None
+    consecutive_failure_disable_window_hours: float = 24.0
 
     # Workspace retention for local mode
     # Set to 0 to disable workspace purging.
