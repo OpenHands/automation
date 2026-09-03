@@ -177,6 +177,16 @@ class EventTrigger(BaseModel):
     somebody replies. Without it the opener and its first reply are two
     subjects.
 
+    `turn_text_expr` renders the turn. Without one the event is rendered as
+    the message a human wrote, and a shape nothing recognises travels as
+    verbatim JSON.
+
+    ```json
+    {"source": "github", "on": "issue_comment.created",
+     "destination": "continue_conversation",
+     "turn_text_expr": "comment.body"}
+    ```
+
     By default a delivered turn also wakes the agent. `wake_agent: false`
     appends it to the conversation and leaves it there, so the script decides
     when to act on what has accumulated.
