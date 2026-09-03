@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode
-from openhands.automation.models import Automation, Base
+from openhands.automation.models import Automation, AutomationLifecycleStatus, Base
 from openhands.automation.utils.webhook import get_event_automations, verify_signature
 
 
@@ -272,6 +272,47 @@ class TestGetEventAutomationsSqliteJsonFiltering:
 
             assert len(result) == 1
             assert result[0][0].id == enabled_automation.id
+        finally:
+            set_sqlite_mode(False)
+
+    @pytest.mark.asyncio
+    async def test_excludes_draft_automations(self, sqlite_session):
+        """Draft automations are not returned even if enabled is inconsistent."""
+        org_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        set_sqlite_mode(True)
+
+        try:
+            active = Automation(
+                id=uuid.uuid4(),
+                name="Active Automation",
+                org_id=org_id,
+                user_id=user_id,
+                trigger={"type": "event", "source": "github", "on": "push"},
+                tarball_path="test.tar.gz",
+                entrypoint="main.py",
+                enabled=True,
+                lifecycle_status=AutomationLifecycleStatus.ACTIVE,
+            )
+            draft = Automation(
+                id=uuid.uuid4(),
+                name="Draft Automation",
+                org_id=org_id,
+                user_id=user_id,
+                trigger={"type": "event", "source": "github", "on": "push"},
+                tarball_path="test.tar.gz",
+                entrypoint="main.py",
+                enabled=True,
+                lifecycle_status=AutomationLifecycleStatus.DRAFT,
+            )
+
+            sqlite_session.add_all([active, draft])
+            await sqlite_session.commit()
+
+            result = await get_event_automations(org_id, "github", sqlite_session)
+
+            assert [automation.id for automation, _ in result] == [active.id]
         finally:
             set_sqlite_mode(False)
 

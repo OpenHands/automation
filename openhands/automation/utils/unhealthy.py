@@ -29,6 +29,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
+    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
 )
@@ -240,6 +241,7 @@ async def _apply_disable(
         )
         .values(
             enabled=False,
+            lifecycle_status=AutomationLifecycleStatus.INACTIVE,
             disabled_reason=cause.reason,
             disabled_detail=disabled_detail,
             disabled_at=disabled_at,

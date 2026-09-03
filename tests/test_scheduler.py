@@ -7,7 +7,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationLifecycleStatus,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
     poll_and_schedule,
@@ -472,6 +477,28 @@ class TestPollAndSchedule:
         runs = await poll_and_schedule(async_session_factory)
 
         assert len(runs) == 0
+
+    async def test_poll_excludes_draft_even_if_enabled_flag_is_true(
+        self, async_session_factory
+    ):
+        """Draft lifecycle rows are never scheduled automatically."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Draft Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                lifecycle_status=AutomationLifecycleStatus.DRAFT,
+            )
+            session.add(automation)
+            await session.commit()
+
+        runs = await poll_and_schedule(async_session_factory)
+
+        assert runs == []
 
     async def test_poll_excludes_recently_triggered(self, async_session_factory):
         """Recently triggered automations are not returned as due."""

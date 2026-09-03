@@ -22,7 +22,12 @@ from openhands.automation.dispatcher import (
     dispatcher_loop,
 )
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationLifecycleStatus,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
     mark_run_status,
@@ -547,6 +552,41 @@ class TestDispatchPendingRuns:
 
         assert dispatched == []
         mock_execute.assert_not_awaited()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatches_manual_run_for_disabled_automation(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Manual pending runs are dispatched even when automation is inactive."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=False,
+                lifecycle_status=AutomationLifecycleStatus.INACTIVE,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                trigger_source="manual",
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+
+        assert [run.id for run in dispatched] == [run_id]
+        mock_execute.assert_awaited_once()
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_respects_batch_size(

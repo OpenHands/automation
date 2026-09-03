@@ -54,6 +54,7 @@ from openhands.automation.git_sync.serializer import (
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncState,
+    AutomationLifecycleStatus,
     TarballUpload,
     UploadStatus,
 )
@@ -474,6 +475,18 @@ async def _validate_and_resolve_fields(
         session, fields, deserialized, slug, existing, pending_storage_deletes
     )
 
+    enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
+    lifecycle_status = fields.get("lifecycle_status")
+    if lifecycle_status == AutomationLifecycleStatus.DRAFT.value:
+        lifecycle = AutomationLifecycleStatus.DRAFT
+        enabled = False
+    else:
+        lifecycle = (
+            AutomationLifecycleStatus.ACTIVE
+            if enabled
+            else AutomationLifecycleStatus.INACTIVE
+        )
+
     return {
         "name": name,
         "model": fields.get("model"),
@@ -482,10 +495,8 @@ async def _validate_and_resolve_fields(
         "setup_script_path": setup_script_path,
         "timeout": timeout,
         "keep_alive": fields.get("keep_alive"),
-        # `dict.get`'s default only applies when the key is absent. A hand edit
-        # leaving "enabled:" empty is valid YAML parsing to None, and
-        # bool(None) would silently disable a live automation on import.
-        "enabled": True if fields.get("enabled") is None else bool(fields["enabled"]),
+        "enabled": enabled,
+        "lifecycle_status": lifecycle,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
@@ -718,6 +729,7 @@ async def _import_from_git(
         automation = await session.get(Automation, state.automation_id)
         if automation is not None and automation.deleted_at is None:
             automation.enabled = False
+            automation.lifecycle_status = AutomationLifecycleStatus.INACTIVE
             automation.deleted_at = utcnow()
             result.deleted_in_db += 1
             logger.info("Soft-deleted automation %s (removed from git)", automation.id)

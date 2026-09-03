@@ -76,6 +76,7 @@ _DRAFT_MODELS: dict[str, type[DraftModel]] = {
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",

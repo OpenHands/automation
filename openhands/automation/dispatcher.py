@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +37,7 @@ from openhands.automation.exceptions import (
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import (
     Automation,
+    AutomationLifecycleStatus,
     AutomationRun,
     AutomationRunStatus,
     TarballUpload,
@@ -135,8 +136,14 @@ async def _poll_pending_runs(
         .options(selectinload(AutomationRun.automation))
         .where(
             AutomationRun.status == AutomationRunStatus.PENDING,
-            Automation.enabled.is_(True),
             Automation.deleted_at.is_(None),
+            or_(
+                AutomationRun.trigger_source == "manual",
+                and_(
+                    Automation.enabled.is_(True),
+                    Automation.lifecycle_status == AutomationLifecycleStatus.ACTIVE,
+                ),
+            ),
         )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
