@@ -71,6 +71,20 @@ class TestServiceSettings:
 
         assert settings.failure_disable_threshold == 0
 
+    def test_auto_migrate_defaults_to_unset(self, monkeypatch):
+        monkeypatch.delenv("AUTOMATION_AUTO_MIGRATE", raising=False)
+
+        assert ServiceSettings().auto_migrate is None
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("true", True), ("1", True), ("false", False), ("0", False)],
+    )
+    def test_auto_migrate_parses_env_var(self, monkeypatch, value, expected):
+        monkeypatch.setenv("AUTOMATION_AUTO_MIGRATE", value)
+
+        assert ServiceSettings().auto_migrate is expected
+
 
 class TestBasePath:
     """Verify base_path is derived from base_url path + /api/automation."""

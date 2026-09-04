@@ -471,6 +471,11 @@ class ServiceSettings(BaseSettings):
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
+        AUTOMATION_AUTO_MIGRATE: Run `alembic upgrade head` during startup.
+            Unset (the default) migrates SQLite only, which is what local
+            deployments have always done; true also migrates PostgreSQL;
+            false never migrates on startup, for deployments that run
+            migrations from their own pipeline.
 
         # GCP Cloud SQL
         AUTOMATION_GCP_DB_INSTANCE: Cloud SQL instance (optional)
@@ -545,6 +550,10 @@ class ServiceSettings(BaseSettings):
     #   - sqlite+aiosqlite:////data/automations.db (local SQLite)
     #   - postgresql+asyncpg://user:pass@host/db (PostgreSQL)
     db_url: str = ""
+
+    # None keeps the historical behaviour: SQLite migrates itself, Postgres
+    # does not.
+    auto_migrate: bool | None = None
 
     # GCP Cloud SQL (if set, takes precedence over host/port)
     gcp_db_instance: str | None = None
