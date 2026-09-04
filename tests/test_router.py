@@ -282,6 +282,21 @@ class TestCreateAutomation:
         assert response.status_code == 201
         assert response.json()["preset_metadata"] is None
 
+    async def test_create_automation_honors_explicit_enabled_state(self, async_client):
+        """Custom SDK automations can be created disabled for a test run."""
+        payload = {
+            "name": "Test Before Enabling",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "enabled": False,
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["enabled"] is False
+
     async def test_create_automation_stores_template_provenance(self, async_client):
         """A catalog entry shipping its own tarball records where it came from."""
         payload = {
