@@ -34,7 +34,7 @@ jobs:
                     --cov=openhands/automation \
                     --cov-report=term-missing \
                     --cov-report=xml:coverage.xml \
-                    --cov-fail-under=0 \
+                    --cov-fail-under=65 \
                     tests/
 
             - name: Pytest coverage PR comment
