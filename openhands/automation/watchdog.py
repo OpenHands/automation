@@ -22,11 +22,9 @@ periodic janitor, and a second loop buys nothing for one bounded DELETE.
 import asyncio
 import logging
 import os
-import shutil
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 from pathlib import Path
 from typing import Final
 from uuid import UUID
@@ -61,6 +59,12 @@ from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 from openhands.automation.utils.unhealthy import (
     maybe_disable_unhealthy_automation_after_run,
+)
+from openhands.automation.utils.workspace import (
+    DeleteOutcome,
+    WorkspaceDeleteResult,
+    delete_workspace as _delete_run_dir,
+    is_link_or_junction as _is_link_or_junction,
 )
 
 
@@ -166,15 +170,19 @@ def _loaded_automation(run: AutomationRun) -> Automation | None:
     return run.automation
 
 
-def _should_cleanup_sandbox_after_terminal(
-    run: AutomationRun, keep_alive: bool | None
+def _should_cleanup_after_terminal(
+    run: AutomationRun, keep_alive: bool | None, backend: ExecutionBackend
 ) -> bool:
-    """Return whether watchdog should explicitly delete this run's sandbox.
+    """Return whether watchdog should explicitly release this run's resources.
 
     A `continue_conversation` automation is forced keep_alive at creation, so
-    the sandbox carrying a live conversation is already excluded here.
+    the sandbox carrying a live conversation is already excluded here. A local
+    run owns no sandbox but does own a run workspace on disk, so the backend
+    decides rather than the presence of a sandbox id.
     """
-    return bool(run.sandbox_id) and keep_alive is not True
+    if keep_alive is True:
+        return False
+    return bool(run.sandbox_id) or backend.is_local_mode
 
 
 async def _defer_sandbox_cleanup(
@@ -399,8 +407,8 @@ async def _verify_and_mark_run(
             )
         if result.rowcount > 0:
             keep_alive = await _get_automation_keep_alive(session, run)
-            if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-                if settings.sandbox_cleanup_delay_seconds > 0:
+            if _should_cleanup_after_terminal(run, keep_alive, backend):
+                if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
                     await _defer_sandbox_cleanup(session, run, backend, settings, now)
                 else:
                     try:
@@ -468,8 +476,8 @@ async def _verify_and_mark_run(
     # Clean up resources via backend only when the automation owns explicit
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
     keep_alive = await _get_automation_keep_alive(session, run)
-    if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-        if settings.sandbox_cleanup_delay_seconds > 0:
+    if _should_cleanup_after_terminal(run, keep_alive, backend):
+        if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
             await _defer_sandbox_cleanup(session, run, backend, settings, now)
         else:
             try:
@@ -627,21 +635,6 @@ class PurgeResult:
     bytes_freed: int
 
 
-class DeleteOutcome(StrEnum):
-    """Outcome of one bounded workspace deletion attempt."""
-
-    DELETED = "deleted"
-    MISSING = "missing"
-    REFUSED = "refused"
-    ERROR = "error"
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceDeleteResult:
-    outcome: DeleteOutcome
-    bytes_freed: int
-
-
 def _empty_result(candidates_found: int = 0) -> PurgeResult:
     return PurgeResult(candidates_found, 0, 0, 0, 0, 0)
 
@@ -649,13 +642,6 @@ def _empty_result(candidates_found: int = 0) -> PurgeResult:
 def _workspace_root(workspace_base: str | os.PathLike[str] | None) -> Path:
     """Return the configured root that owns all automation run directories."""
     return local_runs_root(workspace_base)
-
-
-def _workspace_path(
-    workspace_base: str | os.PathLike[str] | None, run_id: UUID
-) -> Path:
-    """Build a run path from a typed UUID, never from raw path input."""
-    return _workspace_root(workspace_base) / str(run_id)
 
 
 def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
@@ -708,32 +694,6 @@ def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
     return dict(candidates)
 
 
-def _dir_size(path: Path) -> int:
-    """Best-effort reclaimed-space estimate; may undercount on races."""
-    total = 0
-    with suppress(OSError):
-        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
-            # Unlike symlinks, os.walk descends Windows junctions even with
-            # followlinks=False; prune them so external targets are not counted.
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if not _is_link_or_junction(Path(dirpath) / name)
-            ]
-            for filename in filenames:
-                # Read the link itself rather than its target.
-                with suppress(OSError):
-                    total += (
-                        (Path(dirpath) / filename).stat(follow_symlinks=False).st_size
-                    )
-    return total
-
-
-def _is_link_or_junction(path: Path) -> bool:
-    """Return whether path is a symlink or Windows directory junction."""
-    return path.is_symlink() or path.is_junction()
-
-
 def _is_expired(timestamp: datetime | float, cutoff: datetime) -> bool:
     """Return whether a trusted timestamp is older than cutoff."""
     try:
@@ -757,41 +717,8 @@ def _delete_workspace(
     workspace_base: str | os.PathLike[str] | None,
     run_id: UUID,
 ) -> WorkspaceDeleteResult:
-    """Delete one verified run directory without following root reparse points."""
-    runs_root = _workspace_root(workspace_base)
-    workspace_path = _workspace_path(workspace_base, run_id)
-
-    if _is_link_or_junction(runs_root):
-        logger.warning("Refusing linked workspace root: %s", runs_root)
-        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
-    if _is_link_or_junction(workspace_path):
-        logger.warning("Refusing linked workspace path: %s", workspace_path)
-        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
-    if not workspace_path.exists():
-        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
-
-    try:
-        resolved_root = runs_root.resolve(strict=True)
-        resolved_path = workspace_path.resolve(strict=True)
-    except FileNotFoundError:
-        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
-    except OSError as exc:
-        logger.warning("Failed to resolve workspace %s: %s", workspace_path, exc)
-        return WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
-
-    if resolved_path.parent != resolved_root or not resolved_path.is_dir():
-        logger.warning("Refusing workspace outside expected root: %s", workspace_path)
-        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
-
-    size = _dir_size(workspace_path)
-    try:
-        shutil.rmtree(workspace_path)
-        return WorkspaceDeleteResult(DeleteOutcome.DELETED, size)
-    except FileNotFoundError:
-        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
-    except OSError as exc:
-        logger.warning("Failed to delete workspace %s: %s", workspace_path, exc)
-        return WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+    """Delete one verified run directory under the configured runs root."""
+    return _delete_run_dir(_workspace_root(workspace_base), run_id)
 
 
 async def purge_terminal_workspaces(
