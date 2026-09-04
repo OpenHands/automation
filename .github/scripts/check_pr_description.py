@@ -102,8 +102,12 @@ def validate_linked_issue_ready(
     numbers = extract_linked_issue_numbers(body)
     if not numbers:
         return []
-    if not repo or not token:
-        return []
+    if not repo:
+        return [
+            "Repository identity is unavailable; linked issues cannot be validated."
+        ]
+    if not token:
+        return ["GITHUB_TOKEN is unavailable; linked issues cannot be validated."]
 
     missing: list[int] = []
     not_ready_new: list[int] = []
@@ -175,14 +179,12 @@ def main() -> int:
     args = parse_args()
     if args.body_file is not None:
         body = args.body_file.read_text()
-        repo = None
+        errors: list[str] = []
     elif args.event_path is not None:
         body, repo = body_from_event(args.event_path)
+        errors = validate_linked_issue_ready(body, repo, os.environ.get("GITHUB_TOKEN"))
     else:
         raise SystemExit("Pass --body-file or set GITHUB_EVENT_PATH.")
-
-    token = os.environ.get("GITHUB_TOKEN")
-    errors = validate_linked_issue_ready(body, repo, token)
 
     for error in errors:
         print(f"::error::{error}")

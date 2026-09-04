@@ -98,12 +98,22 @@ def test_validate_linked_issue_ready_passes_without_linked_issue():
     )
 
 
-def test_validate_linked_issue_ready_no_token_skips_network(monkeypatch):
+def test_validate_linked_issue_ready_fails_without_repository(monkeypatch):
+    def _fail(*args, **kwargs):
+        raise AssertionError("should not call the network without a repository")
+
+    monkeypatch.setattr(_prod, "fetch_issue_details", _fail)
+    errors = validate_linked_issue_ready("Fixes #12\n", None, "token")
+    assert errors and "Repository identity" in errors[0]
+
+
+def test_validate_linked_issue_ready_fails_without_token(monkeypatch):
     def _fail(*args, **kwargs):
         raise AssertionError("should not call the network without a token")
 
     monkeypatch.setattr(_prod, "fetch_issue_details", _fail)
-    assert validate_linked_issue_ready("Fixes #12\n", None, None) == []
+    errors = validate_linked_issue_ready("Fixes #12\n", "org/repo", None)
+    assert errors and "GITHUB_TOKEN" in errors[0]
 
 
 def test_validate_linked_issue_ready_passes_with_ready_label(monkeypatch):
