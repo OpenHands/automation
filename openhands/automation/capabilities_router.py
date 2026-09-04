@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import parse_event
@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
+_require_view_automations = require_permission("view_automations")
+
 DraftModel = (
     CreateAutomationRequest
     | CreatePromptAutomationRequest
@@ -89,7 +91,7 @@ _TRIGGER_TAGS = frozenset({"cron", "event"})
 
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
@@ -148,7 +150,7 @@ async def get_capabilities(
 @router.post("/validate")
 async def validate_draft(
     body: ValidateDraftRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> ValidateDraftResponse:
     """Validate a draft automation without creating it.

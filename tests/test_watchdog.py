@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from openhands.automation.config import Settings
+from openhands.automation.config import Settings, clear_config_cache
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -25,6 +25,7 @@ from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_sandbox_after_terminal,
     _verify_and_mark_run,
+    mark_stale_runs,
     prune_integration_events,
     watchdog_loop,
 )
@@ -725,6 +726,101 @@ class TestSubjectOwningRunsKeepTheirSandbox:
             # about, and nothing has released it.
             assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
             assert run.subject_released_at is None
+
+
+@pytest.mark.asyncio
+class TestMarkStaleRunsAutoDisable:
+    """The watchdog must re-check auto-disable after it authors a failure.
+
+    Automations that only ever time out never reach the callback or dispatcher
+    paths, so this wiring is the only thing that pauses them.
+    """
+
+    async def test_watchdog_timeout_disables_a_chronically_failing_automation(
+        self, async_session_factory, mock_settings, monkeypatch
+    ):
+        monkeypatch.setenv("AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD", "10")
+        monkeypatch.setenv("AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_WINDOW_HOURS", "24")
+        clear_config_cache()
+
+        now = utcnow()
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Only ever times out",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=60,
+            )
+            session.add(automation)
+            await session.flush()
+            automation_id = automation.id
+
+            for i in range(9):
+                session.add(
+                    AutomationRun(
+                        automation_id=automation_id,
+                        status=AutomationRunStatus.FAILED,
+                        created_at=now - timedelta(hours=i + 1),
+                        completed_at=now - timedelta(hours=i + 1),
+                    )
+                )
+            # The 10th run is stale and RUNNING; the watchdog marks it FAILED.
+            session.add(
+                AutomationRun(
+                    automation_id=automation_id,
+                    status=AutomationRunStatus.RUNNING,
+                    sandbox_id="sb-timeout",
+                    started_at=now - timedelta(minutes=5),
+                    timeout_at=now - timedelta(minutes=1),
+                )
+            )
+            await session.commit()
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(verified=False, error="Sandbox not available")
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation is not None
+            assert automation.enabled is False
+            assert automation.disabled_detail is not None
+            assert automation.disabled_detail["rule"] == "consecutive_failures"
+
+        clear_config_cache()
+
+    async def test_watchdog_leaves_a_healthy_automation_enabled(
+        self, async_session_factory, mock_settings, monkeypatch, automation_with_run
+    ):
+        """One timeout is not grounds to pause; the rule needs the streak."""
+        monkeypatch.setenv("AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD", "10")
+        clear_config_cache()
+
+        automation_id = automation_with_run["automation"].id
+        mock_backend = _create_mock_backend(
+            VerificationResult(verified=False, error="Sandbox not available")
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation is not None
+            assert automation.enabled is True
+
+        clear_config_cache()
 
 
 @pytest.mark.asyncio

@@ -295,7 +295,7 @@ def _get_local_user() -> AuthenticatedUser:
         org_id=local_org_id,
         email="local@localhost",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.LOCAL_API_KEY,
         api_key=None,
     )

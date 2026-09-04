@@ -245,7 +245,9 @@ async def _execute_run(
                 else None,
                 run_id=run.id,
             )
-        elif status_detail is not None:
+        else:
+            # Evaluate whether the automation has failed consecutively and may never
+            # succeed
             automation_disabled = await maybe_disable_unhealthy_automation_after_run(
                 session_factory,
                 automation.id,
