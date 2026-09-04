@@ -8,6 +8,7 @@ import sys
 import urllib.error
 from http.client import HTTPMessage
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_prod_module():
@@ -42,6 +43,24 @@ def test_body_from_event_reads_pull_request_body(tmp_path: Path):
     body, repo = body_from_event(event_path)
     assert body == "Fixes #12"
     assert repo == "org/repo"
+
+
+def test_main_validates_body_file(monkeypatch, tmp_path: Path):
+    body_path = tmp_path / "body.md"
+    body_path.write_text("Fixes #12\n")
+    monkeypatch.setattr(
+        _prod,
+        "parse_args",
+        lambda: SimpleNamespace(body_file=body_path, repo="org/repo", event_path=None),
+    )
+    monkeypatch.setattr(
+        _prod,
+        "fetch_issue_details",
+        lambda repo, num, token: (["bug"], "2026-09-04T00:00:00Z"),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert _prod.main() == 1
 
 
 def test_extract_linked_issue_numbers_keyword_and_bare_ref():
@@ -83,6 +102,11 @@ def test_extract_linked_issue_numbers_accepts_only_closing_keyword_forms():
 def test_extract_linked_issue_numbers_ignores_fenced_code_and_quotes():
     body = "> Fixes #1\n```markdown\nFixes #2\n```\n~~~\nCloses #3\n~~~\nResolves #4\n"
     assert extract_linked_issue_numbers(body) == [4]
+
+
+def test_extract_linked_issue_numbers_ignores_unclosed_fence():
+    body = "Resolves #1\n```markdown\nFixes #2\n"
+    assert extract_linked_issue_numbers(body) == [1]
 
 
 def test_extract_linked_issue_numbers_keyword_inside_word_is_ignored():

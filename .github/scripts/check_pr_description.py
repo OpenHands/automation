@@ -16,9 +16,9 @@ A PR that links no issues passes: many legitimate PRs (dependency bumps, small
 chores) have no tracking issue, and this gate's purpose is to keep linked work
 honest, not to force a link.
 
-Local usage:
+Local usage (with ``GITHUB_TOKEN`` set):
 
-    python .github/scripts/check_pr_description.py --body-file /tmp/pr-body.md
+    python .github/scripts/check_pr_description.py --body-file BODY --repo OWNER/REPO
     python .github/scripts/check_pr_description.py --event-path "$GITHUB_EVENT_PATH"
 """
 
@@ -38,7 +38,7 @@ HEADING_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
 ISSUE_REF_RE = re.compile(
     r"(?i)\b(?:fix(?:es|ed)|clos(?:es|ed)|resolv(?:es|ed))\s+#(\d+)"
 )
-FENCED_CODE_RE = re.compile(r"(?ms)^\s*(```|~~~).*?^\s*\1\s*$")
+FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 BLOCKQUOTE_LINE_RE = re.compile(r"(?m)^\s*>.*$")
 BARE_ISSUE_REF_RE = re.compile(r"(?<!\w)#(\d+)")
 READY_FOR_DEV_LABEL = "ready-for-dev"
@@ -55,10 +55,31 @@ def extract_sections(body: str) -> dict[str, str]:
     return sections
 
 
+def strip_fenced_code(body: str) -> str:
+    searchable_lines: list[str] = []
+    fence_character: str | None = None
+    fence_length = 0
+    for line in body.splitlines(keepends=True):
+        match = FENCE_LINE_RE.match(line)
+        if match:
+            fence = match.group(1)
+            if fence_character is None:
+                fence_character = fence[0]
+                fence_length = len(fence)
+                continue
+            if fence[0] == fence_character and len(fence) >= fence_length:
+                fence_character = None
+                fence_length = 0
+            continue
+        if fence_character is None:
+            searchable_lines.append(line)
+    return "".join(searchable_lines)
+
+
 def extract_linked_issue_numbers(body: str) -> list[int]:
     numbers: list[int] = []
     seen: set[int] = set()
-    searchable_body = FENCED_CODE_RE.sub("", body)
+    searchable_body = strip_fenced_code(body)
     searchable_body = BLOCKQUOTE_LINE_RE.sub("", searchable_body)
     for match in ISSUE_REF_RE.finditer(searchable_body):
         number = int(match.group(1))
@@ -165,6 +186,9 @@ def parse_args() -> argparse.Namespace:
         "--body-file", type=Path, help="Read a PR description body from a file."
     )
     parser.add_argument(
+        "--repo", help="Repository name (owner/repo) for --body-file validation."
+    )
+    parser.add_argument(
         "--event-path",
         type=Path,
         default=Path(os.environ["GITHUB_EVENT_PATH"])
@@ -179,13 +203,13 @@ def main() -> int:
     args = parse_args()
     if args.body_file is not None:
         body = args.body_file.read_text()
-        errors: list[str] = []
+        repo = args.repo
     elif args.event_path is not None:
         body, repo = body_from_event(args.event_path)
-        errors = validate_linked_issue_ready(body, repo, os.environ.get("GITHUB_TOKEN"))
     else:
         raise SystemExit("Pass --body-file or set GITHUB_EVENT_PATH.")
 
+    errors = validate_linked_issue_ready(body, repo, os.environ.get("GITHUB_TOKEN"))
     for error in errors:
         print(f"::error::{error}")
 
