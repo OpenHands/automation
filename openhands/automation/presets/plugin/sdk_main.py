@@ -72,6 +72,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -191,7 +192,7 @@ try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
 except ImportError:
     _coerce_mcp_config = None
-from openhands.sdk.plugin import PluginSource
+from openhands.sdk.plugin import Plugin, PluginSource
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -404,15 +405,33 @@ This automation was triggered by a webhook event:
 
 {USER_PROMPT}"""
 
-    # Deserialize plugin sources using Pydantic validation
-    plugin_sources = [PluginSource.model_validate(p) for p in plugins_config]
-
     print("\n=== PLUGINS CONFIG ===")
-    print(f"  loading {len(plugin_sources)} plugin(s):")
-    for ps in plugin_sources:
+    # Resolve plugins before creating the remote conversation. Passing remote
+    # coordinates makes the agent server fetch them lazily when the conversation
+    # starts, which turns fetch failures into opaque errors while polling events.
+    # The preset runner and local agent server share this workspace, so passing
+    # the resolved path keeps loading server-side while making fetch failures
+    # visible to this script and its completion callback.
+    plugin_cache_dir = Path(workspace_base) / ".openhands" / "plugin-cache"
+    plugin_sources = []
+    print(f"  resolving {len(plugins_config)} plugin(s):")
+    for raw_plugin_source in plugins_config:
+        plugin_source = PluginSource.model_validate(raw_plugin_source)
+        plugin_path = Plugin.fetch(
+            source=plugin_source.source,
+            ref=plugin_source.ref,
+            repo_path=plugin_source.repo_path,
+            cache_dir=plugin_cache_dir,
+        )
+        # Validate the manifest here so the run receives an actionable failure
+        # before the agent server starts the conversation.
+        Plugin.load(plugin_path)
+        plugin_sources.append(PluginSource(source=str(plugin_path)))
+
+        ps = plugin_source
         ref_str = f"@{ps.ref}" if ps.ref else ""
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
-        print(f"    - {ps.source}{ref_str}{path_str}")
+        print(f"    - {ps.source}{ref_str}{path_str} -> {plugin_path}")
 
     # Get LLM config via workspace/profile APIs
     print("\n=== GET_LLM ===")
