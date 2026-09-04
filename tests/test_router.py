@@ -268,6 +268,48 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
+    async def test_create_automation_with_description(
+        self, async_client, async_session
+    ):
+        """A supplied description is stored and echoed; omitted stays null."""
+        payload = {
+            "name": "My Test Automation",
+            "description": "Weekly dependency report",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["description"] == "Weekly dependency report"
+        automation = await async_session.get(Automation, uuid.UUID(data["id"]))
+        assert automation is not None
+        assert automation.description == "Weekly dependency report"
+
+        # Omitted -> null, so undescribed automations look exactly like today's.
+        payload.pop("description")
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["description"] is None
+
+    async def test_create_automation_rejects_oversized_description(self, async_client):
+        """Description is capped at 2000 characters."""
+        payload = {
+            "name": "My Test Automation",
+            "description": "x" * 2001,
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
+
     async def test_create_automation_preset_metadata_is_null(self, async_client):
         """Custom SDK automations are created without preset metadata."""
         payload = {
@@ -1143,6 +1185,38 @@ class TestUpdateAutomation:
         data = response.json()
         assert data["name"] == "Updated Name"
         assert data["entrypoint"] == "uv run script.py"
+
+    async def test_update_automation_description(self, async_client, async_session):
+        """PATCH sets and clears the description like any other field."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Original Name",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"description": "Runs weekly"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["description"] == "Runs weekly"
+
+        # Explicit null clears it -- not a no-op.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"description": None},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["description"] is None
+        await async_session.refresh(automation)
+        assert automation.description is None
 
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""

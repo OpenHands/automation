@@ -644,6 +644,60 @@ class TestRunSyncCycle:
 
         assert read_slugs == ["automation-b"]
 
+    async def test_description_round_trips_through_git(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+    ):
+        """A description set via the API lands in automation.yaml (with no key
+        when absent), and a git-side edit to it imports back on the next cycle.
+        """
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            automation.description = "Weekly dependency report"
+            await mark_git_sync_dirty(session, automation)
+            await session.commit()
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        editor_dir = origin.parent / "editor"
+        await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
+        await pull(editor_dir, "main", "", 30)
+        yaml_path = (
+            editor_dir / "automations" / "my-first-automation" / "automation.yaml"
+        )
+        text = yaml_path.read_text()
+        assert "description: Weekly dependency report" in text
+        yaml_path.write_text(
+            text.replace(
+                "description: Weekly dependency report",
+                "description: Edited in git",
+            )
+        )
+        await commit_and_push(
+            editor_dir,
+            "automations",
+            "edit description",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+
+        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation is not None
+            assert automation.description == "Edited in git"
+
     async def test_dirty_automation_wins_over_conflicting_git_edit(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
     ):

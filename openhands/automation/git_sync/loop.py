@@ -488,6 +488,7 @@ async def _validate_and_resolve_fields(
         "enabled": True if fields.get("enabled") is None else bool(fields["enabled"]),
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
+        "description": fields.get("description"),
         "tarball_path": tarball_path,
     }
 

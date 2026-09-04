@@ -161,6 +161,7 @@ async def create_automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
+        description=body.description,
         model=model,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
