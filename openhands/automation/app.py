@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
         from alembic import command
         from alembic.config import Config
 
-        from openhands.automation.db import normalize_sqlite_url_for_alembic
+        from openhands.automation.db import normalize_url_for_alembic
 
         # Find migrations folder relative to this package.
         # When installed via pip/uvx, migrations are bundled inside
@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI):
         alembic_cfg = Config()
         alembic_cfg.set_main_option("script_location", str(migrations_path))
         # Set the database URL for Alembic to use (sync version)
-        db_url = normalize_sqlite_url_for_alembic(settings.db_url)
+        db_url = normalize_url_for_alembic(settings.db_url)
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
         # Run migrations synchronously (Alembic doesn't support async)

@@ -14,7 +14,7 @@ from openhands.automation.db import (
     _build_pg8000_connect_args,
     _create_sqlite_engine,
     is_sqlite_url,
-    normalize_sqlite_url_for_alembic,
+    normalize_url_for_alembic,
     set_sqlite_mode,
     using_sqlite,
 )
@@ -173,38 +173,54 @@ class TestPostgresSslMode:
         assert captured["kwargs"]["pool_pre_ping"] is True
 
 
-class TestNormalizeSqliteUrlForAlembic:
-    """Tests for normalize_sqlite_url_for_alembic helper function."""
+class TestNormalizeUrlForAlembic:
+    """Tests for normalize_url_for_alembic helper function."""
 
     def test_converts_aiosqlite_to_sqlite(self):
         """Converts sqlite+aiosqlite:// to sqlite://."""
         url = "sqlite+aiosqlite:///test.db"
-        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///test.db"
+        assert normalize_url_for_alembic(url) == "sqlite:///test.db"
 
     def test_converts_aiosqlite_with_absolute_path(self):
         """Converts sqlite+aiosqlite with absolute path."""
         url = "sqlite+aiosqlite:////data/automations.db"
-        assert normalize_sqlite_url_for_alembic(url) == "sqlite:////data/automations.db"
+        assert normalize_url_for_alembic(url) == "sqlite:////data/automations.db"
 
     def test_preserves_plain_sqlite_url(self):
         """Plain sqlite:// URL is unchanged."""
         url = "sqlite:///test.db"
-        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///test.db"
+        assert normalize_url_for_alembic(url) == "sqlite:///test.db"
 
     def test_preserves_postgresql_url(self):
         """PostgreSQL URLs are unchanged."""
         url = "postgresql://user:pass@host/db"
-        assert normalize_sqlite_url_for_alembic(url) == url
+        assert normalize_url_for_alembic(url) == url
 
-    def test_preserves_postgresql_asyncpg_url(self):
-        """PostgreSQL+asyncpg URLs are unchanged."""
+    def test_converts_asyncpg_to_pg8000(self):
+        """Converts postgresql+asyncpg:// to postgresql+pg8000://."""
         url = "postgresql+asyncpg://user:pass@host/db"
-        assert normalize_sqlite_url_for_alembic(url) == url
+        assert normalize_url_for_alembic(url) == "postgresql+pg8000://user:pass@host/db"
+
+    def test_converts_only_the_asyncpg_driver_prefix(self):
+        """A password containing the driver name is left alone."""
+        url = "postgresql+asyncpg://user:postgresql+asyncpg@host/db"
+        assert normalize_url_for_alembic(url) == (
+            "postgresql+pg8000://user:postgresql+asyncpg@host/db"
+        )
+
+    def test_preserves_postgresql_psycopg_url(self):
+        """Other PostgreSQL drivers are unchanged."""
+        url = "postgresql+psycopg2://user:pass@host/db"
+        assert normalize_url_for_alembic(url) == url
 
     def test_handles_memory_database(self):
         """Memory database URL is converted correctly."""
         url = "sqlite+aiosqlite:///:memory:"
-        assert normalize_sqlite_url_for_alembic(url) == "sqlite:///:memory:"
+        assert normalize_url_for_alembic(url) == "sqlite:///:memory:"
+
+    def test_preserves_empty_url(self):
+        """Empty URL is unchanged."""
+        assert normalize_url_for_alembic("") == ""
 
 
 class TestSqliteMigrations:
@@ -270,7 +286,7 @@ class TestSqliteMigrations:
         """Auto-migration on startup creates all required tables.
 
         This tests the auto-migration behavior added in app.py for SQLite,
-        using the normalize_sqlite_url_for_alembic helper function.
+        using the normalize_url_for_alembic helper function.
         """
         import subprocess
 
@@ -281,7 +297,7 @@ class TestSqliteMigrations:
         try:
             # Test the URL normalization helper
             async_url = f"sqlite+aiosqlite:///{db_path}"
-            sync_url = normalize_sqlite_url_for_alembic(async_url)
+            sync_url = normalize_url_for_alembic(async_url)
             assert sync_url == f"sqlite:///{db_path}"
 
             # Run migrations using subprocess to avoid env.py PostgreSQL defaults
