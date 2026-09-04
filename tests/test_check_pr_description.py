@@ -60,14 +60,32 @@ def test_extract_linked_issue_numbers_only_bare_ref_in_issue_section():
     assert extract_linked_issue_numbers(body) == [7]
 
 
+def test_extract_linked_issue_numbers_issue_section_is_case_insensitive():
+    body = "## issue NUMBER\n\n#7\n"
+    assert extract_linked_issue_numbers(body) == [7]
+
+
 def test_extract_linked_issue_numbers_no_bare_ref_outside_issue_section():
     # A bare `#42` in the Summary must not be treated as a linked issue.
     body = "## Summary\n\nSee #42 for background.\n"
     assert extract_linked_issue_numbers(body) == []
 
 
+def test_extract_linked_issue_numbers_accepts_only_closing_keyword_forms():
+    body = (
+        "Fixes #1; fixed #2; closes #3; closed #4; resolves #5; resolved #6.\n"
+        "I plan to fix #7, close #8, and resolve #9 later.\n"
+        "We are fixing #10, closing #11, and resolving #12 now.\n"
+    )
+    assert extract_linked_issue_numbers(body) == [1, 2, 3, 4, 5, 6]
+
+
+def test_extract_linked_issue_numbers_ignores_fenced_code_and_quotes():
+    body = "> Fixes #1\n```markdown\nFixes #2\n```\n~~~\nCloses #3\n~~~\nResolves #4\n"
+    assert extract_linked_issue_numbers(body) == [4]
+
+
 def test_extract_linked_issue_numbers_keyword_inside_word_is_ignored():
-    # "fix"/"clos"/"resolv" must not match inside larger words (e.g. "crucifixes").
     body = "crucifixes #12, encloses #34, transfixes #56.\n"
     assert extract_linked_issue_numbers(body) == []
 

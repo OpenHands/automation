@@ -35,7 +35,11 @@ from pathlib import Path
 
 
 HEADING_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
-ISSUE_REF_RE = re.compile(r"(?i)\b(?:fix|clos|resolv)(?:e?(?:s|d)?|ing)?\s+#(\d+)")
+ISSUE_REF_RE = re.compile(
+    r"(?i)\b(?:fix(?:es|ed)|clos(?:es|ed)|resolv(?:es|ed))\s+#(\d+)"
+)
+FENCED_CODE_RE = re.compile(r"(?ms)^\s*(```|~~~).*?^\s*\1\s*$")
+BLOCKQUOTE_LINE_RE = re.compile(r"(?m)^\s*>.*$")
 BARE_ISSUE_REF_RE = re.compile(r"(?<!\w)#(\d+)")
 READY_FOR_DEV_LABEL = "ready-for-dev"
 READY_FOR_DEV_ROLLOUT_ISO = "2026-09-04"
@@ -47,21 +51,23 @@ def extract_sections(body: str) -> dict[str, str]:
     for index, match in enumerate(matches):
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        sections[match.group(1).strip()] = body[start:end]
+        sections[match.group(1).strip().lower()] = body[start:end]
     return sections
 
 
 def extract_linked_issue_numbers(body: str) -> list[int]:
     numbers: list[int] = []
     seen: set[int] = set()
-    for match in ISSUE_REF_RE.finditer(body):
+    searchable_body = FENCED_CODE_RE.sub("", body)
+    searchable_body = BLOCKQUOTE_LINE_RE.sub("", searchable_body)
+    for match in ISSUE_REF_RE.finditer(searchable_body):
         number = int(match.group(1))
         if number not in seen:
             numbers.append(number)
             seen.add(number)
 
-    sections = extract_sections(body)
-    issue_section = sections.get("Issue Number", "")
+    sections = extract_sections(searchable_body)
+    issue_section = sections.get("issue number", "")
     for match in BARE_ISSUE_REF_RE.finditer(issue_section):
         number = int(match.group(1))
         if number not in seen:
