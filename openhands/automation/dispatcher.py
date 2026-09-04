@@ -423,6 +423,7 @@ async def _execute_run(
             env_vars=env_vars,
             timeout=effective_timeout,
             run_id=run_id,
+            setup_script_path=automation.setup_script_path,
             sandbox_id=ctx.sandbox_id,
         )
     except PermanentDispatchError as exc:
