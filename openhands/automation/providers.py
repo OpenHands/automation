@@ -21,8 +21,6 @@ from openhands.automation.event_schemas import WebhookEvent
 if TYPE_CHECKING:
     from fastapi import Request, Response
 
-    from openhands.automation.ingest import EventSubject
-
 
 DEFAULT_VERIFIER: Final[str] = "hmac_sha256_hex"
 DEFAULT_BUILTIN_SIGNATURE_HEADER: Final[str] = "X-Hub-Signature-256"
@@ -37,7 +35,6 @@ SLACK_TIMESTAMP_HEADER: Final[str] = "X-Slack-Request-Timestamp"
 
 ParseFunc = Callable[[dict[str, Any]], WebhookEvent]
 SecretFunc = Callable[[Settings], str | None]
-SubjectFunc = Callable[[dict[str, Any]], "EventSubject | None"]
 HandshakeFunc = Callable[["Request"], "Response | None"]
 
 
@@ -82,8 +79,6 @@ class Provider:
     # None means the provider does not identify deliveries, so its events are
     # recorded but never deduplicated.
     event_id_header: str | None = None
-    # Reserved for subject-based routing. Nothing reads it.
-    subject: SubjectFunc | None = None
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
     # HTTP handshake, and Socket Mode is our Slack path.
     handshake: HandshakeFunc | None = None

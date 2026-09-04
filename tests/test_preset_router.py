@@ -144,6 +144,26 @@ class TestPresetFileSyntax:
             "setup.sh doesn't look like a valid shell script"
         )
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_creates_its_conversation_under_the_derived_id(self, preset_name):
+        """The other half of the `continue_conversation` contract.
+
+        The dispatcher exports AUTOMATION_CONVERSATION_ID for a subject-owning
+        run, but that only matters if the script actually creates its
+        conversation with it. Exporting it and never reading it looks exactly
+        like the feature working, right up until the first follow-up event
+        404s and the thread silently restarts.
+        """
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert "AUTOMATION_CONVERSATION_ID" in source, (
+            f"{preset_name} preset ignores AUTOMATION_CONVERSATION_ID, so a "
+            "continued thread would get a fresh conversation every event"
+        )
+        assert '"conversation_id"' in source, (
+            f"{preset_name} preset must pass conversation_id to Conversation()"
+        )
+
     def test_shared_finish_tool_hook_syntax(self):
         """Verify shared finish-tool hook helper has valid Python syntax."""
         helper_path = PRESETS_DIR / "finish_tool_hook.py"
