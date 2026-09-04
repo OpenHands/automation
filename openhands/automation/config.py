@@ -507,6 +507,10 @@ class ServiceSettings(BaseSettings):
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
             for terminal runs older than this (default: 604800 — 7 days).
+            A run the watchdog itself terminalizes has its workspace removed
+            right then, so this is the backstop for the ones it never sees:
+            runs completed by callback, cancelled runs, and crashes. Set it to
+            0 to disable the sweep.
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
