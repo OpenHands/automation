@@ -192,6 +192,7 @@ try:
 except ImportError:
     _coerce_mcp_config = None
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
@@ -202,6 +203,21 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _resolve_agent(
+    workspace, llm, cli_mode: bool = True, finish_tool_response_schema=None
+):
+    """Get the correct agent for the server's configured agent_kind."""
+    agent_settings = workspace._fetch_agent_settings()
+    if isinstance(agent_settings, ACPAgentSettings):
+        return agent_settings.create_agent()
+    # Get default agent with tools and condenser (CLI mode to disable browser)
+    return get_default_agent(
+        llm=llm,
+        cli_mode=cli_mode,
+        finish_tool_response_schema=finish_tool_response_schema,
+    )
 
 
 def _normalize_mcp_config(raw_mcp_config):
@@ -453,11 +469,11 @@ This automation was triggered by a webhook event:
         # Not a hard failure — user may not have MCP configured
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-    # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
     report_phase("Configuring agent")
     # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
-    agent = get_default_agent(
+    agent = _resolve_agent(
+        workspace,
         llm=llm,
         cli_mode=True,
         finish_tool_response_schema=TaskOutcome,
