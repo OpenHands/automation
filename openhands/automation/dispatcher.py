@@ -28,6 +28,7 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
@@ -41,6 +42,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     TarballUpload,
 )
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -176,8 +178,15 @@ def _build_event_payload(
         "automation_id": str(automation.id),
         "automation_name": automation.name,
     }
-    if run.event_payload:
-        payload["event"] = run.event_payload
+    # Events that arrived on this subject while the run was still queued are
+    # parked on the payload. Lift them into a field of our own, so the script
+    # still reads the provider's payload exactly as it arrived.
+    event = dict(run.event_payload or {})
+    follow_up_turns = event.pop(COALESCED_TURNS_KEY, None)
+    if event:
+        payload["event"] = event
+    if follow_up_turns:
+        payload["follow_up_turns"] = follow_up_turns
     if automation.model:
         payload["model"] = automation.model
     return payload
@@ -328,6 +337,18 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    # A subject-owning run must create its conversation under the id
+    # `continue_conversation` addresses later, or every follow-up 404s and
+    # silently starts a fresh thread.
+    if run.subject_key:
+        trigger_source = (automation.trigger or {}).get("source")
+        if trigger_source:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = conversation_id_for(
+                automation.org_id,
+                automation.id,
+                trigger_source,
+                run.subject_key,
+            )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:

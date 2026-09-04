@@ -45,8 +45,6 @@ jobs:
 
             - name: Evaluate issue readiness
               id: readiness
-              env:
-                  GITHUB_EVENT_PATH: ${{ github.event_path }}
               run: |
                   set -euo pipefail
                   # --json always exits 0: a not-ready issue is a normal result,

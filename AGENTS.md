@@ -186,6 +186,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
+| `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 

@@ -6,7 +6,16 @@ import uuid
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
@@ -131,6 +140,61 @@ class EventTrigger(BaseModel):
     // No filter - match any event of this type
     {"source": "github", "on": "push"}
     ```
+
+    ## Conversation reuse
+
+    `destination: continue_conversation` sends events about one external
+    subject -- a Slack thread, a pull request -- to the same conversation
+    instead of starting a run each time.
+
+    ```json
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation"}
+    ```
+
+    `subject_key_expr` names that subject, for every source alike.
+
+    ```json
+    {"source": "github", "on": "issue_comment.created",
+     "destination": "continue_conversation",
+     "subject_key_expr":
+       "(pull_request.number || issue.number || number) && join('',
+          [repository.full_name, '#', to_string(
+            pull_request.number || issue.number || number)])"}
+    ```
+
+    For Slack over the socket transport, where the payload is the raw envelope:
+
+    ```json
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation",
+     "subject_key_expr":
+       "join('/', [team_id, event.channel, event.thread_ts || event.ts])"}
+    ```
+
+    The `|| event.ts` half is load-bearing: the mention that opens a thread
+    carries no `thread_ts`, and its own `ts` is what becomes the thread id once
+    somebody replies. Without it the opener and its first reply are two
+    subjects.
+
+    `turn_text_expr` renders the turn. Without one the event is rendered as
+    the message a human wrote, and a shape nothing recognises travels as
+    verbatim JSON.
+
+    ```json
+    {"source": "github", "on": "issue_comment.created",
+     "destination": "continue_conversation",
+     "turn_text_expr": "comment.body"}
+    ```
+
+    By default a delivered turn also wakes the agent. `wake_agent: false`
+    appends it to the conversation and leaves it there, so the script decides
+    when to act on what has accumulated.
+
+    ```json
+    {"source": "slack", "on": "app_mention",
+     "destination": "continue_conversation", "wake_agent": false}
+    ```
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -160,16 +224,67 @@ class EventTrigger(BaseModel):
         ),
     )
 
-    @field_validator("filter")
+    destination: Literal["dispatch_run", "continue_conversation"] = Field(
+        default="dispatch_run",
+        description=(
+            "Where a matching event goes. 'dispatch_run' starts a fresh run. "
+            "'continue_conversation' sends it as another turn on the "
+            "subject's conversation, falling back to a run when there is none."
+        ),
+    )
+    subject_key_expr: str | None = Field(
+        default=None,
+        description=(
+            "JMESPath expression yielding the subject key events are grouped "
+            "by. Required for 'continue_conversation'; without it the event "
+            "starts a run as usual. For GitHub: "
+            "(pull_request.number || issue.number || number) && join('', "
+            "[repository.full_name, '#', to_string(pull_request.number || "
+            "issue.number || number)]). "
+            "The fallback chain keeps a pull request and its comments on one "
+            "subject; the leading guard keeps an event with no number, such "
+            "as a push, from becoming the subject '<repo>#null'. "
+            "For Slack: join('/', [team_id, event.channel, event.thread_ts "
+            "|| event.ts]). "
+            "Ignored unless destination is 'continue_conversation'."
+        ),
+    )
+    turn_text_expr: str | None = Field(
+        default=None,
+        description=(
+            "JMESPath expression rendering the event as the follow-up turn's "
+            "text, e.g. comment.body, overriding the built-in rendering. "
+            "Ignored unless destination is 'continue_conversation'."
+        ),
+    )
+    wake_agent: bool = Field(
+        default=True,
+        description=(
+            "Whether a delivered turn also starts the agent loop. False leaves "
+            "it unanswered, making the conversation the buffer the script "
+            "drains. Ignored unless destination is 'continue_conversation'."
+        ),
+    )
+
+    @field_validator("filter", "subject_key_expr", "turn_text_expr")
     @classmethod
-    def validate_filter_expression(cls, v: str | None) -> str | None:
-        """Validate JMESPath filter expression at creation time."""
+    def validate_jmespath_expression(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        """Validate every JMESPath field at creation time.
+
+        One validator over all of them, so a fourth cannot be added without
+        validation. It matters more here than for most fields: an unchecked
+        typo is indistinguishable from the feature being switched off --
+        `subject_key_expr` silently stops threading, `turn_text_expr` silently
+        falls back to the built-in rendering.
+        """
         if v:
             from openhands.automation.filter_eval import validate_filter
 
             is_valid, error = validate_filter(v)
             if not is_valid:
-                raise ValueError(f"Invalid filter expression: {error}")
+                raise ValueError(f"Invalid {info.field_name} expression: {error}")
         return v
 
     @property
@@ -380,6 +495,28 @@ class CreateAutomationRequest(BaseModel):
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
+    @model_validator(mode="after")
+    def keep_alive_for_continued_conversations(self) -> "CreateAutomationRequest":
+        """A continued conversation outlives its run, so its sandbox must too.
+
+        Settling this at creation keeps the cleanup paths checking `keep_alive`
+        alone, rather than every deletion site re-deriving that a run holding a
+        subject is implicitly kept.
+        """
+        trigger = self.trigger
+        if not isinstance(trigger, EventTrigger):
+            return self
+        if trigger.destination != "continue_conversation":
+            return self
+        if self.keep_alive is False:
+            raise ValueError(
+                "keep_alive cannot be false when destination is "
+                "'continue_conversation': deleting the sandbox would destroy "
+                "the conversation the next event continues"
+            )
+        self.keep_alive = True
+        return self
+
 
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
@@ -458,6 +595,8 @@ class EventResponse(BaseModel):
     received: bool
     matched: int
     runs_created: list[str]  # List of run IDs created
+    # Conversations continued instead of starting a run.
+    conversations_continued: list[str] = Field(default_factory=list)
 
 
 class EventDetectionRule(BaseModel):
