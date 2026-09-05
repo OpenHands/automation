@@ -56,7 +56,7 @@ def test_main_validates_body_file(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         _prod,
         "fetch_issue_details",
-        lambda repo, num, token: (["bug"], "2026-09-04T00:00:00Z"),
+        lambda repo, num, token: (["bug"], "2026-09-12T00:00:00Z"),
     )
     monkeypatch.setenv("GITHUB_TOKEN", "token")
 
@@ -144,7 +144,7 @@ def test_validate_linked_issue_ready_passes_with_ready_label(monkeypatch):
     monkeypatch.setattr(
         _prod,
         "fetch_issue_details",
-        lambda repo, num, token: (["ready-for-dev"], "2026-09-04T00:00:00Z"),
+        lambda repo, num, token: (["ready-for-dev"], "2026-09-12T00:00:00Z"),
     )
     assert validate_linked_issue_ready("Fixes #12\n", "org/repo", "token") == []
 
@@ -175,7 +175,7 @@ def test_validate_linked_issue_ready_fails_for_new_not_ready_issue(monkeypatch):
     monkeypatch.setattr(
         _prod,
         "fetch_issue_details",
-        lambda repo, num, token: (["bug"], "2026-09-04T00:00:00Z"),
+        lambda repo, num, token: (["bug"], "2026-09-12T00:00:00Z"),
     )
     errors = validate_linked_issue_ready("Fixes #12\n", "org/repo", "token")
     assert errors and "ready-for-dev" in errors[0]
@@ -187,8 +187,8 @@ def test_validate_linked_issue_ready_new_unready_not_masked_by_ready_sibling(
     def _issues(repo, num, token):
         # #12 carries ready-for-dev; #34 is new and not ready.
         if num == 34:
-            return ["bug"], "2026-09-04T00:00:00Z"
-        return ["ready-for-dev"], "2026-09-04T00:00:00Z"
+            return ["bug"], "2026-09-12T00:00:00Z"
+        return ["ready-for-dev"], "2026-09-12T00:00:00Z"
 
     monkeypatch.setattr(_prod, "fetch_issue_details", _issues)
     body = "Fixes #12 and Closes #34"
@@ -216,7 +216,7 @@ def test_validate_linked_issue_ready_missing_not_masked_by_valid_sibling(monkeyp
             raise urllib.error.HTTPError(
                 "https://api.github.com", 404, "Not Found", HTTPMessage(), None
             )
-        return ["ready-for-dev"], "2026-09-04T00:00:00Z"
+        return ["ready-for-dev"], "2026-09-12T00:00:00Z"
 
     monkeypatch.setattr(_prod, "fetch_issue_details", _issues)
     errors = validate_linked_issue_ready(
