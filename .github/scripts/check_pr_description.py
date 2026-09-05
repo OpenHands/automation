@@ -42,7 +42,7 @@ FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 BLOCKQUOTE_LINE_RE = re.compile(r"(?m)^\s*>.*$")
 BARE_ISSUE_REF_RE = re.compile(r"(?<!\w)#(\d+)")
 READY_FOR_DEV_LABEL = "ready-for-dev"
-READY_FOR_DEV_ROLLOUT_ISO = "2026-09-10"
+READY_FOR_DEV_ROLLOUT_ISO = "2026-09-12"
 
 
 def extract_sections(body: str) -> dict[str, str]:
