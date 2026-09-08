@@ -7,7 +7,7 @@ run.
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fastapi import (
     APIRouter,
@@ -233,7 +233,7 @@ async def _refresh_validation(
     session: AsyncSession,
 ) -> BaseModel | None:
     parsed, errors = await _validate_draft_body(
-        draft.endpoint, draft.draft_body, user, session
+        cast(DraftEndpoint, draft.endpoint), draft.draft_body, user, session
     )
     draft.validation_errors = _errors_to_json(errors) if errors else None
     draft.dispatchable = not errors
@@ -525,7 +525,7 @@ async def update_draft(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
-    endpoint = body.endpoint or draft.endpoint
+    endpoint = cast(DraftEndpoint, body.endpoint or draft.endpoint)
     draft_body = body.draft if body.draft is not None else draft.draft_body
     draft_body = _normalize_draft_body_or_422(endpoint, draft_body)
     if body.endpoint is not None:

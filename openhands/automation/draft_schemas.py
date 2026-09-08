@@ -121,6 +121,10 @@ class _BaseDraftBody(BaseModel):
         return normalize_automation_state_enabled(data)
 
 
+def _normalize_automation_state(data: Any) -> Any:
+    return normalize_automation_state_enabled(data)
+
+
 def _normalize_list_field(data: dict[str, Any], field: str) -> None:
     if (
         field in data
@@ -169,7 +173,7 @@ class PromptAutomationDraftBody(_BaseDraftBody):
     @model_validator(mode="before")
     @classmethod
     def normalize_repos(cls, data: Any) -> Any:
-        data = super().validate_automation_state_enabled(data)
+        data = _normalize_automation_state(data)
         if isinstance(data, dict):
             _normalize_list_field(data, "repos")
         return data
@@ -210,7 +214,7 @@ class PluginAutomationDraftBody(_BaseDraftBody):
     @model_validator(mode="before")
     @classmethod
     def normalize_plugins_and_repos(cls, data: Any) -> Any:
-        data = super().validate_automation_state_enabled(data)
+        data = _normalize_automation_state(data)
         if isinstance(data, dict):
             _normalize_list_field(data, "plugins")
             _normalize_list_field(data, "repos")
