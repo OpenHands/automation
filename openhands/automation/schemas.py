@@ -796,13 +796,13 @@ class AutomationResponse(BaseModel):
     org_id: uuid.UUID
     model: str | None
 
-    name: str
+    name: str | None
     prompt: str | None
     preset_metadata: dict | None = None
-    trigger: dict
-    tarball_path: str
+    trigger: dict | None
+    tarball_path: str | None
     setup_script_path: str | None
-    entrypoint: str
+    entrypoint: str | None
     timeout: int | None
     keep_alive: bool | None
     enabled: bool

@@ -157,6 +157,9 @@ async def mark_git_sync_dirty(session: AsyncSession, automation: Automation) -> 
 async def _mark_git_sync_dirty_inner(
     session: AsyncSession, automation: Automation
 ) -> None:
+    if automation.lifecycle_status == AutomationState.DRAFT:
+        return
+
     result = await session.execute(
         select(AutomationGitSyncState).where(
             AutomationGitSyncState.automation_id == automation.id
@@ -788,6 +791,7 @@ async def _backfill_missing_states(session: AsyncSession) -> int:
             await session.execute(
                 select(Automation).where(
                     Automation.deleted_at.is_(None),
+                    Automation.lifecycle_status != AutomationState.DRAFT,
                     ~select(AutomationGitSyncState.automation_id)
                     .where(AutomationGitSyncState.automation_id == Automation.id)
                     .exists(),
@@ -873,7 +877,11 @@ async def _export_dirty_automations(
         automation = await session.get(Automation, state.automation_id)
         directory = sync_root / state.slug
 
-        if automation is None or automation.deleted_at is not None:
+        if (
+            automation is None
+            or automation.deleted_at is not None
+            or automation.lifecycle_status == AutomationState.DRAFT
+        ):
             if directory.exists():
                 await asyncio.to_thread(_remove_exported_automation, directory)
                 changed = True

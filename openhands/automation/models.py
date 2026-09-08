@@ -65,7 +65,7 @@ class Automation(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(
         String(256), nullable=True
     )
@@ -84,16 +84,16 @@ class Automation(Base):
 
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
-    trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
+    trigger: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Path to SDK code tarball (e.g., S3 or GCS URL)
-    tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
+    tarball_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relative path inside tarball to setup script (e.g., setup.sh)
     setup_script_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Command to execute the automation (e.g., "uv run script.py")
-    entrypoint: Mapped[str] = mapped_column(Text, nullable=False)
+    entrypoint: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Maximum execution time in seconds (None = use system default)
     timeout: Mapped[int | None] = mapped_column(nullable=True)
@@ -116,6 +116,22 @@ class Automation(Base):
         server_default=AutomationState.ACTIVE.value,
         index=True,
     )
+
+    # Draft setup metadata. Drafts are stored directly in this table so runs
+    # can continue to reference automation_runs.automation_id. These fields are
+    # populated only while lifecycle_status is DRAFT.
+    draft_endpoint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    draft_body: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    dispatchable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    source_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    last_test_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     # Current disabled-state metadata. AutomationDisableEvent keeps history.
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -159,6 +175,17 @@ class Automation(Base):
         "AutomationDisableEvent",
         back_populates="automation",
         cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_automations_org_lifecycle_updated_at",
+            "org_id",
+            "lifecycle_status",
+            "updated_at",
+        ),
+        Index("ix_automations_source_automation_id", "source_automation_id"),
+        Index("ix_automations_last_test_run_id", "last_test_run_id"),
     )
 
 
@@ -273,68 +300,6 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
         Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
-    )
-
-
-class AutomationDraft(Base):
-    """Editable automation setup state, including incomplete form drafts."""
-
-    __tablename__ = "automation_drafts"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-
-    # Creation endpoint this draft body targets: /v1, /v1/preset/prompt, etc.
-    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
-    name: Mapped[str | None] = mapped_column(String(500), nullable=True)
-
-    # Partial request body owned by the setup UI. It may be incomplete and is
-    # only promoted to an Automation after full endpoint-schema validation.
-    draft_body: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False, default=dict
-    )
-    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(
-        JSON, nullable=True
-    )
-    dispatchable: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=text("false")
-    )
-
-    source_automation_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
-    )
-    materialized_automation_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
-    )
-    last_test_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("automation_runs.id", ondelete="SET NULL"), nullable=True
-    )
-
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        onupdate=utcnow,
-        nullable=False,
-    )
-
-    __table_args__ = (
-        Index("ix_automation_drafts_org_updated_at", "org_id", "updated_at"),
-        Index("ix_automation_drafts_org_deleted_at", "org_id", "deleted_at"),
-        Index("ix_automation_drafts_source_automation_id", "source_automation_id"),
-        Index(
-            "ix_automation_drafts_materialized_automation_id",
-            "materialized_automation_id",
-        ),
-        Index("ix_automation_drafts_last_test_run_id", "last_test_run_id"),
     )
 
 

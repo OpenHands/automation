@@ -52,72 +52,46 @@ def upgrade() -> None:
         ["status", "trigger_source"],
     )
 
-    op.create_table(
-        "automation_drafts",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
-        sa.Column("endpoint", sa.String(length=64), nullable=False),
-        sa.Column("name", sa.String(length=500), nullable=True),
-        sa.Column("draft_body", sa.JSON(), nullable=False),
-        sa.Column("validation_errors", sa.JSON(), nullable=True),
-        sa.Column("dispatchable", sa.Boolean(), nullable=False, server_default="false"),
-        sa.Column("source_automation_id", sa.Uuid(), nullable=True),
-        sa.Column("materialized_automation_id", sa.Uuid(), nullable=True),
-        sa.Column("last_test_run_id", sa.Uuid(), nullable=True),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["source_automation_id"], ["automations.id"], ondelete="SET NULL"
-        ),
-        sa.ForeignKeyConstraint(
-            ["materialized_automation_id"], ["automations.id"], ondelete="SET NULL"
-        ),
-        sa.ForeignKeyConstraint(
-            ["last_test_run_id"], ["automation_runs.id"], ondelete="SET NULL"
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_automation_drafts_user_id", "automation_drafts", ["user_id"])
-    op.create_index("ix_automation_drafts_org_id", "automation_drafts", ["org_id"])
+    with op.batch_alter_table("automations") as batch_op:
+        batch_op.alter_column(
+            "name", existing_type=sa.String(length=500), nullable=True
+        )
+        batch_op.alter_column("trigger", existing_type=sa.JSON(), nullable=True)
+        batch_op.alter_column("tarball_path", existing_type=sa.Text(), nullable=True)
+        batch_op.alter_column("entrypoint", existing_type=sa.Text(), nullable=True)
+        batch_op.add_column(
+            sa.Column("draft_endpoint", sa.String(length=64), nullable=True)
+        )
+        batch_op.add_column(sa.Column("draft_body", sa.JSON(), nullable=True))
+        batch_op.add_column(sa.Column("validation_errors", sa.JSON(), nullable=True))
+        batch_op.add_column(
+            sa.Column(
+                "dispatchable",
+                sa.Boolean(),
+                nullable=False,
+                server_default="false",
+            )
+        )
+        batch_op.add_column(sa.Column("source_automation_id", sa.Uuid(), nullable=True))
+        batch_op.add_column(sa.Column("last_test_run_id", sa.Uuid(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_automations_source_automation_id",
+            "automations",
+            ["source_automation_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
     op.create_index(
-        "ix_automation_drafts_deleted_at", "automation_drafts", ["deleted_at"]
+        "ix_automations_org_lifecycle_updated_at",
+        "automations",
+        ["org_id", "lifecycle_status", "updated_at"],
     )
     op.create_index(
-        "ix_automation_drafts_org_updated_at",
-        "automation_drafts",
-        ["org_id", "updated_at"],
+        "ix_automations_source_automation_id", "automations", ["source_automation_id"]
     )
     op.create_index(
-        "ix_automation_drafts_org_deleted_at",
-        "automation_drafts",
-        ["org_id", "deleted_at"],
-    )
-    op.create_index(
-        "ix_automation_drafts_source_automation_id",
-        "automation_drafts",
-        ["source_automation_id"],
-    )
-    op.create_index(
-        "ix_automation_drafts_materialized_automation_id",
-        "automation_drafts",
-        ["materialized_automation_id"],
-    )
-    op.create_index(
-        "ix_automation_drafts_last_test_run_id",
-        "automation_drafts",
-        ["last_test_run_id"],
+        "ix_automations_last_test_run_id", "automations", ["last_test_run_id"]
     )
 
     if _is_sqlite():
@@ -132,28 +106,31 @@ def upgrade() -> None:
         "'How the run was created: manual, cron, event, or NULL for legacy rows.'"
     )
     op.execute(
-        "COMMENT ON TABLE automation_drafts IS "
-        "'Incomplete or complete automation setup drafts saved by setup UIs.'"
+        "COMMENT ON COLUMN automations.draft_body IS "
+        "'Partial setup request body for DRAFT automation rows.'"
     )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_automation_drafts_last_test_run_id", table_name="automation_drafts"
-    )
-    op.drop_index(
-        "ix_automation_drafts_materialized_automation_id",
-        table_name="automation_drafts",
-    )
-    op.drop_index(
-        "ix_automation_drafts_source_automation_id", table_name="automation_drafts"
-    )
-    op.drop_index("ix_automation_drafts_org_deleted_at", table_name="automation_drafts")
-    op.drop_index("ix_automation_drafts_org_updated_at", table_name="automation_drafts")
-    op.drop_index("ix_automation_drafts_deleted_at", table_name="automation_drafts")
-    op.drop_index("ix_automation_drafts_org_id", table_name="automation_drafts")
-    op.drop_index("ix_automation_drafts_user_id", table_name="automation_drafts")
-    op.drop_table("automation_drafts")
+    op.drop_index("ix_automations_last_test_run_id", table_name="automations")
+    op.drop_index("ix_automations_source_automation_id", table_name="automations")
+    op.drop_index("ix_automations_org_lifecycle_updated_at", table_name="automations")
+    with op.batch_alter_table("automations") as batch_op:
+        batch_op.drop_constraint(
+            "fk_automations_source_automation_id", type_="foreignkey"
+        )
+        batch_op.drop_column("last_test_run_id")
+        batch_op.drop_column("source_automation_id")
+        batch_op.drop_column("dispatchable")
+        batch_op.drop_column("validation_errors")
+        batch_op.drop_column("draft_body")
+        batch_op.drop_column("draft_endpoint")
+        batch_op.alter_column("entrypoint", existing_type=sa.Text(), nullable=False)
+        batch_op.alter_column("tarball_path", existing_type=sa.Text(), nullable=False)
+        batch_op.alter_column("trigger", existing_type=sa.JSON(), nullable=False)
+        batch_op.alter_column(
+            "name", existing_type=sa.String(length=500), nullable=False
+        )
 
     op.drop_index(
         "ix_automation_runs_status_trigger_source", table_name="automation_runs"

@@ -9,7 +9,6 @@ import pytest
 from openhands.automation.app import app
 from openhands.automation.models import (
     Automation,
-    AutomationDraft,
     AutomationRun,
     AutomationState,
 )
@@ -59,9 +58,10 @@ async def test_create_incomplete_draft_saves_partial_body(async_client, async_se
     assert data["dispatchable"] is False
     assert data["validation_errors"]
 
-    draft = await async_session.get(AutomationDraft, uuid.UUID(data["id"]))
+    draft = await async_session.get(Automation, uuid.UUID(data["id"]))
     assert draft is not None
-    assert draft.materialized_automation_id is None
+    assert draft.lifecycle_status == AutomationState.DRAFT
+    assert draft.tarball_path is None
 
 
 async def test_raw_draft_with_missing_upload_is_not_dispatchable(
@@ -92,9 +92,10 @@ async def test_raw_draft_with_missing_upload_is_not_dispatchable(
         }
     ]
 
-    draft = await async_session.get(AutomationDraft, uuid.UUID(data["id"]))
+    draft = await async_session.get(Automation, uuid.UUID(data["id"]))
     assert draft is not None
-    assert draft.materialized_automation_id is None
+    assert draft.lifecycle_status == AutomationState.DRAFT
+    assert draft.tarball_path is None
 
 
 async def test_incomplete_draft_dispatch_returns_validation_errors(
@@ -112,9 +113,31 @@ async def test_incomplete_draft_dispatch_returns_validation_errors(
     detail = response.json()["detail"]
     assert detail["message"] == "Draft is not dispatchable"
     assert detail["errors"]
-    draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
+    draft = await async_session.get(Automation, uuid.UUID(draft_id))
     assert draft is not None
-    assert draft.materialized_automation_id is None
+    assert draft.lifecycle_status == AutomationState.DRAFT
+    assert draft.tarball_path is None
+
+
+async def test_incomplete_draft_cannot_be_enabled(async_client):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": "/v1/preset/prompt", "draft": {"name": "Incomplete"}},
+    )
+    draft_id = created.json()["id"]
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{draft_id}", json={"lifecycle_status": "ACTIVE"}
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["message"] == "Automation cannot be enabled"
+    assert {error["field"] for error in detail["errors"]} >= {
+        "trigger",
+        "tarball_path",
+        "entrypoint",
+    }
 
 
 async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_run(
@@ -144,12 +167,12 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     assert run_data["status"] == "PENDING"
     assert run_data["trigger_source"] == "manual"
 
-    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    draft = await async_session.get(Automation, uuid.UUID(created.json()["id"]))
     assert draft is not None
     assert draft.last_test_run_id == uuid.UUID(run_data["id"])
-    assert draft.materialized_automation_id is not None
+    assert draft.lifecycle_status == AutomationState.DRAFT
 
-    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    automation = draft
     assert automation is not None
     assert automation.enabled is False
     assert automation.lifecycle_status == AutomationState.DRAFT

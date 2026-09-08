@@ -1,8 +1,8 @@
 """Server-backed automation drafts.
 
-Draft rows hold partial setup UI state. A draft is materialized into a disabled
-Automation only when it validates and the user manually dispatches it for a test
-run.
+Drafts are stored as DRAFT rows in the automations table. When a draft validates
+and is manually dispatched, the executable fields are written onto the same row
+so the run can keep using automation_runs.automation_id.
 """
 
 import logging
@@ -33,7 +33,6 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
-    AutomationDraft,
     AutomationState,
     TarballUpload,
     UploadStatus,
@@ -66,11 +65,17 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.automation_shape import (
+    assert_executable_automation_shape,
+)
 from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
 )
-from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run import (
+    create_pending_run,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -104,12 +109,13 @@ async def _assert_org_automation_exists(
 
 async def _get_org_draft(
     session: AsyncSession, draft_id: uuid.UUID, org_id: uuid.UUID
-) -> AutomationDraft:
+) -> Automation:
     result = await session.execute(
-        select(AutomationDraft).where(
-            AutomationDraft.id == draft_id,
-            AutomationDraft.org_id == org_id,
-            AutomationDraft.deleted_at.is_(None),
+        select(Automation).where(
+            Automation.id == draft_id,
+            Automation.org_id == org_id,
+            Automation.lifecycle_status == AutomationState.DRAFT,
+            Automation.deleted_at.is_(None),
         )
     )
     draft = result.scalars().first()
@@ -209,16 +215,43 @@ async def _validate_draft_body(
 
 
 async def _refresh_validation(
-    draft: AutomationDraft,
+    draft: Automation,
     user: AuthenticatedUser,
     session: AsyncSession,
 ) -> BaseModel | None:
+    if draft.draft_endpoint is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Draft is missing its target endpoint",
+        )
     parsed, errors = await _validate_draft_body(
-        draft.endpoint, draft.draft_body, user, session
+        draft.draft_endpoint, draft.draft_body or {}, user, session
     )
     draft.validation_errors = _errors_to_json(errors) if errors else None
     draft.dispatchable = not errors
     return parsed if not errors else None
+
+
+def _draft_response(draft: Automation) -> AutomationDraftResponse:
+    return AutomationDraftResponse.model_validate(
+        {
+            "id": draft.id,
+            "user_id": draft.user_id,
+            "org_id": draft.org_id,
+            "endpoint": draft.draft_endpoint,
+            "name": draft.name,
+            "draft": draft.draft_body or {},
+            "validation_errors": draft.validation_errors,
+            "dispatchable": draft.dispatchable,
+            "source_automation_id": draft.source_automation_id,
+            "materialized_automation_id": (
+                draft.id if draft.last_test_run_id is not None else None
+            ),
+            "last_test_run_id": draft.last_test_run_id,
+            "created_at": draft.created_at,
+            "updated_at": draft.updated_at,
+        }
+    )
 
 
 async def _write_generated_tarball(
@@ -380,7 +413,7 @@ async def _materialize_plugin_draft(
 
 
 async def _materialize_draft(
-    draft: AutomationDraft,
+    draft: Automation,
     parsed: BaseModel,
     user: AuthenticatedUser,
     request: Request,
@@ -399,12 +432,6 @@ async def _materialize_draft(
             detail="Unsupported draft endpoint",
         )
 
-    automation: Automation | None = None
-    if draft.materialized_automation_id is not None:
-        existing = await session.get(Automation, draft.materialized_automation_id)
-        if existing is not None and existing.deleted_at is None:
-            automation = existing
-
     values.update(
         {
             "enabled": False,
@@ -414,24 +441,17 @@ async def _materialize_draft(
             "disabled_at": None,
         }
     )
-    if automation is None:
-        automation = Automation(
-            id=uuid.uuid4(),
-            user_id=user.user_id,
-            org_id=user.org_id,
-            telemetry_distinct_id=get_request_telemetry_context(
-                request
-            ).frontend_distinct_id,
-            **values,
-        )
-        session.add(automation)
-        draft.materialized_automation_id = automation.id
-    else:
-        for field, value in values.items():
-            setattr(automation, field, value)
+    for field, value in values.items():
+        setattr(draft, field, value)
+    telemetry_context = get_request_telemetry_context(request).frontend_distinct_id
+    if telemetry_context is not None:
+        draft.telemetry_distinct_id = telemetry_context
+    await assert_executable_automation_shape(
+        draft, user, session, message="Draft is not dispatchable"
+    )
     await session.flush()
-    await mark_git_sync_dirty(session, automation)
-    return automation
+    await mark_git_sync_dirty(session, draft)
+    return draft
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -444,11 +464,13 @@ async def create_draft(
         await _assert_org_automation_exists(
             session, body.source_automation_id, user.org_id
         )
-    draft = AutomationDraft(
+    draft = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
-        endpoint=body.endpoint,
         name=_draft_name(body.name, body.draft),
+        enabled=False,
+        lifecycle_status=AutomationState.DRAFT,
+        draft_endpoint=body.endpoint,
         draft_body=body.draft,
         source_automation_id=body.source_automation_id,
     )
@@ -457,7 +479,7 @@ async def create_draft(
     await _refresh_validation(draft, user, session)
     await session.flush()
     await session.refresh(draft)
-    return AutomationDraftResponse.model_validate(draft)
+    return _draft_response(draft)
 
 
 @router.get("")
@@ -467,22 +489,19 @@ async def list_drafts(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftListResponse:
-    base_query = select(AutomationDraft).where(
-        AutomationDraft.org_id == user.org_id,
-        AutomationDraft.deleted_at.is_(None),
+    base_query = select(Automation).where(
+        Automation.org_id == user.org_id,
+        Automation.lifecycle_status == AutomationState.DRAFT,
+        Automation.deleted_at.is_(None),
     )
     total = (
         await session.execute(select(func.count()).select_from(base_query.subquery()))
     ).scalar() or 0
     result = await session.execute(
-        base_query.order_by(AutomationDraft.updated_at.desc())
-        .offset(offset)
-        .limit(limit)
+        base_query.order_by(Automation.updated_at.desc()).offset(offset).limit(limit)
     )
     return AutomationDraftListResponse(
-        drafts=[
-            AutomationDraftResponse.model_validate(draft) for draft in result.scalars()
-        ],
+        drafts=[_draft_response(draft) for draft in result.scalars()],
         total=total,
     )
 
@@ -494,7 +513,7 @@ async def get_draft(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
-    return AutomationDraftResponse.model_validate(draft)
+    return _draft_response(draft)
 
 
 @router.patch("/{draft_id}")
@@ -506,15 +525,15 @@ async def update_draft(
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     if body.endpoint is not None:
-        draft.endpoint = body.endpoint
+        draft.draft_endpoint = body.endpoint
     if body.draft is not None:
         draft.draft_body = body.draft
     if body.name is not None or body.draft is not None:
-        draft.name = _draft_name(body.name, draft.draft_body)
+        draft.name = _draft_name(body.name, draft.draft_body or {})
     await _refresh_validation(draft, user, session)
     await session.flush()
     await session.refresh(draft)
-    return AutomationDraftResponse.model_validate(draft)
+    return _draft_response(draft)
 
 
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -524,8 +543,18 @@ async def delete_draft(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
-    draft.deleted_at = utcnow()
+    deleted_at = utcnow()
+    draft.enabled = False
+    draft.deleted_at = deleted_at
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        draft.id,
+        reason="Automation draft deleted by user",
+        completed_at=deleted_at,
+        include_manual=True,
+    )
     await session.flush()
+    await mark_git_sync_dirty(session, draft)
 
 
 @router.post("/{draft_id}/dispatch", status_code=status.HTTP_201_CREATED)

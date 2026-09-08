@@ -45,6 +45,7 @@ from openhands.automation.models import (
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.automation_shape import require_dispatch_fields
 from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.run import (
     disable_automation,
@@ -211,7 +212,6 @@ async def _execute_run(
     run_id = str(run.id)
     automation = run.automation
     automation_id = str(automation.id)
-    tarball_path = automation.tarball_path
     backend = get_backend(run)
 
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
@@ -261,6 +261,12 @@ async def _execute_run(
                 "automation_disabled": automation_disabled,
             },
         )
+
+    try:
+        tarball_path, entrypoint = require_dispatch_fields(automation)
+    except ValueError as exc:
+        await _fail(str(exc), disable=False)
+        return
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
@@ -424,7 +430,7 @@ async def _execute_run(
             client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
-            entrypoint=automation.entrypoint,
+            entrypoint=entrypoint,
             tarball_source=tarball_source,
             work_dir=work_dir,
             env_vars=env_vars,

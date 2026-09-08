@@ -55,6 +55,9 @@ from openhands.automation.utils.api_key import (
     APIKeyError,
     get_api_key_for_automation_run,
 )
+from openhands.automation.utils.automation_shape import (
+    assert_executable_automation_shape,
+)
 from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
@@ -194,6 +197,11 @@ async def create_automation(
             request
         ).frontend_distinct_id,
     )
+    if lifecycle_status == ModelAutomationState.ACTIVE:
+        await assert_executable_automation_shape(
+            auto, user, session, message="Automation cannot be enabled"
+        )
+
     session.add(auto)
     await session.flush()
     await session.refresh(auto)
@@ -344,6 +352,11 @@ async def update_automation(
         if auto.preset_metadata is not None:
             auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
+    if auto.lifecycle_status == ModelAutomationState.ACTIVE:
+        await assert_executable_automation_shape(
+            auto, user, session, message="Automation cannot be enabled"
+        )
+
     if skip_pending_reason is not None:
         await skip_pending_runs_for_disabled_automation(
             session,
@@ -431,6 +444,11 @@ async def download_automation_tarball(
     - 404 if the automation has no accessible tarball.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
+    if not auto.tarball_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Automation has no tarball yet",
+        )
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -499,6 +517,9 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
+    await assert_executable_automation_shape(
+        auto, user, session, message="Automation is not dispatchable"
+    )
     run = await create_pending_run(
         session,
         auto,

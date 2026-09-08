@@ -58,6 +58,9 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.automation_shape import (
+    assert_executable_automation_shape,
+)
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -586,10 +589,16 @@ async def create_automation_from_prompt(
                 request
             ).frontend_distinct_id,
         )
+        if lifecycle_status == ModelAutomationState.ACTIVE:
+            await assert_executable_automation_shape(
+                automation, user, session, message="Automation cannot be enabled"
+            )
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        raise
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:
@@ -1029,10 +1038,16 @@ async def create_automation_from_plugin(
                 request
             ).frontend_distinct_id,
         )
+        if lifecycle_status == ModelAutomationState.ACTIVE:
+            await assert_executable_automation_shape(
+                automation, user, session, message="Automation cannot be enabled"
+            )
         session.add(automation)
         await session.flush()
         await session.refresh(automation)
         await mark_git_sync_dirty(session, automation)
+    except HTTPException:
+        raise
     except Exception as e:
         # Clean up orphaned upload on automation creation failure
         try:
