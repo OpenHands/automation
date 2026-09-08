@@ -227,6 +227,87 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
+    async def _other_users_automation(
+        self, async_session, *, enabled: bool = True
+    ) -> Automation:
+        """Persist an automation created by someone other than the caller."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=enabled,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_update_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot edit another user's automation definition."""
+        # Arrange
+        automation = await self._other_users_automation(async_session)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Do something else"},
+        )
+
+        # Assert
+        assert response.status_code == 403
+        assert "creator" in response.json()["detail"]
+
+    async def test_disable_as_non_creator_manager_succeeds(
+        self, async_client, async_session
+    ):
+        """A manager can turn off another user's automation."""
+        # Arrange
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": False}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+
+    async def test_enable_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot turn another user's automation back on."""
+        # Arrange
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        # Assert
+        assert response.status_code == 403
+
+    async def test_disable_with_edits_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """Turning off cannot carry other edits along with it."""
+        # Arrange
+        automation = await self._other_users_automation(async_session)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"enabled": False, "name": "Renamed"},
+        )
+
+        # Assert
+        assert response.status_code == 403
+
 
 class TestCreateAutomation:
     """Tests for POST /v1 endpoint."""

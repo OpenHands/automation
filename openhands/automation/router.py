@@ -100,6 +100,9 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
+
+    ``update_automation`` narrows this further: only the creator may change
+    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -245,11 +248,26 @@ async def update_automation(
     # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Partially update an automation."""
+    """Partially update an automation.
+
+    Only the creator may edit the definition. Admins and owners may set
+    ``enabled`` to ``False`` (turn it off) but nothing else.
+    """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    # Automations run under their creator's identity (git tokens, secrets,
+    # MCP servers), so only the creator may change what they do. Anyone else
+    # who passed _assert_can_manage (admins/owners) may only turn it off.
+    if auto.user_id != user.user_id and update_data != {"enabled": False}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only the automation creator can edit it; admins and owners "
+                "can only turn it off or delete it"
+            ),
+        )
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
