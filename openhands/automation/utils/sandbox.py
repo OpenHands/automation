@@ -31,6 +31,7 @@ __all__ = [
     "get_last_bash_command_result",
     "SandboxApiTransientError",
     "get_sandbox_agent_url",
+    "resume_sandbox",
     "delete_sandbox",
     "cleanup_sandbox",
     "verify_run_status",
@@ -112,6 +113,31 @@ async def get_sandbox_agent_url(
     except Exception as e:
         logger.warning("Failed to get sandbox %s: %s", sandbox_id, e)
         return None
+
+
+async def resume_sandbox(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+) -> bool:
+    """Resume a paused sandbox. Returns True if the API accepted the resume.
+
+    True only means the sandbox exists and is starting; the caller still has to
+    wait for it to report RUNNING. A 404 is ordinary -- the sandbox is gone.
+    """
+    try:
+        resp = await client.post(
+            f"{api_url}/api/v1/sandboxes/{sandbox_id}/resume",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        if resp.status_code >= 300:
+            logger.info("Resume sandbox %s failed: %s", sandbox_id, resp.text)
+            return False
+        return True
+    except Exception as e:
+        logger.info("Error resuming sandbox %s: %s", sandbox_id, e)
+        return False
 
 
 async def delete_sandbox(

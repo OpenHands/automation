@@ -1,7 +1,7 @@
 """Add automation drafts and run trigger source.
 
-Revision ID: 022
-Revises: 021
+Revision ID: 023
+Revises: 022
 Create Date: 2026-09-03
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "022"
-down_revision: str = "021"
+revision: str = "023"
+down_revision: str = "022"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

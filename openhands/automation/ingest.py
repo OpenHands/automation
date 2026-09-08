@@ -16,7 +16,14 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openhands.automation.models import IntegrationEvent
+from openhands.automation.conversations import (
+    CONTINUE_CONVERSATION,
+    continue_conversation,
+    resolve_subject_key,
+    resolve_turn_text,
+)
+from openhands.automation.models import Automation, IntegrationEvent
+from openhands.automation.schemas import EventTrigger
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -27,12 +34,7 @@ from openhands.automation.utils.webhook import (
 
 logger = logging.getLogger("automation.ingest")
 
-
-@dataclass(frozen=True, slots=True)
-class EventSubject:
-    """The external thing an event is about. Reserved; nothing reads it yet."""
-
-    key: str
+__all__ = ["AcceptResult", "AcceptedEvent", "accept_event"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +46,6 @@ class AcceptedEvent:
     # Raw provider payload; JMESPath trigger filters run on this.
     payload: dict[str, Any] = field(default_factory=dict)
     provider_event_id: str | None = None
-    subject: EventSubject | None = None
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
@@ -57,6 +58,9 @@ class AcceptResult:
     matched: int
     run_ids: list[str]
     duplicate: bool = False
+    # Conversations continued instead of starting a run. A matched automation
+    # contributes to exactly one of these two lists.
+    conversation_ids: list[str] = field(default_factory=list)
 
 
 async def accept_event(
@@ -72,6 +76,13 @@ async def accept_event(
     Records the event and creates the runs in one transaction, deduplicating on
     `event.provider_event_id` when the transport supplies one. Commits before
     returning.
+
+    A matched automation whose trigger sets `destination` to
+    `continue_conversation` first tries to deliver the event as another turn on
+    its subject's conversation, creating no run. A subject whose run is still
+    queued has the turn folded into that run instead, so a burst cannot leave
+    one subject with two runs. Anything else -- no subject, no run holding it,
+    one whose sandbox has gone -- falls back to creating a run.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -114,17 +125,17 @@ async def accept_event(
         return AcceptResult(matched=0, run_ids=[], duplicate=True)
 
     automations = await get_event_automations(org_id, source, session)
-    matched_automations = []
+    matched: list[tuple[Automation, EventTrigger]] = [
+        (automation, trigger)
+        for automation, trigger in automations
+        if matches_trigger(trigger, source, event.event_key, webhook_payload)
+    ]
 
-    for automation, trigger in automations:
-        if matches_trigger(trigger, source, event.event_key, webhook_payload):
-            matched_automations.append(automation)
-
-    record.matched_count = len(matched_automations)
+    record.matched_count = len(matched)
 
     logger.info(
         "Event matched %d/%d automations for org=%s",
-        len(matched_automations),
+        len(matched),
         len(automations),
         org_id,
     )
@@ -137,7 +148,7 @@ async def accept_event(
             "event_key": event.event_key,
             "org_id": str(org_id),
             "candidate_count": len(automations),
-            "matched_count": len(matched_automations),
+            "matched_count": len(matched),
         },
     )
 
@@ -149,9 +160,51 @@ async def accept_event(
     )
 
     run_ids: list[str] = []
-    for automation in matched_automations:
+    conversation_ids: list[str] = []
+    for automation, trigger in matched:
+        subject_key = (
+            resolve_subject_key(trigger, webhook_payload)
+            if trigger.destination == CONTINUE_CONVERSATION
+            else None
+        )
+
+        if subject_key is not None:
+            outcome = await continue_conversation(
+                session,
+                org_id=org_id,
+                source=source,
+                subject_key=subject_key,
+                automation_id=automation.id,
+                event_key=event.event_key,
+                event_payload=event_payload,
+                turn_text=resolve_turn_text(trigger, webhook_payload),
+                wake_agent=trigger.wake_agent,
+            )
+            if not outcome.needs_run:
+                assert outcome.conversation_id is not None
+                conversation_ids.append(outcome.conversation_id)
+                await capture_automation_event(
+                    "automation_conversation_continued",
+                    request=request,
+                    session_factory=session_factory,
+                    automation=automation,
+                    properties={
+                        "event_source": source,
+                        "event_key": event.event_key,
+                        "org_id": str(org_id),
+                        # Folded into a run that had not started, rather than
+                        # posted to a live agent server.
+                        "coalesced": outcome.coalesced,
+                    },
+                )
+                continue
+
+        # How a later event on this subject finds this run's sandbox.
         run = await create_automation_run(
-            automation, session, event_payload=event_payload
+            automation,
+            session,
+            event_payload=event_payload,
+            subject_key=subject_key,
         )
         run_ids.append(str(run.id))
         run_properties = {
@@ -179,6 +232,7 @@ async def accept_event(
     await session.commit()
 
     return AcceptResult(
-        matched=len(matched_automations),
+        matched=len(matched),
         run_ids=run_ids,
+        conversation_ids=conversation_ids,
     )

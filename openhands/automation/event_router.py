@@ -316,4 +316,5 @@ async def receive_event(
         received=True,
         matched=result.matched,
         runs_created=result.run_ids,
+        conversations_continued=result.conversation_ids,
     )

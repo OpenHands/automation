@@ -64,6 +64,45 @@ async def test_create_incomplete_draft_saves_partial_body(async_client, async_se
     assert draft.materialized_automation_id is None
 
 
+async def test_create_draft_rejects_unknown_endpoint_fields(async_client):
+    response = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {"name": "Draft", "unexpected": "value"},
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["message"] == "Draft body does not match endpoint schema"
+    assert detail["errors"] == [
+        {
+            "field": "unexpected",
+            "code": "extra_forbidden",
+            "message": "Extra inputs are not permitted",
+        }
+    ]
+
+
+async def test_update_draft_rejects_body_invalid_for_endpoint(async_client):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={"endpoint": "/v1/preset/prompt", "draft": {"name": "Draft"}},
+    )
+
+    response = await async_client.patch(
+        f"/api/automation/v1/drafts/{created.json()['id']}",
+        json={"draft": {"name": "Draft", "tarball_path": "oh-internal://uploads/x"}},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["message"] == "Draft body does not match endpoint schema"
+    assert detail["errors"][0]["field"] == "tarball_path"
+    assert detail["errors"][0]["code"] == "extra_forbidden"
+
+
 async def test_raw_draft_with_missing_upload_is_not_dispatchable(
     async_client, async_session
 ):

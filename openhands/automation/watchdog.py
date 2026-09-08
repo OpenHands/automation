@@ -166,7 +166,11 @@ def _loaded_automation(run: AutomationRun) -> Automation | None:
 def _should_cleanup_sandbox_after_terminal(
     run: AutomationRun, keep_alive: bool | None
 ) -> bool:
-    """Return whether watchdog should explicitly delete this run's sandbox."""
+    """Return whether watchdog should explicitly delete this run's sandbox.
+
+    A `continue_conversation` automation is forced keep_alive at creation, so
+    the sandbox carrying a live conversation is already excluded here.
+    """
     return bool(run.sandbox_id) and keep_alive is not True
 
 

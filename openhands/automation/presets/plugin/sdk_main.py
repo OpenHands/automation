@@ -71,6 +71,7 @@ import random
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 # Detect execution mode based on AGENT_SERVER_URL presence
@@ -395,6 +396,19 @@ This automation was triggered by a webhook event:
 {event_json}
 ```""")
 
+    # More events landed on the same subject before this run got a sandbox, so
+    # the service could not deliver them as turns. They open the conversation
+    # with this one instead of each starting a run of its own.
+    if event_context and event_context.get("follow_up_turns"):
+        follow_ups = "\n\n".join(
+            str(turn) for turn in event_context["follow_up_turns"]
+        )
+        context_sections.append(f"""## Follow-up messages
+
+More activity arrived on the same subject while this run was queued:
+
+{follow_ups}""")
+
     # Prepend context sections to the user prompt
     if context_sections:
         context_block = "\n\n".join(context_sections)
@@ -535,6 +549,11 @@ This automation was triggered by a webhook event:
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
+    # A `continue_conversation` run must use the derived id: RemoteConversation
+    # attaches to that conversation if it exists, and creates it if it does not.
+    automation_conversation_id = os.environ.get("AUTOMATION_CONVERSATION_ID")
+    if automation_conversation_id:
+        conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")

@@ -137,6 +137,7 @@ class PullRequest(BaseModel):
     head: GitHubRef
     labels: list[GitHubLabel] = []
     user: GitHubUser
+    html_url: str | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -203,6 +204,7 @@ class Issue(BaseModel):
     state: str  # "open", "closed"
     labels: list[GitHubLabel] = []
     user: GitHubUser
+    html_url: str | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -236,6 +238,9 @@ class Comment(BaseModel):
     id: int
     body: str
     user: GitHubUser
+    # Kept so a continuation turn can link back to what it is answering;
+    # `extra: ignore` would otherwise drop it.
+    html_url: str | None = None
 
     model_config = {"extra": "ignore"}
 

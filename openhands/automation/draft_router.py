@@ -24,12 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.capabilities_router import (
-    _DRAFT_MODELS,
     _cron_errors,
     _event_type_errors,
     _schema_errors,
 )
 from openhands.automation.db import get_session
+from openhands.automation.draft_schemas import (
+    FINAL_DRAFT_MODELS,
+    normalize_draft_body,
+)
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
@@ -131,6 +134,21 @@ def _errors_to_json(errors: list[DraftValidationError]) -> list[dict[str, Any]]:
     return [error.model_dump() for error in errors]
 
 
+def _normalize_draft_body_or_422(
+    endpoint: DraftEndpoint, draft_body: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        return normalize_draft_body(endpoint, draft_body)
+    except ValidationError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": "Draft body does not match endpoint schema",
+                "errors": _errors_to_json(_schema_errors(e)),
+            },
+        ) from e
+
+
 async def _validate_draft_body(
     endpoint: DraftEndpoint,
     draft_body: dict[str, Any],
@@ -138,7 +156,8 @@ async def _validate_draft_body(
     session: AsyncSession,
 ) -> tuple[BaseModel | None, list[DraftValidationError]]:
     try:
-        draft = _DRAFT_MODELS[endpoint].model_validate(draft_body)
+        normalized_draft = normalize_draft_body(endpoint, draft_body)
+        draft = FINAL_DRAFT_MODELS[endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return None, _schema_errors(e)
 
@@ -444,12 +463,13 @@ async def create_draft(
         await _assert_org_automation_exists(
             session, body.source_automation_id, user.org_id
         )
+    draft_body = _normalize_draft_body_or_422(body.endpoint, body.draft)
     draft = AutomationDraft(
         user_id=user.user_id,
         org_id=user.org_id,
         endpoint=body.endpoint,
-        name=_draft_name(body.name, body.draft),
-        draft_body=body.draft,
+        name=_draft_name(body.name, draft_body),
+        draft_body=draft_body,
         source_automation_id=body.source_automation_id,
     )
     session.add(draft)
@@ -505,12 +525,15 @@ async def update_draft(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
+    endpoint = body.endpoint or draft.endpoint
+    draft_body = body.draft if body.draft is not None else draft.draft_body
+    draft_body = _normalize_draft_body_or_422(endpoint, draft_body)
     if body.endpoint is not None:
         draft.endpoint = body.endpoint
-    if body.draft is not None:
-        draft.draft_body = body.draft
+    if body.draft is not None or body.endpoint is not None:
+        draft.draft_body = draft_body
     if body.name is not None or body.draft is not None:
-        draft.name = _draft_name(body.name, draft.draft_body)
+        draft.name = _draft_name(body.name, draft_body)
     await _refresh_validation(draft, user, session)
     await session.flush()
     await session.refresh(draft)

@@ -1,0 +1,55 @@
+---
+name: Bug
+description: Report a problem with the automation service
+title: '[Bug]: '
+labels: [bug]
+body:
+    - type: textarea
+      id: bug-description
+      attributes:
+          label: Bug Description
+          description: Clearly describe what went wrong.
+      validations:
+          required: true
+
+    - type: textarea
+      id: expected-behavior
+      attributes:
+          label: Expected Behavior
+          description: What did you expect to happen?
+      validations:
+          required: false
+
+    - type: textarea
+      id: actual-behavior
+      attributes:
+          label: Actual Behavior
+          description: |
+              What actually happened? Include a reproducible command from the
+              development workflow (e.g. `uv run pytest`, `uv run python`, or a
+              `curl` call against the service API) so maintainers can
+              reproduce the problem.
+          placeholder: |
+              Example - `uv run pytest tests/test_scheduler.py` fails with a
+              KeyError when the cron schedule is empty.
+      validations:
+          required: false
+
+    - type: textarea
+      id: acceptance-criteria
+      attributes:
+          label: Acceptance Criteria
+          description: List the testable checklist item(s) that would prove this bug is fixed.
+          placeholder: |
+              - [ ] The reported error no longer occurs
+              - [ ] A regression test covers the fix
+      validations:
+          required: false
+
+    - type: textarea
+      id: additional-context
+      attributes:
+          label: Additional Context
+          description: Logs, screenshots, environment details, or anything else that helps.
+      validations:
+          required: false
