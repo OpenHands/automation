@@ -979,6 +979,64 @@ class AutomationListResponse(BaseModel):
     total: int
 
 
+class CreateAutomationDraftRequest(BaseModel):
+    """Create a server-backed automation setup draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: DraftEndpoint
+    draft: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+    source_automation_id: uuid.UUID | None = None
+
+
+class UpdateAutomationDraftRequest(BaseModel):
+    """Partially update a server-backed automation setup draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: DraftEndpoint | None = None
+    draft: dict[str, Any] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class AutomationDraftResponse(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    org_id: uuid.UUID
+    endpoint: DraftEndpoint
+    name: str | None
+    draft: dict[str, Any] = Field(validation_alias="draft_body")
+    validation_errors: list[dict[str, Any]] | None = None
+    dispatchable: bool
+    source_automation_id: uuid.UUID | None = None
+    materialized_automation_id: uuid.UUID | None = None
+    last_test_run_id: uuid.UUID | None = None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class AutomationDraftListResponse(BaseModel):
+    drafts: list[AutomationDraftResponse]
+    total: int
+
+
+class DraftDispatchRequest(BaseModel):
+    """Optional body for dispatching a draft as a test run.
+
+    ``event_payload`` lets an authenticated user supply a synthetic webhook
+    payload for event-triggered draft automations, bypassing signature
+    verification — the caller is already authenticated, so the payload is
+    trusted as test input rather than a real delivery.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_payload: dict[str, Any] | None = None
+
+
 # --- Run schemas ---
 
 

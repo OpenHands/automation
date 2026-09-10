@@ -117,9 +117,6 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
-
-    ``update_automation`` narrows this further: only the creator may change
-    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -519,7 +516,6 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
-
     run = await create_pending_run(
         session,
         auto,
