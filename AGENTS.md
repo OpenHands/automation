@@ -1,6 +1,6 @@
 # Automations Service
 
-Self-contained microservice that schedules and dispatches automation runs inside OpenHands Cloud sandboxes.
+Self-contained microservice that schedules and dispatches automation runs inside OpenHands sandboxes.
 
 ## Cross-Repository Boundaries
 
@@ -8,8 +8,7 @@ This repository owns the Automation Service: automation definitions, cron schedu
 
 Related repositories have different responsibilities:
 
-- [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk) owns the Python SDK, Agent Server, canonical API, and execution behavior.
-- [`OpenHands/typescript-client`](https://github.com/OpenHands/typescript-client) owns the browser-compatible typed client for the Agent Server API.
+- [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk) owns the Python SDK, Agent Server, canonical API, execution behavior, and the browser-compatible TypeScript client under `clients/typescript/`.
 - [`OpenHands/OpenHands`](https://github.com/OpenHands/OpenHands) owns Agent Canvas UI, frontend integration, and local-stack orchestration.
 - [`OpenHands/extensions`](https://github.com/OpenHands/extensions) owns reusable skills, plugins, automations, and integrations.
 
@@ -63,8 +62,7 @@ automation/
 │   └── test_tarball/       # Tarball contents uploaded to sandbox during test
 │       ├── main.py         # Test script run inside sandbox (SDK workspace test)
 │       └── setup.sh        # Installs SDK inside sandbox
-├── tests/                   # Unit tests (flat structure, no external deps)
-│   ├── integration/        # Integration tests (require OPENHANDS_API_KEY)
+├── tests/                   # Unit and container-backed integration tests
 │   ├── test_auth.py
 │   ├── test_dispatcher.py
 │   ├── test_execution.py
@@ -74,28 +72,12 @@ automation/
 └── pyproject.toml
 ```
 
-## Cross-Repo Coordination
-
-Three repos work together:
-
-| Repo | Branch | Purpose |
-|------|--------|---------|
-| `OpenHands/automation` | `dispatch-phase1b` | Automation service (this repo) |
-| `OpenHands/deploy` (aka `All-Hands-AI/deploy`) | `dispatch-phase1b` | Deploys automation as a sidecar |
-| `OpenHands/software-agent-sdk` | `feat/saas-runtime-mode` | SDK changes for in-sandbox execution |
-
-**AUTOMATION_SHA linking**: The deploy repo references a specific automation commit in two workflow files:
-- `.github/workflows/deploy.yaml` → `AUTOMATION_SHA: "<full-sha>"`
-- `.github/workflows/deploy-automation.yaml` → `AUTOMATION_SHA: "<full-sha>"`
-
-After pushing to the automation repo, update both files in the deploy repo.
-
 ## Configuration
 
 Configuration is centralized in `config.py` using a composed `AppConfig` with typed sections:
 
 ```python
-from automation.config import get_config
+from openhands.automation.config import get_config
 
 config = get_config()
 config.service.db_host          # ServiceSettings (AUTOMATION_ prefix)
@@ -117,15 +99,12 @@ config.log.log_level            # LogSettings (no prefix)
 
 ```bash
 # Pre-commit (run from repo root)
-pre-commit run --files openhands/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
+uv run pre-commit run --all-files --show-diff-on-failure
 
-# Unit tests (no external deps, skips Docker-dependent tests)
-uv run pytest tests/ -v --ignore=tests/integration
+# Test suite (requires Docker for the PostgreSQL fixture; some tests also use MinIO or fake-gcs-server containers)
+uv run python -m pytest tests/
 
-# Integration test (requires OPENHANDS_API_KEY)
-OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
-
-# E2E test script (live sandbox, ~80s)
+# E2E test script (requires OPENHANDS_API_KEY and a live sandbox service)
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
 
@@ -276,8 +255,8 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 ### Notes
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
-- The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
-- Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
+- Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
+- Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
 
 ## Catalog Bundles
 
@@ -490,6 +469,3 @@ When bumping `openhands-sdk` / `openhands-workspace` pins:
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
    release-please handles the version bump and release.
-4. After the release publishes, update `AUTOMATION_SHA` in the deploy repo:
-   - `.github/workflows/deploy.yaml`
-   - `.github/workflows/deploy-automation.yaml`
