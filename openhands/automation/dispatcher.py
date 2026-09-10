@@ -214,8 +214,6 @@ async def _execute_run(
     run_id = str(run.id)
     automation = run.automation
     automation_id = str(automation.id)
-    # The dispatcher freezes this field in the same transaction that claims
-    # the run. Fall back only for runs created before provenance was added.
     tarball_path = run.source_tarball_path or automation.tarball_path
     backend = get_backend(run)
 
