@@ -335,6 +335,41 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+class AutomationState(StrEnum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
+
+
+DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
+
+
+def automation_state_enabled(status: AutomationState | str | None) -> bool:
+    if status is None:
+        return True
+    return AutomationState(status) == AutomationState.ACTIVE
+
+
+def normalize_automation_state_enabled(data: Any) -> Any:
+    """Keep automation state and enabled compatible in request bodies."""
+    if not isinstance(data, dict):
+        return data
+    lifecycle = data.get("lifecycle_status")
+    if lifecycle is None:
+        return data
+    try:
+        expected_enabled = automation_state_enabled(lifecycle)
+    except ValueError:
+        return data
+    if "enabled" in data and bool(data["enabled"]) != expected_enabled:
+        raise ValueError("enabled must be true only when lifecycle_status is ACTIVE")
+    data = dict(data)
+    data["enabled"] = expected_enabled
+    return data
+
+
 def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
@@ -460,6 +495,20 @@ class CreateAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Backward-compatible active flag; false creates INACTIVE unless "
+            "lifecycle_status is DRAFT."
+        ),
+    )
+    lifecycle_status: AutomationState | None = Field(
+        default=None,
+        description=(
+            "First-class automation state. DRAFT/INACTIVE rows are not "
+            "triggered automatically."
+        ),
+    )
     template: TemplateProvenance | None = Field(
         default=None,
         description=(
@@ -468,6 +517,11 @@ class CreateAutomationRequest(BaseModel):
             "template id is returned unchanged with HTTP 200."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -548,6 +602,12 @@ class UpdateAutomationRequest(BaseModel):
     )
     keep_alive: bool | None = Field(default=None)
     enabled: bool | None = None
+    lifecycle_status: AutomationState | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -877,6 +937,7 @@ class AutomationResponse(BaseModel):
     timeout: int | None
     keep_alive: bool | None
     enabled: bool
+    lifecycle_status: AutomationState = AutomationState.ACTIVE
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
     disabled_at: UtcDatetime | None = None
@@ -942,6 +1003,7 @@ class AutomationRunResponse(BaseModel):
     id: uuid.UUID
     automation_id: uuid.UUID
     status: RunStatus
+    trigger_source: str | None = None
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None

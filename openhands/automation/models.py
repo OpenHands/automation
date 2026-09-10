@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -46,6 +47,14 @@ class AutomationRunStatus(enum.Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     SKIPPED = "SKIPPED"
+
+
+class AutomationState(enum.Enum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
 
 
 class Automation(Base):
@@ -94,8 +103,19 @@ class Automation(Base):
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
-    # Whether the automation is enabled (can be triggered)
+    # Whether the automation is enabled (can be triggered automatically).
+    # Kept for backwards compatibility; lifecycle_status stores the
+    # active/inactive/draft automation state. Only ACTIVE rows should have
+    # enabled=True.
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    lifecycle_status: Mapped[AutomationState] = mapped_column(
+        Enum(AutomationState, native_enum=False, length=20),
+        nullable=False,
+        default=AutomationState.ACTIVE,
+        server_default=AutomationState.ACTIVE.value,
+        index=True,
+    )
 
     # Current disabled-state metadata. AutomationDisableEvent keeps history.
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -218,6 +238,11 @@ class AutomationRun(Base):
     # local mode). Set immediately after `_start_bash` returns.
     bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # How this run was created: manual, cron, event, or null for legacy rows.
+    trigger_source: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
@@ -258,6 +283,7 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
         # Partial: only live subjects are ever looked up, and only
         # `continue_conversation` runs set one.
         Index(
