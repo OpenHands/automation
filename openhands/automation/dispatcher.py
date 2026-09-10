@@ -51,6 +51,7 @@ from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    snapshot_run_source,
     update_bash_command_id,
     update_run_current_phase,
     update_run_timeout_at,
@@ -213,7 +214,9 @@ async def _execute_run(
     run_id = str(run.id)
     automation = run.automation
     automation_id = str(automation.id)
-    tarball_path = automation.tarball_path
+    # The dispatcher freezes this field in the same transaction that claims
+    # the run. Fall back only for runs created before provenance was added.
+    tarball_path = run.source_tarball_path or automation.tarball_path
     backend = get_backend(run)
 
     def _log_ctx(sandbox_id: str | None = None) -> dict[str, Any]:
@@ -580,6 +583,7 @@ async def dispatch_pending_runs(
                     + run_timeout_seconds
                     + sandbox_cfg.run_timeout_margin
                 )
+                await snapshot_run_source(session, run, run.automation)
                 await mark_run_status(
                     session,
                     run,

@@ -16,6 +16,7 @@ from openhands.automation.middleware import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationGitSyncState,
     AutomationRun,
     AutomationRunStatus,
     AutomationServiceMetadata,
@@ -385,12 +386,25 @@ async def test_background_runs_inherit_automation_telemetry_identity():
             automation = _automation(telemetry_distinct_id="ph-fe-owner")
             session.add(automation)
             await session.flush()
+            session.add(
+                AutomationGitSyncState(
+                    automation_id=automation.id,
+                    slug="telemetry-source",
+                    last_synced_commit="c" * 40,
+                    dirty=False,
+                )
+            )
+            await session.flush()
 
             scheduled_run = await create_pending_run(session, automation)
             webhook_run = await create_automation_run(automation, session)
 
             assert scheduled_run.telemetry_distinct_id == "ph-fe-owner"
             assert webhook_run.telemetry_distinct_id == "ph-fe-owner"
+            assert scheduled_run.source_tarball_path == automation.tarball_path
+            assert webhook_run.source_tarball_path == automation.tarball_path
+            assert scheduled_run.source_commit == "c" * 40
+            assert webhook_run.source_commit == "c" * 40
     finally:
         await engine.dispose()
 

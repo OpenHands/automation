@@ -218,6 +218,18 @@ class AutomationRun(Base):
     # local mode). Set immediately after `_start_bash` returns.
     bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Source snapshot initialized when the run is created and frozen when the
+    # dispatcher claims it. The automation definition may be edited before a
+    # historical run is viewed, so reading Automation.tarball_path later
+    # cannot answer what that run actually executed.
+    source_tarball_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Git provenance is present only when the automation was fully reconciled
+    # with git when the dispatcher claims the run. A dirty sync state
+    # deliberately yields NULL because its last synced commit no longer
+    # identifies the tarball that will execute.
+    source_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event
