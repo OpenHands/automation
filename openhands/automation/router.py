@@ -519,7 +519,6 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
-
     run = await create_pending_run(
         session,
         auto,

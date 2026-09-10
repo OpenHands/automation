@@ -18,6 +18,7 @@ from openhands.automation.db import (
     set_sqlite_mode,
 )
 from openhands.automation.dispatcher import dispatcher_loop
+from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
 from openhands.automation.git_sync import git_sync_loop, is_git_sync_supported
 from openhands.automation.git_sync.router import router as git_sync_router
@@ -293,6 +294,7 @@ _base_path = get_settings().base_path
 app.include_router(uploads_router, prefix=_base_path)
 app.include_router(capabilities_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
+app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)

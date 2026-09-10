@@ -3,6 +3,7 @@
 import logging
 import uuid
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -176,6 +177,7 @@ async def create_pending_run(
     *,
     telemetry_distinct_id: str | None = None,
     trigger_source: str | None = None,
+    event_payload: dict[str, Any] | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -185,6 +187,9 @@ async def create_pending_run(
     Args:
         session: Database session
         automation: The automation to create a run for
+        event_payload: Optional synthetic event payload for manual test
+            dispatches of event-triggered automations. Bypasses webhook
+            signature verification because the caller is authenticated.
 
     Returns:
         The created AutomationRun
@@ -196,6 +201,7 @@ async def create_pending_run(
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
         trigger_source=trigger_source,
+        event_payload=event_payload,
         telemetry_distinct_id=(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),
