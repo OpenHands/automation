@@ -222,6 +222,18 @@
         <figcaption>Fig 2 · Version B is both what the dispatcher records and what the executor launches; version A was never claimed for execution.</figcaption>
       </figure>
       <div class="callout note"><strong>ⓘ Why not freeze at creation?</strong> That would silently change existing queue semantics by forcing an older definition to execute after an edit. Claim-time freezing adds provenance without making that product change.</div>
+      <h3>Decision record</h3>
+      <table>
+        <thead><tr><th>Option considered</th><th>Decision</th><th>Reason</th></tr></thead>
+        <tbody>
+          <tr><td>Read the automation row when history is requested</td><td class="no">Rejected</td><td>The row is mutable and cannot describe a historical run after an edit.</td></tr>
+          <tr><td>Snapshot only when the run is created</td><td class="no">Rejected</td><td>A queued run may be edited before dispatch; the recorded source could differ from existing execution behavior.</td></tr>
+          <tr><td>Force creation-time source to execute</td><td class="no">Rejected</td><td>That would introduce a new queue/version policy beyond the provenance scope.</td></tr>
+          <tr><td>Initialize at creation, refresh and freeze at claim</td><td class="yes">Selected</td><td>Preserves current dispatch semantics and makes the persisted source equal the executor input.</td></tr>
+          <tr><td>Always copy <code>last_synced_commit</code></td><td class="no">Rejected</td><td>A dirty sync state makes that SHA stale and therefore misleading.</td></tr>
+          <tr><td>Copy the commit only when <code>dirty = false</code></td><td class="yes">Selected</td><td>Records exact Git provenance where supportable and honest <code>null</code> otherwise.</td></tr>
+        </tbody>
+      </table>
       <p class="source-line">Sources: <a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/openhands/automation/utils/run.py#L216-L226">creation snapshot · run.py:216–226</a> · <a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/openhands/automation/dispatcher.py#L578-L592">claim snapshot · dispatcher.py:578–592</a></p>
     </section>
 
@@ -276,6 +288,21 @@
         <div class="status pass">PASS</div><div><strong>Static quality</strong><br>Ruff format/lint, pycodestyle, Pyright with 0 errors, and <code>git diff --check</code>.</div>
         <div class="status wait">WAIT</div><div><strong>Fork CI authorization</strong><br>Repository unit-test, pre-commit, Docker, and artifact workflows have not started; a maintainer must approve first-time fork workflows.</div>
       </div>
+      <h3>Requirement-to-test matrix</h3>
+      <table>
+        <thead><tr><th>Required behavior</th><th>Evidence</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Non-Git runs retain the selected tarball without inventing a commit.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_scheduler.py#L942-L950">test_scheduler.py:942–950</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Clean Git state records the reconciled commit.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_scheduler.py#L952-L979">test_scheduler.py:952–979</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Dirty Git state suppresses the stale commit.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_scheduler.py#L981-L1008">test_scheduler.py:981–1008</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Scheduled and webhook runs share provenance semantics.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_telemetry.py#L386-L407">test_telemetry.py:386–407</a></td><td class="yes">Covered</td></tr>
+          <tr><td>An edit while PENDING is reflected when dispatch claims the run.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_dispatcher.py#L389-L429">test_dispatcher.py:389–429</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Execution consumes the frozen run path.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_dispatcher.py#L1014-L1026">test_dispatcher.py:1014–1026</a></td><td class="yes">Covered</td></tr>
+          <tr><td>The response serializes both provenance fields.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_schemas.py#L161-L170">test_schemas.py:161–170</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Migration reaches head on SQLite with both columns.</td><td><a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_db.py#L258-L263">test_db.py:258–263</a></td><td class="yes">Covered</td></tr>
+          <tr><td>Full PostgreSQL suite and repository coverage threshold.</td><td>GitHub <code>unit-tests</code> workflow</td><td class="no">Awaiting approval</td></tr>
+        </tbody>
+      </table>
       <p class="source-line">Test sources: <a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_scheduler.py#L942-L1008">creation semantics</a> · <a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_schemas.py#L161-L170">API serialization</a> · <a class="src" href="https://github.com/palrohitg/automation/blob/01785229145d8f330112c7e6d430f03ec273fd14/tests/test_dispatcher.py#L389-L429">claim race</a></p>
     </section>
 
@@ -293,7 +320,21 @@
         </tbody>
       </table>
       <div class="callout warn"><strong>⚠ Not full reproducibility:</strong> this snapshot does not freeze entrypoint, model, secrets, runtime image, or dependency resolution. A tarball path is source provenance; this PR does not guarantee the referenced artifact is retained forever.</div>
-      <p>The issue's remaining questions—restore granularity, unpin behavior, manual versus automatic rollback, “last good” semantics, watcher authority, and URL normalization—remain product decisions. Nothing in this schema forces an answer.</p>
+      <h3>Open questions from #342</h3>
+      <table>
+        <thead><tr><th>Open question</th><th>Disposition in this PR</th></tr></thead>
+        <tbody>
+          <tr><td>Per-automation restore or repository-wide pin?</td><td>Deferred. The stored fields support investigation without choosing restore granularity.</td></tr>
+          <tr><td>How is a pinned repository unpinned, and which side wins?</td><td>Deferred with Git ref support; this PR does not change sync conflict policy.</td></tr>
+          <tr><td>Manual or automatic rollback?</td><td>Deferred. No endpoint, trigger, or watcher performs a restore.</td></tr>
+          <tr><td>What counts as “last good” for infrequent automations?</td><td>Deferred. This PR records facts per run and defines no selection query.</td></tr>
+          <tr><td>Should a watcher report or act?</td><td>Deferred. No watcher behavior is introduced.</td></tr>
+          <tr><td>What is the canonical Git URL/ref form?</td><td>Deferred. Git sync configuration and status responses are unchanged.</td></tr>
+        </tbody>
+      </table>
+      <h3>Operational cost and rollout</h3>
+      <p>Each source snapshot performs one primary-key lookup against <code>automation_git_sync_state</code>. It runs at creation and once at dispatch claim; the second lookup is the cost of closing the pending-edit race. Migration columns are nullable, so deployment requires no application-level backfill or coordinated client release.</p>
+      <p>Rollback is straightforward at the schema level: migration downgrade drops the two columns. During mixed-history operation, nullable response fields and the executor fallback keep pre-existing records valid.</p>
       <p class="source-line">Scope source: <a class="src" href="https://github.com/OpenHands/automation/issues/342">issue #342 · strategy and open questions</a></p>
     </section>
 
