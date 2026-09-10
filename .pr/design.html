@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Run source provenance — PR design note</title>
+  <style>
+    :root { --ink:#18212b; --muted:#607080; --paper:#fbfaf6; --card:#fff; --line:#d8d6ce; --accent:#0c7c72; --warm:#e98245; --soft:#e7f4f1; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.55 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    a { color:#086b64; text-decoration-thickness:1px; text-underline-offset:3px; }
+    aside { position:fixed; inset:0 auto 0 0; width:240px; padding:34px 24px; border-right:1px solid var(--line); background:#f2f0e9; }
+    aside strong { display:block; margin-bottom:22px; font-size:18px; letter-spacing:-.02em; }
+    aside a { display:block; margin:10px 0; color:#43515d; text-decoration:none; }
+    main { max-width:980px; margin-left:240px; padding:58px 64px 100px; }
+    h1 { max-width:760px; margin:0 0 12px; font:700 52px/1.02 Georgia,serif; letter-spacing:-.035em; }
+    h2 { margin:66px 0 18px; font:700 30px/1.15 Georgia,serif; letter-spacing:-.02em; }
+    h3 { margin:0 0 7px; font-size:17px; }
+    p { max-width:780px; }
+    .eyebrow { margin-bottom:14px; color:var(--accent); font-size:13px; font-weight:800; letter-spacing:.13em; text-transform:uppercase; }
+    .lede { max-width:790px; color:#3f4c57; font-size:21px; }
+    .meta { display:flex; flex-wrap:wrap; gap:10px; margin:24px 0 0; }
+    .pill { padding:5px 10px; border:1px solid #a8cfc9; border-radius:999px; background:var(--soft); color:#205e58; font-size:13px; font-weight:700; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+    .card { padding:22px; border:1px solid var(--line); border-radius:14px; background:var(--card); box-shadow:0 4px 18px #17212b0a; }
+    .number { color:var(--warm); font:700 30px/1 Georgia,serif; }
+    .diagram { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:16px; background:#fff; }
+    code { padding:2px 5px; border-radius:5px; background:#eceae3; font:14px ui-monospace,SFMono-Regular,Menlo,monospace; }
+    table { width:100%; border-collapse:collapse; background:#fff; }
+    th,td { padding:12px 14px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:#465460; font-size:13px; text-transform:uppercase; letter-spacing:.06em; }
+    .callout { padding:18px 20px; border-left:4px solid var(--warm); background:#fff3e9; }
+    .ok { color:#176b4d; font-weight:700; }
+    footer { margin-top:70px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+    @media (max-width:760px) { aside { position:static; width:auto; border-right:0; border-bottom:1px solid var(--line); } main { margin:0; padding:38px 22px 70px; } h1 { font-size:40px; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <strong>Run provenance</strong>
+    <a href="#summary">Summary</a>
+    <a href="#problem">Problem</a>
+    <a href="#flow">Before / after</a>
+    <a href="#decisions">Design decisions</a>
+    <a href="#contract">Data &amp; API</a>
+    <a href="#verification">Verification</a>
+    <a href="#scope">Scope &amp; risks</a>
+  </aside>
+  <main>
+    <section id="summary">
+      <div class="eyebrow">Issue #342 · Phase 1</div>
+      <h1>Make every automation run identify its source</h1>
+      <p class="lede">A run now records the tarball selected for execution and, when trustworthy, the Git commit that produced it. Historical run data no longer changes meaning when the automation is edited later.</p>
+      <div class="meta"><span class="pill">PostgreSQL + SQLite</span><span class="pill">Backward-compatible API</span><span class="pill">Nullable provenance</span></div>
+    </section>
+
+    <section id="problem">
+      <h2>The missing link</h2>
+      <div class="grid">
+        <article class="card"><div class="number">01</div><h3>Mutable definition</h3><p>The executor previously read <code>automation.tarball_path</code>. Once that row changed, a historical run could not prove which source it launched.</p></article>
+        <article class="card"><div class="number">02</div><h3>Potentially stale Git SHA</h3><p><code>last_synced_commit</code> is only valid while Git sync state is clean. Recording it after a DB-side edit would claim provenance the system cannot support.</p></article>
+      </div>
+    </section>
+
+    <section id="flow">
+      <h2>Before / after</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 880 360" width="100%" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Source resolution before and after this change</title>
+          <desc id="diagram-desc">Previously execution and history both depended on the mutable automation row. Now creation initializes provenance, dispatch freezes it, and execution reads the run snapshot.</desc>
+          <defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0 L10 4 L0 8z" fill="#58717b"/></marker></defs>
+          <text x="20" y="32" font-weight="700" fill="#b85b2a">BEFORE</text>
+          <rect x="20" y="55" width="205" height="74" rx="16" fill="#fff3e9" stroke="#e4aa86" stroke-width="2"/>
+          <text x="42" y="84" font-weight="700">Automation row</text><text x="42" y="108" fill="#607080">mutable tarball_path</text>
+          <path d="M225 92 C285 92 285 92 345 92" fill="none" stroke="#58717b" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="348" y="55" width="205" height="74" rx="16" fill="#fff" stroke="#d8d6ce" stroke-width="2"/>
+          <text x="371" y="84" font-weight="700">Dispatcher</text><text x="371" y="108" fill="#607080">reads latest value</text>
+          <path d="M553 92 C615 92 615 92 675 92" fill="none" stroke="#58717b" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="678" y="55" width="180" height="74" rx="16" fill="#fff" stroke="#d8d6ce" stroke-width="2"/>
+          <text x="701" y="84" font-weight="700">Run history</text><text x="701" y="108" fill="#b85b2a">source unknown</text>
+
+          <text x="20" y="190" font-weight="700" fill="#0c7c72">AFTER</text>
+          <rect x="20" y="213" width="205" height="94" rx="16" fill="#e7f4f1" stroke="#77bdb4" stroke-width="2"/>
+          <text x="42" y="242" font-weight="700">Automation + sync state</text><text x="42" y="266" fill="#607080">tarball + clean commit</text><text x="42" y="288" fill="#607080">dirty → commit is null</text>
+          <path d="M225 260 C285 260 285 260 345 260" fill="none" stroke="#58717b" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="348" y="213" width="205" height="94" rx="16" fill="#e7f4f1" stroke="#77bdb4" stroke-width="2"/>
+          <text x="371" y="242" font-weight="700">Claim transaction</text><text x="371" y="266" fill="#607080">freeze source on run</text><text x="371" y="288" fill="#607080">then mark RUNNING</text>
+          <path d="M553 260 C615 260 615 260 675 260" fill="none" stroke="#58717b" stroke-width="2" marker-end="url(#arrow)"/>
+          <rect x="678" y="213" width="180" height="94" rx="16" fill="#e7f4f1" stroke="#77bdb4" stroke-width="2"/>
+          <text x="701" y="242" font-weight="700">Execution + API</text><text x="701" y="266" fill="#607080">read frozen tarball</text><text x="701" y="288" fill="#176b4d">history is truthful</text>
+          <path d="M17 142 C172 153 710 144 860 151" fill="none" stroke="#d8d6ce" stroke-width="2" stroke-dasharray="7 8"/>
+        </svg>
+      </div>
+    </section>
+
+    <section id="decisions">
+      <h2>Design decisions</h2>
+      <div class="grid">
+        <article class="card"><h3>Freeze at claim time</h3><p>Creation initializes the fields for immediate visibility. Dispatch refreshes them in the transaction that moves the run to <code>RUNNING</code>, preserving existing “latest definition at dispatch” behavior while making the recorded source match execution. See <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/openhands/automation/dispatcher.py#L570-L594">the claim path</a>.</p></article>
+        <article class="card"><h3>Trust only clean Git state</h3><p>A commit is copied only where <code>dirty = false</code>. Unsynced or edited automations retain a useful tarball identifier and an honest <code>null</code> commit. See <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/openhands/automation/utils/run.py#L34-L65">the snapshot helper</a>.</p></article>
+        <article class="card"><h3>Execute the snapshot</h3><p>The executor reads <code>run.source_tarball_path</code>. A fallback to the automation row keeps pre-migration pending runs dispatchable. See <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/openhands/automation/dispatcher.py#L214-L220">source resolution</a>.</p></article>
+        <article class="card"><h3>Keep the migration additive</h3><p>Both columns are nullable and use generic SQLAlchemy types, so existing rows and both supported databases remain compatible. See <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/migrations/versions/023_add_run_source_provenance.py#L20-L51">migration 023</a>.</p></article>
+      </div>
+    </section>
+
+    <section id="contract">
+      <h2>Data and API contract</h2>
+      <table>
+        <thead><tr><th>Field</th><th>Meaning</th><th>Null behavior</th></tr></thead>
+        <tbody>
+          <tr><td><code>source_tarball_path</code></td><td>Tarball selected when the dispatcher claims the run.</td><td>Legacy rows only; executor falls back to current automation.</td></tr>
+          <tr><td><code>source_commit</code></td><td>Git commit reconciled with that automation source.</td><td>Expected for non-Git, never-synced, or dirty state.</td></tr>
+        </tbody>
+      </table>
+      <p>The fields are exposed directly on <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/openhands/automation/schemas.py#L945-L955"><code>AutomationRunResponse</code></a>. Both scheduler-created and <a href="https://github.com/palrohitg/automation/blob/1f4369573e1f45339e300f89d572f01111db055d/openhands/automation/utils/webhook.py#L263-L272">webhook-created</a> runs use the same helper.</p>
+    </section>
+
+    <section id="verification">
+      <h2>Verification</h2>
+      <table>
+        <tbody>
+          <tr><td class="ok">PASS</td><td>41 focused tests: response serialization, trigger creation, telemetry identity, and SQLite migration-to-head.</td></tr>
+          <tr><td class="ok">PASS</td><td>Local SQLite end-to-end: PENDING → claim/freeze → post-claim automation edit → execution received frozen source.</td></tr>
+          <tr><td class="ok">PASS</td><td>Ruff format/lint, pycodestyle, Pyright (0 errors), and <code>git diff --check</code>.</td></tr>
+          <tr><td>BLOCKED</td><td>Live staging sandbox E2E requires <code>OPENHANDS_API_KEY</code>, which is not available in the local environment.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="scope">
+      <h2>Scope and risks</h2>
+      <div class="callout"><strong>This is phase 1 of issue #342.</strong> It makes the executed source observable. Git ref pinning, restore endpoints, rollback policy, and UI are deliberately not included.</div>
+      <p><strong>Known boundary:</strong> this records source provenance, not a full immutable execution configuration. Entrypoint, model, secrets, and runtime dependencies are outside this change. The nullable schema also means older runs cannot be reconstructed retroactively.</p>
+      <p><strong>Performance:</strong> source stamping adds one indexed primary-key lookup of Git sync state per created run and once again at dispatch claim. That second lookup closes the edit-while-pending race.</p>
+    </section>
+
+    <footer>Prepared for review of <a href="https://github.com/OpenHands/automation/issues/342">OpenHands/automation #342</a>. Base <code>345c6be</code> · implementation <code>1f43695</code>.</footer>
+  </main>
+</body>
+</html>
