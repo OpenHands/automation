@@ -107,7 +107,7 @@ class _BaseDraftBody(BaseModel):
     timeout: int | None = None
     keep_alive: bool | None = None
     enabled: bool | None = None
-    lifecycle_status: AutomationState | None = None
+    state: AutomationState | None = None
     template: TemplateProvenance | None = None
 
     @field_validator("timeout")

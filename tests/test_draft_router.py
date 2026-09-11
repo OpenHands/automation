@@ -194,7 +194,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     automation = await async_session.get(Automation, draft.materialized_automation_id)
     assert automation is not None
     assert automation.enabled is False
-    assert automation.lifecycle_status == AutomationState.DRAFT
+    assert automation.state == AutomationState.DRAFT
     assert automation.prompt == "Write a short greeting."
     assert automation.tarball_path.startswith("oh-internal://uploads/")
 
@@ -307,7 +307,7 @@ async def test_dispatch_complete_draft_again_reuses_and_overwrites_materialized_
     automation = await async_session.get(Automation, first_automation_id)
     assert automation is not None
     assert automation.prompt == "Second prompt."
-    assert automation.lifecycle_status == AutomationState.DRAFT
+    assert automation.state == AutomationState.DRAFT
     assert automation.enabled is False
     assert draft_file_store.write_stream.await_count == 2
 
@@ -370,7 +370,7 @@ async def test_dispatch_draft_does_not_overwrite_linked_non_draft_automation(
         tarball_path="s3://bucket/code.tar.gz",
         entrypoint="python main.py",
         enabled=True,
-        lifecycle_status=AutomationState.ACTIVE,
+        state=AutomationState.ACTIVE,
     )
     draft = AutomationDraft(
         user_id=TEST_USER_ID,
@@ -395,7 +395,7 @@ async def test_dispatch_draft_does_not_overwrite_linked_non_draft_automation(
     await async_session.refresh(active)
     assert draft.materialized_automation_id != active.id
     assert active.prompt == "Do not overwrite."
-    assert active.lifecycle_status == AutomationState.ACTIVE
+    assert active.state == AutomationState.ACTIVE
     assert active.deleted_at is None
 
     new_automation = await async_session.get(
@@ -403,7 +403,7 @@ async def test_dispatch_draft_does_not_overwrite_linked_non_draft_automation(
     )
     assert new_automation is not None
     assert new_automation.prompt == "New draft prompt."
-    assert new_automation.lifecycle_status == AutomationState.DRAFT
+    assert new_automation.state == AutomationState.DRAFT
 
 
 async def test_delete_draft_soft_deletes_materialized_draft_automation_and_run(
@@ -440,7 +440,7 @@ async def test_delete_draft_soft_deletes_materialized_draft_automation_and_run(
     await async_session.refresh(run)
     assert draft.deleted_at is not None
     assert automation.deleted_at == draft.deleted_at
-    assert automation.lifecycle_status == AutomationState.DRAFT
+    assert automation.state == AutomationState.DRAFT
     assert automation.enabled is False
     assert run.status == AutomationRunStatus.SKIPPED
     assert run.completed_at == draft.deleted_at
@@ -459,7 +459,7 @@ async def test_delete_draft_does_not_delete_linked_non_draft_automation(
         tarball_path="s3://bucket/code.tar.gz",
         entrypoint="python main.py",
         enabled=True,
-        lifecycle_status=AutomationState.ACTIVE,
+        state=AutomationState.ACTIVE,
     )
     draft = AutomationDraft(
         user_id=TEST_USER_ID,
@@ -481,4 +481,4 @@ async def test_delete_draft_does_not_delete_linked_non_draft_automation(
     assert draft.deleted_at is not None
     assert active.deleted_at is None
     assert active.enabled is True
-    assert active.lifecycle_status == AutomationState.ACTIVE
+    assert active.state == AutomationState.ACTIVE

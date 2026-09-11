@@ -345,6 +345,12 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
+type PublicAutomationState = Literal[AutomationState.ACTIVE, AutomationState.INACTIVE]
+
+
+DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
+
+
 def normalize_automation_state_enabled(data: Any) -> Any:
     """Keep automation state and enabled compatible in request bodies.
 
@@ -371,6 +377,18 @@ def normalize_automation_state_enabled(data: Any) -> Any:
     data = dict(data)
     data["enabled"] = expected_enabled
     return data
+
+
+PUBLIC_DRAFT_STATE_ERROR: Final[str] = (
+    "state=DRAFT is reserved for automation draft test artifacts. "
+    "Use the /v1/drafts API endpoints to create drafts."
+)
+
+
+def reject_public_draft_state(state: Any) -> Any:
+    if state in (AutomationState.DRAFT, AutomationState.DRAFT.value):
+        raise ValueError(PUBLIC_DRAFT_STATE_ERROR)
+    return state
 
 
 def validate_command_string(
@@ -502,16 +520,15 @@ class CreateAutomationRequest(BaseModel):
         default=True,
         deprecated=True,
         description=(
-            "Deprecated: use state instead. Backward-compatible "
-            "active flag; false creates INACTIVE unless state is "
-            "DRAFT. Will be removed in a future release."
+            "Deprecated: use state instead. Backward-compatible active flag; "
+            "false creates INACTIVE. Will be removed in a future release."
         ),
     )
-    state: AutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "First-class automation state. DRAFT/INACTIVE rows are not "
-            "triggered automatically."
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
         ),
     )
     template: TemplateProvenance | None = Field(
@@ -527,6 +544,11 @@ class CreateAutomationRequest(BaseModel):
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -613,12 +635,17 @@ class UpdateAutomationRequest(BaseModel):
             "Deprecated: use state instead. Will be removed in a future release."
         ),
     )
-    state: AutomationState | None = None
+    state: PublicAutomationState | None = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
