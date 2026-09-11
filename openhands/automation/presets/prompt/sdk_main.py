@@ -509,6 +509,10 @@ More activity arrived on the same subject while this run was queued:
         conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
     conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
+
+    # Register conversation ID with workspace for completion callback
+    workspace.register_conversation(str(conversation.id))
+
     print(f"  conversation created: {type(conversation).__name__}")
 
     # Set a descriptive title so automation runs are distinguishable in the
