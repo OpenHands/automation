@@ -186,6 +186,7 @@ class TestAutomationResponseUtcSerialisation:
             org_id=uuid.uuid4(),
             model=None,
             name="Test",
+            description=None,
             prompt=None,
             trigger={"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
             tarball_path="s3://bucket/key.tar.gz",

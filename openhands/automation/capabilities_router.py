@@ -83,6 +83,10 @@ _STATIC_FEATURES = (
     "presetPlugin",
     "presetPrompt",
     "repoClone",
+    # Automations carry an editable human-facing description. The UI gates
+    # the field on this rather than the manifest alone: a PATCH carrying
+    # `description` to an older service 422s the whole request.
+    "automationDescription",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.

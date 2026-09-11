@@ -134,6 +134,34 @@ class TestSerializeAutomation:
         assert fields["prompt"] == "do the thing"
         assert fields["tarball_source"] == {"type": "internal", "url": None}
 
+    def test_description_omitted_when_null(self):
+        """Regression: emitting `description: null` for automations that have
+        none would rewrite every already-synced automation.yaml (and its
+        content hash) on the first cycle, pushing one no-op commit per
+        automation -- the same trap as the empty `tarball_executables` list.
+        """
+        automation = _make_automation()
+        files = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
+
+        import yaml
+
+        fields = yaml.safe_load(files["automation.yaml"])
+        assert "description" not in fields
+
+    def test_description_serialized_when_set(self):
+        automation = _make_automation(description="Weekly dependency report")
+        files = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
+
+        import yaml
+
+        fields = yaml.safe_load(files["automation.yaml"])
+        assert fields["description"] == "Weekly dependency report"
+
+        # Round-trips through the importer's parsed field dict.
+        deserialized = deserialize_automation(files)
+        assert deserialized is not None
+        assert deserialized.fields["description"] == "Weekly dependency report"
+
     def test_external_url_skips_tarball_dir(self):
         automation = _make_automation(tarball_path="https://example.com/x.tar.gz")
         files = serialize_automation(automation, None)
