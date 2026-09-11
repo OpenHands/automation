@@ -268,6 +268,21 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
+    async def test_create_automation_rejects_draft_lifecycle_status(self, async_client):
+        """Normal automation creation cannot create draft test artifacts."""
+        payload = {
+            "name": "Draft via public API",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "lifecycle_status": "DRAFT",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
     async def test_create_automation_preset_metadata_is_null(self, async_client):
         """Custom SDK automations are created without preset metadata."""
         payload = {
@@ -1228,6 +1243,32 @@ class TestUpdateAutomation:
         assert events[0].reason == "manual"
         assert events[0].detail == {"reason": "manual", "source": "user"}
         assert events[0].source == "manual"
+
+    async def test_update_automation_rejects_draft_lifecycle_status(
+        self, async_client, async_session
+    ):
+        """Normal automation updates cannot move rows into DRAFT."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"lifecycle_status": "DRAFT"},
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+        await async_session.refresh(automation)
+        assert automation.enabled is True
 
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""

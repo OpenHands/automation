@@ -742,6 +742,24 @@ class TestCreateAutomationFromPrompt:
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
 
+    async def test_create_from_prompt_rejects_draft_lifecycle_status(
+        self, async_client
+    ):
+        """Prompt preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Prompt Automation",
+            "prompt": "Write a short greeting.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "lifecycle_status": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
     async def test_create_from_prompt_stores_preset_metadata(self, async_client):
         """Prompt preset records preset metadata without repos when none given."""
         test_prompt = "Summarize open PRs"
@@ -1871,6 +1889,25 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_rejects_draft_lifecycle_status(
+        self, async_client
+    ):
+        """Plugin preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review the code.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "lifecycle_status": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
 
     async def test_create_from_plugin_stores_preset_metadata(self, async_client):
         """Plugin preset records plugins and repos in preset metadata."""

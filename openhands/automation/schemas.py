@@ -344,6 +344,9 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
+type PublicAutomationState = Literal[AutomationState.ACTIVE, AutomationState.INACTIVE]
+
+
 DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
 
 
@@ -371,14 +374,31 @@ def normalize_automation_state_enabled(data: Any) -> Any:
     if lifecycle is None:
         return data
     try:
-        expected_enabled = automation_state_enabled(lifecycle)
+        lifecycle_state = AutomationState(lifecycle)
     except ValueError:
         return data
-    if "enabled" in data and bool(data["enabled"]) != expected_enabled:
+    expected_enabled = automation_state_enabled(lifecycle_state)
+    if (
+        lifecycle_state != AutomationState.DRAFT
+        and "enabled" in data
+        and bool(data["enabled"]) != expected_enabled
+    ):
         raise ValueError("enabled must be true only when lifecycle_status is ACTIVE")
     data = dict(data)
     data["enabled"] = expected_enabled
     return data
+
+
+PUBLIC_DRAFT_LIFECYCLE_ERROR: Final[str] = (
+    "lifecycle_status=DRAFT is reserved for automation draft test artifacts. "
+    "Use the /v1/drafts API endpoints to create drafts."
+)
+
+
+def reject_public_draft_lifecycle_status(status: Any) -> Any:
+    if status in (AutomationState.DRAFT, AutomationState.DRAFT.value):
+        raise ValueError(PUBLIC_DRAFT_LIFECYCLE_ERROR)
+    return status
 
 
 def validate_command_string(
@@ -511,15 +531,15 @@ class CreateAutomationRequest(BaseModel):
         deprecated=True,
         description=(
             "Deprecated: use lifecycle_status instead. Backward-compatible "
-            "active flag; false creates INACTIVE unless lifecycle_status is "
-            "DRAFT. Will be removed in a future release."
+            "active flag; false creates INACTIVE. Will be removed in a "
+            "future release."
         ),
     )
-    lifecycle_status: AutomationState | None = Field(
+    lifecycle_status: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "First-class automation state. DRAFT/INACTIVE rows are not "
-            "triggered automatically."
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
         ),
     )
     template: TemplateProvenance | None = Field(
@@ -535,6 +555,11 @@ class CreateAutomationRequest(BaseModel):
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("lifecycle_status", mode="before")
+    @classmethod
+    def validate_public_lifecycle_status(cls, v: Any) -> Any:
+        return reject_public_draft_lifecycle_status(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -622,12 +647,17 @@ class UpdateAutomationRequest(BaseModel):
             "future release."
         ),
     )
-    lifecycle_status: AutomationState | None = None
+    lifecycle_status: PublicAutomationState | None = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("lifecycle_status", mode="before")
+    @classmethod
+    def validate_public_lifecycle_status(cls, v: Any) -> Any:
+        return reject_public_draft_lifecycle_status(v)
 
     @field_validator("tarball_path")
     @classmethod
