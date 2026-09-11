@@ -54,6 +54,7 @@ from openhands.automation.git_sync.serializer import (
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncState,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -474,6 +475,16 @@ async def _validate_and_resolve_fields(
         session, fields, deserialized, slug, existing, pending_storage_deletes
     )
 
+    enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
+    state = fields.get("state")
+    if state == AutomationState.DRAFT.value:
+        automation_state = AutomationState.DRAFT
+        enabled = False
+    else:
+        automation_state = (
+            AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
+        )
+
     return {
         "name": name,
         "model": fields.get("model"),
@@ -482,10 +493,8 @@ async def _validate_and_resolve_fields(
         "setup_script_path": setup_script_path,
         "timeout": timeout,
         "keep_alive": fields.get("keep_alive"),
-        # `dict.get`'s default only applies when the key is absent. A hand edit
-        # leaving "enabled:" empty is valid YAML parsing to None, and
-        # bool(None) would silently disable a live automation on import.
-        "enabled": True if fields.get("enabled") is None else bool(fields["enabled"]),
+        "enabled": enabled,
+        "state": automation_state,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
@@ -718,6 +727,7 @@ async def _import_from_git(
         automation = await session.get(Automation, state.automation_id)
         if automation is not None and automation.deleted_at is None:
             automation.enabled = False
+            automation.state = AutomationState.INACTIVE
             automation.deleted_at = utcnow()
             result.deleted_in_db += 1
             logger.info("Soft-deleted automation %s (removed from git)", automation.id)

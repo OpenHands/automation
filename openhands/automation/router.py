@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, Final
 
 from fastapi import (
     APIRouter,
@@ -30,6 +30,7 @@ from openhands.automation.models import (
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState as ModelAutomationState,
     TarballUpload,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
@@ -67,6 +68,10 @@ from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
 from openhands.automation.utils.sandbox import cleanup_sandbox
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -84,6 +89,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
+
+_STATE_ONLY_UPDATE_FIELDS: Final[frozenset[str]] = frozenset({"state", "enabled"})
+
+
 _require_view_automations = require_permission("view_automations")
 _require_manage_automations = require_permission("manage_automations")
 
@@ -100,9 +109,6 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
-
-    ``update_automation`` narrows this further: only the creator may change
-    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -111,6 +117,19 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only admins, owners, or the automation creator can modify it",
+    )
+
+
+def _assert_can_update_fields(
+    automation: Automation, user: AuthenticatedUser, requested_fields: set[str]
+) -> None:
+    if automation.user_id == user.user_id:
+        return
+    if requested_fields <= _STATE_ONLY_UPDATE_FIELDS:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only the automation creator can change its definition",
     )
 
 
@@ -160,6 +179,8 @@ async def create_automation(
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
+    state = model_automation_state(body.state, body.enabled)
+
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
@@ -172,6 +193,8 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
+        enabled=automation_state_enabled(state),
+        state=state,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
@@ -248,29 +271,25 @@ async def update_automation(
     # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Partially update an automation.
-
-    Only the creator may edit the definition. Admins and owners may set
-    ``enabled`` to ``False`` (turn it off) but nothing else.
-    """
+    """Partially update an automation."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
-    # Automations run under their creator's identity (git tokens, secrets,
-    # MCP servers), so only the creator may change what they do. Anyone else
-    # who passed _assert_can_manage (admins/owners) may only turn it off.
-    if auto.user_id != user.user_id and update_data != {"enabled": False}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only the automation creator can edit it; admins and owners "
-                "can only turn it off or delete it"
-            ),
-        )
+    _assert_can_update_fields(auto, user, set(update_data))
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
+
+    requested_state = update_data.pop("state", None)
+    if requested_state is not None:
+        state = model_automation_state(
+            requested_state, update_data.get("enabled", auto.enabled)
+        )
+        update_data["state"] = state
+        update_data["enabled"] = automation_state_enabled(state)
+    elif "enabled" in update_data:
+        update_data["state"] = model_automation_state(None, update_data["enabled"])
 
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
@@ -296,8 +315,16 @@ async def update_automation(
         update_data["disabled_detail"] = None
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
-        if auto.enabled:
-            skip_pending_reason = "Automation disabled by user"
+        state = update_data.get("state")
+        is_manual_inactive = state == ModelAutomationState.INACTIVE or (
+            state is None and auto.state != ModelAutomationState.DRAFT
+        )
+        skip_pending_reason = (
+            "Automation moved to draft by user"
+            if state == ModelAutomationState.DRAFT
+            else "Automation disabled by user"
+        )
+        if auto.enabled and is_manual_inactive:
             disabled_at = utcnow()
             disabled_detail = {"reason": "manual", "source": "user"}
             update_data["disabled_reason"] = "manual"
@@ -374,6 +401,7 @@ async def delete_automation(
     await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
+    auto.state = ModelAutomationState.INACTIVE
     deleted_at = utcnow()
     auto.deleted_at = deleted_at
     if was_enabled:
@@ -395,6 +423,7 @@ async def delete_automation(
         reason="Automation deleted by user",
         disabled_detail=auto.disabled_detail,
         completed_at=deleted_at,
+        include_manual=True,
     )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
@@ -490,15 +519,6 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
-    if not auto.enabled:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Automation is disabled",
-                "disabled_reason": auto.disabled_reason,
-                "disabled_detail": auto.disabled_detail,
-            },
-        )
 
     run = await create_pending_run(
         session,
@@ -506,6 +526,7 @@ async def dispatch_automation(
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
+        trigger_source="manual",
     )
     await session.flush()
     await session.refresh(run)

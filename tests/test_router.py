@@ -12,6 +12,7 @@ from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
     AutomationRun,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -227,86 +228,55 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
-    async def _other_users_automation(
-        self, async_session, *, enabled: bool = True
-    ) -> Automation:
-        """Persist an automation created by someone other than the caller."""
+    async def test_admin_non_creator_cannot_update_definition(
+        self, async_client, async_session
+    ):
+        """Admins cannot edit code/config that runs as another user."""
         automation = Automation(
             user_id=self._OTHER_USER_ID,
             org_id=TEST_ORG_ID,
-            name="Teammate Automation",
+            name="Owned by someone else",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
-            enabled=enabled,
         )
         async_session.add(automation)
         await async_session.commit()
-        return automation
 
-    async def test_update_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot edit another user's automation definition."""
-        # Arrange
-        automation = await self._other_users_automation(async_session)
-
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"prompt": "Do something else"},
+            json={"name": "Hijacked definition"},
         )
 
-        # Assert
         assert response.status_code == 403
         assert "creator" in response.json()["detail"]
 
-    async def test_disable_as_non_creator_manager_succeeds(
+    async def test_admin_non_creator_can_update_state(
         self, async_client, async_session
     ):
-        """A manager can turn off another user's automation."""
-        # Arrange
-        automation = await self._other_users_automation(async_session, enabled=True)
-
-        # Act
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"enabled": False}
+        """Admins can activate or deactivate automations they do not own."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Owned by someone else",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+            state=AutomationState.ACTIVE,
         )
+        async_session.add(automation)
+        await async_session.commit()
 
-        # Assert
-        assert response.status_code == 200
-        assert response.json()["enabled"] is False
-
-    async def test_enable_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot turn another user's automation back on."""
-        # Arrange
-        automation = await self._other_users_automation(async_session, enabled=False)
-
-        # Act
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"enabled": True}
-        )
-
-        # Assert
-        assert response.status_code == 403
-
-    async def test_disable_with_edits_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """Turning off cannot carry other edits along with it."""
-        # Arrange
-        automation = await self._other_users_automation(async_session)
-
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"enabled": False, "name": "Renamed"},
+            json={"state": "INACTIVE"},
         )
 
-        # Assert
-        assert response.status_code == 403
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "INACTIVE"
+        assert data["enabled"] is False
 
 
 class TestCreateAutomation:
@@ -1776,10 +1746,10 @@ class TestDispatchAutomation:
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
 
-    async def test_dispatch_disabled_automation_returns_reason(
+    async def test_dispatch_disabled_automation_creates_manual_run(
         self, async_client, async_session
     ):
-        """Dispatching a disabled automation returns its blocking reason."""
+        """Manual dispatch is allowed for inactive automations."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -1798,11 +1768,11 @@ class TestDispatchAutomation:
             f"/api/automation/v1/{automation.id}/dispatch"
         )
 
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert detail["message"] == "Automation is disabled"
-        assert detail["disabled_reason"] == "auth: Invalid API key"
-        assert detail["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert response.status_code == 201
+        data = response.json()
+        assert data["automation_id"] == str(automation.id)
+        assert data["status"] == "PENDING"
+        assert data["trigger_source"] == "manual"
 
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""

@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+import warnings
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 
@@ -29,6 +30,7 @@ from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
 )
+from openhands.automation.utils.state import automation_state_enabled
 from openhands.automation.utils.time import UtcDatetime
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
@@ -335,6 +337,42 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+class AutomationState(StrEnum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
+
+
+def normalize_automation_state_enabled(data: Any) -> Any:
+    """Keep automation state and enabled compatible in request bodies.
+
+    Emits a DeprecationWarning when ``enabled`` is explicitly provided —
+    callers should migrate to ``state``.
+    """
+    if not isinstance(data, dict):
+        return data
+    if "enabled" in data:
+        warnings.warn(
+            "The 'enabled' field is deprecated; use 'state' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    state_value = data.get("state")
+    if state_value is None:
+        return data
+    try:
+        expected_enabled = automation_state_enabled(state_value)
+    except ValueError:
+        return data
+    if "enabled" in data and bool(data["enabled"]) != expected_enabled:
+        raise ValueError("enabled must be true only when state is ACTIVE")
+    data = dict(data)
+    data["enabled"] = expected_enabled
+    return data
+
+
 def validate_command_string(
     v: str | None, field_name: str, *, allow_none: bool = True
 ) -> str | None:
@@ -460,6 +498,22 @@ class CreateAutomationRequest(BaseModel):
             "completion (or after post-run callbacks, when configured)."
         ),
     )
+    enabled: bool = Field(
+        default=True,
+        deprecated=True,
+        description=(
+            "Deprecated: use state instead. Backward-compatible "
+            "active flag; false creates INACTIVE unless state is "
+            "DRAFT. Will be removed in a future release."
+        ),
+    )
+    state: AutomationState | None = Field(
+        default=None,
+        description=(
+            "First-class automation state. DRAFT/INACTIVE rows are not "
+            "triggered automatically."
+        ),
+    )
     template: TemplateProvenance | None = Field(
         default=None,
         description=(
@@ -468,6 +522,11 @@ class CreateAutomationRequest(BaseModel):
             "template id is returned unchanged with HTTP 200."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -547,7 +606,19 @@ class UpdateAutomationRequest(BaseModel):
         description=build_automation_timeout_description(include_default=False),
     )
     keep_alive: bool | None = Field(default=None)
-    enabled: bool | None = None
+    enabled: bool | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "Deprecated: use state instead. Will be removed in a future release."
+        ),
+    )
+    state: AutomationState | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_automation_state_enabled(cls, data: Any) -> Any:
+        return normalize_automation_state_enabled(data)
 
     @field_validator("tarball_path")
     @classmethod
@@ -876,7 +947,14 @@ class AutomationResponse(BaseModel):
     entrypoint: str
     timeout: int | None
     keep_alive: bool | None
-    enabled: bool
+    enabled: bool = Field(
+        deprecated=True,
+        description=(
+            "Deprecated: use state instead. Included for backward "
+            "compatibility; will be removed in a future release."
+        ),
+    )
+    state: AutomationState = AutomationState.ACTIVE
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
     disabled_at: UtcDatetime | None = None
@@ -942,6 +1020,7 @@ class AutomationRunResponse(BaseModel):
     id: uuid.UUID
     automation_id: uuid.UUID
     status: RunStatus
+    trigger_source: str | None = None
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
