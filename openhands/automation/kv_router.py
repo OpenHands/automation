@@ -204,7 +204,11 @@ async def get_kv_auth_context(
     user: Annotated[AuthenticatedUser | None, Depends(_try_resolve_user)] = None,
     automation_id: Annotated[
         uuid.UUID | None,
-        Query(description="Automation ID (required for user auth, ignored for KV token auth)"),
+        Query(
+            description=(
+                "Automation ID (required for user auth, ignored for KV token auth)"
+            )
+        ),
     ] = None,
     session: AsyncSession = Depends(get_session),
 ) -> KVAuthContext:
@@ -253,7 +257,10 @@ async def get_kv_auth_context(
     if automation_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="automation_id query parameter is required for user-authenticated KV access",
+            detail=(
+                "automation_id query parameter is required "
+                "for user-authenticated KV access"
+            ),
         )
 
     await _verify_automation_access(session, user, automation_id)

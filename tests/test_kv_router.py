@@ -37,10 +37,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.app import app
 from openhands.automation.db import get_session
-from openhands.automation.kv_router import get_kv_auth_context, get_token_claims
+from openhands.automation.kv_router import get_kv_auth_context
 from openhands.automation.models import Automation, AutomationKV
 from openhands.automation.utils.kv import (
-    KVTokenClaims,
     decrypt_value,
     encrypt_value,
 )

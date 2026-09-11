@@ -9,11 +9,9 @@ mock user identity.
 """
 
 import uuid
-from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -21,14 +19,14 @@ from openhands.automation.app import app
 from openhands.automation.auth import (
     AuthenticatedUser,
     AuthMethod,
-    authenticate_request,
     get_http_client,
 )
 from openhands.automation.config import clear_config_cache, get_config
 from openhands.automation.db import get_session, set_sqlite_mode
-from openhands.automation.kv_router import _try_resolve_user, get_kv_auth_context
+from openhands.automation.kv_router import _try_resolve_user
 from openhands.automation.models import Automation, AutomationKV, Base
 from openhands.automation.utils.kv import create_kv_token, encrypt_value
+
 
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
@@ -97,7 +95,9 @@ async def sqlite_engine(monkeypatch):
 
 @pytest.fixture
 async def sqlite_session(sqlite_engine):
-    factory = async_sessionmaker(sqlite_engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        sqlite_engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as session:
         yield session
 
@@ -106,7 +106,9 @@ async def sqlite_session(sqlite_engine):
 async def kv_user_client(sqlite_engine, sqlite_session, mock_user, monkeypatch):
     """Client with user auth (member role) and KV secret configured."""
 
-    factory = async_sessionmaker(sqlite_engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        sqlite_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     async def override_get_session():
         async with factory() as s:
@@ -136,7 +138,9 @@ async def kv_user_client(sqlite_engine, sqlite_session, mock_user, monkeypatch):
 async def kv_admin_client(sqlite_engine, sqlite_session, mock_admin, monkeypatch):
     """Client with admin user auth."""
 
-    factory = async_sessionmaker(sqlite_engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        sqlite_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     async def override_get_session():
         async with factory() as s:
@@ -172,7 +176,9 @@ async def kv_token_client(sqlite_engine, sqlite_session, monkeypatch):
     get_http_client (the latter is needed by _try_resolve_user).
     """
 
-    factory = async_sessionmaker(sqlite_engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        sqlite_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
     async def override_get_session():
         async with factory() as s:
@@ -248,11 +254,15 @@ def kv_token():
 class TestUserAuthBasic:
     """Test that user auth works for basic KV operations."""
 
-    async def test_list_keys_with_user_auth(self, kv_user_client, test_automation, sqlite_session):
+    async def test_list_keys_with_user_auth(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
         """User can list keys with API key + automation_id query param."""
         # Seed some state
         encrypted = encrypt_value(TEST_KV_SECRET, {"key1": "val1", "key2": "val2"})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         resp = await kv_user_client.get(
@@ -265,10 +275,14 @@ class TestUserAuthBasic:
         assert set(data["keys"]) == {"key1", "key2"}
         assert data["count"] == 2
 
-    async def test_get_value_with_user_auth(self, kv_user_client, test_automation, sqlite_session):
+    async def test_get_value_with_user_auth(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
         """User can get a value with user auth."""
         encrypted = encrypt_value(TEST_KV_SECRET, {"mykey": {"nested": 42}})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         resp = await kv_user_client.get(
@@ -291,10 +305,14 @@ class TestUserAuthBasic:
         assert resp.json()["key"] == "newkey"
         assert resp.json()["value"] == "hello world"
 
-    async def test_delete_value_with_user_auth(self, kv_user_client, test_automation, sqlite_session):
+    async def test_delete_value_with_user_auth(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
         """User can delete a value with user auth."""
         encrypted = encrypt_value(TEST_KV_SECRET, {"todelete": "val"})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         resp = await kv_user_client.delete(
@@ -314,7 +332,9 @@ class TestUserAuthBasic:
 class TestUserAuthErrors:
     """Test error handling for user-authenticated KV access."""
 
-    async def test_missing_automation_id_query_param(self, kv_user_client, test_automation):
+    async def test_missing_automation_id_query_param(
+        self, kv_user_client, test_automation
+    ):
         """User auth without automation_id query param returns 400."""
         resp = await kv_user_client.get(
             _KV,
@@ -343,10 +363,14 @@ class TestUserAuthErrors:
         )
         assert resp.status_code == 404
 
-    async def test_x_session_api_key_header_works(self, kv_user_client, test_automation, sqlite_session):
+    async def test_x_session_api_key_header_works(
+        self, kv_user_client, test_automation, sqlite_session
+    ):
         """X-Session-API-Key header also works for user auth."""
         encrypted = encrypt_value(TEST_KV_SECRET, {"k": "v"})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         resp = await kv_user_client.get(
@@ -365,10 +389,14 @@ class TestUserAuthErrors:
 class TestKVTokenAuthStillWorks:
     """Verify that existing KV JWT token auth is not broken."""
 
-    async def test_list_keys_with_kv_token(self, kv_token_client, test_automation, sqlite_session, kv_token):
+    async def test_list_keys_with_kv_token(
+        self, kv_token_client, test_automation, sqlite_session, kv_token
+    ):
         """KV JWT token auth still works without automation_id query param."""
         encrypted = encrypt_value(TEST_KV_SECRET, {"tk": "tv"})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         resp = await kv_token_client.get(
@@ -378,7 +406,9 @@ class TestKVTokenAuthStillWorks:
         assert resp.status_code == 200
         assert resp.json()["keys"] == ["tk"]
 
-    async def test_set_value_with_kv_token(self, kv_token_client, test_automation, kv_token):
+    async def test_set_value_with_kv_token(
+        self, kv_token_client, test_automation, kv_token
+    ):
         """KV JWT token auth can set values."""
         resp = await kv_token_client.put(
             f"{_KV}/fromtoken",
@@ -387,10 +417,14 @@ class TestKVTokenAuthStillWorks:
         )
         assert resp.status_code == 201
 
-    async def test_kv_token_ignores_automation_id_param(self, kv_token_client, test_automation, sqlite_session, kv_token):
+    async def test_kv_token_ignores_automation_id_param(
+        self, kv_token_client, test_automation, sqlite_session, kv_token
+    ):
         """KV JWT token auth ignores automation_id query param (uses token's claim)."""
         encrypted = encrypt_value(TEST_KV_SECRET, {"real": "data"})
-        sqlite_session.add(AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted))
+        sqlite_session.add(
+            AutomationKV(automation_id=TEST_AUTOMATION_ID, state_encrypted=encrypted)
+        )
         await sqlite_session.commit()
 
         # Pass a different automation_id in query — should be ignored
