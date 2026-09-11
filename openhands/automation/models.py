@@ -8,7 +8,6 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
-    Boolean,
     DateTime,
     Enum,
     Float,
