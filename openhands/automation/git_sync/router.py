@@ -21,6 +21,7 @@ from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
     find_org_using_repo,
     get_org_config,
+    lock_repo_identity,
     resolve_candidate_git_sync_settings,
     resolve_effective_git_sync_settings,
     resolve_effective_sync_interval_seconds,
@@ -141,6 +142,10 @@ async def update_git_sync_config(
         candidate = await resolve_candidate_git_sync_settings(
             session, user.org_id, mapped
         )
+        if candidate.git_sync_repo_url:
+            # Held until this request's session commits, so a concurrent save
+            # of the same repo by another org waits and then sees this one.
+            await lock_repo_identity(session, candidate)
         if candidate.git_sync_repo_url and (
             await find_org_using_repo(session, candidate, exclude_org_id=user.org_id)
             is not None

@@ -6,15 +6,17 @@ sync without a restart. Each org's overrides are one JSON blob on its
 blob over `base_git_sync_settings()` to get the settings a cycle runs with.
 """
 
+import hashlib
 import json
 import uuid
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.config import GitSyncSettings, get_config
+from openhands.automation.db import using_sqlite
 from openhands.automation.git_sync.secret_store import (
     decrypt_secret_fields,
     encrypt_secret_fields,
@@ -203,6 +205,29 @@ def _repo_identity(git_settings: GitSyncSettings) -> tuple[str, str, str]:
         _normalize_repo_url(git_settings.git_sync_repo_url),
         git_settings.git_sync_branch.strip(),
         git_settings.git_sync_path.strip().strip("/"),
+    )
+
+
+async def lock_repo_identity(session: AsyncSession, candidate: GitSyncSettings) -> None:
+    """Serialise config writes that name the same repository, branch and path.
+
+    `find_org_using_repo` followed by `apply_git_sync_config_override` is a
+    check and then a write, so two orgs saving the same repo at once could
+    both pass the check and both keep it. Row locks can't close that gap: the
+    other org's row may not exist yet. A transaction-scoped advisory lock on
+    the repo identity holds the second writer until the first commits, so its
+    check sees the committed row. Released by the caller's commit. SQLite runs
+    single-process and skips it (the same pattern as `conversations.py`).
+    """
+    if using_sqlite():
+        return
+    digest = hashlib.blake2b(
+        "/".join(_repo_identity(candidate)).encode(), digest_size=8
+    ).digest()
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+            key=int.from_bytes(digest, "big", signed=True)
+        )
     )
 
 

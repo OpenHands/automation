@@ -557,6 +557,26 @@ class TestOrgScoping:
         assert response.status_code == 200
         assert response.json()["enabled"] is True
 
+    async def test_concurrent_saves_of_the_same_repo_are_serialised(
+        self, async_session_factory
+    ):
+        """The 409 is a check followed by a write, so two orgs saving the same
+        repo at once could both pass the check. The repo-identity lock holds
+        the second until the first commits, so its check sees the row."""
+        from openhands.automation.git_sync.config_override import lock_repo_identity
+
+        candidate = GitSyncSettings(git_sync_repo_url="https://example.com/shared.git")
+        async with async_session_factory() as first, async_session_factory() as second:
+            await lock_repo_identity(first, candidate)
+            waiter = asyncio.create_task(lock_repo_identity(second, candidate))
+            await asyncio.sleep(0.2)
+
+            assert not waiter.done(), "second writer did not wait for the first"
+
+            await first.commit()
+            await asyncio.wait_for(waiter, timeout=5)
+            await second.commit()
+
     async def test_records_who_configured_the_org(
         self, async_client, async_session, mock_authenticated_user
     ):

@@ -1244,6 +1244,48 @@ class TestSyncInProgress:
 
         assert await self._sync_started_at(sqlite_session_factory) is None
 
+    async def test_a_live_lease_skips_the_cycle(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        monkeypatch,
+    ):
+        """Another replica's cycle is running: this one must skip, not fail.
+
+        Regression: the lease UPDATE was also evaluated in Python against the
+        org row while the session still held it. SQLite returns that timestamp
+        naive, the comparison value is aware, and the evaluation raised
+        TypeError -- exactly the case the lease exists for. Whether the row is
+        still referenced at that point is down to garbage-collection timing,
+        so this holds on to it to make the case deterministic.
+        """
+        import openhands.automation.git_sync.loop as loop_module
+
+        held_rows = []
+        real_get_or_create = loop_module.get_or_create_org_config
+
+        async def keep_the_row(session, org_id):
+            row = await real_get_or_create(session, org_id)
+            held_rows.append(row)
+            return row
+
+        monkeypatch.setattr(loop_module, "get_or_create_org_config", keep_the_row)
+
+        async with sqlite_session_factory() as session:
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config.sync_started_at = utcnow()
+            await session.commit()
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.skipped is True
+        assert result.exported == 0
+
     async def test_an_expired_lease_does_not_block_the_org(
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):

@@ -411,8 +411,12 @@ exactly one org, the deterministic local org from `auth.py`'s
   there enables sync without a restart. It is refused with a 409 when another
   org already syncs the same repository, branch and path — each org's export
   writes `{path}/{slug}/` and its import reads every directory there, so the
-  two would import each other's automations — and with a 503 when no wrapping
-  secret is available (below). `POST /sync` returns 503 while the org's sync
+  two would import each other's automations. That check is a read followed
+  by a write, so on PostgreSQL the request first takes a transaction-scoped
+  advisory lock on the repo identity (`lock_repo_identity`); a concurrent
+  save of the same repo by another org waits for the commit and then sees
+  the row. It is refused with a 503 when no wrapping secret is available
+  (below). `POST /sync` returns 503 while the org's sync
   is not enabled.
 - The token and encryption key in that blob are encrypted at rest by
   `git_sync/secret_store.py`, wrapped with `AUTOMATION_GIT_SYNC_SECRET`,

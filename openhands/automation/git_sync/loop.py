@@ -1029,6 +1029,11 @@ async def _acquire_sync_lease(
                 ),
             )
             .values(sync_started_at=started_at)
+            # The database decides the match and `rowcount` reports it. The
+            # default also re-evaluates the WHERE in Python against the row
+            # loaded above, where SQLite's naive timestamp can't be compared
+            # with the aware `started_at` and raised instead of skipping.
+            .execution_options(synchronize_session=False)
         )
         await session.commit()
         return result.rowcount == 1
@@ -1052,6 +1057,9 @@ async def _release_sync_lease(
                 AutomationGitSyncOrgConfig.sync_started_at == started_at,
             )
             .values(sync_started_at=None)
+            # As in `_acquire_sync_lease`: nothing in this session is read
+            # afterwards, so the database alone decides the match.
+            .execution_options(synchronize_session=False)
         )
         await session.commit()
 
