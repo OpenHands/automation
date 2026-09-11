@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
-from typing import Any
+from typing import Any, Final
 
 from fastapi import (
     APIRouter,
@@ -39,7 +39,6 @@ from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
-    AutomationState,
     CreateAutomationRequest,
     RunCompleteRequest,
     RunPhaseRequest,
@@ -69,6 +68,10 @@ from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
 from openhands.automation.utils.sandbox import cleanup_sandbox
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -87,18 +90,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
 
-def _model_automation_state(
-    state: AutomationState | str | None, enabled: bool
-) -> ModelAutomationState:
-    if state is not None:
-        return ModelAutomationState(str(state))
-    return ModelAutomationState.ACTIVE if enabled else ModelAutomationState.INACTIVE
-
-
-def _automation_state_enabled(
-    state: ModelAutomationState,
-) -> bool:
-    return state == ModelAutomationState.ACTIVE
+_STATE_ONLY_UPDATE_FIELDS: Final[frozenset[str]] = frozenset({"state", "enabled"})
 
 
 _require_view_automations = require_permission("view_automations")
@@ -117,9 +109,6 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
-
-    ``update_automation`` narrows this further: only the creator may change
-    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -128,6 +117,19 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only admins, owners, or the automation creator can modify it",
+    )
+
+
+def _assert_can_update_fields(
+    automation: Automation, user: AuthenticatedUser, requested_fields: set[str]
+) -> None:
+    if automation.user_id == user.user_id:
+        return
+    if requested_fields <= _STATE_ONLY_UPDATE_FIELDS:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only the automation creator can change its definition",
     )
 
 
@@ -177,7 +179,7 @@ async def create_automation(
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
-    state = _model_automation_state(body.state, body.enabled)
+    state = model_automation_state(body.state, body.enabled)
 
     auto = Automation(
         user_id=user.user_id,
@@ -191,7 +193,7 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
-        enabled=_automation_state_enabled(state),
+        enabled=automation_state_enabled(state),
         state=state,
         telemetry_distinct_id=get_request_telemetry_context(
             request
@@ -274,19 +276,20 @@ async def update_automation(
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    _assert_can_update_fields(auto, user, set(update_data))
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
     requested_state = update_data.pop("state", None)
     if requested_state is not None:
-        state = _model_automation_state(
+        state = model_automation_state(
             requested_state, update_data.get("enabled", auto.enabled)
         )
         update_data["state"] = state
-        update_data["enabled"] = _automation_state_enabled(state)
+        update_data["enabled"] = automation_state_enabled(state)
     elif "enabled" in update_data:
-        update_data["state"] = _model_automation_state(None, update_data["enabled"])
+        update_data["state"] = model_automation_state(None, update_data["enabled"])
 
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.

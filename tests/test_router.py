@@ -12,6 +12,7 @@ from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
     AutomationRun,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -226,6 +227,56 @@ class TestPermissionEnforcement:
         response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
 
         assert response.status_code == 204
+
+    async def test_admin_non_creator_cannot_update_definition(
+        self, async_client, async_session
+    ):
+        """Admins cannot edit code/config that runs as another user."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Owned by someone else",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Hijacked definition"},
+        )
+
+        assert response.status_code == 403
+        assert "creator" in response.json()["detail"]
+
+    async def test_admin_non_creator_can_update_state(
+        self, async_client, async_session
+    ):
+        """Admins can activate or deactivate automations they do not own."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Owned by someone else",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+            state=AutomationState.ACTIVE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "INACTIVE"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "INACTIVE"
+        assert data["enabled"] is False
 
 
 class TestCreateAutomation:

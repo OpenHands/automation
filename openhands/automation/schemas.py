@@ -30,6 +30,7 @@ from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
 )
+from openhands.automation.utils.state import automation_state_enabled
 from openhands.automation.utils.time import UtcDatetime
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
@@ -342,15 +343,6 @@ class AutomationState(StrEnum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
     DRAFT = "DRAFT"
-
-
-DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
-
-
-def automation_state_enabled(status: AutomationState | str | None) -> bool:
-    if status is None:
-        return True
-    return AutomationState(status) == AutomationState.ACTIVE
 
 
 def normalize_automation_state_enabled(data: Any) -> Any:
