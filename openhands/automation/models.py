@@ -296,7 +296,6 @@ class AutomationRun(Base):
     )
 
 
-
 class AutomationDraft(Base):
     """Editable automation setup state, including incomplete form drafts."""
 
