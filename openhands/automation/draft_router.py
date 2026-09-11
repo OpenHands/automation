@@ -74,7 +74,10 @@ from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
 )
-from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.run import (
+    create_pending_run,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -122,6 +125,21 @@ async def _get_org_draft(
             status.HTTP_404_NOT_FOUND, detail="Automation draft not found"
         )
     return draft
+
+
+async def _get_live_materialized_draft_automation(
+    session: AsyncSession, draft: AutomationDraft
+) -> Automation | None:
+    if draft.materialized_automation_id is None:
+        return None
+    automation = await session.get(Automation, draft.materialized_automation_id)
+    if automation is None:
+        return None
+    if automation.org_id != draft.org_id or automation.deleted_at is not None:
+        return None
+    if automation.lifecycle_status != AutomationState.DRAFT:
+        return None
+    return automation
 
 
 def _draft_name(name: str | None, draft_body: dict[str, Any]) -> str | None:
@@ -419,11 +437,7 @@ async def _materialize_draft(
             detail="Unsupported draft endpoint",
         )
 
-    automation: Automation | None = None
-    if draft.materialized_automation_id is not None:
-        existing = await session.get(Automation, draft.materialized_automation_id)
-        if existing is not None and existing.deleted_at is None:
-            automation = existing
+    automation = await _get_live_materialized_draft_automation(session, draft)
 
     values.update(
         {
@@ -548,7 +562,22 @@ async def delete_draft(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
-    draft.deleted_at = utcnow()
+    deleted_at = utcnow()
+    draft.deleted_at = deleted_at
+
+    automation = await _get_live_materialized_draft_automation(session, draft)
+    if automation is not None:
+        automation.enabled = False
+        automation.deleted_at = deleted_at
+        await skip_pending_runs_for_disabled_automation(
+            session,
+            automation.id,
+            reason="Automation draft deleted by user",
+            completed_at=deleted_at,
+            include_manual=True,
+        )
+        await mark_git_sync_dirty(session, automation)
+
     await session.flush()
 
 

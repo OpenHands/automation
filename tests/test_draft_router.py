@@ -11,10 +11,13 @@ from openhands.automation.models import (
     Automation,
     AutomationDraft,
     AutomationRun,
+    AutomationRunStatus,
     AutomationState,
 )
 from openhands.automation.storage import get_file_store
 
+
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
@@ -253,3 +256,229 @@ async def test_dispatch_event_draft_with_synthetic_payload(
     run = await async_session.get(AutomationRun, uuid.UUID(run_data["id"]))
     assert run is not None
     assert run.event_payload == synthetic
+
+
+async def test_dispatch_complete_draft_again_reuses_and_overwrites_materialized_draft(
+    async_client, async_session, draft_file_store
+):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Repeatable draft",
+                "prompt": "First prompt.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    first_dispatch = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+    assert first_dispatch.status_code == 201
+
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    first_automation_id = draft.materialized_automation_id
+    assert first_automation_id is not None
+
+    updated = await async_client.patch(
+        f"/api/automation/v1/drafts/{created.json()['id']}",
+        json={
+            "draft": {
+                "name": "Repeatable draft",
+                "prompt": "Second prompt.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            }
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["dispatchable"] is True
+
+    second_dispatch = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+    assert second_dispatch.status_code == 201
+
+    await async_session.refresh(draft)
+    assert draft.materialized_automation_id == first_automation_id
+    assert draft.last_test_run_id == uuid.UUID(second_dispatch.json()["id"])
+
+    automation = await async_session.get(Automation, first_automation_id)
+    assert automation is not None
+    assert automation.prompt == "Second prompt."
+    assert automation.lifecycle_status == AutomationState.DRAFT
+    assert automation.enabled is False
+    assert draft_file_store.write_stream.await_count == 2
+
+
+async def test_edit_materialized_draft_incomplete_keeps_projection_and_dispatch_fails(
+    async_client, async_session, draft_file_store
+):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Completable draft",
+                "prompt": "Complete prompt.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    first_dispatch = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+    assert first_dispatch.status_code == 201
+
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation_id = draft.materialized_automation_id
+    assert automation_id is not None
+
+    updated = await async_client.patch(
+        f"/api/automation/v1/drafts/{created.json()['id']}",
+        json={"draft": {"name": "Now incomplete"}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["dispatchable"] is False
+
+    second_dispatch = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+    assert second_dispatch.status_code == 422
+
+    await async_session.refresh(draft)
+    assert draft.materialized_automation_id == automation_id
+    assert draft.last_test_run_id == uuid.UUID(first_dispatch.json()["id"])
+
+    automation = await async_session.get(Automation, automation_id)
+    assert automation is not None
+    assert automation.prompt == "Complete prompt."
+    assert draft_file_store.write_stream.await_count == 1
+
+
+async def test_dispatch_draft_does_not_overwrite_linked_non_draft_automation(
+    async_client, async_session, draft_file_store
+):
+    active = Automation(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Finalized automation",
+        prompt="Do not overwrite.",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path="s3://bucket/code.tar.gz",
+        entrypoint="python main.py",
+        enabled=True,
+        lifecycle_status=AutomationState.ACTIVE,
+    )
+    draft = AutomationDraft(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        endpoint="/v1/preset/prompt",
+        name="Draft linked to finalized automation",
+        draft_body={
+            "name": "Draft linked to finalized automation",
+            "prompt": "New draft prompt.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+    )
+    async_session.add_all([active, draft])
+    await async_session.flush()
+    draft.materialized_automation_id = active.id
+    await async_session.commit()
+
+    response = await async_client.post(f"/api/automation/v1/drafts/{draft.id}/dispatch")
+
+    assert response.status_code == 201
+    await async_session.refresh(draft)
+    await async_session.refresh(active)
+    assert draft.materialized_automation_id != active.id
+    assert active.prompt == "Do not overwrite."
+    assert active.lifecycle_status == AutomationState.ACTIVE
+    assert active.deleted_at is None
+
+    new_automation = await async_session.get(
+        Automation, draft.materialized_automation_id
+    )
+    assert new_automation is not None
+    assert new_automation.prompt == "New draft prompt."
+    assert new_automation.lifecycle_status == AutomationState.DRAFT
+
+
+async def test_delete_draft_soft_deletes_materialized_draft_automation_and_run(
+    async_client, async_session, draft_file_store
+):
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Deletable draft",
+                "prompt": "Test prompt.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    dispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+    assert dispatched.status_code == 201
+
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    run = await async_session.get(AutomationRun, uuid.UUID(dispatched.json()["id"]))
+    assert automation is not None
+    assert run is not None
+
+    response = await async_client.delete(f"/api/automation/v1/drafts/{draft.id}")
+
+    assert response.status_code == 204
+    await async_session.refresh(draft)
+    await async_session.refresh(automation)
+    await async_session.refresh(run)
+    assert draft.deleted_at is not None
+    assert automation.deleted_at == draft.deleted_at
+    assert automation.lifecycle_status == AutomationState.DRAFT
+    assert automation.enabled is False
+    assert run.status == AutomationRunStatus.SKIPPED
+    assert run.completed_at == draft.deleted_at
+    assert run.status_detail["detail"] == "Automation draft deleted by user"
+
+
+async def test_delete_draft_does_not_delete_linked_non_draft_automation(
+    async_client, async_session
+):
+    active = Automation(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Finalized automation",
+        prompt="Keep me.",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path="s3://bucket/code.tar.gz",
+        entrypoint="python main.py",
+        enabled=True,
+        lifecycle_status=AutomationState.ACTIVE,
+    )
+    draft = AutomationDraft(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        endpoint="/v1/preset/prompt",
+        name="Linked to active automation",
+        draft_body={"name": "Linked to active automation"},
+    )
+    async_session.add_all([active, draft])
+    await async_session.flush()
+    draft.materialized_automation_id = active.id
+    await async_session.commit()
+
+    response = await async_client.delete(f"/api/automation/v1/drafts/{draft.id}")
+
+    assert response.status_code == 204
+    await async_session.refresh(draft)
+    await async_session.refresh(active)
+    assert draft.deleted_at is not None
+    assert active.deleted_at is None
+    assert active.enabled is True
+    assert active.lifecycle_status == AutomationState.ACTIVE
