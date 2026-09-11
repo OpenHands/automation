@@ -135,7 +135,7 @@ async def get_event_automations(
     base_filters = [
         Automation.org_id == org_id,
         Automation.enabled == True,  # noqa: E712
-        Automation.lifecycle_status == AutomationState.ACTIVE,
+        Automation.state == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -199,7 +199,7 @@ async def get_requested_event_types(
 
     base_filters = [
         Automation.enabled == True,  # noqa: E712
-        Automation.lifecycle_status == AutomationState.ACTIVE,
+        Automation.state == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 

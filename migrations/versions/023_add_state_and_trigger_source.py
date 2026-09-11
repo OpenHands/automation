@@ -1,4 +1,4 @@
-"""Add automation lifecycle_status and run trigger_source.
+"""Add automation state and run trigger_source.
 
 Revision ID: 023
 Revises: 022
@@ -21,19 +21,19 @@ def upgrade() -> None:
     op.add_column(
         "automations",
         sa.Column(
-            "lifecycle_status",
+            "state",
             sa.String(length=20),
             nullable=False,
             server_default="ACTIVE",
         ),
     )
     op.create_index(
-        "ix_automations_lifecycle_status", "automations", ["lifecycle_status"]
+        "ix_automations_state", "automations", ["state"]
     )
     # Backfill from the legacy enabled flag so existing rows match the new
     # state model on day one.
     op.execute(
-        "UPDATE automations SET lifecycle_status = CASE "
+        "UPDATE automations SET state = CASE "
         "WHEN enabled THEN 'ACTIVE' ELSE 'INACTIVE' END"
     )
 
@@ -58,5 +58,5 @@ def downgrade() -> None:
     op.drop_index("ix_automation_runs_trigger_source", table_name="automation_runs")
     op.drop_column("automation_runs", "trigger_source")
 
-    op.drop_index("ix_automations_lifecycle_status", table_name="automations")
-    op.drop_column("automations", "lifecycle_status")
+    op.drop_index("ix_automations_state", table_name="automations")
+    op.drop_column("automations", "state")

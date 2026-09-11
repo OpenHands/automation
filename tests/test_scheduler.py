@@ -481,7 +481,7 @@ class TestPollAndSchedule:
     async def test_poll_excludes_draft_even_if_enabled_flag_is_true(
         self, async_session_factory
     ):
-        """Draft lifecycle rows are never scheduled automatically."""
+        """Draft state rows are never scheduled automatically."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
@@ -491,7 +491,7 @@ class TestPollAndSchedule:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=True,
-                lifecycle_status=AutomationState.DRAFT,
+                state=AutomationState.DRAFT,
             )
             session.add(automation)
             await session.commit()

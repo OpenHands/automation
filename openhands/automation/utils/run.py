@@ -71,7 +71,7 @@ async def disable_automation(
                 )
                 .values(
                     enabled=False,
-                    lifecycle_status=AutomationState.INACTIVE,
+                    state=AutomationState.INACTIVE,
                     disabled_reason=reason,
                     disabled_detail=disabled_detail,
                     disabled_at=disabled_at,

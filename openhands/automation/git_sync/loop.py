@@ -476,12 +476,14 @@ async def _validate_and_resolve_fields(
     )
 
     enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
-    lifecycle_status = fields.get("lifecycle_status")
-    if lifecycle_status == AutomationState.DRAFT.value:
-        lifecycle = AutomationState.DRAFT
+    state = fields.get("state")
+    if state == AutomationState.DRAFT.value:
+        automation_state = AutomationState.DRAFT
         enabled = False
     else:
-        lifecycle = AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
+        automation_state = (
+            AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
+        )
 
     return {
         "name": name,
@@ -492,7 +494,7 @@ async def _validate_and_resolve_fields(
         "timeout": timeout,
         "keep_alive": fields.get("keep_alive"),
         "enabled": enabled,
-        "lifecycle_status": lifecycle,
+        "state": automation_state,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,
@@ -725,7 +727,7 @@ async def _import_from_git(
         automation = await session.get(Automation, state.automation_id)
         if automation is not None and automation.deleted_at is None:
             automation.enabled = False
-            automation.lifecycle_status = AutomationState.INACTIVE
+            automation.state = AutomationState.INACTIVE
             automation.deleted_at = utcnow()
             result.deleted_in_db += 1
             logger.info("Soft-deleted automation %s (removed from git)", automation.id)

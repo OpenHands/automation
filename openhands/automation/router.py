@@ -88,17 +88,17 @@ router = APIRouter(prefix="/v1", tags=["Automations"])
 
 
 def _model_automation_state(
-    lifecycle_status: AutomationState | str | None, enabled: bool
+    state: AutomationState | str | None, enabled: bool
 ) -> ModelAutomationState:
-    if lifecycle_status is not None:
-        return ModelAutomationState(str(lifecycle_status))
+    if state is not None:
+        return ModelAutomationState(str(state))
     return ModelAutomationState.ACTIVE if enabled else ModelAutomationState.INACTIVE
 
 
 def _automation_state_enabled(
-    lifecycle_status: ModelAutomationState,
+    state: ModelAutomationState,
 ) -> bool:
-    return lifecycle_status == ModelAutomationState.ACTIVE
+    return state == ModelAutomationState.ACTIVE
 
 
 _require_view_automations = require_permission("view_automations")
@@ -177,7 +177,7 @@ async def create_automation(
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
 
-    lifecycle_status = _model_automation_state(body.lifecycle_status, body.enabled)
+    state = _model_automation_state(body.state, body.enabled)
 
     auto = Automation(
         user_id=user.user_id,
@@ -191,8 +191,8 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
-        enabled=_automation_state_enabled(lifecycle_status),
-        lifecycle_status=lifecycle_status,
+        enabled=_automation_state_enabled(state),
+        state=state,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
@@ -278,17 +278,15 @@ async def update_automation(
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
-    requested_lifecycle = update_data.pop("lifecycle_status", None)
-    if requested_lifecycle is not None:
-        lifecycle_status = _model_automation_state(
-            requested_lifecycle, update_data.get("enabled", auto.enabled)
+    requested_state = update_data.pop("state", None)
+    if requested_state is not None:
+        state = _model_automation_state(
+            requested_state, update_data.get("enabled", auto.enabled)
         )
-        update_data["lifecycle_status"] = lifecycle_status
-        update_data["enabled"] = _automation_state_enabled(lifecycle_status)
+        update_data["state"] = state
+        update_data["enabled"] = _automation_state_enabled(state)
     elif "enabled" in update_data:
-        update_data["lifecycle_status"] = _model_automation_state(
-            None, update_data["enabled"]
-        )
+        update_data["state"] = _model_automation_state(None, update_data["enabled"])
 
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
@@ -314,14 +312,13 @@ async def update_automation(
         update_data["disabled_detail"] = None
         update_data["disabled_at"] = None
     elif update_data.get("enabled") is False:
-        lifecycle_status = update_data.get("lifecycle_status")
-        is_manual_inactive = lifecycle_status == ModelAutomationState.INACTIVE or (
-            lifecycle_status is None
-            and auto.lifecycle_status != ModelAutomationState.DRAFT
+        state = update_data.get("state")
+        is_manual_inactive = state == ModelAutomationState.INACTIVE or (
+            state is None and auto.state != ModelAutomationState.DRAFT
         )
         skip_pending_reason = (
             "Automation moved to draft by user"
-            if lifecycle_status == ModelAutomationState.DRAFT
+            if state == ModelAutomationState.DRAFT
             else "Automation disabled by user"
         )
         if auto.enabled and is_manual_inactive:
@@ -401,7 +398,7 @@ async def delete_automation(
     await _assert_can_manage(auto, user)
     was_enabled = auto.enabled
     auto.enabled = False
-    auto.lifecycle_status = ModelAutomationState.INACTIVE
+    auto.state = ModelAutomationState.INACTIVE
     deleted_at = utcnow()
     auto.deleted_at = deleted_at
     if was_enabled:
