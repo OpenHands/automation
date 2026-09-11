@@ -293,7 +293,7 @@ class TestGetEventAutomationsSqliteJsonFiltering:
                 tarball_path="test.tar.gz",
                 entrypoint="main.py",
                 enabled=True,
-                lifecycle_status=AutomationState.ACTIVE,
+                state=AutomationState.ACTIVE,
             )
             draft = Automation(
                 id=uuid.uuid4(),
@@ -304,7 +304,7 @@ class TestGetEventAutomationsSqliteJsonFiltering:
                 tarball_path="test.tar.gz",
                 entrypoint="main.py",
                 enabled=True,
-                lifecycle_status=AutomationState.DRAFT,
+                state=AutomationState.DRAFT,
             )
 
             sqlite_session.add_all([active, draft])

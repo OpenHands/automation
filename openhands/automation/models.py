@@ -103,12 +103,12 @@ class Automation(Base):
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
-    # Deprecated: use lifecycle_status instead. Kept for backwards
+    # Deprecated: use state instead. Kept for backwards
     # compatibility; only ACTIVE rows have enabled=True. Will be removed in a
     # future release.
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
 
-    lifecycle_status: Mapped[AutomationState] = mapped_column(
+    state: Mapped[AutomationState] = mapped_column(
         Enum(AutomationState, native_enum=False, length=20),
         nullable=False,
         default=AutomationState.ACTIVE,

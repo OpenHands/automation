@@ -569,7 +569,7 @@ class TestDispatchPendingRuns:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=False,
-                lifecycle_status=AutomationState.INACTIVE,
+                state=AutomationState.INACTIVE,
             )
             session.add(automation)
             await session.commit()

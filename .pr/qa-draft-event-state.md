@@ -10,7 +10,7 @@ PASS
 
 ## Scope
 
-Exercised the requested draft lifecycle flow through the FastAPI app using authenticated API requests, a SQLite test database, and an in-memory file store.
+Exercised the requested draft state flow through the FastAPI app using authenticated API requests, a SQLite test database, and an in-memory file store.
 
 Because this PR QA ran in the development container without a live OpenHands sandbox backend, dispatcher selection was exercised and the async sandbox execution task was replaced with a QA completion stub. This confirms the run is accepted by the dispatcher and reaches `COMPLETED` in the test harness without making external sandbox/network calls.
 
@@ -28,7 +28,7 @@ Because this PR QA ran in the development container without a live OpenHands san
    - Materialized automation ID: `e74eac21-fa00-4ffe-bd1a-0e7ff7be6796`
    - Run ID: `3567655c-0c97-467c-ab78-a99b109b3f63`
    - Initial run status from draft dispatch: `PENDING`
-   - Materialized automation lifecycle: `DRAFT`
+   - Materialized automation state: `DRAFT`
    - Materialized automation enabled: `false`
    - Stored event payload:
      ```json
@@ -49,7 +49,7 @@ Because this PR QA ran in the development container without a live OpenHands san
    - Final run status: `COMPLETED`
 8. Activated the materialized automation through the normal automation API.
    - Automation ID: `e74eac21-fa00-4ffe-bd1a-0e7ff7be6796`
-   - Final `lifecycle_status`: `ACTIVE`
+   - Final `state`: `ACTIVE`
    - Final `enabled`: `true`
 
 ## Notes
@@ -57,4 +57,4 @@ Because this PR QA ran in the development container without a live OpenHands san
 - Draft dispatch accepted synthetic `event_payload` bodies from authenticated requests.
 - No webhook delivery endpoint was called, and no webhook signature headers were supplied for the test dispatches.
 - A custom webhook source was still configured because event-draft validation currently requires the event source to exist before a draft is dispatchable.
-- Raw JSON evidence is in `.pr/qa-draft-event-lifecycle.json`.
+- Raw JSON evidence is in `.pr/qa-draft-event-state.json`.

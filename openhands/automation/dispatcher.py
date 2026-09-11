@@ -143,7 +143,7 @@ async def _poll_pending_runs(
                 AutomationRun.trigger_source == "manual",
                 and_(
                     Automation.enabled.is_(True),
-                    Automation.lifecycle_status == AutomationState.ACTIVE,
+                    Automation.state == AutomationState.ACTIVE,
                 ),
             ),
         )

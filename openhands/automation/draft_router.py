@@ -137,7 +137,7 @@ async def _get_live_materialized_draft_automation(
         return None
     if automation.org_id != draft.org_id or automation.deleted_at is not None:
         return None
-    if automation.lifecycle_status != AutomationState.DRAFT:
+    if automation.state != AutomationState.DRAFT:
         return None
     return automation
 
@@ -442,7 +442,7 @@ async def _materialize_draft(
     values.update(
         {
             "enabled": False,
-            "lifecycle_status": AutomationState.DRAFT,
+            "state": AutomationState.DRAFT,
             "disabled_reason": None,
             "disabled_detail": None,
             "disabled_at": None,

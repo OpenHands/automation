@@ -52,7 +52,7 @@ from openhands.automation.schemas import (
     TemplateProvenance,
     Trigger,
     normalize_automation_state_enabled,
-    reject_public_draft_lifecycle_status,
+    reject_public_draft_state,
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
@@ -85,15 +85,15 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
 
 def _model_automation_state(
-    lifecycle_status: AutomationState | str | None, enabled: bool
+    state: AutomationState | str | None, enabled: bool
 ) -> ModelAutomationState:
-    if lifecycle_status is not None:
-        return ModelAutomationState(str(lifecycle_status))
+    if state is not None:
+        return ModelAutomationState(str(state))
     return ModelAutomationState.ACTIVE if enabled else ModelAutomationState.INACTIVE
 
 
-def _automation_state_enabled(lifecycle_status: ModelAutomationState) -> bool:
-    return lifecycle_status == ModelAutomationState.ACTIVE
+def _automation_state_enabled(state: ModelAutomationState) -> bool:
+    return state == ModelAutomationState.ACTIVE
 
 
 _require_manage_automations = require_permission("manage_automations")
@@ -224,10 +224,10 @@ class CreatePromptAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
-    lifecycle_status: PublicAutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "Public automation state. Use ACTIVE or INACTIVE; "
             "drafts are managed through /v1/drafts."
         ),
     )
@@ -237,10 +237,10 @@ class CreatePromptAutomationRequest(BaseModel):
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
-    @field_validator("lifecycle_status", mode="before")
+    @field_validator("state", mode="before")
     @classmethod
-    def validate_public_lifecycle_status(cls, v: Any) -> Any:
-        return reject_public_draft_lifecycle_status(v)
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -517,7 +517,7 @@ async def create_automation_from_prompt(
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
-    lifecycle_status = _model_automation_state(body.lifecycle_status, body.enabled)
+    state = _model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -587,8 +587,8 @@ async def create_automation_from_prompt(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=_automation_state_enabled(lifecycle_status),
-            lifecycle_status=lifecycle_status,
+            enabled=_automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -743,10 +743,10 @@ class CreatePluginAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
-    lifecycle_status: PublicAutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "Public automation state. Use ACTIVE or INACTIVE; "
             "drafts are managed through /v1/drafts."
         ),
     )
@@ -756,10 +756,10 @@ class CreatePluginAutomationRequest(BaseModel):
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
-    @field_validator("lifecycle_status", mode="before")
+    @field_validator("state", mode="before")
     @classmethod
-    def validate_public_lifecycle_status(cls, v: Any) -> Any:
-        return reject_public_draft_lifecycle_status(v)
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -942,7 +942,7 @@ async def create_automation_from_plugin(
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
-    lifecycle_status = _model_automation_state(body.lifecycle_status, body.enabled)
+    state = _model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -1035,8 +1035,8 @@ async def create_automation_from_plugin(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=_automation_state_enabled(lifecycle_status),
-            lifecycle_status=lifecycle_status,
+            enabled=_automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,

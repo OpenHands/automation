@@ -62,7 +62,7 @@ def _disable_invalid_cron_automation(
     error: BaseException,
 ) -> None:
     automation.enabled = False
-    automation.lifecycle_status = AutomationState.INACTIVE
+    automation.state = AutomationState.INACTIVE
     logger.error(
         "Disabling automation with invalid cron trigger: %s",
         reason,
@@ -132,7 +132,7 @@ async def _fetch_enabled_automations(
         select(Automation)
         .where(
             Automation.enabled.is_(True),
-            Automation.lifecycle_status == AutomationState.ACTIVE,
+            Automation.state == AutomationState.ACTIVE,
             Automation.deleted_at.is_(None),
             (Automation.last_polled_at.is_(None))
             | (Automation.last_polled_at < poll_threshold),

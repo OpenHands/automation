@@ -51,9 +51,9 @@ This QA used the actual automation backend process and REST API calls:
    - `bash_command_id`: `108d4ad6dfda4cce90980fae4a51b6dc`
    - `sandbox_id`: `null`
 10. Activated the materialized automation through `PATCH /{automation_id}`.
-    - Final `lifecycle_status`: `ACTIVE`
+    - Final `state`: `ACTIVE`
     - Final `enabled`: `true`
     - Final name: `QA REST event draft v2`
     - Final timeout: `121`
 
-Raw JSON evidence is in `.pr/qa-rest-draft-event-lifecycle.json`.
+Raw JSON evidence is in `.pr/qa-rest-draft-event-state.json`.

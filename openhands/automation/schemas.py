@@ -360,44 +360,44 @@ def normalize_automation_state_enabled(data: Any) -> Any:
     """Keep automation state and enabled compatible in request bodies.
 
     Emits a DeprecationWarning when ``enabled`` is explicitly provided —
-    callers should migrate to ``lifecycle_status``.
+    callers should migrate to ``state``.
     """
     if not isinstance(data, dict):
         return data
     if "enabled" in data:
         warnings.warn(
-            "The 'enabled' field is deprecated; use 'lifecycle_status' instead.",
+            "The 'enabled' field is deprecated; use 'state' instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-    lifecycle = data.get("lifecycle_status")
-    if lifecycle is None:
+    state_value = data.get("state")
+    if state_value is None:
         return data
     try:
-        lifecycle_state = AutomationState(lifecycle)
+        automation_state = AutomationState(state_value)
     except ValueError:
         return data
-    expected_enabled = automation_state_enabled(lifecycle_state)
+    expected_enabled = automation_state_enabled(automation_state)
     if (
-        lifecycle_state != AutomationState.DRAFT
+        automation_state != AutomationState.DRAFT
         and "enabled" in data
         and bool(data["enabled"]) != expected_enabled
     ):
-        raise ValueError("enabled must be true only when lifecycle_status is ACTIVE")
+        raise ValueError("enabled must be true only when state is ACTIVE")
     data = dict(data)
     data["enabled"] = expected_enabled
     return data
 
 
-PUBLIC_DRAFT_LIFECYCLE_ERROR: Final[str] = (
-    "lifecycle_status=DRAFT is reserved for automation draft test artifacts. "
+PUBLIC_DRAFT_STATE_ERROR: Final[str] = (
+    "state=DRAFT is reserved for automation draft test artifacts. "
     "Use the /v1/drafts API endpoints to create drafts."
 )
 
 
-def reject_public_draft_lifecycle_status(status: Any) -> Any:
+def reject_public_draft_state(status: Any) -> Any:
     if status in (AutomationState.DRAFT, AutomationState.DRAFT.value):
-        raise ValueError(PUBLIC_DRAFT_LIFECYCLE_ERROR)
+        raise ValueError(PUBLIC_DRAFT_STATE_ERROR)
     return status
 
 
@@ -530,15 +530,15 @@ class CreateAutomationRequest(BaseModel):
         default=True,
         deprecated=True,
         description=(
-            "Deprecated: use lifecycle_status instead. Backward-compatible "
+            "Deprecated: use state instead. Backward-compatible "
             "active flag; false creates INACTIVE. Will be removed in a "
             "future release."
         ),
     )
-    lifecycle_status: PublicAutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "Public automation state. Use ACTIVE or INACTIVE; "
             "drafts are managed through /v1/drafts."
         ),
     )
@@ -556,10 +556,10 @@ class CreateAutomationRequest(BaseModel):
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
 
-    @field_validator("lifecycle_status", mode="before")
+    @field_validator("state", mode="before")
     @classmethod
-    def validate_public_lifecycle_status(cls, v: Any) -> Any:
-        return reject_public_draft_lifecycle_status(v)
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -643,21 +643,20 @@ class UpdateAutomationRequest(BaseModel):
         default=None,
         deprecated=True,
         description=(
-            "Deprecated: use lifecycle_status instead. Will be removed in a "
-            "future release."
+            "Deprecated: use state instead. Will be removed in a future release."
         ),
     )
-    lifecycle_status: PublicAutomationState | None = None
+    state: PublicAutomationState | None = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
 
-    @field_validator("lifecycle_status", mode="before")
+    @field_validator("state", mode="before")
     @classmethod
-    def validate_public_lifecycle_status(cls, v: Any) -> Any:
-        return reject_public_draft_lifecycle_status(v)
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -989,11 +988,11 @@ class AutomationResponse(BaseModel):
     enabled: bool = Field(
         deprecated=True,
         description=(
-            "Deprecated: use lifecycle_status instead. Included for backward "
+            "Deprecated: use state instead. Included for backward "
             "compatibility; will be removed in a future release."
         ),
     )
-    lifecycle_status: AutomationState = AutomationState.ACTIVE
+    state: AutomationState = AutomationState.ACTIVE
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
     disabled_at: UtcDatetime | None = None

@@ -268,14 +268,14 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
-    async def test_create_automation_rejects_draft_lifecycle_status(self, async_client):
+    async def test_create_automation_rejects_draft_state(self, async_client):
         """Normal automation creation cannot create draft test artifacts."""
         payload = {
             "name": "Draft via public API",
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             "tarball_path": "s3://bucket/path/to/code.tar.gz",
             "entrypoint": "uv run script.py",
-            "lifecycle_status": "DRAFT",
+            "state": "DRAFT",
         }
 
         response = await async_client.post("/api/automation/v1", json=payload)
@@ -1244,7 +1244,7 @@ class TestUpdateAutomation:
         assert events[0].detail == {"reason": "manual", "source": "user"}
         assert events[0].source == "manual"
 
-    async def test_update_automation_rejects_draft_lifecycle_status(
+    async def test_update_automation_rejects_draft_state(
         self, async_client, async_session
     ):
         """Normal automation updates cannot move rows into DRAFT."""
@@ -1262,7 +1262,7 @@ class TestUpdateAutomation:
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"lifecycle_status": "DRAFT"},
+            json={"state": "DRAFT"},
         )
 
         assert response.status_code == 422

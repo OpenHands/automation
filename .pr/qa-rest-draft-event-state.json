@@ -125,7 +125,7 @@
         "id": "a762c275-7b06-4818-9151-5c7ed5ce474d",
         "keep_alive": null,
         "last_triggered_at": "2026-09-11T15:45:01.571434Z",
-        "lifecycle_status": "ACTIVE",
+        "state": "ACTIVE",
         "model": null,
         "name": "QA REST event draft v2",
         "org_id": "46d09c5c-7d7d-585f-8c37-a6b45a3de738",

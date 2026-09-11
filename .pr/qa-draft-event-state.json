@@ -37,7 +37,7 @@
       },
       "initial_run_status": "PENDING",
       "materialized_enabled": false,
-      "materialized_lifecycle": "DRAFT",
+      "materialized_state": "DRAFT",
       "run_id": "3567655c-0c97-467c-ab78-a99b109b3f63",
       "step": "materialized_and_dispatched_first_test"
     },
@@ -68,7 +68,7 @@
     {
       "automation_id": "e74eac21-fa00-4ffe-bd1a-0e7ff7be6796",
       "enabled": true,
-      "lifecycle_status": "ACTIVE",
+      "state": "ACTIVE",
       "step": "activated_materialized_automation"
     }
   ],

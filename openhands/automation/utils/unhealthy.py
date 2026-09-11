@@ -241,7 +241,7 @@ async def _apply_disable(
         )
         .values(
             enabled=False,
-            lifecycle_status=AutomationState.INACTIVE,
+            state=AutomationState.INACTIVE,
             disabled_reason=cause.reason,
             disabled_detail=disabled_detail,
             disabled_at=disabled_at,
