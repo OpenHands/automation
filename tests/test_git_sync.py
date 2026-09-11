@@ -8,13 +8,14 @@ import io
 import subprocess
 import tarfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from openhands.automation.auth import _get_local_user
 from openhands.automation.config import GitSyncSettings, ServiceSettings
 from openhands.automation.git_sync import (
     git_sync_loop,
@@ -30,16 +31,13 @@ from openhands.automation.git_sync.client import (
 )
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
+    get_or_create_org_config,
 )
-from openhands.automation.git_sync.loop import (
-    GIT_SYNC_LAST_COMMIT_KEY,
-    GIT_SYNC_LAST_ERROR_AT_KEY,
-    GIT_SYNC_LAST_ERROR_KEY,
-    _delete_superseded_upload,
-)
+from openhands.automation.git_sync.loop import _delete_superseded_upload
 from openhands.automation.git_sync.serializer import encrypt_file_tree
 from openhands.automation.models import (
     Automation,
+    AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
     Base,
     TarballUpload,
@@ -47,15 +45,32 @@ from openhands.automation.models import (
 )
 from openhands.automation.storage.local import LocalFileStore
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.service_metadata import (
-    get_service_metadata,
-    set_service_metadata,
-)
 from openhands.automation.utils.tarball_validation import parse_internal_upload_id
+
+
+# The one org local mode syncs. `run_sync_cycle` is per org, so the
+# automations these tests create must belong to it to be exported.
+_LOCAL_USER = _get_local_user()
+LOCAL_USER_ID = _LOCAL_USER.user_id
+LOCAL_ORG_ID = _LOCAL_USER.org_id
 
 
 async def _aiter(data: bytes):
     yield data
+
+
+async def _org_config(
+    session_factory, org_id: uuid.UUID = LOCAL_ORG_ID
+) -> AutomationGitSyncOrgConfig | None:
+    """The org's row, where a cycle records its last commit, run and error."""
+    async with session_factory() as session:
+        return await session.get(AutomationGitSyncOrgConfig, org_id)
+
+
+async def _apply_override(session, updates: dict) -> None:
+    await apply_git_sync_config_override(
+        session, LOCAL_ORG_ID, updates, configured_by_user_id=LOCAL_USER_ID
+    )
 
 
 def _make_tarball(files: dict[str, bytes]) -> bytes:
@@ -135,6 +150,8 @@ async def _create_internal_automation(
     *,
     name: str = "My First Automation",
     tarball_files: dict[str, bytes] | None = None,
+    user_id: uuid.UUID = LOCAL_USER_ID,
+    org_id: uuid.UUID = LOCAL_ORG_ID,
 ) -> uuid.UUID:
     tarball_files = tarball_files or {"main.py": b"print(1)"}
     tarball_bytes = _make_tarball(tarball_files)
@@ -147,7 +164,6 @@ async def _create_internal_automation(
     )
 
     async with session_factory() as session:
-        user_id, org_id = uuid.uuid4(), uuid.uuid4()
         upload = TarballUpload(
             id=upload_id,
             user_id=user_id,
@@ -309,7 +325,7 @@ class TestRunSyncCycle:
         await _create_internal_automation(sqlite_session_factory, file_store)
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         assert result.exported == 1
@@ -353,7 +369,9 @@ class TestRunSyncCycle:
         monkeypatch.setattr(loop_module, "commit_and_push", failing_commit_and_push)
 
         with pytest.raises(GitSyncError):
-            await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
 
         # The push failed, but the export bookkeeping must already be committed
         # and queryable from a fresh session -- proving the transaction wasn't
@@ -370,10 +388,12 @@ class TestRunSyncCycle:
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         await _create_internal_automation(sqlite_session_factory, file_store)
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         assert result.exported == 0
@@ -391,10 +411,14 @@ class TestRunSyncCycle:
         both must be present.
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         moved = git_settings.model_copy(update={"git_sync_path": "custom-path"})
-        result = await run_sync_cycle(sqlite_session_factory, moved, service_settings)
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, moved, service_settings
+        )
 
         assert result.exported == 1
         assert result.pushed_commit is not None
@@ -427,15 +451,20 @@ class TestRunSyncCycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         # Unreachable base -> diff fails -> full-scan fallback.
         async with sqlite_session_factory() as session:
-            await set_service_metadata(session, GIT_SYNC_LAST_COMMIT_KEY, "0" * 40)
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config.last_synced_commit = "0" * 40
             await session.commit()
 
         moved = git_settings.model_copy(update={"git_sync_path": "elsewhere"})
-        result = await run_sync_cycle(sqlite_session_factory, moved, service_settings)
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, moved, service_settings
+        )
 
         assert result.deleted_in_db == 0
         async with sqlite_session_factory() as session:
@@ -462,7 +491,7 @@ class TestRunSyncCycle:
         """
         await _create_internal_automation(sqlite_session_factory, file_store)
         first = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert first.pushed_commit is not None
 
@@ -476,7 +505,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, repointed, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, repointed, service_settings
         )
 
         assert result.exported == 0, "nothing should be newly dirty"
@@ -514,7 +543,7 @@ class TestRunSyncCycle:
             sqlite_session_factory, file_store
         )
         result1 = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result1.exported == 1
 
@@ -531,7 +560,7 @@ class TestRunSyncCycle:
             await session.commit()
 
         result2 = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         assert result2.exported == 0
@@ -556,7 +585,9 @@ class TestRunSyncCycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         editor_dir = origin.parent / "editor"
         await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
@@ -581,7 +612,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.imported == 0  # matched an existing slug, not a new automation
 
@@ -607,7 +638,9 @@ class TestRunSyncCycle:
         await _create_internal_automation(
             sqlite_session_factory, file_store, name="Automation B"
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         editor_dir = origin.parent / "editor"
         await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
@@ -640,7 +673,9 @@ class TestRunSyncCycle:
 
         monkeypatch.setattr(loop_module, "_read_directory_files", instrumented_read)
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         assert read_slugs == ["automation-b"]
 
@@ -650,7 +685,9 @@ class TestRunSyncCycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         # Git-side edit, not yet synced back.
         editor_dir = origin.parent / "editor"
@@ -682,7 +719,9 @@ class TestRunSyncCycle:
             await mark_git_sync_dirty(session, automation)
             await session.commit()
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
@@ -694,7 +733,9 @@ class TestRunSyncCycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
@@ -704,7 +745,7 @@ class TestRunSyncCycle:
             await session.commit()
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.deleted_in_git == 1
 
@@ -728,7 +769,9 @@ class TestRunSyncCycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         editor_dir = origin.parent / "editor"
         await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
@@ -751,7 +794,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.deleted_in_db == 1
 
@@ -791,7 +834,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.imported == 1
 
@@ -834,7 +877,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.imported == 1
 
@@ -875,7 +918,7 @@ class TestRunSyncCycle:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         assert result.imported == 0
@@ -887,7 +930,7 @@ class TestRunSyncCycle:
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
         """A manual cycle must not run concurrently with the periodic loop's
-        against the same workdir."""
+        against the same org: the one that loses the lease skips."""
         import openhands.automation.git_sync.loop as loop_module
 
         concurrency = {"active": 0, "max": 0}
@@ -904,12 +947,17 @@ class TestRunSyncCycle:
 
         monkeypatch.setattr(loop_module, "ensure_repo", instrumented_ensure_repo)
 
-        await asyncio.gather(
-            run_sync_cycle(sqlite_session_factory, git_settings, service_settings),
-            run_sync_cycle(sqlite_session_factory, git_settings, service_settings),
+        results = await asyncio.gather(
+            run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            ),
+            run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            ),
         )
 
         assert concurrency["max"] == 1
+        assert sorted(result.skipped for result in results) == [False, True]
 
 
 class TestEncryption:
@@ -924,7 +972,7 @@ class TestEncryption:
         )
 
         first = await run_sync_cycle(
-            sqlite_session_factory, encrypted_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, encrypted_settings, service_settings
         )
         assert first.exported == 1
         assert first.pushed_commit is not None
@@ -945,7 +993,7 @@ class TestEncryption:
         # random per-encryption IV must not make identical content look
         # changed and trigger a needless commit.
         second = await run_sync_cycle(
-            sqlite_session_factory, encrypted_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, encrypted_settings, service_settings
         )
         assert second.exported == 0
         assert second.pushed_commit is None
@@ -991,7 +1039,7 @@ class TestEncryption:
         )
 
         result = await run_sync_cycle(
-            sqlite_session_factory, encrypted_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, encrypted_settings, service_settings
         )
         assert result.imported == 1
 
@@ -1020,7 +1068,7 @@ class TestEncryption:
             sqlite_session_factory, file_store, name="Was Encrypted"
         )
         await run_sync_cycle(
-            sqlite_session_factory, encrypted_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, encrypted_settings, service_settings
         )
 
         # A fresh DB on the same repo with no encryption key: its first cycle
@@ -1037,7 +1085,7 @@ class TestEncryption:
         )
         try:
             result = await run_sync_cycle(
-                fresh_factory, fresh_workdir_settings, service_settings
+                fresh_factory, LOCAL_ORG_ID, fresh_workdir_settings, service_settings
             )
             assert result.imported == 0  # skipped, not crashed
         finally:
@@ -1077,7 +1125,7 @@ class TestEncryption:
             update={"git_sync_encryption_key": "the-wrong-key"}
         )
         result = await run_sync_cycle(
-            sqlite_session_factory, wrong_key_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, wrong_key_settings, service_settings
         )
 
         assert result.imported == 0
@@ -1098,87 +1146,90 @@ class TestLastError:
         monkeypatch.setattr(loop_module, "pull", failing_pull)
 
         with pytest.raises(GitSyncError):
-            await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
-
-        async with sqlite_session_factory() as session:
-            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
-            last_error_at = await get_service_metadata(
-                session, GIT_SYNC_LAST_ERROR_AT_KEY
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
             )
-            assert last_error is not None
-            assert "simulated pull failure" in last_error
-            assert last_error_at is not None
+
+        org_config = await _org_config(sqlite_session_factory)
+        assert org_config is not None
+        assert org_config.last_error is not None
+        assert "simulated pull failure" in org_config.last_error
+        assert org_config.last_error_at is not None
 
     async def test_successful_cycle_clears_previous_error(
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         async with sqlite_session_factory() as session:
-            await set_service_metadata(
-                session, GIT_SYNC_LAST_ERROR_KEY, "a stale error"
-            )
-            await set_service_metadata(
-                session, GIT_SYNC_LAST_ERROR_AT_KEY, utcnow().isoformat()
-            )
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config.last_error = "a stale error"
+            org_config.last_error_at = utcnow()
             await session.commit()
 
         await _create_internal_automation(sqlite_session_factory, file_store)
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
-        async with sqlite_session_factory() as session:
-            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
-            last_error_at = await get_service_metadata(
-                session, GIT_SYNC_LAST_ERROR_AT_KEY
-            )
-            assert last_error == ""
-            # Both halves, or /status reports a timestamp with no message.
-            assert not last_error_at
+        org_config = await _org_config(sqlite_session_factory)
+        assert org_config is not None
+        assert org_config.last_error is None
+        # Both halves, or /status reports a timestamp with no message.
+        assert org_config.last_error_at is None
 
 
 class TestSyncInProgress:
     """A cycle reports its outcome only once it ends, so `GET /status` needs a
-    separate signal to tell "running" from "nothing happened".
+    separate signal to tell "running" from "nothing happened". It is the org
+    row's `sync_started_at`, which doubles as the cross-replica lease.
     """
+
+    async def _sync_started_at(self, session_factory) -> datetime | None:
+        org_config = await _org_config(session_factory)
+        return org_config.sync_started_at if org_config is not None else None
 
     async def test_reports_the_running_cycle_and_clears_it_afterwards(
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         import openhands.automation.git_sync.loop as loop_module
 
-        assert loop_module.get_sync_started_at() is None
+        assert await self._sync_started_at(sqlite_session_factory) is None
 
         started = asyncio.Event()
         finish = asyncio.Event()
         seen_while_running: list[datetime | None] = []
 
-        original = loop_module._run_sync_cycle_locked
+        original = loop_module._run_sync_cycle_leased
 
         async def paused_cycle(*args, **kwargs):
             started.set()
             await finish.wait()
             return await original(*args, **kwargs)
 
-        loop_module._run_sync_cycle_locked = paused_cycle
+        loop_module._run_sync_cycle_leased = paused_cycle
         try:
             await _create_internal_automation(sqlite_session_factory, file_store)
             cycle = asyncio.create_task(
-                run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+                run_sync_cycle(
+                    sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+                )
             )
             await started.wait()
-            seen_while_running.append(loop_module.get_sync_started_at())
+            seen_while_running.append(
+                await self._sync_started_at(sqlite_session_factory)
+            )
             finish.set()
             await cycle
         finally:
-            loop_module._run_sync_cycle_locked = original
+            loop_module._run_sync_cycle_leased = original
 
         assert seen_while_running[0] is not None
-        assert loop_module.get_sync_started_at() is None
+        assert await self._sync_started_at(sqlite_session_factory) is None
 
     async def test_clears_the_flag_when_the_cycle_fails(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
-        # A failed cycle leaving the flag set would report a sync as running
-        # forever and, via the trigger's no-op guard, lock out every later
-        # manual sync until a restart.
+        # A failed cycle leaving the lease set would report a sync as running
+        # and skip every later cycle for the org until the lease expired.
         import openhands.automation.git_sync.loop as loop_module
 
         async def failing_pull(*args, **kwargs):
@@ -1187,9 +1238,76 @@ class TestSyncInProgress:
         monkeypatch.setattr(loop_module, "pull", failing_pull)
 
         with pytest.raises(GitSyncError):
-            await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
 
-        assert loop_module.get_sync_started_at() is None
+        assert await self._sync_started_at(sqlite_session_factory) is None
+
+    async def test_a_live_lease_skips_the_cycle(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        monkeypatch,
+    ):
+        """Another replica's cycle is running: this one must skip, not fail.
+
+        Regression: the lease UPDATE was also evaluated in Python against the
+        org row while the session still held it. SQLite returns that timestamp
+        naive, the comparison value is aware, and the evaluation raised
+        TypeError -- exactly the case the lease exists for. Whether the row is
+        still referenced at that point is down to garbage-collection timing,
+        so this holds on to it to make the case deterministic.
+        """
+        import openhands.automation.git_sync.loop as loop_module
+
+        held_rows = []
+        real_get_or_create = loop_module.get_or_create_org_config
+
+        async def keep_the_row(session, org_id):
+            row = await real_get_or_create(session, org_id)
+            held_rows.append(row)
+            return row
+
+        monkeypatch.setattr(loop_module, "get_or_create_org_config", keep_the_row)
+
+        async with sqlite_session_factory() as session:
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config.sync_started_at = utcnow()
+            await session.commit()
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.skipped is True
+        assert result.exported == 0
+
+    async def test_an_expired_lease_does_not_block_the_org(
+        self, sqlite_session_factory, file_store, git_settings, service_settings
+    ):
+        """A replica that died mid-cycle never cleared its lease. Once it is
+        older than the TTL the next cycle must take over rather than skip."""
+        import openhands.automation.git_sync.loop as loop_module
+
+        async with sqlite_session_factory() as session:
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            org_config.sync_started_at = (
+                utcnow() - loop_module._lease_ttl(git_settings) - timedelta(seconds=1)
+            )
+            await session.commit()
+        await _create_internal_automation(sqlite_session_factory, file_store)
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.skipped is False
+        assert result.exported == 1
+        assert await self._sync_started_at(sqlite_session_factory) is None
 
 
 class TestGitSyncLoop:
@@ -1203,9 +1321,7 @@ class TestGitSyncLoop:
     ):
         await _create_internal_automation(sqlite_session_factory, file_store)
         async with sqlite_session_factory() as session:
-            await apply_git_sync_config_override(
-                session, {"git_sync_interval_seconds": 1}
-            )
+            await _apply_override(session, {"git_sync_interval_seconds": 1})
             await session.commit()
         shutdown_event = asyncio.Event()
 
@@ -1292,9 +1408,7 @@ class TestGitSyncLoop:
                 assert states[0].dirty is True
 
                 # Now configure an interval, as the UI would.
-                await apply_git_sync_config_override(
-                    session, {"git_sync_interval_seconds": 1}
-                )
+                await _apply_override(session, {"git_sync_interval_seconds": 1})
                 await session.commit()
 
             for _ in range(200):
@@ -1321,7 +1435,7 @@ class TestGitSyncLoop:
         self, sqlite_session_factory, file_store, git_settings, service_settings
     ):
         async with sqlite_session_factory() as session:
-            await apply_git_sync_config_override(
+            await _apply_override(
                 session,
                 {"git_sync_enabled": False, "git_sync_interval_seconds": 1},
             )
@@ -1370,7 +1484,7 @@ class TestBackfillsPreExistingAutomations:
         await self._create_automation_without_state(sqlite_session_factory, file_store)
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         assert result.exported == 1
@@ -1396,7 +1510,7 @@ class TestBackfillsPreExistingAutomations:
             await session.commit()
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.exported == 0
 
@@ -1405,8 +1519,12 @@ class TestBackfillsPreExistingAutomations:
     ):
         await self._create_automation_without_state(sqlite_session_factory, file_store)
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             states = (
@@ -1426,7 +1544,9 @@ class TestExportPreservesUserFiles:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         workdir = Path(git_settings.git_sync_local_workdir)
         slug_dir = workdir / "automations" / "my-first-automation"
@@ -1456,7 +1576,9 @@ class TestExportPreservesUserFiles:
             await mark_git_sync_dirty(session, automation)
             await session.commit()
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         assert (slug_dir / "README.md").read_text() == "hand-written notes"
         assert (slug_dir / "automation.yaml").is_file()
@@ -1474,7 +1596,9 @@ class TestDirtyAutomationOverwritesGitEdit:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         # Someone edits automation.yaml in the repo...
         editor_dir = origin.parent / "editor"
@@ -1516,7 +1640,9 @@ class TestDirtyAutomationOverwritesGitEdit:
             await mark_git_sync_dirty(session, automation)
             await session.commit()
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         verify_dir = origin.parent / "verify-conflict"
         subprocess.run(
@@ -1585,7 +1711,7 @@ class TestSymlinkedSlugDirectory:
 
         # Must complete rather than raising, and must not import the target.
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
         assert result.exported == 1
 
@@ -1634,14 +1760,14 @@ class TestMalformedYamlDoesNotAbortTheCycle:
         await _create_internal_automation(sqlite_session_factory, file_store)
 
         result = await run_sync_cycle(
-            sqlite_session_factory, git_settings, service_settings
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
         )
 
         # The healthy automation still exported and pushed.
         assert result.exported == 1
-        async with sqlite_session_factory() as session:
-            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
-        assert not last_error
+        org_config = await _org_config(sqlite_session_factory)
+        assert org_config is not None
+        assert not org_config.last_error
 
 
 class TestTarballUploadLifecycle:
@@ -1684,7 +1810,9 @@ class TestTarballUploadLifecycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             before = (await session.get(Automation, automation_id)).tarball_path
@@ -1695,7 +1823,9 @@ class TestTarballUploadLifecycle:
         await self._push_yaml_edit(
             origin, "editor-yaml", "enabled: true", "enabled: false"
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
@@ -1711,7 +1841,9 @@ class TestTarballUploadLifecycle:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             old_path = (await session.get(Automation, automation_id)).tarball_path
@@ -1747,7 +1879,9 @@ class TestTarballUploadLifecycle:
             ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
         )
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
@@ -1796,7 +1930,9 @@ class TestEnabledKeyWithNullValue:
         automation_id = await _create_internal_automation(
             sqlite_session_factory, file_store
         )
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         editor_dir = origin.parent / "editor-enabled"
         subprocess.run(
@@ -1826,7 +1962,9 @@ class TestEnabledKeyWithNullValue:
             ["git", "push", "origin", "HEAD:main"], cwd=editor_dir, check=True
         )
 
-        await run_sync_cycle(sqlite_session_factory, git_settings, service_settings)
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
 
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
@@ -1846,7 +1984,9 @@ class TestSyncPathValidation:
         )
 
         with pytest.raises(ValueError):
-            await run_sync_cycle(sqlite_session_factory, traversing, service_settings)
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, traversing, service_settings
+            )
 
 
 class TestCredentialRedaction:
@@ -1866,10 +2006,104 @@ class TestCredentialRedaction:
         )
 
         with pytest.raises(GitSyncError):
-            await run_sync_cycle(sqlite_session_factory, bad, service_settings)
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, bad, service_settings
+            )
 
-        async with sqlite_session_factory() as session:
-            last_error = await get_service_metadata(session, GIT_SYNC_LAST_ERROR_KEY)
+        org_config = await _org_config(sqlite_session_factory)
+        assert org_config is not None
+        last_error = org_config.last_error
         assert last_error
         assert "ghp_SUPERSECRET" not in last_error
         assert "***" in last_error
+
+
+class TestOrgIsolation:
+    """Sync is per org: a cycle for one org must not export another org's
+    automations, and what it imports belongs to the org and the admin who
+    configured it."""
+
+    async def test_a_cycle_exports_only_its_own_orgs_automations(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        other_org_id = uuid.uuid4()
+        other_id = await _create_internal_automation(
+            sqlite_session_factory,
+            file_store,
+            name="Other Org",
+            user_id=uuid.uuid4(),
+            org_id=other_org_id,
+        )
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        assert result.exported == 1
+        async with sqlite_session_factory() as session:
+            other_state = await session.get(AutomationGitSyncState, other_id)
+            assert other_state is not None
+            assert other_state.org_id == other_org_id
+            assert other_state.dirty is True, "another org's automation was exported"
+
+        verify_dir = origin.parent / "verify-isolation"
+        subprocess.run(
+            ["git", "clone", f"file://{origin}", str(verify_dir)],
+            check=True,
+            capture_output=True,
+        )
+        assert (verify_dir / "automations" / "my-first-automation").is_dir()
+        assert not (verify_dir / "automations" / "other-org").exists()
+
+    async def test_imported_automations_belong_to_the_configuring_user(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        """An automation authored in git runs as the admin who last saved the
+        org's Git Sync config, not as a fixed identity."""
+        admin_id = uuid.uuid4()
+        async with sqlite_session_factory() as session:
+            await apply_git_sync_config_override(
+                session, LOCAL_ORG_ID, {}, configured_by_user_id=admin_id
+            )
+            await session.commit()
+
+        seed_dir = origin.parent / "seed-owner"
+        await ensure_repo(seed_dir, f"file://{origin}", "main", "", 30)
+        await pull(seed_dir, "main", "", 30)
+        autodir = seed_dir / "automations" / "hand-written"
+        autodir.mkdir(parents=True)
+        (autodir / "automation.yaml").write_text(
+            "name: Hand Written\n"
+            "entrypoint: python main.py\n"
+            "trigger:\n"
+            "  type: cron\n"
+            "  schedule: '0 12 * * *'\n"
+            "  timezone: UTC\n"
+            "enabled: true\n"
+        )
+        (autodir / "tarball").mkdir()
+        (autodir / "tarball" / "main.py").write_text('print("hi")')
+        await commit_and_push(
+            seed_dir,
+            "automations",
+            "seed",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
+        )
+
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert result.imported == 1
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            assert automation.user_id == admin_id
+            assert automation.org_id == LOCAL_ORG_ID
+            upload = (await session.execute(select(TarballUpload))).scalars().one()
+            assert upload.user_id == admin_id
+            assert upload.org_id == LOCAL_ORG_ID

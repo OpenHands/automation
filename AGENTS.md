@@ -35,7 +35,7 @@ automation/
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
-│       ├── git_sync/           # Bidirectional git sync (local mode only, see below)
+│       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
 │       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
 │       │   ├── router.py       # Git sync status/trigger API
@@ -305,95 +305,129 @@ clone; it fetches what it needs itself.
 
 ## Git Sync
 
-Local/self-hosted deployments can mirror their automations to a git repo for
-visibility, versioning, and backup — see issue #300. **Only active in local
-mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
-agent server, which doesn't make sense for the multi-tenant SaaS deployment.
+Deployments can mirror automations to a git repo for visibility, versioning,
+and backup — see issue #300. Sync is **scoped to an organization**: each org
+syncs its own automations to its own repo, configured from the Git Sync page
+by an org admin/owner (`manage_automations`) and stored on that org's
+`automation_git_sync_org_config` row. Local mode is the same code path with
+exactly one org, the deterministic local org from `auth.py`'s
+`_get_local_user()`.
 
-- Configuring a repo is what enables sync — there is no separate feature
-  flag. The repo URL may come either from `AUTOMATION_GIT_SYNC_REPO_URL` or
-  from the Git Sync page, and nothing syncs until one is set. The background
-  loop and the `dirty` CRUD hook start in every local-mode deployment
-  (`is_git_sync_supported`), idle, so a repo configured from the UI syncs
-  without a restart. See `GitSyncSettings` in
-  `config.py` for the full list of env vars.
+- Configuring a repo is what enables sync for an org — there is no separate
+  feature flag. In local mode the repo URL may also come from
+  `AUTOMATION_GIT_SYNC_REPO_URL`; outside local mode the env-level repo URL,
+  token and encryption key are ignored (`base_git_sync_settings` in
+  `git_sync/config_override.py`), since a shared deployment must not sync
+  every org into one repo. The background loop and the `dirty` CRUD hook run
+  in every deployment, idle until an org is configured, so a repo configured
+  from the UI syncs without a restart. See `GitSyncSettings` in `config.py`
+  for the env vars.
+- The loop ticks every 15 s, reads every org's config, and runs a cycle for
+  the orgs that are enabled, have a positive interval and are due — their
+  interval has elapsed since their last success *or* failure, so a broken
+  repo isn't retried every tick. Orgs sync one after another within a tick.
+- **Cross-replica lease**: the cloud runs several replicas, each with the
+  loop, and none shares a disk. A cycle first claims the org's
+  `sync_started_at` with a conditional UPDATE and clears it in `finally`; a
+  replica that loses the race skips (`SyncCycleResult.skipped`). A crashed
+  cycle's lease expires after `max(300 s, 5 × git timeout)`. `GET /status`
+  reads the same column for `sync_in_progress`, so every replica reports the
+  same thing, and `POST /sync` returns `triggered: false` while it is live —
+  that cycle covers everything the new one would.
+- Each org's checkout lives at `{workspace_base}/git-sync/{org_id}` (local
+  mode keeps the historical `{workspace_base}/git-sync`, or
+  `AUTOMATION_GIT_SYNC_LOCAL_WORKDIR`). It is a cache: cloud pods have no
+  persistent disk, so a fresh pod re-clones on its first cycle.
 - Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
   (metadata) plus its tarball contents extracted under `tarball/**`. Those are
   the only paths the exporter owns (`is_generated_path`): other files committed
   in the same directory are left alone. `automation.yaml` carries a
   `tarball_executables` list when any tarball member is executable, since the
   extracted files are committed as plain content and the mode would otherwise
-  be lost on the way back in.
+  be lost on the way back in. Slugs are unique per org
+  (`AutomationGitSyncState`, `(org_id, slug)`), not globally.
 - `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
   `..`, no leading/trailing slashes, never empty. It is joined onto the local
   checkout and passed to `git add -- <path>`, and each slug directory under it
   is pruned during export, so a traversing value would delete host directories.
 - `git_sync/router.py` exposes `GET /v1/git-sync/status`,
   `PUT /v1/git-sync/config`, `POST /v1/git-sync/sync` (manual trigger), and
-  `POST /v1/git-sync/check`.
+  `POST /v1/git-sync/check`. Every endpoint acts on the caller's org
+  (`user.org_id`); status needs `view_automations`, the rest
+  `manage_automations`.
 - `POST /v1/git-sync/check` takes the same body as `PUT /config` and reports
   whether *that* configuration can reach its repo, without saving it or
   syncing: `resolve_candidate_git_sync_settings` merges the update in memory,
   and `check_remote_access` runs a single `git ls-remote`. Keep it that way —
   validating by running a cycle would clone, import whatever the repo holds
-  into the local automations, and push every dirty automation to a URL nobody
+  into the org's automations, and push every dirty automation to a URL nobody
   has vetted yet, which for a mistyped URL is the damage rather than the
   diagnosis. It proves read access only: a token with no write scope passes
   and still fails at push time, and the encryption key is never exercised. A
   branch that doesn't exist yet is reported as `branch_exists: false`, not a
   failure — the first cycle creates it. A bad configuration comes back as
   `200 {"ok": false, "detail": ...}`, since the request itself succeeded.
-- **Sync is manual by default**: the interval defaults to `0`, meaning a
+- **Sync is manual by default**: an org's interval defaults to `0`, meaning a
   cycle runs only when `POST /v1/git-sync/sync` is called. Set a positive
   `interval_seconds` via `PUT /v1/git-sync/config` (the UI) to also sync
   automatically. Unlike every other git-sync setting it has **no environment
-  variable** — it is runtime-only config, stored with the other overrides
-  (see `DEFAULT_SYNC_INTERVAL_SECONDS` in `git_sync/config_override.py`).
-  The background loop always runs so a newly-set interval takes effect
-  without a restart; while the interval is 0 it idles without syncing.
-  Either way one cycle is the same bidirectional pull → import → export →
-  push; there's no way to run a single direction.
+  variable** — it is runtime-only config, stored with the org's other
+  overrides (see `DEFAULT_SYNC_INTERVAL_SECONDS` in
+  `git_sync/config_override.py`). The background loop always runs so a
+  newly-set interval takes effect without a restart. Either way one cycle is
+  the same bidirectional pull → import → export → push; there's no way to run
+  a single direction.
 - Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
   on every create/update/delete via the API; the sync loop treats a dirty
   automation as authoritative over a conflicting git-side change for the same
-  cycle — the VM always wins until its change has been pushed. The import skips
-  a dirty slug and the export then compares against what is actually on disk,
-  not against `state.content_hash`: a git-side edit leaves the DB row untouched,
-  so a hash comparison would skip the write and strand the two versions.
+  cycle — the service always wins until its change has been pushed. The import
+  skips a dirty slug and the export then compares against what is actually on
+  disk, not against `state.content_hash`: a git-side edit leaves the DB row
+  untouched, so a hash comparison would skip the write and strand the two
+  versions.
 - Automations that predate git sync being switched on have no state row, and the
   export only reads dirty ones. `_backfill_missing_states` creates them (dirty)
-  at the start of every cycle, so the first sync exports everything rather than
-  reporting success against an empty repo.
-- Automations created directly in git (e.g. via a PR) are imported and
-  stamped with the deterministic local-mode user/org IDs from `auth.py`'s
-  `_get_local_user()`.
-- **Encryption**: set `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY` to encrypt file
-  contents (via the SDK's Fernet-based `Cipher`, same primitive as the KV
-  store) before they're committed. Reading a repo written before encryption
-  was turned on still works — plaintext files pass through unchanged.
-- **Runtime config**: `PUT /v1/git-sync/config` reconfigures or pauses/resumes
-  an already-running sync (repo/branch/path/token/encryption key/author)
+  for the org at the start of every cycle, so the first sync exports everything
+  rather than reporting success against an empty repo.
+- Automations created directly in git (e.g. via a PR) are imported into the org
+  and stamped with the user who last saved the org's Git Sync config
+  (`configured_by_user_id`). They run as that user — in cloud mode that means
+  minting their API key, so they must stay a member of the org; re-saving the
+  config re-stamps the owner. Local mode falls back to `_get_local_user()`.
+  Outside local mode an org row that was never saved from the UI has no such
+  user, so new directories are skipped (logged) while already-synced
+  automations keep updating. Anything pushed to the configured repo becomes an
+  automation that runs under that user: treat write access to the repo like
+  admin access to the org.
+- **Encryption**: set the org's encryption key (or, in local mode,
+  `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
+  SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're
+  committed. Reading a repo written before encryption was turned on still
+  works — plaintext files pass through unchanged.
+- **Runtime config**: `PUT /v1/git-sync/config` configures, reconfigures or
+  pauses/resumes the org's sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as
-  JSON in `automation_service_metadata`). Setting a repo URL there enables
-  sync without a restart; only a deployment that can't sync at all (not local
-  mode) is refused, on both the config endpoint (409) and the manual trigger
-  (503).
+  JSON on the org's `automation_git_sync_org_config` row). Setting a repo URL
+  there enables sync without a restart. It is refused with a 409 when another
+  org already syncs the same repository, branch and path — each org's export
+  writes `{path}/{slug}/` and its import reads every directory there, so the
+  two would import each other's automations. That check is a read followed
+  by a write, so on PostgreSQL the request first takes a transaction-scoped
+  advisory lock on the repo identity (`lock_repo_identity`); a concurrent
+  save of the same repo by another org waits for the commit and then sees
+  the row. It is refused with a 503 when no wrapping secret is available
+  (below). `POST /sync` returns 503 while the org's sync
+  is not enabled.
 - The token and encryption key in that blob are encrypted at rest by
-  `git_sync/secret_store.py`, wrapped with `AUTOMATION_KV_SECRET` when the
-  deployment sets one and otherwise with a key generated into a 0600 file
-  under the workspace. If neither can be obtained, `PUT /config` fails with a
-  503 rather than storing the secret in the clear.
+  `git_sync/secret_store.py`, wrapped with `AUTOMATION_GIT_SYNC_SECRET`,
+  falling back to `AUTOMATION_KV_SECRET`, and in local mode only to a key
+  generated into a 0600 file under the workspace. Cloud mode requires one of
+  the env secrets: replicas don't share a disk, so a per-pod key file would
+  make a token stored by one pod unreadable on the others. If no key can be
+  obtained, `PUT /config` fails with a 503 rather than storing the secret in
+  the clear.
 - `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
-  the most recent failed cycle, cleared on the next successful one.
-- **In-flight cycles**: a cycle writes its outcome only when it ends, so
-  `/status` also reports `sync_in_progress`/`sync_started_at` — otherwise a
-  caller can't tell a running sync from one that never started, and a cycle
-  the periodic loop began is invisible to the UI. The flag is in-process
-  state (`get_sync_started_at`), scoped like the `_sync_cycle_lock` it
-  shadows: a crash mid-cycle can't strand it the way a persisted flag would.
-  `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
-  when one is already running — that cycle covers everything the new one
-  would, and the lock would only queue it behind anyway.
+  the org's most recent failed cycle, cleared on the next successful one.
 
 ## Stream Sources
 
