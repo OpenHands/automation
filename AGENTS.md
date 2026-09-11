@@ -149,13 +149,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. Fork PRs must remove `.pr/` manually before merge.
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
-- For fork PRs, remove `.pr/` manually before merging.
+- Cleanup PRs follow the normal review and required-check protections for `main`.
 
 
 ## Dispatch Pipeline
