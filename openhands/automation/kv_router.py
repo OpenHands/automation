@@ -184,12 +184,14 @@ async def _try_resolve_user(
     request: Request,
     http_client: Any = Depends(get_http_client),
 ) -> AuthenticatedUser | None:
-    """Attempt to resolve user auth; return None if no valid credential.
+    """Attempt to resolve user auth; return None if it cannot be resolved.
 
     This wrapper lets ``get_kv_auth_context`` declare user auth as an optional
     FastAPI dependency (so it can be overridden in tests) while still trying
-    the KV token path first.  Only 401 is swallowed — other errors (429 rate
-    limit, 502 gateway) propagate.
+    the KV token path first.  Returns None on 401 (no/invalid credential) or
+    on unexpected errors (e.g. no http_client available when KV token auth
+    is being used).  Other HTTP errors (429, 502) propagate so the client
+    sees them rather than silently falling through.
     """
     try:
         return await authenticate_request(request, http_client)
@@ -197,6 +199,12 @@ async def _try_resolve_user(
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
             return None
         raise
+    except Exception as exc:
+        # If user auth fails for non-HTTP reasons (e.g. no http_client
+        # available when the caller is using KV token auth), fall through
+        # to the KV token path rather than crashing.
+        logger.debug("User auth skipped due to error: %s", exc)
+        return None
 
 
 async def get_kv_auth_context(
