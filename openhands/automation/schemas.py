@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+import warnings
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 
@@ -353,9 +354,19 @@ def automation_state_enabled(status: AutomationState | str | None) -> bool:
 
 
 def normalize_automation_state_enabled(data: Any) -> Any:
-    """Keep automation state and enabled compatible in request bodies."""
+    """Keep automation state and enabled compatible in request bodies.
+
+    Emits a DeprecationWarning when ``enabled`` is explicitly provided —
+    callers should migrate to ``lifecycle_status``.
+    """
     if not isinstance(data, dict):
         return data
+    if "enabled" in data:
+        warnings.warn(
+            "The 'enabled' field is deprecated; use 'lifecycle_status' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     lifecycle = data.get("lifecycle_status")
     if lifecycle is None:
         return data
@@ -497,9 +508,11 @@ class CreateAutomationRequest(BaseModel):
     )
     enabled: bool = Field(
         default=True,
+        deprecated=True,
         description=(
-            "Backward-compatible active flag; false creates INACTIVE unless "
-            "lifecycle_status is DRAFT."
+            "Deprecated: use lifecycle_status instead. Backward-compatible "
+            "active flag; false creates INACTIVE unless lifecycle_status is "
+            "DRAFT. Will be removed in a future release."
         ),
     )
     lifecycle_status: AutomationState | None = Field(
@@ -601,7 +614,14 @@ class UpdateAutomationRequest(BaseModel):
         description=build_automation_timeout_description(include_default=False),
     )
     keep_alive: bool | None = Field(default=None)
-    enabled: bool | None = None
+    enabled: bool | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "Deprecated: use lifecycle_status instead. Will be removed in a "
+            "future release."
+        ),
+    )
     lifecycle_status: AutomationState | None = None
 
     @model_validator(mode="before")
@@ -936,7 +956,13 @@ class AutomationResponse(BaseModel):
     entrypoint: str
     timeout: int | None
     keep_alive: bool | None
-    enabled: bool
+    enabled: bool = Field(
+        deprecated=True,
+        description=(
+            "Deprecated: use lifecycle_status instead. Included for backward "
+            "compatibility; will be removed in a future release."
+        ),
+    )
     lifecycle_status: AutomationState = AutomationState.ACTIVE
     disabled_reason: str | None = None
     disabled_detail: dict[str, Any] | None = None
