@@ -23,7 +23,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
-    _should_cleanup_sandbox_after_terminal,
+    _should_cleanup_after_terminal,
     _verify_and_mark_run,
     mark_stale_runs,
     prune_integration_events,
@@ -39,10 +39,30 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def _create_mock_backend(verification_result: VerificationResult) -> MagicMock:
     """Create a mock backend with configured verification result."""
     mock_backend = MagicMock()
+    mock_backend.is_local_mode = False
     mock_backend.verify_run = AsyncMock(return_value=verification_result)
     mock_backend.cleanup_after_verification = AsyncMock()
     mock_backend.get_api_key = AsyncMock(return_value="test-api-key")
     return mock_backend
+
+
+def _local_backend() -> MagicMock:
+    backend = MagicMock()
+    backend.is_local_mode = True
+    return backend
+
+
+def _cloud_backend() -> MagicMock:
+    backend = MagicMock()
+    backend.is_local_mode = False
+    return backend
+
+
+def _sandboxless_run() -> MagicMock:
+    run = MagicMock(spec=AutomationRun)
+    run.sandbox_id = None
+    run.subject_key = None
+    return run
 
 
 @pytest.fixture
@@ -683,13 +703,23 @@ class TestSubjectOwningRunsKeepTheirSandbox:
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = "T06P212QSEA/C123/1755000000.000100"
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=True) is False
+        assert (
+            _should_cleanup_after_terminal(
+                run, keep_alive=True, backend=_cloud_backend()
+            )
+            is False
+        )
 
     def test_an_ordinary_run_is_still_cleaned_up(self):
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = None
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is True
+        assert (
+            _should_cleanup_after_terminal(
+                run, keep_alive=False, backend=_cloud_backend()
+            )
+            is True
+        )
 
     @pytest.mark.asyncio
     async def test_watchdog_does_not_delete_the_conversations_sandbox(
@@ -726,6 +756,34 @@ class TestSubjectOwningRunsKeepTheirSandbox:
             # about, and nothing has released it.
             assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
             assert run.subject_released_at is None
+
+
+class TestLocalRunsReachTerminalCleanup:
+    """#422: a local run has no sandbox id, so the sandbox test excluded it."""
+
+    def test_a_local_run_without_a_sandbox_is_cleaned_up(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=None, backend=_local_backend()
+            )
+            is True
+        )
+
+    def test_keep_alive_still_holds_a_local_workspace(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=True, backend=_local_backend()
+            )
+            is False
+        )
+
+    def test_a_cloud_run_without_a_sandbox_is_unchanged(self):
+        assert (
+            _should_cleanup_after_terminal(
+                _sandboxless_run(), keep_alive=None, backend=_cloud_backend()
+            )
+            is False
+        )
 
 
 @pytest.mark.asyncio
