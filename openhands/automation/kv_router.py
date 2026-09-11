@@ -29,6 +29,7 @@ because automation state is intended to be small and access is infrequent.
 
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import (
@@ -38,12 +39,18 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     Response,
     status,
 )
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    authenticate_request,
+    get_http_client,
+)
 from openhands.automation.config import KVSettings, get_config
 from openhands.automation.db import get_session, using_sqlite
 from openhands.automation.kv_helpers import (
@@ -78,7 +85,7 @@ from openhands.automation.kv_schemas import (
     KVPatchRequest,
     KVSetResponse,
 )
-from openhands.automation.models import AutomationKV
+from openhands.automation.models import Automation, AutomationKV
 from openhands.automation.utils.kv import KVTokenClaims, KVTokenError, verify_kv_token
 
 
@@ -90,13 +97,182 @@ router = APIRouter(prefix="/v1/kv", tags=["KV Store"])
 # --- Authentication ---
 
 
+@dataclass
+class KVAuthContext:
+    """Resolved authorization for a KV request.
+
+    Holds the automation_id whose state should be accessed.  The automation_id
+    comes from either:
+
+    1. A per-run KV JWT token (``Authorization: Bearer <jwt>``) — used by
+       automation scripts during a run.  The token embeds the automation_id
+       as a trusted claim.
+
+    2. User authentication (API key / X-Session-API-Key / cookie) — used by
+       humans and spawned conversations acting on a user's behalf.  Requires
+       an ``automation_id`` query parameter; the user must be a member of the
+       automation's org.
+    """
+
+    automation_id: uuid.UUID
+    auth_method: str  # "kv_token" | "user"
+
+
+async def _try_kv_token_auth(
+    authorization: str,
+    kv_secret: str,
+) -> KVTokenClaims | None:
+    """Attempt to authenticate via KV JWT token.
+
+    Returns None if the Authorization header is not a valid KV JWT (allowing
+    the caller to fall through to user auth).  Raises HTTPException for
+    malformed tokens that look like KV JWTs but fail verification.
+    """
+    if not authorization.startswith("Bearer "):
+        return None
+
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+
+    # A KV JWT has exactly three dot-separated base64 segments.  A user API
+    # key will not match this shape, so we can cheaply distinguish the two
+    # and avoid a spurious "Invalid token" error for legitimate API keys.
+    if token.count(".") != 2:
+        return None
+
+    try:
+        return verify_kv_token(kv_secret, token)
+    except KVTokenError:
+        # The token *looks* like a JWT but failed verification — this is a
+        # real auth failure, not a "try user auth" situation.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired KV token",
+        )
+
+
+async def _verify_automation_access(
+    session: AsyncSession,
+    user: AuthenticatedUser,
+    automation_id: uuid.UUID,
+) -> None:
+    """Verify that the user has access to the given automation's KV data.
+
+    The user must be a member of the automation's org (view_automations).
+    Unlike management endpoints, we do not require manage_automations for KV
+    reads — a member who can see the automation can inspect its state.
+    """
+    result = await session.execute(
+        select(Automation).where(Automation.id == automation_id)
+    )
+    automation = result.scalars().first()
+    if automation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Automation not found",
+        )
+    if automation.org_id != user.org_id:
+        # Don't leak existence — return 404 rather than 403
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Automation not found",
+        )
+
+
+async def _try_resolve_user(
+    request: Request,
+    http_client: Any = Depends(get_http_client),
+) -> AuthenticatedUser | None:
+    """Attempt to resolve user auth; return None if no valid credential.
+
+    This wrapper lets ``get_kv_auth_context`` declare user auth as an optional
+    FastAPI dependency (so it can be overridden in tests) while still trying
+    the KV token path first.  Only 401 is swallowed — other errors (429 rate
+    limit, 502 gateway) propagate.
+    """
+    try:
+        return await authenticate_request(request, http_client)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
+
+
+async def get_kv_auth_context(
+    authorization: Annotated[str | None, Header()] = None,
+    user: Annotated[AuthenticatedUser | None, Depends(_try_resolve_user)] = None,
+    automation_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Automation ID (required for user auth, ignored for KV token auth)"),
+    ] = None,
+    session: AsyncSession = Depends(get_session),
+) -> KVAuthContext:
+    """Unified auth dependency for KV endpoints.
+
+    Supports two authentication paths:
+
+    1. **KV JWT token** (automation runs): ``Authorization: Bearer <jwt>``
+       where the JWT is signed with ``AUTOMATION_KV_SECRET`` and contains the
+       automation_id as a claim.  No query parameter needed.  User auth is
+       NOT required in this path — the KV token is self-contained.
+
+    2. **User auth** (humans / spawned conversations): Standard OpenHands
+       authentication (API key, X-Session-API-Key, or cookie).  Requires an
+       ``automation_id`` query parameter; the user must be in the automation's
+       org.
+
+    The KV JWT path is checked first so existing automation scripts continue
+    to work without changes.  If the Bearer token is not a JWT (or is absent),
+    user auth is used.
+    """
+    kv_config = get_config().kv
+
+    if not kv_config.kv_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="KV store not configured (missing AUTOMATION_KV_SECRET)",
+        )
+
+    # --- Path 1: KV JWT token ---
+    if authorization:
+        claims = await _try_kv_token_auth(authorization, kv_config.kv_secret)
+        if claims is not None:
+            return KVAuthContext(
+                automation_id=claims.automation_id,
+                auth_method="kv_token",
+            )
+
+    # --- Path 2: User auth ---
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: provide a KV token or user credentials",
+        )
+
+    if automation_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="automation_id query parameter is required for user-authenticated KV access",
+        )
+
+    await _verify_automation_access(session, user, automation_id)
+
+    return KVAuthContext(
+        automation_id=automation_id,
+        auth_method="user",
+    )
+
+
+# Backward-compatible alias — tests override this to bypass auth.
+# New code should depend on get_kv_auth_context instead.
 async def get_token_claims(
     authorization: Annotated[str, Header()],
 ) -> KVTokenClaims:
-    """Extract and verify claims from the KV token.
+    """Extract and verify claims from the KV token (legacy).
 
-    The token is passed via Authorization: Bearer <token> header.
-    It contains the automation_id as a trusted claim.
+    Kept for backward compatibility with tests that override this dependency
+    directly.  Production endpoints now use :func:`get_kv_auth_context`.
     """
     kv_config = get_config().kv
 
@@ -126,15 +302,6 @@ async def get_token_claims(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         )
-
-
-# Backward-compatible alias for tests
-async def get_automation_id_from_token(
-    authorization: Annotated[str, Header()],
-) -> uuid.UUID:
-    """Extract automation_id from KV token (deprecated, use get_token_claims)."""
-    claims = await get_token_claims(authorization)
-    return claims.automation_id
 
 
 # --- Validation Helpers ---
@@ -375,7 +542,7 @@ def _get_version(state: dict[str, Any]) -> int:
 
 @router.get("")
 async def list_keys(
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVListKeysResponse:
     """List all keys for this automation.
@@ -384,7 +551,7 @@ async def list_keys(
     """
     kv_config = get_config().kv
 
-    row = await _get_state_row(session, claims.automation_id)
+    row = await _get_state_row(session, ctx.automation_id)
     state = _decrypt_state(kv_config.kv_secret, row)
 
     # Filter out system keys (e.g., $version)
@@ -397,7 +564,7 @@ async def get_value(
     key: ValidatedKey,
     path: str | None = Query(default=None, description="Nested path (dot notation)"),
     meta: bool = Query(default=False, description="Include metadata and version"),
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse | KVKeyPathResponse | KVKeyMetaResponse:
     """Get a value by key, optionally at a nested path.
@@ -406,7 +573,7 @@ async def get_value(
     """
     kv_config = get_config().kv
 
-    row = await _get_state_row(session, claims.automation_id)
+    row = await _get_state_row(session, ctx.automation_id)
     state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
@@ -455,7 +622,7 @@ async def set_value(
         default=None,
         description="Only set if current state version matches (optimistic lock)",
     ),
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVSetResponse | KVConflictResponse:
     """Set a value for a key.
@@ -484,7 +651,7 @@ async def set_value(
     # Lock the state row for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -516,7 +683,7 @@ async def set_value(
 
     # Save
     saved_row = await _save_state(
-        session, claims.automation_id, state, kv_config.kv_secret, row
+        session, ctx.automation_id, state, kv_config.kv_secret, row
     )
 
     created = not key_exists
@@ -539,7 +706,7 @@ async def patch_value(
         default=None,
         description="Only patch if current state version matches (optimistic lock)",
     ),
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyPathResponse:
     """Update a nested path within an existing value.
@@ -552,7 +719,7 @@ async def patch_value(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -586,7 +753,7 @@ async def patch_value(
     state[key] = value
     _check_state_size(state, kv_config)
 
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyPathResponse(
         key=key,
@@ -607,7 +774,7 @@ async def delete_key(
         default=None,
         description="Only delete if current state version matches (optimistic lock)",
     ),
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVDeleteResponse:
     """Delete a key.
@@ -620,7 +787,7 @@ async def delete_key(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -643,7 +810,7 @@ async def delete_key(
         if _has_user_keys(state):
             # Still have user keys, update the row
             await _save_state(
-                session, claims.automation_id, state, kv_config.kv_secret, row
+                session, ctx.automation_id, state, kv_config.kv_secret, row
             )
         else:
             # No user keys left, delete the row entirely
@@ -657,7 +824,7 @@ async def delete_key(
 async def increment(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
     """Atomically increment an integer value.
@@ -673,7 +840,7 @@ async def increment(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -692,7 +859,7 @@ async def increment(
         state[key] = new_value
 
     _check_state_size(state, kv_config)
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -701,7 +868,7 @@ async def increment(
 async def decrement(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVIncrResponse:
     """Atomically decrement an integer value.
@@ -717,7 +884,7 @@ async def decrement(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -736,7 +903,7 @@ async def decrement(
         state[key] = new_value
 
     _check_state_size(state, kv_config)
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVIncrResponse(key=key, value=new_value)
 
@@ -745,7 +912,7 @@ async def decrement(
 async def lpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Push a value to the left (front) of a list.
@@ -757,7 +924,7 @@ async def lpush(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -775,7 +942,7 @@ async def lpush(
         state[key] = value
 
     _check_state_size(state, kv_config)
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -784,7 +951,7 @@ async def lpush(
 async def rpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Push a value to the right (back) of a list.
@@ -796,7 +963,7 @@ async def rpush(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -814,7 +981,7 @@ async def rpush(
         state[key] = value
 
     _check_state_size(state, kv_config)
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVListLengthResponse(key=key, length=len(state[key]))
 
@@ -822,7 +989,7 @@ async def rpush(
 @router.post("/{key}/lpop")
 async def lpop(
     key: ValidatedKey,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
     """Pop a value from the left (front) of a list.
@@ -834,7 +1001,7 @@ async def lpop(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -854,7 +1021,7 @@ async def lpop(
     popped = value.pop(0)
     state[key] = value
 
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -862,7 +1029,7 @@ async def lpop(
 @router.post("/{key}/rpop")
 async def rpop(
     key: ValidatedKey,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVKeyResponse:
     """Pop a value from the right (back) of a list.
@@ -874,7 +1041,7 @@ async def rpop(
     # Lock for atomic read-modify-write
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -894,7 +1061,7 @@ async def rpop(
     popped = value.pop()
     state[key] = value
 
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVKeyResponse(key=key, value=popped)
 
@@ -902,13 +1069,13 @@ async def rpop(
 @router.get("/{key}/len")
 async def list_length(
     key: ValidatedKey,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVListLengthResponse:
     """Get the length of a list."""
     kv_config = get_config().kv
 
-    row = await _get_state_row(session, claims.automation_id)
+    row = await _get_state_row(session, ctx.automation_id)
     state = _decrypt_state(kv_config.kv_secret, row)
 
     if key not in state:
@@ -1075,7 +1242,7 @@ def _execute_batch_operation(
 @router.post("/batch")
 async def batch(
     body: KVBatchRequest,
-    claims: KVTokenClaims = Depends(get_token_claims),
+    ctx: KVAuthContext = Depends(get_kv_auth_context),
     session: AsyncSession = Depends(get_session),
 ) -> KVBatchResponse:
     """Execute multiple KV operations atomically in a single transaction.
@@ -1099,7 +1266,7 @@ async def batch(
     # Acquire lock for atomic batch execution
     try:
         row = await _get_state_row_for_update(
-            session, claims.automation_id, kv_config.kv_lock_timeout_ms
+            session, ctx.automation_id, kv_config.kv_lock_timeout_ms
         )
     except Exception as e:
         if _is_lock_timeout_error(e):
@@ -1134,6 +1301,6 @@ async def batch(
     _check_state_size(state, kv_config)
 
     # Save state (auto-increments $version)
-    await _save_state(session, claims.automation_id, state, kv_config.kv_secret, row)
+    await _save_state(session, ctx.automation_id, state, kv_config.kv_secret, row)
 
     return KVBatchResponse(version=_get_version(state), results=results)
