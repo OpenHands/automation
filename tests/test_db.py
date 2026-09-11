@@ -97,6 +97,19 @@ class TestCreateSqliteEngine:
         result = _create_sqlite_engine("sqlite+aiosqlite:////data/automations.db")
         assert result.is_sqlite is True
 
+    @pytest.mark.asyncio
+    async def test_uses_null_pool(self):
+        """SQLite engine uses NullPool to disable connection pooling.
+
+        Without NullPool, SQLAlchemy defaults to AsyncAdaptedQueuePool
+        which silently imposes a 5-connection pool with 30s timeout (#347).
+        """
+        from sqlalchemy.pool import NullPool
+
+        result = _create_sqlite_engine("sqlite+aiosqlite:///:memory:")
+        assert isinstance(result.engine.pool, NullPool)
+        await result.dispose()
+
 
 class TestEngineResult:
     """Tests for EngineResult dataclass."""

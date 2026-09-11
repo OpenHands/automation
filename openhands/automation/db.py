@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from openhands.automation.config import ServiceSettings, get_config
 
@@ -153,7 +154,10 @@ def _create_sqlite_engine(db_url: str) -> EngineResult:
 
     SQLite configuration notes:
     - Uses aiosqlite driver for async support
-    - No connection pooling (SQLite handles this internally)
+    - Uses NullPool to disable SQLAlchemy's connection pooling;
+      without this, the default AsyncAdaptedQueuePool silently applies
+      a 5-connection pool with 10 overflow and 30 s timeout, causing
+      500 errors under concurrent fan-out (see issue #347).
     - check_same_thread=False required for async usage
     """
     # Ensure the URL uses aiosqlite driver
@@ -162,10 +166,8 @@ def _create_sqlite_engine(db_url: str) -> EngineResult:
 
     engine = create_async_engine(
         db_url,
-        # SQLite-specific settings
         connect_args={"check_same_thread": False},
-        # No pooling for SQLite - it handles this internally
-        pool_pre_ping=True,
+        poolclass=NullPool,
     )
     logger.info("Created SQLite engine: %s", db_url.split("?")[0])
     return EngineResult(engine=engine, is_sqlite=True)
