@@ -46,10 +46,11 @@ from openhands.automation.models import (
 )
 from openhands.automation.schemas import (
     AutomationResponse,
-    AutomationState,
+    PublicAutomationState,
     TemplateProvenance,
     Trigger,
     normalize_automation_state_enabled,
+    reject_public_draft_state,
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
@@ -213,11 +214,11 @@ class CreatePromptAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
-    state: AutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "First-class automation state. DRAFT/INACTIVE rows are not "
-            "triggered automatically."
+            "Public automation state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
         ),
     )
 
@@ -225,6 +226,11 @@ class CreatePromptAutomationRequest(BaseModel):
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @model_validator(mode="before")
     @classmethod
@@ -727,11 +733,11 @@ class CreatePluginAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
-    state: AutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "First-class automation state. DRAFT/INACTIVE rows are not "
-            "triggered automatically."
+            "Public automation state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
         ),
     )
 
@@ -739,6 +745,11 @@ class CreatePluginAutomationRequest(BaseModel):
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @model_validator(mode="before")
     @classmethod
