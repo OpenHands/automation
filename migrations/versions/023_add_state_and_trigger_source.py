@@ -27,9 +27,7 @@ def upgrade() -> None:
             server_default="ACTIVE",
         ),
     )
-    op.create_index(
-        "ix_automations_state", "automations", ["state"]
-    )
+    op.create_index("ix_automations_state", "automations", ["state"])
     # Backfill from the legacy enabled flag so existing rows match the new
     # state model on day one.
     op.execute(
