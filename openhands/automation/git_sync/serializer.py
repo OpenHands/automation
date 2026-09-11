@@ -140,6 +140,9 @@ def _automation_yaml_fields(
         "timeout": automation.timeout,
         "keep_alive": automation.keep_alive,
         "enabled": automation.enabled,
+        "lifecycle_status": getattr(
+            automation.lifecycle_status, "value", automation.lifecycle_status
+        ),
         "prompt": automation.prompt,
         "preset_metadata": automation.preset_metadata,
         "tarball_source": {

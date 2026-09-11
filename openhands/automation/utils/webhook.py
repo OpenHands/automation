@@ -19,6 +19,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     CustomWebhook,
 )
 from openhands.automation.providers import (
@@ -134,6 +135,7 @@ async def get_event_automations(
     base_filters = [
         Automation.org_id == org_id,
         Automation.enabled == True,  # noqa: E712
+        Automation.lifecycle_status == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -197,6 +199,7 @@ async def get_requested_event_types(
 
     base_filters = [
         Automation.enabled == True,  # noqa: E712
+        Automation.lifecycle_status == AutomationState.ACTIVE,
         Automation.deleted_at.is_(None),
     ]
 
@@ -263,6 +266,7 @@ async def create_automation_run(
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
+        trigger_source="event",
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
         subject_key=subject_key,
