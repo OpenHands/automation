@@ -28,6 +28,7 @@ from openhands.automation.providers import (
     verify_signature,
 )
 from openhands.automation.schemas import EventTrigger, WebhookConfig
+from openhands.automation.utils.run import snapshot_run_source
 
 
 logger = logging.getLogger("automation.utils.webhook")
@@ -267,5 +268,6 @@ async def create_automation_run(
         telemetry_distinct_id=automation.telemetry_distinct_id,
         subject_key=subject_key,
     )
+    await snapshot_run_source(session, run, automation)
     session.add(run)
     return run
