@@ -341,6 +341,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    setup_script_path: str | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -348,7 +349,7 @@ async def execute_in_context(
     The context (agent_url, session_key) is obtained from the backend.
 
     1. Get tarball into environment (upload bytes OR download from URL).
-    2. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+    2. Extract it, run the setup script (if present), then start *entrypoint*.
     3. Return immediately without waiting for the entrypoint to complete.
 
     Args:
@@ -364,6 +365,10 @@ async def execute_in_context(
             path (/tmp/automation-<run_id>.tar.gz) that prevents collisions
             when concurrent runs share the same filesystem (sandboxless mode)
         sandbox_id: Sandbox ID for logging (Cloud mode only)
+        setup_script_path: Path to the setup script inside the extracted
+            tarball (default: ``setup.sh``). The value is validated by the
+            request layer (relative, no traversal, no shell metacharacters)
+            before it is stored on the automation.
 
     Returns:
         DispatchResult with success status
@@ -408,12 +413,13 @@ async def execute_in_context(
             )
             env_prefix = _env_command_prefix(env_path)
 
+        setup_cmd = _shell_quote(setup_script_path or "setup.sh")
         cmd = (
             f"{env_prefix}mkdir -p {work_dir}"
             f" && tar xzf {tarball_path} -C {work_dir}"
             f" && rm -f {tarball_path}"
             f" && cd {work_dir}"
-            f" && ([ ! -f setup.sh ] || bash setup.sh)"
+            f" && ([ ! -f {setup_cmd} ] || bash {setup_cmd})"
             f" && {entrypoint}"
         )
 
@@ -484,6 +490,7 @@ async def run_automation(
     run_id: str | None = None,
     keep_sandbox: bool = False,
     work_dir: str = DEFAULT_WORK_DIR,
+    setup_script_path: str | None = None,
 ) -> AutomationResult:
     """Execute an automation end-to-end in a fresh sandbox (blocking).
 
@@ -492,7 +499,7 @@ async def run_automation(
 
     1. Create sandbox and wait until RUNNING.
     2. Get tarball into sandbox (upload bytes OR download from URL).
-    3. Extract it, run ``setup.sh`` (if present), then run *entrypoint*.
+    3. Extract it, run the setup script (if present), then run *entrypoint*.
     4. Wait for completion and return the result.
     5. Delete the sandbox (unless *keep_sandbox* is True).
 
@@ -500,8 +507,9 @@ async def run_automation(
     (downloaded directly inside sandbox via curl). URLs avoid downloading
     untrusted/large files on the automation service.
 
-    *env_vars* are exported before setup.sh and the entrypoint run,
-    so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
+    *env_vars* are exported before the setup script and the entrypoint run,
+    so the setup script can consume injected values such as
+    ``AUTOMATION_API_URL``.
     The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
     **always** injected so the SDK's ``local_agent_server_mode`` works.
     If *callback_url* / *run_id* are set they are injected as
@@ -510,6 +518,10 @@ async def run_automation(
 
     *work_dir* is the working directory for tarball extraction
     (default: /workspace/project).
+
+    *setup_script_path* is the path of the setup script inside the extracted
+    tarball (default: ``setup.sh``). Validated by the request layer before it
+    is stored on the automation.
     """
     timeout = resolve_automation_timeout_seconds(timeout)
     http_timeout = get_config().http.http_long_timeout
@@ -574,11 +586,12 @@ async def run_automation(
                 )
                 env_prefix = _env_command_prefix(env_path)
 
+            setup_cmd = _shell_quote(setup_script_path or "setup.sh")
             cmd = (
                 f"{env_prefix}mkdir -p {work_dir}"
                 f" && tar xzf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
-                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && ([ ! -f {setup_cmd} ] || bash {setup_cmd})"
                 f" && {entrypoint}"
             )
 
