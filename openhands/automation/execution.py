@@ -224,7 +224,10 @@ async def _start_bash(
         .start(command, timeout=timeout)
     )
 
-    return body.get("id")
+    command_id = body.get("id")
+    if not isinstance(command_id, str) or not command_id:
+        raise ValueError("Agent Server returned no background command ID")
+    return command_id
 
 
 def _is_permanent_http_error(stderr: str) -> bool:
