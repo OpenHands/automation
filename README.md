@@ -19,22 +19,30 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 
 ## Development
 
-### Local Docker execution
+### Conversation execution in local or Docker workspaces
 
-Set `AUTOMATION_AGENT_SERVER_URL` and `AUTOMATION_AGENT_SERVER_API_KEY` to an
-agent-server running in Docker conversation mode. Set
-`AUTOMATION_DOCKER_AGENT_PROFILE` to the UUID of a saved agent profile on that
-server. Each bundle then gets its own Docker conversation and `/workspace`.
-The server must support scoped runtime routes, runtime credential provisioning,
-and runtime release. `AUTOMATION_DOCKER_MAX_CONCURRENT_RUNS` defaults to 2;
-use the agent-server container CPU, memory, and PID settings to bound each run.
+Set `AUTOMATION_AGENT_SERVER_URL`, `AUTOMATION_AGENT_SERVER_API_KEY`, and
+`AUTOMATION_AGENT_PROFILE` (a saved agent profile UUID). The backend reads the
+server's authoritative `conversation_runtime` and provisions a run conversation
+using the same API and profile in either mode. No bundle configuration or workflow
+branch changes when switching workspace kind.
 
-Bundles receive `AUTOMATION_CONVERSATION_ID`, an inner `AGENT_SERVER_URL`, and
-only that runtime's `SESSION_API_KEY`. The outer server key and shared automation
-callback key are not forwarded. The watchdog polls the bundle's scoped bash
-result and releases finished containers while preserving conversation history.
-This opt-in mode currently uses one configured agent profile for all bundles;
-the existing local and Cloud execution modes retain their defaults.
+Both modes supply `AUTOMATION_CONVERSATION_ID`, `AGENT_SERVER_URL`,
+`SESSION_API_KEY`, and `WORKSPACE_BASE`, and use conversation-scoped upload,
+bash execution, and completion verification. Local workspaces live in per-run
+subdirectories of the configured workspace root. Docker workspaces use
+`/workspace` and receive only the selected inner session key, never the outer
+server key or shared callback key. Local mode retains its existing single-tenant
+server credential boundary; a local workspace is not a security sandbox.
+
+`AUTOMATION_CONVERSATION_MAX_CONCURRENT_RUNS` defaults to 2. Docker servers must
+support runtime credential provisioning and release; bound container CPU, memory,
+and PIDs in the server configuration. Completed Docker runtimes are released while
+history remains; the persistent local server and its history are retained.
+
+The earlier `AUTOMATION_DOCKER_AGENT_PROFILE` and related Docker-only settings
+remain compatibility aliases for existing deployments. Without either profile
+setting, existing local and Cloud dispatch behavior is unchanged.
 
 ### Prerequisites
 
@@ -119,8 +127,8 @@ containers/          # Docker configuration
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
 
-For different role permissions, set `AUTOMATION_DOCKER_AGENT_PROFILE_OVERRIDES`
+For different role permissions, set `AUTOMATION_AGENT_PROFILE_OVERRIDES`
 to a JSON object mapping automation UUIDs to saved agent profile UUIDs. Unmapped
-automations use `AUTOMATION_DOCKER_AGENT_PROFILE`. This host-controlled mapping
+automations use `AUTOMATION_AGENT_PROFILE`. This host-controlled mapping
 lets deterministic jobs select a profile with no model credential or agent tools,
 while implementation and review jobs select only their required tools/model.

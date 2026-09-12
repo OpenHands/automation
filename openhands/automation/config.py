@@ -564,9 +564,35 @@ class ServiceSettings(BaseSettings):
     # - Authenticates using local_api_key instead of OpenHands SaaS API
     agent_server_url: str = ""
     agent_server_api_key: str = ""
+    # Shared conversation execution; the server advertises its workspace runtime.
+    agent_profile: str = ""
+    agent_profile_overrides: dict[str, str] = Field(default_factory=dict)
+    conversation_max_concurrent_runs: int = Field(default=2, ge=1)
+    # Compatibility for early Docker-only deployments.
     docker_agent_profile: str = ""
     docker_agent_profile_overrides: dict[str, str] = Field(default_factory=dict)
     docker_max_concurrent_runs: int = Field(default=2, ge=1)
+
+    @property
+    def run_agent_profile(self) -> str:
+        return self.agent_profile or self.docker_agent_profile
+
+    @property
+    def run_agent_profile_overrides(self) -> dict[str, str]:
+        return (
+            self.agent_profile_overrides
+            if self.agent_profile
+            else self.docker_agent_profile_overrides
+        )
+
+    @property
+    def run_concurrency_limit(self) -> int:
+        return (
+            self.conversation_max_concurrent_runs
+            if self.agent_profile
+            else self.docker_max_concurrent_runs
+        )
+
     # Optional override for the AGENT_SERVER_URL env var exported into the
     # in-sandbox bash chain by LocalAgentServerBackend.build_env_vars.
     # When empty, defaults to agent_server_url (the URL the backend itself
