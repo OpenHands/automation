@@ -91,172 +91,81 @@ class TestVerificationResult:
 
 
 class TestGetLastBashCommandResult:
-    """Tests for get_last_bash_command_result function."""
+    """Exercise legacy verification through the public SDK's HTTP transport."""
 
     @pytest.mark.asyncio
-    async def test_handles_http_error(self):
-        """Returns error result when HTTP request fails."""
-        from unittest.mock import AsyncMock, MagicMock
-
+    @pytest.mark.parametrize("status", [404, 429])
+    async def test_handles_http_errors(self, status):
         import httpx
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Not found", request=MagicMock(), response=MagicMock(status_code=404)
-        )
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
-
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(status))
+        ) as client:
+            result = await get_last_bash_command_result(
+                client, "http://localhost:3000", "test-key"
+            )
         assert result.found is False
-        assert result.error is not None and "Not found" in result.error
+        assert result.error and str(status) in result.error
+        if status == 429:
+            assert result.error_info is not None
+            assert (
+                result.error_info.fingerprint
+                == "agent_server:bash_events_search:rate_limited:429"
+            )
+        else:
+            assert result.error_info is None
 
     @pytest.mark.asyncio
-    async def test_handles_transient_rate_limit(self):
-        """Returns structured transient info for retryable agent-server errors."""
-        from unittest.mock import AsyncMock, MagicMock
-
+    @pytest.mark.parametrize(
+        "items,expected",
+        [
+            ([], BashCommandResult(found=False, error="No bash output found")),
+            (
+                [{"exit_code": None}],
+                BashCommandResult(found=True, error="Command still running"),
+            ),
+            (
+                [{"exit_code": 0, "stdout": "Hello", "stderr": ""}],
+                BashCommandResult(found=True, exit_code=0, stdout="Hello"),
+            ),
+        ],
+    )
+    async def test_command_result_states(self, items, expected):
         import httpx
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Rate limited", request=MagicMock(), response=MagicMock(status_code=429)
-        )
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
-
-        assert result.found is False
-        assert result.error is not None and "HTTP 429" in result.error
-        assert result.error_info is not None
-        assert (
-            result.error_info.fingerprint
-            == "agent_server:bash_events_search:rate_limited:429"
-        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json={"items": items})
+            )
+        ) as client:
+            result = await get_last_bash_command_result(
+                client, "http://localhost:3000", "test-key"
+            )
+        assert result == expected
 
     @pytest.mark.asyncio
-    async def test_handles_empty_response(self):
-        """Returns error result when no bash output found."""
-        from unittest.mock import AsyncMock, MagicMock
-
+    @pytest.mark.parametrize("command_id", [None, "abc123"])
+    async def test_correlates_the_selected_command(self, command_id):
         import httpx
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
+        requests = []
 
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={"items": []})
 
-        assert result.found is False
-        assert result.error == "No bash output found"
-
-    @pytest.mark.asyncio
-    async def test_handles_running_command(self):
-        """Returns running result when exit_code is None."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "items": [{"exit_code": None, "stdout": "", "stderr": ""}]
-        }
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
-
-        assert result.found is True
-        assert result.exit_code is None
-        assert result.error == "Command still running"
-
-    @pytest.mark.asyncio
-    async def test_handles_completed_command(self):
-        """Returns completed result with exit code and output."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "items": [{"exit_code": 0, "stdout": "Hello", "stderr": ""}]
-        }
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
-
-        assert result.found is True
-        assert result.exit_code == 0
-        assert result.stdout == "Hello"
-
-    @pytest.mark.asyncio
-    async def test_adds_command_id_filter_when_provided(self):
-        """When command_id is provided, params include command_id__eq."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        await get_last_bash_command_result(
-            mock_client,
-            "http://localhost:3000",
-            "test-key",
-            command_id="abc123",
-        )
-
-        # Verify the request was made with command_id__eq in params
-        mock_client.get.assert_called_once()
-        _, kwargs = mock_client.get.call_args
-        assert kwargs["params"]["command_id__eq"] == "abc123"
-        assert kwargs["params"]["kind__eq"] == "BashOutput"
-        assert kwargs["params"]["sort_order"] == "TIMESTAMP_DESC"
-        assert kwargs["params"]["limit"] == 1
-
-    @pytest.mark.asyncio
-    async def test_omits_command_id_filter_when_none(self):
-        """When command_id is None, params do NOT include command_id__eq."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        await get_last_bash_command_result(
-            mock_client,
-            "http://localhost:3000",
-            "test-key",
-        )
-
-        mock_client.get.assert_called_once()
-        _, kwargs = mock_client.get.call_args
-        assert "command_id__eq" not in kwargs["params"]
-        assert kwargs["params"]["kind__eq"] == "BashOutput"
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await get_last_bash_command_result(
+                client, "http://localhost:3000", "test-key", command_id=command_id
+            )
+        assert len(requests) == 1
+        request = requests[0]
+        assert request.url.path == "/api/bash/bash_events/search"
+        assert request.headers["X-Session-API-Key"] == "test-key"
+        assert request.url.params.get("command_id__eq") == command_id
+        assert request.url.params["kind__eq"] == "BashOutput"
+        assert request.url.params["sort_order"] == "TIMESTAMP_DESC"
+        assert request.url.params["limit"] == "1"
 
 
 class TestVerifyRunOnAgentServer:
