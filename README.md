@@ -137,7 +137,8 @@ while implementation and review jobs select only their required tools/model.
 
 The conversation backend and Agent Server execution helpers use public clients
 from [software-agent-sdk #5010](https://github.com/OpenHands/software-agent-sdk/pull/5010).
-This draft requires that SDK release before merging; the released dependency pin
-must be updated then. Integration validation currently supplies the reviewed SDK
-source through `PYTHONPATH`, including the server runtime stack. Workflow bundles
+This draft pins the SDK implementation by immutable Git commit so its tests and
+source installation are reproducible. Replace that integration pin with the SDK
+release before merging. The live factory additionally integrates the server
+runtime stack; those server changes are separate from this client dependency. Workflow bundles
 receive the same environment contract in local and Docker workspaces.
