@@ -484,6 +484,7 @@ class TestPrivateEnvironmentInjection:
             "https://agent.example.com",
             "session-key",
             f"rm -f -- '{env_path}'",
+            api_prefix="/api",
             timeout=int(get_config().http.http_timeout),
         )
 

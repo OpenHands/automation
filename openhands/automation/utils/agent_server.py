@@ -38,6 +38,7 @@ async def get_last_bash_command_result(
     agent_url: str,
     session_key: str,
     command_id: str | None = None,
+    api_prefix: str = "/api",
 ) -> BashCommandResult:
     """Query the agent server for a bash command's result.
 
@@ -74,7 +75,7 @@ async def get_last_bash_command_result(
         if command_id:
             params["command_id__eq"] = command_id
         resp = await client.get(
-            f"{agent_url}/api/bash/bash_events/search",
+            f"{agent_url}{api_prefix}/bash/bash_events/search",
             params=params,
             headers={"X-Session-API-Key": session_key},
             timeout=30.0,
@@ -207,6 +208,7 @@ async def verify_run_on_agent_server(
     session_key: str,
     run_id: str | None = None,
     bash_command_id: str | None = None,
+    api_prefix: str = "/api",
 ) -> VerificationResult:
     """Verify an automation run's status by querying an agent server directly.
 
@@ -234,7 +236,11 @@ async def verify_run_on_agent_server(
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Get last bash command result, scoped to this run's command if known
         bash_result = await get_last_bash_command_result(
-            client, agent_url, session_key, command_id=bash_command_id
+            client,
+            agent_url,
+            session_key,
+            command_id=bash_command_id,
+            api_prefix=api_prefix,
         )
 
         if not bash_result.found:

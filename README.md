@@ -19,6 +19,23 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 
 ## Development
 
+### Local Docker execution
+
+Set `AUTOMATION_AGENT_SERVER_URL` and `AUTOMATION_AGENT_SERVER_API_KEY` to an
+agent-server running in Docker conversation mode. Set
+`AUTOMATION_DOCKER_AGENT_PROFILE` to the UUID of a saved agent profile on that
+server. Each bundle then gets its own Docker conversation and `/workspace`.
+The server must support scoped runtime routes, runtime credential provisioning,
+and runtime release. `AUTOMATION_DOCKER_MAX_CONCURRENT_RUNS` defaults to 2;
+use the agent-server container CPU, memory, and PID settings to bound each run.
+
+Bundles receive `AUTOMATION_CONVERSATION_ID`, an inner `AGENT_SERVER_URL`, and
+only that runtime's `SESSION_API_KEY`. The outer server key and shared automation
+callback key are not forwarded. The watchdog polls the bundle's scoped bash
+result and releases finished containers while preserving conversation history.
+This opt-in mode currently uses one configured agent profile for all bundles;
+the existing local and Cloud execution modes retain their defaults.
+
 ### Prerequisites
 
 - Python 3.12+

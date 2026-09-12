@@ -28,6 +28,7 @@ class ExecutionContext:
     sandbox_id: str | None = None
     api_url: str | None = None
     api_key: str | None = None
+    api_prefix: str = "/api"
 
 
 class ExecutionBackend(ABC):

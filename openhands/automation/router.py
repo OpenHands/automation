@@ -880,6 +880,15 @@ async def cancel_run(
         properties={"trigger_source": "manual"},
     )
 
+    from openhands.automation.config import get_config
+
+    if get_config().service.docker_agent_profile:
+        from openhands.automation.backends import get_backend
+
+        # Release the transaction before waiting for Docker to stop.
+        await session.commit()
+        await get_backend(run).cleanup_after_verification(str(run_id))
+
     # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
     # unlike `complete_run` the sandbox goes even when the run owns a subject
     # -- but the subject is released with it, or the next event would pick this

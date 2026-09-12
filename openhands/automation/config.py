@@ -564,6 +564,8 @@ class ServiceSettings(BaseSettings):
     # - Authenticates using local_api_key instead of OpenHands SaaS API
     agent_server_url: str = ""
     agent_server_api_key: str = ""
+    docker_agent_profile: str = ""
+    docker_max_concurrent_runs: int = Field(default=2, ge=1)
     # Optional override for the AGENT_SERVER_URL env var exported into the
     # in-sandbox bash chain by LocalAgentServerBackend.build_env_vars.
     # When empty, defaults to agent_server_url (the URL the backend itself
