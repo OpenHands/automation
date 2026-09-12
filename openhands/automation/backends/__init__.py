@@ -59,7 +59,9 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
             sandbox_agent_server_url=settings.sandbox_agent_server_url or None,
         )
         if isinstance(backend, DockerAgentServerBackend):
-            backend.agent_profile_id = settings.docker_agent_profile
+            backend.agent_profile_id = settings.docker_agent_profile_overrides.get(
+                str(run.automation_id), settings.docker_agent_profile
+            )
         return backend
     else:
         return CloudSandboxBackend(

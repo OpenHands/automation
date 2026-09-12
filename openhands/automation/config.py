@@ -565,6 +565,7 @@ class ServiceSettings(BaseSettings):
     agent_server_url: str = ""
     agent_server_api_key: str = ""
     docker_agent_profile: str = ""
+    docker_agent_profile_overrides: dict[str, str] = Field(default_factory=dict)
     docker_max_concurrent_runs: int = Field(default=2, ge=1)
     # Optional override for the AGENT_SERVER_URL env var exported into the
     # in-sandbox bash chain by LocalAgentServerBackend.build_env_vars.

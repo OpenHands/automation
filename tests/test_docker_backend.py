@@ -72,3 +72,30 @@ async def test_failed_credential_handoff_releases_runtime():
     assert requests[-1].url.path == f"/api/conversations/{run.id}/runtime"
     with pytest.raises(RuntimeError, match="not been provisioned"):
         backend.build_env_vars()
+
+
+def test_host_configuration_selects_a_profile_for_each_automation(monkeypatch):
+    import json
+
+    from openhands.automation.backends import get_backend
+    from openhands.automation.config import clear_config_cache
+
+    automation_id = uuid4()
+    selected = str(uuid4())
+    default = str(uuid4())
+    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://server")
+    monkeypatch.setenv("AUTOMATION_DOCKER_AGENT_PROFILE", default)
+    monkeypatch.setenv(
+        "AUTOMATION_DOCKER_AGENT_PROFILE_OVERRIDES",
+        json.dumps({str(automation_id): selected}),
+    )
+    clear_config_cache()
+    try:
+        scoped = get_backend(AutomationRun(id=uuid4(), automation_id=automation_id))
+        ordinary = get_backend(AutomationRun(id=uuid4(), automation_id=uuid4()))
+        assert isinstance(scoped, DockerAgentServerBackend)
+        assert isinstance(ordinary, DockerAgentServerBackend)
+        assert scoped.agent_profile_id == selected
+        assert ordinary.agent_profile_id == default
+    finally:
+        clear_config_cache()

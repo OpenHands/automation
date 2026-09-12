@@ -118,3 +118,9 @@ containers/          # Docker configuration
 ## Deployment
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
+
+For different role permissions, set `AUTOMATION_DOCKER_AGENT_PROFILE_OVERRIDES`
+to a JSON object mapping automation UUIDs to saved agent profile UUIDs. Unmapped
+automations use `AUTOMATION_DOCKER_AGENT_PROFILE`. This host-controlled mapping
+lets deterministic jobs select a profile with no model credential or agent tools,
+while implementation and review jobs select only their required tools/model.
