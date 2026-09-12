@@ -32,9 +32,9 @@ from openhands.automation.utils.time import utcnow
 
 logger = logging.getLogger("automation.streams.slack")
 
-# Widen once the transport is proven; every other event type is acked and
-# dropped.
-SUPPORTED_EVENT_TYPES = frozenset({"app_mention"})
+# `message` is narrowed below to replies to the bot's own thread messages;
+# every other event type is acked and dropped.
+SUPPORTED_EVENT_TYPES = frozenset({"app_mention", "message"})
 
 
 @dataclass
@@ -146,6 +146,12 @@ class SlackStreamProvider:
         # automation that wrote it.
         if event.get("bot_id") or event.get("subtype") == "bot_message":
             return None
+
+        if event_key == "message":
+            is_thread_reply = bool(event.get("thread_ts"))
+            replies_to_bot = event.get("parent_user_id") == self.bot_user_id
+            if not (is_thread_reply and replies_to_bot):
+                return None
 
         return AcceptedEvent(
             source=self.source,
