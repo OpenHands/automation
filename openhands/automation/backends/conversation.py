@@ -10,6 +10,7 @@ from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
 )
+from openhands.sdk.client import AsyncAgentServerClient
 
 
 class ConversationAgentServerBackend(LocalAgentServerBackend):
@@ -19,52 +20,43 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
 
     async def _resolve_runtime(self, client: httpx.AsyncClient) -> str:
         if self._runtime_kind is None:
-            response = await client.get(
-                f"{self.agent_server_url}/server_info",
-                headers={"X-Session-API-Key": self.api_key},
-            )
-            response.raise_for_status()
-            self._runtime_kind = response.json()["conversation_runtime"]
+            info = await AsyncAgentServerClient(
+                self.agent_server_url, self.api_key, http_client=client
+            ).get_server_info()
+            self._runtime_kind = info["conversation_runtime"]
             if self._runtime_kind not in ("local", "docker"):
                 raise ValueError("Unsupported agent-server conversation runtime")
         return self._runtime_kind
 
     @property
     def api_prefix(self) -> str:
-        return f"/api/conversations/{self._run.id}"
+        return (
+            AsyncAgentServerClient(self.agent_server_url, self.api_key)
+            .runtime(str(self._run.id))
+            .api_prefix
+        )
 
     async def get_execution_context(
         self, client: httpx.AsyncClient
     ) -> ExecutionContext:
         runtime_kind = await self._resolve_runtime(client)
-        response = await client.post(
-            f"{self.agent_server_url}/api/conversations",
-            headers={"X-Session-API-Key": self.api_key},
-            json={
-                "conversation_id": str(self._run.id),
-                "agent_profile_id": self.agent_profile_id,
-                "workspace": {
-                    "kind": "LocalWorkspace",
-                    "working_dir": self.get_work_dir(str(self._run.id)),
-                },
-                "title": self._run.automation.name,
-                "max_iterations": 160,
-                "tags": {"automationrun": str(self._run.id)},
-            },
-            timeout=180,
+        server = AsyncAgentServerClient(
+            self.agent_server_url, self.api_key, http_client=client
         )
-        response.raise_for_status()
+        await server.create_conversation(
+            conversation_id=str(self._run.id),
+            agent_profile_id=self.agent_profile_id,
+            working_dir=self.get_work_dir(str(self._run.id)),
+            title=self._run.automation.name,
+            max_iterations=160,
+            tags={"automationrun": str(self._run.id)},
+        )
         self.runtime_api_key = self.api_key if runtime_kind == "local" else ""
         if runtime_kind == "docker":
             try:
-                credentials = await client.post(
-                    f"{self.agent_server_url}{self.api_prefix}/runtime/credentials",
-                    headers={"X-Session-API-Key": self.api_key},
-                )
-                credentials.raise_for_status()
-                self.runtime_api_key = credentials.json()["session_api_key"]
-                if not self.runtime_api_key:
-                    raise ValueError("Runtime returned an empty session credential")
+                self.runtime_api_key = await server.runtime(
+                    str(self._run.id)
+                ).get_session_key()
             except Exception:
                 await self.release_context(
                     client, ExecutionContext(self.agent_server_url, self.api_key)
@@ -109,13 +101,11 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
     ) -> None:
         if await self._resolve_runtime(client) == "local":
             return  # Persistent server and conversation history belong to the host.
-        response = await client.delete(
-            f"{ctx.agent_url}{self.api_prefix}/runtime",
-            headers={"X-Session-API-Key": self.api_key},
-            timeout=60,
+        await (
+            AsyncAgentServerClient(ctx.agent_url, self.api_key, http_client=client)
+            .runtime(str(self._run.id))
+            .release()
         )
-        if response.status_code != 404:
-            response.raise_for_status()
 
     async def verify_run(self, run_id: str) -> VerificationResult:
         return await verify_run_on_agent_server(

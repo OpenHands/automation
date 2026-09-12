@@ -16,6 +16,7 @@ from openhands.automation.utils.transient import (
     TransientErrorInfo,
     classify_httpx_transient_error,
 )
+from openhands.sdk.client import AsyncAgentServerClient
 
 
 logger = logging.getLogger(__name__)
@@ -63,25 +64,11 @@ async def get_last_bash_command_result(
         BashCommandResult with found=True if command result was retrieved
     """
     try:
-        # Search for the most recent BashOutput event, scoped to this run's
-        # bash command whenever we know which one it is. The agent-server's
-        # search endpoint accepts ``command_id__eq`` and only matches
-        # BashOutput files whose embedded command_id matches.
-        params: dict[str, str | int] = {
-            "kind__eq": "BashOutput",
-            "sort_order": "TIMESTAMP_DESC",
-            "limit": 1,
-        }
-        if command_id:
-            params["command_id__eq"] = command_id
-        resp = await client.get(
-            f"{agent_url}{api_prefix}/bash/bash_events/search",
-            params=params,
-            headers={"X-Session-API-Key": session_key},
-            timeout=30.0,
+        page = (
+            await AsyncAgentServerClient(agent_url, session_key, http_client=client)
+            .runtime_for_api_prefix(api_prefix)
+            .get_output(command_id)
         )
-        resp.raise_for_status()
-        page = resp.json()
 
         items = page.get("items", [])
         if not items:

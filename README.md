@@ -132,3 +132,12 @@ to a JSON object mapping automation UUIDs to saved agent profile UUIDs. Unmapped
 automations use `AUTOMATION_AGENT_PROFILE`. This host-controlled mapping
 lets deterministic jobs select a profile with no model credential or agent tools,
 while implementation and review jobs select only their required tools/model.
+
+### SDK Client Integration Dependency
+
+The conversation backend and Agent Server execution helpers use public clients
+from [software-agent-sdk #5010](https://github.com/OpenHands/software-agent-sdk/pull/5010).
+This draft requires that SDK release before merging; the released dependency pin
+must be updated then. Integration validation currently supplies the reviewed SDK
+source through `PYTHONPATH`, including the server runtime stack. Workflow bundles
+receive the same environment contract in local and Docker workspaces.

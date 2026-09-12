@@ -27,6 +27,7 @@ from openhands.automation.exceptions import PermanentDispatchError, TarballNotFo
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.sandbox import delete_sandbox
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.sdk.client import AsyncAgentServerClient
 
 
 # Default working directory for cloud/container mode
@@ -179,16 +180,11 @@ async def _upload(
     with proxies that collapse double-slashes (e.g. //tmp -> /tmp).
     See: https://github.com/All-Hands-AI/OpenHands/commit/a14158e
     """
-    # Use query param instead of path param to avoid double-slash normalization
-    from urllib.parse import urlencode
-
-    params = urlencode({"path": dest})
-    resp = await client.post(
-        f"{agent_url}{api_prefix}/file/upload?{params}",
-        files={"file": ("upload", data)},
-        headers={"X-Session-API-Key": session_key},
+    await (
+        AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .upload(dest, data)
     )
-    resp.raise_for_status()
 
 
 async def _bash(
@@ -202,14 +198,12 @@ async def _bash(
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    resp = await client.post(
-        f"{agent_url}{api_prefix}/bash/execute_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=httpx.Timeout(timeout + 30),
+    body = (
+        await AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .execute(command, timeout=timeout)
     )
-    resp.raise_for_status()
-    body = resp.json()
+
     return body.get("exit_code"), body.get("stdout") or "", body.get("stderr") or ""
 
 
@@ -224,15 +218,12 @@ async def _start_bash(
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    http_timeout = get_config().http.http_timeout
-    resp = await client.post(
-        f"{agent_url}{api_prefix}/bash/start_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=http_timeout,
+    body = (
+        await AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .start(command, timeout=timeout)
     )
-    resp.raise_for_status()
-    body = resp.json()
+
     return body.get("id")
 
 
