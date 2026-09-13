@@ -77,10 +77,12 @@ async def lifespan(app: FastAPI):
     # Set SQLite mode flag for scheduler/dispatcher to use
     set_sqlite_mode(engine_result.is_sqlite)
 
-    # Auto-run migrations for SQLite on startup
-    # This ensures the schema is always up-to-date for local deployments
-    # For PostgreSQL, migrations are typically run separately via `alembic upgrade head`
-    if engine_result.is_sqlite:
+    should_migrate = (
+        settings.auto_migrate
+        if settings.auto_migrate is not None
+        else engine_result.is_sqlite
+    )
+    if should_migrate:
         from alembic import command
         from alembic.config import Config
 
@@ -114,10 +116,10 @@ async def lifespan(app: FastAPI):
         # Run migrations synchronously (Alembic doesn't support async)
         try:
             command.upgrade(alembic_cfg, "head")
-            logger.info("SQLite database migrations applied successfully")
+            logger.info("Database migrations applied successfully")
         except Exception as e:
-            logger.error(f"Failed to apply SQLite migrations: {e}")
-            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
+            logger.error(f"Failed to apply migrations: {e}")
+            msg = f"Migration failed. Database may be inconsistent: {e}"
             raise RuntimeError(msg) from e
 
     # Start the background scheduler and dispatcher
