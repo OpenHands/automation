@@ -37,10 +37,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.app import app
 from openhands.automation.db import get_session
-from openhands.automation.kv_router import get_token_claims
+from openhands.automation.kv_router import get_kv_auth_context
 from openhands.automation.models import Automation, AutomationKV
 from openhands.automation.utils.kv import (
-    KVTokenClaims,
     decrypt_value,
     encrypt_value,
 )
@@ -117,11 +116,16 @@ async def kv_client(async_engine, async_session_factory, async_session, monkeypa
     async def override_get_session():
         yield async_session
 
-    async def override_get_token_claims():
-        return KVTokenClaims(automation_id=TEST_AUTOMATION_ID)
+    # Override the unified auth dependency to bypass both KV token and user auth.
+    # This returns a KVAuthContext with the test automation_id, just as the
+    # old get_token_claims override returned KVTokenClaims.
+    from openhands.automation.kv_router import KVAuthContext
+
+    async def override_get_kv_auth_context():
+        return KVAuthContext(automation_id=TEST_AUTOMATION_ID, auth_method="kv_token")
 
     app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_token_claims] = override_get_token_claims
+    app.dependency_overrides[get_kv_auth_context] = override_get_kv_auth_context
 
     app.state.engine = async_engine
     app.state.session_factory = async_session_factory
