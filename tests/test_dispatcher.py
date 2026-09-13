@@ -964,6 +964,19 @@ class TestExecuteRunPhaseReporting:
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_restricted_backend_uses_runtime_polling_without_service_credentials(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        mock_settings.local_api_key = "service-admin-key"
+        await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert "AUTOMATION_CALLBACK_URL" not in env_vars
+        assert "AUTOMATION_PHASE_URL" not in env_vars
+        assert "service-admin-key" not in env_vars.values()
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_marks_starting_automation_phase_after_bash_dispatch(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
