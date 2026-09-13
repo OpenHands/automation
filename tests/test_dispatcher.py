@@ -872,7 +872,7 @@ class TestEffectiveTimeout:
             )
 
         backend = MagicMock()
-        ctx = MagicMock(
+        ctx = ExecutionContext(
             agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
@@ -904,7 +904,7 @@ class TestExecuteRunPhaseReporting:
         mock_settings,
         mock_client,
         *,
-        scoped_runtime=False,
+        runtime_conversation_id=None,
         conversation_id=None,
     ):
         """Drive _execute_run through a successful dispatch; returns run_id."""
@@ -949,10 +949,18 @@ class TestExecuteRunPhaseReporting:
             agent_url="http://agent.test",
             sandbox_id="sbx-1",
             session_key="sk-1",
-            api_prefix=f"/api/conversations/{run_id}" if scoped_runtime else "/api",
+            api_prefix=(
+                f"/api/conversations/{runtime_conversation_id}"
+                if runtime_conversation_id
+                else "/api"
+            ),
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
-        backend.build_env_vars = MagicMock(return_value={})
+        backend.build_env_vars = MagicMock(
+            return_value={"AUTOMATION_CONVERSATION_ID": runtime_conversation_id}
+            if runtime_conversation_id
+            else {}
+        )
         backend.get_work_dir = MagicMock(return_value="/workspace")
         mock_execute.return_value = MagicMock(
             success=True, bash_command_id="cmd-1", error=None
@@ -975,18 +983,19 @@ class TestExecuteRunPhaseReporting:
         scoped_runtime,
         conversation_id,
     ):
+        runtime_id = str(uuid.uuid4()) if scoped_runtime else None
         run_id = await self._run_successful_execution(
             mock_execute,
             async_session_factory,
             mock_settings,
             mock_client,
-            scoped_runtime=scoped_runtime,
+            runtime_conversation_id=runtime_id,
             conversation_id=conversation_id,
         )
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.conversation_id == (
-                str(run_id) if scoped_runtime else conversation_id
+                runtime_id if scoped_runtime else conversation_id
             )
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
@@ -1382,7 +1391,7 @@ class TestExecuteRunDerivedConversationId:
             )
 
         backend = MagicMock()
-        ctx = MagicMock(
+        ctx = ExecutionContext(
             agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)

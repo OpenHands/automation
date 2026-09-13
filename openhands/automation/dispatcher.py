@@ -524,7 +524,7 @@ async def _execute_run(
                 await link_session.execute(
                     update(AutomationRun)
                     .where(AutomationRun.id == run.id)
-                    .values(conversation_id=str(run.id))
+                    .values(conversation_id=env_vars["AUTOMATION_CONVERSATION_ID"])
                 )
                 await link_session.commit()
         await update_run_current_phase(session_factory, run.id, "Starting automation")

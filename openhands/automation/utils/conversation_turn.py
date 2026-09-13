@@ -20,10 +20,12 @@ from typing import Any, Final
 import httpx
 
 from openhands.automation.backends import get_backend
+from openhands.automation.backends.local import LocalAgentServerBackend
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.log_context import log_extra
 from openhands.automation.utils.sandbox import get_sandbox_agent_url, resume_sandbox
+from openhands.sdk.client import AsyncAgentServerClient
 
 
 logger = logging.getLogger("automation.conversation_turn")
@@ -184,10 +186,9 @@ async def _resolve_agent_server(
 ) -> tuple[str, str] | None:
     """Find the agent server holding this run's conversation."""
     backend = get_backend(run)
-    if backend.is_local_mode:
-        # Side-effect free here; the cloud backend's version creates a sandbox.
-        ctx = await backend.get_execution_context(client)
-        return ctx.agent_url, ctx.session_key
+    if isinstance(backend, LocalAgentServerBackend):
+        # Resolving an existing conversation must not provision another one.
+        return backend.agent_server_url, await backend.get_api_key()
 
     if not run.sandbox_id:
         return None
@@ -253,31 +254,23 @@ async def send_conversation_turn(
                 return False
 
             agent_url, session_key = resolved
+            server = AsyncAgentServerClient(agent_url, session_key, http_client=client)
             deadline = time.monotonic() + (
                 CONVERSATION_WAIT_SECONDS if run.completed_at is None else 0
             )
             while True:
-                response = await client.post(
-                    f"{agent_url.rstrip('/')}/api/conversations/"
-                    f"{conversation_id}/events",
-                    json={
-                        "role": "user",
-                        "content": [{"type": "text", "text": text}],
-                        # False leaves the message in history unanswered. It
-                        # does not stop a loop already running from reading it.
-                        "run": wake_agent,
-                    },
-                    headers={"X-Session-API-Key": session_key},
-                )
-                if response.status_code != 404 or time.monotonic() >= deadline:
+                try:
+                    await server.send_message(conversation_id, text, run=wake_agent)
                     break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404 or time.monotonic() >= deadline:
+                        raise
                 logger.info(
                     "Conversation %s is not open yet; waiting for it",
                     conversation_id,
                     extra=extra,
                 )
                 await asyncio.sleep(CONVERSATION_POLL_SECONDS)
-            response.raise_for_status()
     except Exception as exc:
         logger.info(
             "Could not send a turn to conversation %s: %s",

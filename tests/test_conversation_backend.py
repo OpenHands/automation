@@ -9,12 +9,25 @@ import pytest
 from openhands.automation.backends.conversation import ConversationAgentServerBackend
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.subjects import conversation_id_for
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["local", "docker"])
-async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
-    run = AutomationRun(id=uuid4(), automation=Automation(name="portable workflow"))
+@pytest.mark.parametrize("subject", [None, "org/repo/42"])
+async def test_same_bundle_contract_and_scoped_execution(runtime, subject, tmp_path):
+    automation = Automation(
+        id=uuid4(),
+        org_id=uuid4(),
+        name="portable workflow",
+        trigger={"type": "event", "source": "github-events"},
+    )
+    run = AutomationRun(id=uuid4(), automation=automation, subject_key=subject)
+    conversation_id = (
+        conversation_id_for(automation.org_id, automation.id, "github-events", subject)
+        if subject
+        else str(run.id)
+    )
     backend = ConversationAgentServerBackend(
         "http://server",
         "host-key",
@@ -43,7 +56,7 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
             "AUTOMATION_AGENT_PROFILE_ID",
             "WORKSPACE_BASE",
         }
-        assert env["AUTOMATION_CONVERSATION_ID"] == str(run.id)
+        assert env["AUTOMATION_CONVERSATION_ID"] == conversation_id
         assert env["WORKSPACE_BASE"] == backend.get_work_dir(str(run.id))
         assert env["SESSION_API_KEY"] == (
             "inner-key" if runtime == "docker" else "host-key"
@@ -53,7 +66,7 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
         creation = next(r for r in requests if r.url.path == "/api/conversations")
         payload = json.loads(creation.content)
         assert payload["workspace"]["working_dir"] == env["WORKSPACE_BASE"]
-        assert payload["conversation_id"] == str(run.id)
+        assert payload["conversation_id"] == conversation_id
         assert payload["agent_profile_id"] == backend.agent_profile_id
         assert payload["max_iterations"] == 160
         assert payload["tags"] == {"automationrun": str(run.id)}
@@ -75,7 +88,8 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
         ]
         assert execution
         assert all(
-            r.url.path.startswith(f"/api/conversations/{run.id}/") for r in execution
+            r.url.path.startswith(f"/api/conversations/{conversation_id}/")
+            for r in execution
         )
         before = len(requests)
         await backend.release_context(client, context)
@@ -83,7 +97,9 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
             assert len(requests) == before
         else:
             assert requests[-1].method == "DELETE"
-            assert requests[-1].url.path == f"/api/conversations/{run.id}/runtime"
+            assert (
+                requests[-1].url.path == f"/api/conversations/{conversation_id}/runtime"
+            )
 
 
 @pytest.mark.parametrize("explicit", [False, True])

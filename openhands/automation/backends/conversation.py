@@ -6,6 +6,7 @@ import httpx
 
 from openhands.automation.backends.base import ExecutionContext
 from openhands.automation.backends.local import LocalAgentServerBackend
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
@@ -17,6 +18,16 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
     agent_profile_id: str
     runtime_api_key: str = ""
     _runtime_kind: str | None = None
+
+    @property
+    def conversation_id(self) -> str:
+        automation = self._run.automation
+        source = (automation.trigger or {}).get("source")
+        if self._run.subject_key and source:
+            return conversation_id_for(
+                automation.org_id, automation.id, source, self._run.subject_key
+            )
+        return str(self._run.id)
 
     async def _resolve_runtime(self, client: httpx.AsyncClient) -> str:
         if self._runtime_kind is None:
@@ -32,7 +43,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
     def api_prefix(self) -> str:
         return (
             AsyncAgentServerClient(self.agent_server_url, self.api_key)
-            .runtime(str(self._run.id))
+            .runtime(self.conversation_id)
             .api_prefix
         )
 
@@ -44,7 +55,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
             self.agent_server_url, self.api_key, http_client=client
         )
         await server.create_conversation(
-            conversation_id=str(self._run.id),
+            conversation_id=self.conversation_id,
             agent_profile_id=self.agent_profile_id,
             working_dir=self.get_work_dir(str(self._run.id)),
             title=self._run.automation.name,
@@ -56,7 +67,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
         if runtime_kind == "docker":
             try:
                 self.runtime_api_key = await server.runtime(
-                    str(self._run.id)
+                    self.conversation_id
                 ).get_session_key()
             except Exception:
                 await self.release_context(
@@ -81,7 +92,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
                     else self.agent_server_url
                 )
             ),
-            "AUTOMATION_CONVERSATION_ID": str(self._run.id),
+            "AUTOMATION_CONVERSATION_ID": self.conversation_id,
             "AUTOMATION_AGENT_PROFILE_ID": self.agent_profile_id,
             "WORKSPACE_BASE": self.get_work_dir(str(self._run.id)),
             "SESSION_API_KEY": self.runtime_api_key,
@@ -105,7 +116,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
             return  # Persistent server and conversation history belong to the host.
         await (
             AsyncAgentServerClient(ctx.agent_url, self.api_key, http_client=client)
-            .runtime(str(self._run.id))
+            .runtime(self.conversation_id)
             .release()
         )
 
