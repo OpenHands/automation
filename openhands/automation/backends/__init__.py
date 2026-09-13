@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
 from openhands.automation.backends.cloud import CloudSandboxBackend
 from openhands.automation.backends.conversation import ConversationAgentServerBackend
-from openhands.automation.backends.docker import DockerAgentServerBackend
 from openhands.automation.backends.local import LocalAgentServerBackend
 
 
@@ -49,8 +48,6 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
         backend_type = (
             ConversationAgentServerBackend
             if settings.agent_profile
-            else DockerAgentServerBackend
-            if settings.docker_agent_profile
             else LocalAgentServerBackend
         )
         backend = backend_type(
@@ -62,9 +59,7 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
             sandbox_agent_server_url=settings.sandbox_agent_server_url or None,
         )
         if isinstance(backend, ConversationAgentServerBackend):
-            backend.agent_profile_id = settings.run_agent_profile_overrides.get(
-                str(run.automation_id), settings.run_agent_profile
-            )
+            backend.agent_profile_id = settings.agent_profile
         return backend
     else:
         return CloudSandboxBackend(

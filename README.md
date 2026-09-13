@@ -40,10 +40,6 @@ support runtime credential provisioning and release; bound container CPU, memory
 and PIDs in the server configuration. Completed Docker runtimes are released while
 history remains; the persistent local server and its history are retained.
 
-The earlier `AUTOMATION_DOCKER_AGENT_PROFILE` and related Docker-only settings
-remain compatibility aliases for existing deployments. Without either profile
-setting, existing local and Cloud dispatch behavior is unchanged.
-
 ### Prerequisites
 
 - Python 3.12+

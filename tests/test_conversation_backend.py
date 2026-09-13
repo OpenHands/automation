@@ -85,7 +85,7 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
             assert requests[-1].url.path == f"/api/conversations/{run.id}/runtime"
 
 
-def test_generic_profile_selects_shared_backend_and_per_automation_override(
+def test_default_profile_selects_shared_backend(
     monkeypatch,
 ):
     from openhands.automation.backends import get_backend
@@ -94,14 +94,10 @@ def test_generic_profile_selects_shared_backend_and_per_automation_override(
     automation_id = uuid4()
     monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://server")
     monkeypatch.setenv("AUTOMATION_AGENT_PROFILE", "default-profile")
-    monkeypatch.setenv(
-        "AUTOMATION_AGENT_PROFILE_OVERRIDES",
-        json.dumps({str(automation_id): "role-profile"}),
-    )
     clear_config_cache()
     try:
         backend = get_backend(AutomationRun(id=uuid4(), automation_id=automation_id))
         assert type(backend) is ConversationAgentServerBackend
-        assert backend.agent_profile_id == "role-profile"
+        assert backend.agent_profile_id == "default-profile"
     finally:
         clear_config_cache()
