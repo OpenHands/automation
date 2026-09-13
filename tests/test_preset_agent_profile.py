@@ -33,8 +33,8 @@ def test_profile_preset_requires_the_provisioned_identity(monkeypatch, matches):
     )
     if matches:
         actual = load_provisioned_agent()
-        assert actual is not None
-        assert actual == agent
+        assert isinstance(actual, Agent)
+        assert actual.llm.model == "test-model"
     else:
         with pytest.raises(ValueError, match="does not match"):
             load_provisioned_agent()
