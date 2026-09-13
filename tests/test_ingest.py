@@ -593,6 +593,7 @@ async def test_accepted_event_defaults():
     assert event.provider_event_id is None
     assert event.occurred_at is None
     assert event.parsed_event is None
+    assert event.existing_subject_only is False
 
 
 def test_dataclasses_are_frozen():
