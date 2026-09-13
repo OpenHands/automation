@@ -512,7 +512,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
-        if backend.api_prefix:
+        if ctx.api_prefix:
             async with session_factory() as link_session:
                 await link_session.execute(
                     update(AutomationRun)

@@ -455,6 +455,7 @@ class TestGetBackend:
         """Create a mock AutomationRun."""
         run = MagicMock()
         run.sandbox_id = "sandbox-123"
+        run.agent_profile_id = None
         return run
 
     def test_local_mode(self, monkeypatch, mock_run):

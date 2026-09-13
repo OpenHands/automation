@@ -328,6 +328,10 @@ async def update_automation(
             update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
     original_prompt = auto.prompt
+    profile_changed = (
+        "agent_profile_id" in update_data
+        and auto.agent_profile_id != update_data["agent_profile_id"]
+    )
     for field, value in update_data.items():
         setattr(auto, field, value)
 
@@ -336,13 +340,12 @@ async def update_automation(
     # changes, rebuild the tarball so the next dispatch runs the new prompt
     # instead of the original baked one. Skipped when the value is unchanged (a
     # no-op edit), or for non-preset automations.
-    if (
-        "prompt" in update_data
-        and isinstance(auto.prompt, str)
-        and auto.prompt != original_prompt
+    if isinstance(auto.prompt, str) and (
+        ("prompt" in update_data and auto.prompt != original_prompt)
+        or (profile_changed and auto.preset_metadata)
     ):
         new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session, background_tasks
+            auto, auto.prompt, session, background_tasks, refresh_runner=profile_changed
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path

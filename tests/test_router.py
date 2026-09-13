@@ -1239,6 +1239,48 @@ class TestDeleteAutomation:
 
 
 class TestUpdateAutomation:
+    async def test_selecting_profile_refreshes_existing_preset_runner(
+        self, async_client, async_session, preset_store, local_mode
+    ):
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Keep this task"
+        )
+        automation.preset_metadata = {"preset_type": "prompt"}
+        await async_session.commit()
+        upload_id = parse_internal_upload_id(automation.tarball_path)
+        assert upload_id is not None
+        old_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for name, data in {
+                "main.py": b"legacy runner",
+                "prompt.txt": b"Keep this task",
+                "repos_config.json": b"[]",
+            }.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        preset_store._storage[old_path] = buffer.getvalue()
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"agent_profile_id": str(uuid.uuid4())},
+        )
+        assert response.status_code == 200
+        new_id = parse_internal_upload_id(response.json()["tarball_path"])
+        assert new_id is not None and new_id != upload_id
+        new_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, new_id)
+        with tarfile.open(
+            fileobj=io.BytesIO(preset_store._storage[new_path]), mode="r:gz"
+        ) as tar:
+            runner = tar.extractfile("main.py")
+            helper = tar.extractfile("agent_profile.py")
+            prompt = tar.extractfile("prompt.txt")
+            repos = tar.extractfile("repos_config.json")
+            assert runner and helper and prompt and repos
+            assert b"load_provisioned_agent" in runner.read()
+            assert prompt.read() == b"Keep this task"
+            assert repos.read() == b"[]"
+
     """Tests for PATCH /v1/{id} endpoint."""
 
     async def test_update_automation_name(self, async_client, async_session):

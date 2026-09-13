@@ -40,6 +40,7 @@ async def test_same_bundle_contract_and_scoped_execution(runtime, tmp_path):
             "AGENT_SERVER_URL",
             "SESSION_API_KEY",
             "AUTOMATION_CONVERSATION_ID",
+            "AUTOMATION_AGENT_PROFILE_ID",
             "WORKSPACE_BASE",
         }
         assert env["AUTOMATION_CONVERSATION_ID"] == str(run.id)

@@ -26,7 +26,7 @@ dependencies = [
   "httpx>=0.27",
   "jmespath>=1.0",
   # Temporary integration pin for software-agent-sdk#5010; replace with its release.
-  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@79021c687c63bd1e925cf157f5897ceeaa12f029#subdirectory=openhands-sdk",
+  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@85b8bc7d6338dbc42ecb22465b89cde44b9376c3#subdirectory=openhands-sdk",
   "openhands-workspace==1.46.0",
   "pg8000>=1.31",
   "prometheus-client>=0.19",

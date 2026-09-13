@@ -50,6 +50,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
             title=self._run.automation.name,
             max_iterations=160,
             tags={"automationrun": str(self._run.id)},
+            plugins=(self._run.automation.preset_metadata or {}).get("plugins"),
         )
         self.runtime_api_key = self.api_key if runtime_kind == "local" else ""
         if runtime_kind == "docker":
@@ -81,6 +82,7 @@ class ConversationAgentServerBackend(LocalAgentServerBackend):
                 )
             ),
             "AUTOMATION_CONVERSATION_ID": str(self._run.id),
+            "AUTOMATION_AGENT_PROFILE_ID": self.agent_profile_id,
             "WORKSPACE_BASE": self.get_work_dir(str(self._run.id)),
             "SESSION_API_KEY": self.runtime_api_key,
         }

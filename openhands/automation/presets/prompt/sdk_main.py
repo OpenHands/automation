@@ -77,6 +77,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from agent_profile import load_provisioned_agent
+
+
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
 IS_LOCAL_MODE = bool(agent_server_url)
@@ -188,9 +191,11 @@ def _phase_poster() -> None:
 
 
 # SDK imports (before workspace context so import errors are caught)
-from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
+
+from openhands.sdk import Conversation, RemoteConversation
 from openhands.tools.preset import TaskOutcome
+
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
@@ -218,7 +223,6 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
-
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -308,6 +312,7 @@ with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
     report_phase("Setting up workspace")
+    provisioned_agent = load_provisioned_agent()
 
     # Parse event payload if present (for event-triggered automations)
     event_context = None
@@ -324,12 +329,19 @@ with workspace_ctx as workspace:
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
     clone_result = None
     repo_dirs = []
+    profile_repos_context = ""
 
     if os.path.exists(REPOS_CONFIG_FILE):
         print("\n=== CLONE REPOS ===")
         with open(REPOS_CONFIG_FILE) as f:
             repos_config = json.load(f)
-        if repos_config:
+        if repos_config and provisioned_agent is not None:
+            profile_repos_context = (
+                "Check out these repositories in your workspace using only the credentials "
+                "available to your agent profile, then follow their repository guidance:\n"
+                + json.dumps(repos_config)
+            )
+        elif repos_config:
             report_phase("Cloning repositories")
             clone_result = workspace.clone_repos(repos_config)
             print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
@@ -342,13 +354,15 @@ with workspace_ctx as workspace:
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
     report_phase("Loading skills")
-    loaded_skills, agent_context = workspace.load_skills_from_agent_server(
-        project_dirs=repo_dirs if repo_dirs else None
-    )
+    loaded_skills, agent_context = [], None
+    if provisioned_agent is None:
+        loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+            project_dirs=repo_dirs if repo_dirs else None
+        )
     print(f"  loaded {len(loaded_skills)} skills")
 
     # Get repos context (mapping of URLs to local paths)
-    repos_context = ""
+    repos_context = profile_repos_context
     if clone_result and clone_result.repo_mappings:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
@@ -379,9 +393,7 @@ This automation was triggered by a webhook event:
     # the service could not deliver them as turns. They open the conversation
     # with this one instead of each starting a run of its own.
     if event_context and event_context.get("follow_up_turns"):
-        follow_ups = "\n\n".join(
-            str(turn) for turn in event_context["follow_up_turns"]
-        )
+        follow_ups = "\n\n".join(str(turn) for turn in event_context["follow_up_turns"])
         context_sections.append(f"""## Follow-up messages
 
 More activity arrived on the same subject while this run was queued:
@@ -397,69 +409,75 @@ More activity arrived on the same subject while this run was queued:
 
 {USER_PROMPT}"""
 
-    # Get LLM config via workspace/profile APIs
-    print("\n=== GET_LLM ===")
-    try:
-        llm = workspace.get_llm(profile_name=model_profile)
-    except FileNotFoundError:
-        if not model_profile:
-            raise
-        print(
-            f"  profile {model_profile!r} not found; "
-            "falling back to active/default profile"
+    if provisioned_agent is not None:
+        # The server already resolved the model, tools, skills, MCP, and secrets.
+        # Attaching must not reload defaults or forward the host's secret store.
+        agent = provisioned_agent
+        secrets = {}
+    else:
+        # Get LLM config via workspace/profile APIs
+        print("\n=== GET_LLM ===")
+        try:
+            llm = workspace.get_llm(profile_name=model_profile)
+        except FileNotFoundError:
+            if not model_profile:
+                raise
+            print(
+                f"  profile {model_profile!r} not found; "
+                "falling back to active/default profile"
+            )
+            llm = workspace.get_llm()
+        print(f"  profile: {model_profile or 'DEFAULT'}")
+        print(f"  model: {llm.model}")
+        print(f"  api_key present: {bool(llm.api_key)}")
+
+        # Get secrets via workspace
+        print("\n=== GET_SECRETS ===")
+        secrets = {}
+        try:
+            secrets = workspace.get_secrets()
+            print(f"  available: {list(secrets.keys()) or '(none)'}")
+        except Exception as e:
+            # Not a hard failure — user may not have secrets configured
+            print(f"  get_secrets() failed (ok if no secrets): {e}")
+
+        # Get MCP config via workspace
+        print("\n=== GET_MCP_CONFIG ===")
+        mcp_config = {}
+        try:
+            mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+            if mcp_config:
+                print(f"  servers: {list(mcp_config.keys())}")
+            else:
+                print("  no MCP servers configured")
+        except Exception as e:
+            # Not a hard failure — user may not have MCP configured
+            print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+
+        # Get default agent with tools and condenser (CLI mode to disable browser)
+        print("\n=== AGENT ===")
+        report_phase("Configuring agent")
+        # Keep finish-tool schema wiring in sync with presets/plugin/sdk_main.py.
+        agent = get_default_agent(
+            llm=llm,
+            cli_mode=True,
+            finish_tool_response_schema=TaskOutcome,
         )
-        llm = workspace.get_llm()
-    print(f"  profile: {model_profile or 'DEFAULT'}")
-    print(f"  model: {llm.model}")
-    print(f"  api_key present: {bool(llm.api_key)}")
 
-    # Get secrets via workspace
-    print("\n=== GET_SECRETS ===")
-    secrets = {}
-    try:
-        secrets = workspace.get_secrets()
-        print(f"  available: {list(secrets.keys()) or '(none)'}")
-    except Exception as e:
-        # Not a hard failure — user may not have secrets configured
-        print(f"  get_secrets() failed (ok if no secrets): {e}")
-
-    # Get MCP config via workspace
-    print("\n=== GET_MCP_CONFIG ===")
-    mcp_config = {}
-    try:
-        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+        # Add MCP config and agent_context using model_copy if configured
+        agent_updates = {}
         if mcp_config:
-            print(f"  servers: {list(mcp_config.keys())}")
-        else:
-            print("  no MCP servers configured")
-    except Exception as e:
-        # Not a hard failure — user may not have MCP configured
-        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+            agent_updates["mcp_config"] = mcp_config
+        if agent_context:
+            agent_updates["agent_context"] = agent_context
+        if agent_updates:
+            agent = agent.model_copy(update=agent_updates)
 
-    # Get default agent with tools and condenser (CLI mode to disable browser)
-    print("\n=== AGENT ===")
-    report_phase("Configuring agent")
-    # Keep finish-tool schema wiring in sync with presets/plugin/sdk_main.py.
-    agent = get_default_agent(
-        llm=llm,
-        cli_mode=True,
-        finish_tool_response_schema=TaskOutcome,
-    )
-
-    # Add MCP config and agent_context using model_copy if configured
-    agent_updates = {}
-    if mcp_config:
-        agent_updates["mcp_config"] = mcp_config
-    if agent_context:
-        agent_updates["agent_context"] = agent_context
-    if agent_updates:
-        agent = agent.model_copy(update=agent_updates)
-
-    print(f"  tools: {[t.name for t in agent.tools]}")
-    print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
-    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
-    condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
-    print(f"  condenser: {condenser_name}")
+        print(f"  tools: {[t.name for t in agent.tools]}")
+        print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+        print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
+        condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
+        print(f"  condenser: {condenser_name}")
 
     # Create conversation
     print("\n=== CONVERSATION ===")
