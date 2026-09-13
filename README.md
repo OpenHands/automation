@@ -19,6 +19,27 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 
 ## Development
 
+### Conversation execution in local or Docker workspaces
+
+Set `AUTOMATION_AGENT_SERVER_URL`, `AUTOMATION_AGENT_SERVER_API_KEY`, and
+`AUTOMATION_AGENT_PROFILE` (a saved agent profile UUID). The backend reads the
+server's authoritative `conversation_runtime` and provisions a run conversation
+using the same API and profile in either mode. No bundle configuration or workflow
+branch changes when switching workspace kind.
+
+Both modes supply `AUTOMATION_CONVERSATION_ID`, `AGENT_SERVER_URL`,
+`SESSION_API_KEY`, and `WORKSPACE_BASE`, and use conversation-scoped upload,
+bash execution, and completion verification. Local workspaces live in per-run
+subdirectories of the configured workspace root. Docker workspaces use
+`/workspace` and receive only the selected inner session key, never the outer
+server key or shared callback key. Local mode retains its existing single-tenant
+server credential boundary; a local workspace is not a security sandbox.
+
+`AUTOMATION_CONVERSATION_MAX_CONCURRENT_RUNS` defaults to 2. Docker servers must
+support runtime credential provisioning and release; bound container CPU, memory,
+and PIDs in the server configuration. Completed Docker runtimes are released while
+history remains; the persistent local server and its history are retained.
+
 ### Prerequisites
 
 - Python 3.12+
@@ -101,3 +122,19 @@ containers/          # Docker configuration
 ## Deployment
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
+
+For different role permissions, set `AUTOMATION_AGENT_PROFILE_OVERRIDES`
+to a JSON object mapping automation UUIDs to saved agent profile UUIDs. Unmapped
+automations use `AUTOMATION_AGENT_PROFILE`. This host-controlled mapping
+lets deterministic jobs select a profile with no model credential or agent tools,
+while implementation and review jobs select only their required tools/model.
+
+### SDK Client Integration Dependency
+
+The conversation backend and Agent Server execution helpers use public clients
+from [software-agent-sdk #5010](https://github.com/OpenHands/software-agent-sdk/pull/5010).
+This draft pins the SDK implementation by immutable Git commit so its tests and
+source installation are reproducible. Replace that integration pin with the SDK
+release before merging. The live factory additionally integrates the server
+runtime stack; those server changes are separate from this client dependency. Workflow bundles
+receive the same environment contract in local and Docker workspaces.

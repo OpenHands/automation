@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -131,6 +131,28 @@ async def _poll_pending_runs(
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
     """
+    run_profile = get_config().service.agent_profile
+    active = []
+    if run_profile:
+        active = (
+            (
+                await session.execute(
+                    select(AutomationRun.automation_id).where(
+                        AutomationRun.status == AutomationRunStatus.RUNNING
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        batch_size = min(
+            batch_size,
+            1,
+            get_config().service.conversation_max_concurrent_runs - len(active),
+        )
+        if batch_size <= 0:
+            return []
+
     select_query = (
         select(AutomationRun)
         .join(AutomationRun.automation)
@@ -143,6 +165,8 @@ async def _poll_pending_runs(
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
+    if run_profile and active:
+        select_query = select_query.where(AutomationRun.automation_id.not_in(active))
 
     # Apply row locking for PostgreSQL only (SQLite doesn't support it)
     if not using_sqlite():
@@ -445,6 +469,7 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            api_prefix=ctx.api_prefix,
         )
     except PermanentDispatchError as exc:
         logger.error(
@@ -487,6 +512,14 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        if get_config().service.agent_profile:
+            async with session_factory() as link_session:
+                await link_session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run.id)
+                    .values(conversation_id=str(run.id))
+                )
+                await link_session.commit()
         await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)

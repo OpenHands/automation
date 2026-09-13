@@ -2269,7 +2269,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", specifier = "==1.46.0" },
+    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=79021c687c63bd1e925cf157f5897ceeaa12f029" },
     { name = "openhands-workspace", specifier = "==1.46.0" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
@@ -2301,8 +2301,8 @@ dev = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.46.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.47.0"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=79021c687c63bd1e925cf157f5897ceeaa12f029#79021c687c63bd1e925cf157f5897ceeaa12f029" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2322,10 +2322,6 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
     { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/09/ca00f55b3bca9198b257cc733067d13c01f07cfc400f9e03785545ffa2a5/openhands_sdk-1.46.0.tar.gz", hash = "sha256:4240c0d17d681d694b6b0d2c92462b023ff20c16d5233c6229ec57a5d4f34cbb", size = 714276, upload-time = "2026-09-09T00:56:41.775Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/63/199953bcb187562763052ef71db500ae22c84d355eb950ea260fd698830e/openhands_sdk-1.46.0-py3-none-any.whl", hash = "sha256:ef6fd74ac80208d67aa138a1da321479cf3b6a80aed2d68c53463c0551fee84d", size = 849925, upload-time = "2026-09-09T00:56:37.127Z" },
 ]
 
 [[package]]

@@ -27,6 +27,7 @@ from openhands.automation.exceptions import PermanentDispatchError, TarballNotFo
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.sandbox import delete_sandbox
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.sdk.client import AsyncAgentServerClient
 
 
 # Default working directory for cloud/container mode
@@ -171,6 +172,7 @@ async def _upload(
     session_key: str,
     data: bytes,
     dest: str,
+    api_prefix: str = "/api",
 ) -> None:
     """Upload bytes to the sandbox via the agent-server file API.
 
@@ -178,16 +180,11 @@ async def _upload(
     with proxies that collapse double-slashes (e.g. //tmp -> /tmp).
     See: https://github.com/All-Hands-AI/OpenHands/commit/a14158e
     """
-    # Use query param instead of path param to avoid double-slash normalization
-    from urllib.parse import urlencode
-
-    params = urlencode({"path": dest})
-    resp = await client.post(
-        f"{agent_url}/api/file/upload?{params}",
-        files={"file": ("upload", data)},
-        headers={"X-Session-API-Key": session_key},
+    await (
+        AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .upload(dest, data)
     )
-    resp.raise_for_status()
 
 
 async def _bash(
@@ -196,18 +193,17 @@ async def _bash(
     session_key: str,
     command: str,
     timeout: int | None = None,
+    api_prefix: str = "/api",
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    resp = await client.post(
-        f"{agent_url}/api/bash/execute_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=httpx.Timeout(timeout + 30),
+    body = (
+        await AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .execute(command, timeout=timeout)
     )
-    resp.raise_for_status()
-    body = resp.json()
+
     return body.get("exit_code"), body.get("stdout") or "", body.get("stderr") or ""
 
 
@@ -217,20 +213,21 @@ async def _start_bash(
     session_key: str,
     command: str,
     timeout: int | None = None,
+    api_prefix: str = "/api",
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    http_timeout = get_config().http.http_timeout
-    resp = await client.post(
-        f"{agent_url}/api/bash/start_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=http_timeout,
+    body = (
+        await AsyncAgentServerClient(agent_url, session_key, http_client=client)
+        .runtime_for_api_prefix(api_prefix)
+        .start(command, timeout=timeout)
     )
-    resp.raise_for_status()
-    body = resp.json()
-    return body.get("id")
+
+    command_id = body.get("id")
+    if not isinstance(command_id, str) or not command_id:
+        raise ValueError("Agent Server returned no background command ID")
+    return command_id
 
 
 def _is_permanent_http_error(stderr: str) -> bool:
@@ -259,6 +256,7 @@ async def _download_in_sandbox(
     dest: str,
     timeout: int | None = None,
     max_filesize: int | None = None,
+    api_prefix: str = "/api",
 ) -> None:
     """Download a tarball directly inside the sandbox using curl.
 
@@ -292,7 +290,7 @@ async def _download_in_sandbox(
     )
 
     exit_code, stdout, stderr = await _bash(
-        client, agent_url, session_key, cmd, timeout=timeout + 30
+        client, agent_url, session_key, cmd, timeout=timeout + 30, api_prefix=api_prefix
     )
 
     if exit_code != 0:
@@ -341,6 +339,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    api_prefix: str = "/api",
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -383,17 +382,31 @@ async def execute_in_context(
         if run_id and "/" not in run_id
         else TARBALL_PATH
     )
+    if api_prefix != "/api":
+        tarball_path = f"{work_dir}/automation-{run_id or 'run'}.tar.gz"
     env_path: str | None = None
 
     try:
         # Get tarball into environment: upload bytes or download from URL
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
-            await _upload(client, agent_url, session_key, tarball_source, tarball_path)
+            await _upload(
+                client,
+                agent_url,
+                session_key,
+                tarball_source,
+                tarball_path,
+                api_prefix=api_prefix,
+            )
         else:
             logger.info("Downloading tarball from URL", extra=_log_ctx())
             await _download_in_sandbox(
-                client, agent_url, session_key, tarball_source, tarball_path
+                client,
+                agent_url,
+                session_key,
+                tarball_source,
+                tarball_path,
+                api_prefix=api_prefix,
             )
 
         env_prefix = ""
@@ -405,6 +418,7 @@ async def execute_in_context(
                 session_key,
                 _serialize_env_vars(env_vars),
                 env_path,
+                api_prefix=api_prefix,
             )
             env_prefix = _env_command_prefix(env_path)
 
@@ -419,7 +433,7 @@ async def execute_in_context(
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(
-            client, agent_url, session_key, cmd, timeout=timeout
+            client, agent_url, session_key, cmd, timeout=timeout, api_prefix=api_prefix
         )
         env_path = None
         logger.info(
@@ -448,6 +462,7 @@ async def execute_in_context(
                     agent_url,
                     session_key,
                     f"rm -f -- {_shell_quote(env_path)}",
+                    api_prefix=api_prefix,
                     timeout=int(get_config().http.http_timeout),
                 )
                 if exit_code != 0:
@@ -584,7 +599,11 @@ async def run_automation(
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
             exit_code, stdout, stderr = await _bash(
-                client, agent_url, session_key, cmd, timeout=timeout
+                client,
+                agent_url,
+                session_key,
+                cmd,
+                timeout=timeout,
             )
 
             success = exit_code == 0

@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from openhands.automation.config import get_config
@@ -160,59 +161,31 @@ class TestUploadUsesQueryParams:
     """
 
     @pytest.mark.asyncio
-    async def test_upload_uses_query_param_for_path(self):
-        """_upload should use ?path= query param, not path in URL."""
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
+    @pytest.mark.parametrize(
+        "destination", ["/tmp/automation.tar.gz", "/workspace/file.txt"]
+    )
+    async def test_upload_preserves_path_in_query(self, destination):
+        """Exercise the SDK transport through the dispatcher's upload entrypoint."""
+        requests = []
 
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={})
 
-        await _upload(
-            client=mock_client,
-            agent_url="https://agent.example.com",
-            session_key="test-session-key",
-            data=b"test data",
-            dest="/tmp/automation.tar.gz",
-        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await _upload(
+                client=client,
+                agent_url="https://agent.example.com",
+                session_key="test-session-key",
+                data=b"test data",
+                dest=destination,
+            )
 
-        # Verify post was called with query param, not path param
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-
-        url = call_args[0][0]
-        # URL should use query param format
-        assert "?path=" in url, f"Expected query param in URL, got: {url}"
-        assert "/tmp/automation.tar.gz" not in url.split("?")[0], (
-            f"Path should not be in URL path segment: {url}"
-        )
-        # Verify the path is properly encoded in query string
-        assert (
-            "path=%2Ftmp%2Fautomation.tar.gz" in url
-            or "path=/tmp/automation.tar.gz" in url
-        )
-
-    @pytest.mark.asyncio
-    async def test_upload_preserves_absolute_path(self):
-        """_upload should preserve leading slash in path via query param."""
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-
-        await _upload(
-            client=mock_client,
-            agent_url="https://agent.example.com",
-            session_key="test-session-key",
-            data=b"test data",
-            dest="/workspace/file.txt",
-        )
-
-        url = mock_client.post.call_args[0][0]
-        # The path in query param should preserve the leading slash
-        # (either URL-encoded as %2F or literal /)
-        assert "%2Fworkspace" in url or "/workspace" in url.split("?")[1]
+        assert len(requests) == 1
+        assert requests[0].method == "POST"
+        assert requests[0].url.path == "/api/file/upload"
+        assert requests[0].url.params["path"] == destination
+        assert requests[0].headers["X-Session-API-Key"] == "test-session-key"
 
 
 class TestExecuteInContextErrors:
@@ -484,6 +457,7 @@ class TestPrivateEnvironmentInjection:
             "https://agent.example.com",
             "session-key",
             f"rm -f -- '{env_path}'",
+            api_prefix="/api",
             timeout=int(get_config().http.http_timeout),
         )
 
