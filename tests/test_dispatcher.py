@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.backends.base import ExecutionContext
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
@@ -897,7 +898,14 @@ class TestExecuteRunPhaseReporting:
     """Phase-reporting wiring in _execute_run."""
 
     async def _run_successful_execution(
-        self, mock_execute, async_session_factory, mock_settings, mock_client
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        *,
+        scoped_runtime=False,
+        conversation_id=None,
     ):
         """Drive _execute_run through a successful dispatch; returns run_id."""
         async with async_session_factory() as session:
@@ -917,6 +925,7 @@ class TestExecuteRunPhaseReporting:
                 automation_id=automation.id,
                 status=AutomationRunStatus.RUNNING,
                 started_at=utcnow(),
+                conversation_id=conversation_id,
             )
             session.add(run)
             await session.commit()
@@ -936,8 +945,11 @@ class TestExecuteRunPhaseReporting:
             )
 
         backend = MagicMock()
-        ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        ctx = ExecutionContext(
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_prefix=f"/api/conversations/{run_id}" if scoped_runtime else "/api",
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -950,6 +962,32 @@ class TestExecuteRunPhaseReporting:
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         return run_id
+
+    @pytest.mark.parametrize("scoped_runtime", [False, True])
+    @pytest.mark.parametrize("conversation_id", [None, "callback-conversation"])
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_links_only_conversation_scoped_runtimes(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        scoped_runtime,
+        conversation_id,
+    ):
+        run_id = await self._run_successful_execution(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            scoped_runtime=scoped_runtime,
+            conversation_id=conversation_id,
+        )
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.conversation_id == (
+                str(run_id) if scoped_runtime else conversation_id
+            )
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_exposes_phase_url_to_sandbox(
