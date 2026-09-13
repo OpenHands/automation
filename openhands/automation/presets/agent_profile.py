@@ -28,4 +28,9 @@ def load_provisioned_agent() -> AgentBase | None:
         raise ValueError(
             "The provisioned conversation does not match its selected profile"
         )
-    return AgentBase.model_validate(info["agent"])
+    agent = info["agent"]
+    if agent.get("kind") == "ACPAgent":
+        from openhands.sdk.agent import ACPAgent
+
+        return ACPAgent.model_validate(agent)
+    return AgentBase.model_validate(agent)

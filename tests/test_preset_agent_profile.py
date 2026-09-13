@@ -13,7 +13,8 @@ def test_unprofiled_preset_keeps_existing_configuration(monkeypatch):
 
 
 @pytest.mark.parametrize("matches", [True, False])
-def test_profile_preset_requires_the_provisioned_identity(monkeypatch, matches):
+@pytest.mark.parametrize("kind", ["Agent", "ACPAgent"])
+def test_profile_preset_requires_the_provisioned_identity(monkeypatch, matches, kind):
     from openhands.sdk import LLM, Agent
 
     agent = Agent(llm=LLM(model="test-model"))
@@ -22,7 +23,11 @@ def test_profile_preset_requires_the_provisioned_identity(monkeypatch, matches):
         "launched_agent_profile": {
             "agent_profile_id": "selected" if matches else "different"
         },
-        "agent": agent.model_dump(mode="json"),
+        "agent": (
+            agent.model_dump(mode="json")
+            if kind == "Agent"
+            else {"kind": "ACPAgent", "acp_command": ["test-acp-server"]}
+        ),
     }
     monkeypatch.setenv("AUTOMATION_AGENT_PROFILE_ID", "selected")
     monkeypatch.setenv("AUTOMATION_CONVERSATION_ID", "run")
@@ -33,8 +38,14 @@ def test_profile_preset_requires_the_provisioned_identity(monkeypatch, matches):
     )
     if matches:
         actual = load_provisioned_agent()
-        assert isinstance(actual, Agent)
-        assert actual.llm.model == "test-model"
+        if kind == "Agent":
+            assert isinstance(actual, Agent)
+            assert actual.llm.model == "test-model"
+        else:
+            from openhands.sdk.agent import ACPAgent
+
+            assert isinstance(actual, ACPAgent)
+            assert actual.acp_command == ["test-acp-server"]
     else:
         with pytest.raises(ValueError, match="does not match"):
             load_provisioned_agent()
