@@ -180,7 +180,12 @@ async def create_pending_run(
     """
     now = utcnow()
 
+    from openhands.automation.config import get_config
+
+    default_profile = get_config().service.agent_profile
     run = AutomationRun(
+        agent_profile_id=automation.agent_profile_id
+        or (uuid.UUID(default_profile) if default_profile else None),
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,

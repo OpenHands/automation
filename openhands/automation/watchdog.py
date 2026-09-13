@@ -172,7 +172,8 @@ def _should_cleanup_sandbox_after_terminal(
     the sandbox carrying a live conversation is already excluded here.
     """
     return (
-        bool(run.sandbox_id) or bool(get_config().service.run_agent_profile)
+        bool(run.sandbox_id)
+        or bool(run.agent_profile_id or get_config().service.agent_profile)
     ) and keep_alive is not True
 
 
@@ -526,7 +527,7 @@ async def mark_stale_runs(
                         AutomationRun.bash_command_id.isnot(None)
                         | (AutomationRun.timeout_at < now)
                     )
-                    if settings.run_agent_profile
+                    if settings.is_local_mode
                     else AutomationRun.timeout_at < now
                 ),
             )

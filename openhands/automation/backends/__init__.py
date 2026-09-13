@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
 from openhands.automation.backends.cloud import CloudSandboxBackend
 from openhands.automation.backends.conversation import ConversationAgentServerBackend
-from openhands.automation.backends.docker import DockerAgentServerBackend
 from openhands.automation.backends.local import LocalAgentServerBackend
 
 
@@ -45,13 +44,15 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
     config = get_config()
     settings = config.service
 
+    profile_id = (
+        str(run.agent_profile_id) if run.agent_profile_id else settings.agent_profile
+    )
+    if profile_id and not settings.is_local_mode:
+        raise ValueError("Agent profiles require a configured Agent Server")
+
     if settings.is_local_mode:
         backend_type = (
-            ConversationAgentServerBackend
-            if settings.agent_profile
-            else DockerAgentServerBackend
-            if settings.docker_agent_profile
-            else LocalAgentServerBackend
+            ConversationAgentServerBackend if profile_id else LocalAgentServerBackend
         )
         backend = backend_type(
             agent_server_url=settings.agent_server_url,
@@ -62,9 +63,7 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
             sandbox_agent_server_url=settings.sandbox_agent_server_url or None,
         )
         if isinstance(backend, ConversationAgentServerBackend):
-            backend.agent_profile_id = settings.run_agent_profile_overrides.get(
-                str(run.automation_id), settings.run_agent_profile
-            )
+            backend.agent_profile_id = profile_id
         return backend
     else:
         return CloudSandboxBackend(

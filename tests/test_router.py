@@ -312,6 +312,45 @@ class TestPermissionEnforcement:
 class TestCreateAutomation:
     """Tests for POST /v1 endpoint."""
 
+    async def test_profile_round_trip_and_queued_run_snapshot(
+        self, async_client, async_session, local_mode
+    ):
+        from openhands.automation.utils.run import create_pending_run
+
+        selected, replacement = uuid.uuid4(), uuid.uuid4()
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Independent reviewer",
+                "agent_profile_id": str(selected),
+                "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+                "tarball_path": "s3://bucket/reviewer.tar.gz",
+                "entrypoint": "python3 main.py",
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["agent_profile_id"] == str(selected)
+        path = "/api/automation/v1/" + data["id"]
+        automation = await async_session.get(Automation, uuid.UUID(data["id"]))
+        queued = await create_pending_run(async_session, automation)
+        await async_session.commit()
+        changed = await async_client.patch(
+            path, json={"agent_profile_id": str(replacement)}
+        )
+        assert changed.status_code == 200
+        assert changed.json()["agent_profile_id"] == str(replacement)
+        await async_session.refresh(queued)
+        assert queued.agent_profile_id == selected
+        cleared = await async_client.patch(path, json={"agent_profile_id": None})
+        assert cleared.status_code == 200
+        assert cleared.json()["agent_profile_id"] is None
+        assert (await async_client.get(path)).json()["agent_profile_id"] is None
+        invalid = await async_client.patch(
+            path, json={"agent_profile_id": "missing-profile"}
+        )
+        assert invalid.status_code == 422
+
     async def test_create_automation_success(
         self, async_client, async_session, local_mode
     ):

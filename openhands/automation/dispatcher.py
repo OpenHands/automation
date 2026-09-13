@@ -131,7 +131,7 @@ async def _poll_pending_runs(
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
     """
-    run_profile = get_config().service.run_agent_profile
+    run_profile = get_config().service.is_local_mode
     active = []
     if run_profile:
         active = (
@@ -146,7 +146,9 @@ async def _poll_pending_runs(
             .all()
         )
         batch_size = min(
-            batch_size, 1, get_config().service.run_concurrency_limit - len(active)
+            batch_size,
+            1,
+            get_config().service.conversation_max_concurrent_runs - len(active),
         )
         if batch_size <= 0:
             return []
@@ -510,7 +512,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
-        if get_config().service.run_agent_profile:
+        if backend.api_prefix:
             async with session_factory() as link_session:
                 await link_session.execute(
                     update(AutomationRun)

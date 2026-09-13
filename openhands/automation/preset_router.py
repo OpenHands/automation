@@ -51,7 +51,10 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    resolve_model_profile_for_user,
+    validate_agent_profile_selection,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -144,6 +147,8 @@ class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = None
 
     name: str = Field(..., min_length=1, max_length=500)
     prompt: str = Field(
@@ -481,7 +486,12 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    model = resolve_model_profile_for_user(body.model, user)
+    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -545,6 +555,7 @@ async def create_automation_from_prompt(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -627,6 +638,8 @@ class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = None
 
     name: str = Field(..., min_length=1, max_length=500)
     plugins: list[PluginSource] | None = Field(
@@ -891,7 +904,12 @@ async def create_automation_from_plugin(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    model = resolve_model_profile_for_user(body.model, user)
+    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -978,6 +996,7 @@ async def create_automation_from_plugin(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

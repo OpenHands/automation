@@ -477,6 +477,9 @@ async def _validate_and_resolve_fields(
     return {
         "name": name,
         "model": fields.get("model"),
+        "agent_profile_id": uuid.UUID(fields["agent_profile_id"])
+        if fields.get("agent_profile_id")
+        else None,
         "trigger": trigger.model_dump(),
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
