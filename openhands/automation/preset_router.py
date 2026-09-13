@@ -51,7 +51,10 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    resolve_model_profile_for_user,
+    validate_agent_profile_selection,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -110,6 +113,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
+            "agent_profile.py": (PRESETS_DIR / "agent_profile.py").read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -125,6 +129,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
+            "agent_profile.py": (PRESETS_DIR / "agent_profile.py").read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -144,6 +149,8 @@ class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = None
 
     name: str = Field(..., min_length=1, max_length=500)
     prompt: str = Field(
@@ -258,6 +265,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
         _add_file_to_tar(
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )
+        _add_file_to_tar(tar, "agent_profile.py", preset_files["agent_profile.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -276,27 +284,38 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 _build_storage_path = build_upload_storage_path
 
 
-def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes | None:
+def _replace_prompt_in_tarball(
+    tarball_bytes: bytes,
+    new_prompt: str,
+    runner_files: dict[str, str] | None = None,
+) -> bytes | None:
     """Return a copy of a preset tarball with ``prompt.txt`` swapped for ``new_prompt``.
 
-    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``,
-    ``repos_config.json``, ...) is copied through unchanged, so plugin and repo
-    configuration are preserved and the working template is untouched.
+    Optional ``runner_files`` upgrade the generated runner when its profile
+    changes. All other members, including plugin and repository configuration,
+    are preserved.
 
     Returns ``None`` if the archive has no ``prompt.txt`` member — i.e. it is not a
     regenerable preset tarball — so the caller can leave the tarball as-is.
     """
     out_buffer = io.BytesIO()
     found = False
+    replacements = {"prompt.txt": new_prompt, **(runner_files or {})}
+    seen = set()
     with (
         tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as src,
         tarfile.open(fileobj=out_buffer, mode="w:gz") as dst,
     ):
         for member in src.getmembers():
+            seen.add(member.name)
             if member.name == "prompt.txt":
                 found = True
+            if member.name in replacements:
                 _add_file_to_tar(
-                    dst, "prompt.txt", new_prompt, mode=member.mode or 0o644
+                    dst,
+                    member.name,
+                    replacements[member.name],
+                    mode=member.mode or 0o644,
                 )
                 continue
             if member.isfile():
@@ -309,6 +328,8 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
                 dst.addfile(info, io.BytesIO(data))
             else:
                 dst.addfile(member)
+        for name in replacements.keys() - seen:
+            _add_file_to_tar(dst, name, replacements[name])
 
     if not found:
         return None
@@ -334,6 +355,8 @@ async def regenerate_preset_prompt_tarball(
     new_prompt: str,
     session: AsyncSession,
     background_tasks: BackgroundTasks,
+    *,
+    refresh_runner: bool = False,
 ) -> str | None:
     """Rebuild a preset automation's tarball with an updated prompt.
 
@@ -343,7 +366,8 @@ async def regenerate_preset_prompt_tarball(
     running the original prompt.
 
     Reads the automation's current internal-upload tarball, swaps in ``new_prompt``
-    (leaving all other files untouched), uploads the result as a new internal upload,
+    and optionally refreshes the preset runner when its agent profile changes.
+    Repository and plugin configuration are preserved. Uploads a new internal upload,
     and returns its ``oh-internal://`` URL for the caller to store on ``tarball_path``.
     The superseded upload is soft-deleted in the current transaction; its storage
     object is removed via ``background_tasks`` only after the transaction commits.
@@ -373,7 +397,14 @@ async def regenerate_preset_prompt_tarball(
         # leaving the old prompt baked into the tarball.
         return None
 
-    new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt)
+    runner_files = None
+    if refresh_runner:
+        kind = (automation.preset_metadata or {}).get("preset_type")
+        if kind == "prompt":
+            runner_files = _load_prompt_preset_files()
+        elif kind == "plugin":
+            runner_files = _load_plugin_preset_files()
+    new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt, runner_files)
     if new_tarball is None:
         return None
 
@@ -481,7 +512,12 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    model = resolve_model_profile_for_user(body.model, user)
+    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -545,6 +581,7 @@ async def create_automation_from_prompt(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
@@ -627,6 +664,8 @@ class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = None
 
     name: str = Field(..., min_length=1, max_length=500)
     plugins: list[PluginSource] | None = Field(
@@ -806,6 +845,7 @@ def _generate_plugin_tarball(
         _add_file_to_tar(
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )
+        _add_file_to_tar(tar, "agent_profile.py", preset_files["agent_profile.py"])
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -891,7 +931,16 @@ async def create_automation_from_plugin(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    model = resolve_model_profile_for_user(body.model, user)
+    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
+    if body.agent_profile_id and body.variants:
+        raise HTTPException(
+            422, "Agent profiles cannot be combined with model experiment variants"
+        )
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -978,6 +1027,7 @@ async def create_automation_from_plugin(
             prompt=body.prompt,
             preset_metadata=preset_metadata,
             model=model,
+            agent_profile_id=body.agent_profile_id,
             trigger=body.trigger.model_dump(),
             tarball_path=tarball_path,
             setup_script_path="setup.sh",

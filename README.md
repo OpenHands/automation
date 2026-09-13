@@ -22,7 +22,8 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 ### Conversation execution in local or Docker workspaces
 
 Set `AUTOMATION_AGENT_SERVER_URL`, `AUTOMATION_AGENT_SERVER_API_KEY`, and
-`AUTOMATION_AGENT_PROFILE` (a saved agent profile UUID). The backend reads the
+an `agent_profile_id` on each automation (a saved agent profile UUID).
+`AUTOMATION_AGENT_PROFILE` optionally supplies the deployment default. The backend reads the
 server's authoritative `conversation_runtime` and provisions a run conversation
 using the same API and profile in either mode. No bundle configuration or workflow
 branch changes when switching workspace kind.
@@ -39,6 +40,18 @@ server credential boundary; a local workspace is not a security sandbox.
 support runtime credential provisioning and release; bound container CPU, memory,
 and PIDs in the server configuration. Completed Docker runtimes are released while
 history remains; the persistent local server and its history are retained.
+
+The definition and each queued run store `agent_profile_id`. Editing a definition
+affects future runs; already queued runs retain their selected profile ID. The
+Agent Server resolves that profile at dispatch, including its model, tools, and
+`secret_refs`. Missing profiles or secrets fail creation rather than falling back
+to a more privileged agent. Setting the field to `null` uses the deployment
+default. A separate `model` selection is rejected when an agent profile is set.
+
+Profile selection is advertised by the `agentProfiles` capability when an Agent
+Server is configured. Cloud dispatch without a configured server retains its
+existing behavior and rejects explicit profile selections. Local workspaces
+share the host security boundary; use Docker for process isolation.
 
 ### Prerequisites
 
@@ -123,11 +136,16 @@ containers/          # Docker configuration
 
 This service is deployed via the [deploy repository](https://github.com/All-Hands-AI/deploy). Docker images are automatically built and pushed to `ghcr.io/openhands/automation` on every push to main and on tags.
 
-For different role permissions, set `AUTOMATION_AGENT_PROFILE_OVERRIDES`
-to a JSON object mapping automation UUIDs to saved agent profile UUIDs. Unmapped
-automations use `AUTOMATION_AGENT_PROFILE`. This host-controlled mapping
-lets deterministic jobs select a profile with no model credential or agent tools,
-while implementation and review jobs select only their required tools/model.
+Each automation chooses its own saved agent profile through the create or patch
+API. Profile IDs are included in git sync and run history. For example:
+
+```json
+{"agent_profile_id": "11111111-1111-4111-8111-111111111111"}
+```
+
+The automation definition contains no token values or host-side override map.
+Manage credential availability in the selected profile's `secret_refs` and the
+Agent Server's existing secret store.
 
 ### SDK Client Integration Dependency
 

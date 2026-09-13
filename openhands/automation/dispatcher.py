@@ -131,7 +131,7 @@ async def _poll_pending_runs(
     Eagerly loads the ``automation`` relationship so that ``user_id``,
     ``org_id``, and tarball config are available for dispatch.
     """
-    run_profile = get_config().service.agent_profile
+    run_profile = get_config().service.is_local_mode
     active = []
     if run_profile:
         active = (
@@ -350,10 +350,17 @@ async def _execute_run(
     # 3. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
-    env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
-    env_vars["AUTOMATION_PHASE_URL"] = (
-        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
-    )
+    # Callbacks are optional. A restricted backend without callback credentials
+    # uses the existing runtime watchdog instead of receiving the service key.
+    if (
+        env_vars.get("AUTOMATION_CALLBACK_API_KEY")
+        or env_vars.get("OPENHANDS_API_KEY")
+        or not settings.local_api_key
+    ):
+        env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+        env_vars["AUTOMATION_PHASE_URL"] = (
+            f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+        )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -512,12 +519,12 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
-        if get_config().service.agent_profile:
+        if ctx.api_prefix != "/api":
             async with session_factory() as link_session:
                 await link_session.execute(
                     update(AutomationRun)
                     .where(AutomationRun.id == run.id)
-                    .values(conversation_id=str(run.id))
+                    .values(conversation_id=env_vars["AUTOMATION_CONVERSATION_ID"])
                 )
                 await link_session.commit()
         await update_run_current_phase(session_factory, run.id, "Starting automation")

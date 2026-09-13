@@ -169,7 +169,6 @@ async def test_cancel_conversation_run_without_cloud_id(
     from openhands.automation import backends
     from openhands.automation.config import clear_config_cache
 
-    monkeypatch.setenv("AUTOMATION_AGENT_PROFILE", str(uuid.uuid4()))
     clear_config_cache()
     backend = Mock(
         cleanup_after_verification=AsyncMock(
@@ -183,6 +182,8 @@ async def test_cancel_conversation_run_without_cloud_id(
         _, run = await _create_automation_with_run(
             async_session, status=AutomationRunStatus.RUNNING
         )
+        run.agent_profile_id = uuid.uuid4()
+        await async_session.commit()
         run_id = str(run.id)
         resp = await async_client.post(f"/api/automation/v1/runs/{run_id}/cancel")
         assert resp.status_code == 200

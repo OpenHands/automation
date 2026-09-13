@@ -423,6 +423,12 @@ class TemplateProvenance(BaseModel):
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Selected agent profile; null uses the deployment default. "
+        "The profile owns agent settings and secret selection.",
+    )
+
     name: str = Field(..., min_length=1, max_length=500)
     model: str | None = Field(
         default=None,
@@ -522,6 +528,12 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Selected agent profile; null uses the deployment default. "
+        "The profile owns agent settings and secret selection.",
+    )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
     model: str | None = Field(
@@ -862,6 +874,12 @@ class TelemetryConsentResponse(BaseModel):
 
 
 class AutomationResponse(BaseModel):
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Selected agent profile; null uses the deployment default. "
+        "The profile owns agent settings and secret selection.",
+    )
+
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID
@@ -938,6 +956,12 @@ class RunPhaseRequest(BaseModel):
 
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
+
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Selected agent profile; null uses the deployment default. "
+        "The profile owns agent settings and secret selection.",
+    )
 
     id: uuid.UUID
     automation_id: uuid.UUID
