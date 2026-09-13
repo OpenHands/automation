@@ -904,7 +904,12 @@ async def cancel_run(
 
         # Release the transaction before waiting for Docker to stop.
         await session.commit()
-        await get_backend(run).cleanup_after_verification(str(run_id))
+        try:
+            await get_backend(run).cleanup_after_verification(str(run_id))
+        except Exception:
+            logger.warning(
+                "Runtime cleanup failed for cancelled run %s", run_id, exc_info=True
+            )
 
     # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
     # unlike `complete_run` the sandbox goes even when the run owns a subject

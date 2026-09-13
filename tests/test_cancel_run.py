@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils import utcnow
 
@@ -158,8 +160,9 @@ async def test_cancel_same_org_other_users_run(async_client, async_session):
     assert resp.json()["status"] == "CANCELLED"
 
 
-async def test_cancel_docker_run_releases_runtime_without_cloud_id(
-    async_client, async_session, monkeypatch
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_cancel_conversation_run_without_cloud_id(
+    async_client, async_session, monkeypatch, cleanup_fails
 ):
     from unittest.mock import AsyncMock, Mock
 
@@ -167,7 +170,13 @@ async def test_cancel_docker_run_releases_runtime_without_cloud_id(
     from openhands.automation.config import clear_config_cache
 
     clear_config_cache()
-    backend = Mock(cleanup_after_verification=AsyncMock())
+    backend = Mock(
+        cleanup_after_verification=AsyncMock(
+            side_effect=RuntimeError("Runtime temporarily unreachable")
+            if cleanup_fails
+            else None
+        )
+    )
     monkeypatch.setattr(backends, "get_backend", lambda run: backend)
     try:
         _, run = await _create_automation_with_run(
@@ -178,6 +187,7 @@ async def test_cancel_docker_run_releases_runtime_without_cloud_id(
         run_id = str(run.id)
         resp = await async_client.post(f"/api/automation/v1/runs/{run_id}/cancel")
         assert resp.status_code == 200
+        assert resp.json()["status"] == "CANCELLED"
         backend.cleanup_after_verification.assert_awaited_once_with(run_id)
     finally:
         clear_config_cache()
