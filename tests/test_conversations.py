@@ -548,6 +548,119 @@ async def test_two_mentions_in_one_thread_reach_the_same_conversation(
 
 
 @pytest.mark.asyncio
+async def test_human_rooted_slack_reply_reaches_the_owned_thread(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """Slack names the root author, so ownership comes from the prior run."""
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(on=["app_mention", "message"]),
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]))
+
+    reply = slack_envelope(
+        ts="1755000009.000900",
+        thread_ts="1755000000.000100",
+        text="Can you explain that?",
+    )
+    reply["event"]["type"] = "message"
+    reply["event"]["parent_user_id"] = "U456"
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="message",
+            payload=reply,
+            provider_event_id="Ev2",
+            existing_subject_only=True,
+        ),
+        async_session,
+    )
+
+    key = f"{TEAM}/C123/1755000000.000100"
+    assert result.run_ids == []
+    assert result.conversation_ids == [
+        expected_conversation(org_id, automation.id, key)
+    ]
+    assert len(await fetch_runs(async_session)) == 1
+    assert "Can you explain that?" in delivered_turns[0][1]
+
+
+@pytest.mark.asyncio
+async def test_human_rooted_slack_reply_cannot_claim_an_unowned_thread(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """A message in an unrelated Slack thread must not start an automation."""
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(on=["app_mention", "message"]),
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    reply = slack_envelope(
+        ts="1755000009.000900",
+        thread_ts="1755000000.000100",
+        text="Conversation between other people",
+    )
+    reply["event"]["type"] = "message"
+    reply["event"]["parent_user_id"] = "U456"
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="message",
+            payload=reply,
+            provider_event_id="Ev1",
+            existing_subject_only=True,
+        ),
+        async_session,
+    )
+
+    assert result.run_ids == []
+    assert result.conversation_ids == []
+    assert await fetch_runs(async_session) == []
+    assert delivered_turns == []
+
+
+@pytest.mark.asyncio
+async def test_follow_up_only_event_cannot_use_a_dispatch_run_trigger(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """The transport guard also applies when the matching trigger is unthreaded."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "message"},
+        )
+    )
+    await async_session.commit()
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="message",
+            payload=slack_envelope(thread_ts="1755000000.000100"),
+            provider_event_id="Ev1",
+            existing_subject_only=True,
+        ),
+        async_session,
+    )
+
+    assert result.run_ids == []
+    assert result.conversation_ids == []
+    assert await fetch_runs(async_session) == []
+
+
+@pytest.mark.asyncio
 async def test_an_event_arriving_mid_run_continues_that_conversation(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):

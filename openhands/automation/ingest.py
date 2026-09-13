@@ -49,6 +49,10 @@ class AcceptedEvent:
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
+    # Some transports can identify a possible follow-up but cannot prove from
+    # the payload alone that this service owns its subject. Such events may
+    # continue an existing subject, but must never open a new run.
+    existing_subject_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +86,8 @@ async def accept_event(
     its subject's conversation, creating no run. A subject whose run is still
     queued has the turn folded into that run instead, so a burst cannot leave
     one subject with two runs. Anything else -- no subject, no run holding it,
-    one whose sandbox has gone -- falls back to creating a run.
+    one whose sandbox has gone -- falls back to creating a run unless the
+    transport marked the event as `existing_subject_only`.
 
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
@@ -198,6 +203,9 @@ async def accept_event(
                     },
                 )
                 continue
+
+        if event.existing_subject_only:
+            continue
 
         # How a later event on this subject finds this run's sandbox.
         run = await create_automation_run(

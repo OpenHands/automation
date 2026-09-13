@@ -32,8 +32,8 @@ from openhands.automation.utils.time import utcnow
 
 logger = logging.getLogger("automation.streams.slack")
 
-# `message` is narrowed below to replies to the bot's own thread messages;
-# every other event type is acked and dropped.
+# `message` is narrowed below to human-authored thread replies; bare channel
+# traffic and every other event type are acked and dropped.
 SUPPORTED_EVENT_TYPES = frozenset({"app_mention", "message"})
 
 
@@ -148,9 +148,7 @@ class SlackStreamProvider:
             return None
 
         if event_key == "message":
-            is_thread_reply = bool(event.get("thread_ts"))
-            replies_to_bot = event.get("parent_user_id") == self.bot_user_id
-            if not (is_thread_reply and replies_to_bot):
+            if not event.get("thread_ts"):
                 return None
 
         return AcceptedEvent(
@@ -171,6 +169,14 @@ class SlackStreamProvider:
                 _event_key=event_key,
                 payload=envelope,
                 source_override=self.source,
+            ),
+            # Slack reports the thread-root author in `parent_user_id`, not
+            # the author of the immediately preceding reply. In a human-rooted
+            # thread, durable subject ownership is the only safe proof that
+            # this is a follow-up to an automation conversation.
+            existing_subject_only=(
+                event_key == "message"
+                and event.get("parent_user_id") != self.bot_user_id
             ),
         )
 
