@@ -77,14 +77,16 @@ async def lifespan(app: FastAPI):
     # Set SQLite mode flag for scheduler/dispatcher to use
     set_sqlite_mode(engine_result.is_sqlite)
 
-    # Auto-run migrations for SQLite on startup
-    # This ensures the schema is always up-to-date for local deployments
-    # For PostgreSQL, migrations are typically run separately via `alembic upgrade head`
-    if engine_result.is_sqlite:
+    should_migrate = (
+        settings.auto_migrate
+        if settings.auto_migrate is not None
+        else engine_result.is_sqlite
+    )
+    if should_migrate:
         from alembic import command
         from alembic.config import Config
 
-        from openhands.automation.db import normalize_sqlite_url_for_alembic
+        from openhands.automation.db import normalize_url_for_alembic
 
         # Find migrations folder relative to this package.
         # When installed via pip/uvx, migrations are bundled inside
@@ -108,16 +110,16 @@ async def lifespan(app: FastAPI):
         alembic_cfg = Config()
         alembic_cfg.set_main_option("script_location", str(migrations_path))
         # Set the database URL for Alembic to use (sync version)
-        db_url = normalize_sqlite_url_for_alembic(settings.db_url)
+        db_url = normalize_url_for_alembic(settings.db_url)
         alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
         # Run migrations synchronously (Alembic doesn't support async)
         try:
             command.upgrade(alembic_cfg, "head")
-            logger.info("SQLite database migrations applied successfully")
+            logger.info("Database migrations applied successfully")
         except Exception as e:
-            logger.error(f"Failed to apply SQLite migrations: {e}")
-            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
+            logger.error(f"Failed to apply migrations: {e}")
+            msg = f"Migration failed. Database may be inconsistent: {e}"
             raise RuntimeError(msg) from e
 
     # Start the background scheduler and dispatcher
