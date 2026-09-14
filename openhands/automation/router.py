@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from fastapi import (
@@ -66,7 +67,7 @@ from openhands.automation.utils.run import (
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
-from openhands.automation.utils.sandbox import cleanup_sandbox
+from openhands.automation.utils.sandbox import cleanup_sandbox, pause_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -584,8 +585,10 @@ async def complete_run(
     parent automation.
 
     If keep_alive is not true, deletes the sandbox after updating the run
-    status. When post-run callbacks are configured, cleanup will happen after
-    callbacks instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
+    status, or -- when ``sandbox_cleanup_delay_seconds`` is set -- pauses it
+    and leaves deletion to the watchdog once the delay has passed. When
+    post-run callbacks are configured, cleanup will happen after callbacks
+    instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -604,6 +607,15 @@ async def complete_run(
     # Optimistic locking: only update if the run is still RUNNING.
     # This prevents races between the watchdog and the callback.
     now = utcnow()
+    from openhands.automation.config import get_settings
+
+    settings = get_settings()
+    cleanup_delay = settings.sandbox_cleanup_delay_seconds
+    # Same gate as the cleanup branch below; a delay only replaces deletion
+    # with a pause and stamps when the watchdog should delete instead.
+    defer_cleanup = (
+        cleanup_delay > 0 and bool(run.sandbox_id) and automation.keep_alive is not True
+    )
     new_status = (
         AutomationRunStatus.COMPLETED
         if body.status == "COMPLETED"
@@ -613,6 +625,8 @@ async def complete_run(
         "status": new_status,
         "completed_at": now,
     }
+    if defer_cleanup:
+        values["sandbox_cleanup_due_at"] = now + timedelta(seconds=cleanup_delay)
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
@@ -722,9 +736,6 @@ async def complete_run(
     # here without a second condition.
     if run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
-        from openhands.automation.config import get_settings
-
-        settings = get_settings()
         api_key = user.api_key
         if api_key is None:
             # Cookie-authenticated users don't carry an API key;
@@ -740,14 +751,26 @@ async def complete_run(
                 api_key = None
 
         if api_key is not None:
-            asyncio.create_task(
-                cleanup_sandbox(
-                    api_url=settings.openhands_api_base_url,
-                    api_key=api_key,
-                    sandbox_id=run.sandbox_id,
-                    run_id=str(run_id),
+            if cleanup_delay > 0:
+                # Deferred: pause now so the conversation stays resumable; the
+                # watchdog deletes the sandbox at sandbox_cleanup_due_at.
+                asyncio.create_task(
+                    pause_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
                 )
-            )
+            else:
+                asyncio.create_task(
+                    cleanup_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
+                )
 
     return AutomationRunResponse.model_validate(run)
 

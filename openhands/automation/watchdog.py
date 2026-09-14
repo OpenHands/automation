@@ -14,9 +14,9 @@ reset to bash-start + run budget + margin once the bash command starts
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
 
-The same loop prunes ``integration_events`` and local-mode run workspaces: it
-is the service's only periodic janitor, and a second loop buys nothing for one
-bounded DELETE.
+The same loop prunes ``integration_events`` and local-mode run workspaces, and
+deletes sandboxes whose deferred cleanup is due: it is the service's only
+periodic janitor, and a second loop buys nothing for one bounded DELETE.
 """
 
 import asyncio
@@ -36,7 +36,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.backends import get_backend
+from openhands.automation.backends import ExecutionBackend, get_backend
 from openhands.automation.backends.local import local_runs_root
 from openhands.automation.config import Settings, get_config
 from openhands.automation.models import (
@@ -56,6 +56,7 @@ from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_exception,
     run_status_detail_from_transient_error,
 )
+from openhands.automation.utils.sandbox import pause_sandbox
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 from openhands.automation.utils.unhealthy import (
@@ -71,6 +72,8 @@ logger = logging.getLogger("automation.watchdog")
 PRUNE_BATCH_SIZE = 5000
 WORKSPACE_PURGE_BATCH_SIZE: Final[int] = 50
 WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR: Final[int] = 3
+# Deferred sandbox deletions attempted per scan; each costs one API round trip.
+SANDBOX_CLEANUP_BATCH_SIZE: Final[int] = 50
 
 # Roots already reported as missing, so the warning does not repeat every scan.
 _missing_root_warned: set[str] = set()
@@ -172,6 +175,43 @@ def _should_cleanup_sandbox_after_terminal(
     the sandbox carrying a live conversation is already excluded here.
     """
     return bool(run.sandbox_id) and keep_alive is not True
+
+
+async def _defer_sandbox_cleanup(
+    session: AsyncSession,
+    run: AutomationRun,
+    backend: ExecutionBackend,
+    settings: Settings,
+    now: datetime,
+) -> None:
+    """Stamp when the janitor should delete the sandbox, and pause it meanwhile.
+
+    Runs in the same transaction as the terminal UPDATE (``mark_stale_runs``
+    commits both), so the stamp cannot be lost once the run is terminal. The
+    pause is best-effort: a sandbox that is gone or refuses to pause is still
+    deleted by ``cleanup_due_sandboxes`` when the stamp is due.
+    """
+    sandbox_id = run.sandbox_id
+    if not sandbox_id:
+        return
+    extra = log_extra(run_id=str(run.id), sandbox_id=sandbox_id)
+    await session.execute(
+        update(AutomationRun)
+        .where(AutomationRun.id == run.id)
+        .values(
+            sandbox_cleanup_due_at=now
+            + timedelta(seconds=settings.sandbox_cleanup_delay_seconds)
+        )
+    )
+    try:
+        await pause_sandbox(
+            api_url=settings.openhands_api_base_url,
+            api_key=await backend.get_api_key(),
+            sandbox_id=sandbox_id,
+            run_id=str(run.id),
+        )
+    except Exception as e:
+        logger.warning("Pause after terminal verification failed: %s", e, extra=extra)
 
 
 async def _verify_and_mark_run(
@@ -360,14 +400,17 @@ async def _verify_and_mark_run(
         if result.rowcount > 0:
             keep_alive = await _get_automation_keep_alive(session, run)
             if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-                try:
-                    await backend.cleanup_after_verification(run_id)
-                except Exception as e:
-                    logger.warning(
-                        "Cleanup after terminal verification failed: %s",
-                        e,
-                        extra=extra,
-                    )
+                if settings.sandbox_cleanup_delay_seconds > 0:
+                    await _defer_sandbox_cleanup(session, run, backend, settings, now)
+                else:
+                    try:
+                        await backend.cleanup_after_verification(run_id)
+                    except Exception as e:
+                        logger.warning(
+                            "Cleanup after terminal verification failed: %s",
+                            e,
+                            extra=extra,
+                        )
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
@@ -426,10 +469,13 @@ async def _verify_and_mark_run(
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
     keep_alive = await _get_automation_keep_alive(session, run)
     if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-        try:
-            await backend.cleanup_after_verification(run_id)
-        except Exception as e:
-            logger.warning("Cleanup after verification failed: %s", e, extra=extra)
+        if settings.sandbox_cleanup_delay_seconds > 0:
+            await _defer_sandbox_cleanup(session, run, backend, settings, now)
+        else:
+            try:
+                await backend.cleanup_after_verification(run_id)
+            except Exception as e:
+                logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
     error_msg = verification.detail or "no completion callback received"
 
@@ -922,6 +968,63 @@ async def prune_integration_events(
     return result.rowcount
 
 
+async def cleanup_due_sandboxes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Delete sandboxes whose deferred cleanup is due, one bounded batch per scan.
+
+    Rows are stamped by ``complete_run`` and ``_verify_and_mark_run`` when the
+    service runs with a cleanup delay. The stamp is cleared after one attempt
+    whatever the outcome: deletion is best-effort here exactly as on the
+    immediate path (which never retries either), and the runtime's own TTL
+    reaper is the backstop, so a sandbox that will not delete cannot pin the
+    sweep forever.
+    """
+    now = utcnow()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(AutomationRun.id)
+            .where(
+                AutomationRun.sandbox_cleanup_due_at.isnot(None),
+                AutomationRun.sandbox_cleanup_due_at <= now,
+            )
+            .order_by(AutomationRun.sandbox_cleanup_due_at)
+            .limit(SANDBOX_CLEANUP_BATCH_SIZE)
+        )
+        due_run_ids = list(result.scalars().all())
+
+    cleaned = 0
+    for run_id in due_run_ids:
+        async with session_factory() as session:
+            # Re-fetch with the automation relationship so the backend can
+            # mint the per-user API key it deletes with.
+            result = await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.id == run_id)
+            )
+            run = result.scalars().first()
+            if run is None:
+                continue
+            extra = log_extra(run_id=str(run_id), sandbox_id=run.sandbox_id)
+            try:
+                if run.sandbox_id:
+                    await get_backend(run).cleanup_after_verification(str(run_id))
+            except Exception as e:
+                logger.warning("Deferred sandbox cleanup failed: %s", e, extra=extra)
+            try:
+                await session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run_id)
+                    .values(sandbox_cleanup_due_at=None)
+                )
+                await session.commit()
+                cleaned += 1
+            except Exception:
+                logger.exception("Error clearing sandbox cleanup stamp", extra=extra)
+    return cleaned
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -960,6 +1063,14 @@ async def watchdog_loop(
                 logger.info("Pruned %d expired integration event(s)", pruned)
         except Exception:
             logger.exception("Error pruning integration events")
+
+        if not settings.is_local_mode:
+            try:
+                cleaned = await cleanup_due_sandboxes(session_factory)
+                if cleaned:
+                    logger.info("Deleted %d deferred sandbox(es)", cleaned)
+            except Exception:
+                logger.exception("Error cleaning up deferred sandboxes")
 
         if settings.is_local_mode and settings.workspace_retention_seconds > 0:
             try:
