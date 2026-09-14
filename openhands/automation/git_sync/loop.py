@@ -62,6 +62,10 @@ from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.periodic_loop import run_periodic_loop
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.service_metadata import (
     get_service_metadata,
     set_service_metadata,
@@ -476,14 +480,12 @@ async def _validate_and_resolve_fields(
     )
 
     enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
-    state = fields.get("state")
-    if state == AutomationState.DRAFT.value:
-        automation_state = AutomationState.DRAFT
-        enabled = False
-    else:
-        automation_state = (
-            AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
-        )
+    automation_state = model_automation_state(fields.get("state"), enabled)
+    expected_enabled = automation_state_enabled(automation_state)
+    if fields.get("state") is not None and fields.get("enabled") is not None:
+        if enabled != expected_enabled:
+            raise ValueError("enabled must be true only when state is ACTIVE")
+    enabled = expected_enabled
 
     return {
         "name": name,
