@@ -1,11 +1,14 @@
 """Tests for database module."""
 
+import asyncio
 import os
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 
 from openhands.automation import db as db_module
 from openhands.automation.config import ServiceSettings
@@ -96,6 +99,56 @@ class TestCreateSqliteEngine:
         """SQLite with absolute path works."""
         result = _create_sqlite_engine("sqlite+aiosqlite:////data/automations.db")
         assert result.is_sqlite is True
+
+    @pytest.mark.asyncio
+    async def test_configures_file_database_for_concurrent_service_tasks(
+        self, tmp_path: Path
+    ):
+        result = _create_sqlite_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+        try:
+            async with result.engine.connect() as connection:
+                assert (
+                    await connection.execute(text("PRAGMA journal_mode"))
+                ).scalar() == "wal"
+                assert (
+                    await connection.execute(text("PRAGMA foreign_keys"))
+                ).scalar() == 1
+                assert (
+                    await connection.execute(text("PRAGMA busy_timeout"))
+                ).scalar() == 30_000
+        finally:
+            await result.dispose()
+
+    @pytest.mark.asyncio
+    async def test_waits_for_a_short_lived_write_lock(self, tmp_path: Path):
+        path = tmp_path / "contention.db"
+        result = _create_sqlite_engine(f"sqlite+aiosqlite:///{path}")
+        try:
+            async with result.engine.begin() as connection:
+                await connection.execute(text("CREATE TABLE writes (value INTEGER)"))
+
+            lock = sqlite3.connect(path)
+            lock.execute("BEGIN IMMEDIATE")
+            lock.execute("INSERT INTO writes VALUES (1)")
+
+            async def write_from_service_connection() -> None:
+                async with result.engine.begin() as connection:
+                    await connection.execute(text("INSERT INTO writes VALUES (2)"))
+
+            pending_write = asyncio.create_task(write_from_service_connection())
+            await asyncio.sleep(0.1)
+            assert not pending_write.done()
+            lock.commit()
+            lock.close()
+            await asyncio.wait_for(pending_write, timeout=2)
+
+            async with result.engine.connect() as connection:
+                count = (
+                    await connection.execute(text("SELECT count(*) FROM writes"))
+                ).scalar()
+            assert count == 2
+        finally:
+            await result.dispose()
 
 
 class TestEngineResult:
