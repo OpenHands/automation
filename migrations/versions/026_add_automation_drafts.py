@@ -1,7 +1,7 @@
 """Add automation_drafts table.
 
-Revision ID: 024
-Revises: 023
+Revision ID: 026
+Revises: 025
 Create Date: 2026-09-10
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "024"
-down_revision: str = "023"
+revision: str = "026"
+down_revision: str = "025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

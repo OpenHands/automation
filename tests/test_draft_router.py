@@ -348,6 +348,18 @@ async def test_edit_materialized_draft_incomplete_keeps_projection_and_dispatch_
     )
     assert second_dispatch.status_code == 422
 
+    normal_dispatch = await async_client.post(
+        f"/api/automation/v1/{automation_id}/dispatch"
+    )
+    assert normal_dispatch.status_code == 422
+    assert normal_dispatch.json()["detail"] == second_dispatch.json()["detail"]
+
+    normal_activate = await async_client.patch(
+        f"/api/automation/v1/{automation_id}", json={"state": "ACTIVE"}
+    )
+    assert normal_activate.status_code == 422
+    assert normal_activate.json()["detail"] == second_dispatch.json()["detail"]
+
     await async_session.refresh(draft)
     assert draft.materialized_automation_id == automation_id
     assert draft.last_test_run_id == uuid.UUID(first_dispatch.json()["id"])
