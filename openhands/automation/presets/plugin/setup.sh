@@ -44,11 +44,8 @@ if [ -n "${AUTOMATION_PHASE_URL:-}" ] && [ -n "$PHASE_TOKEN" ]; then
 fi
 
 echo "[setup] Creating isolated virtual environment"
-# Pin CPython >=3.12 so uv doesn't pick an older system Python (e.g. macOS
-# CommandLineTools 3.9) that can't satisfy openhands-sdk's requires-python.
-# No upper bound: the SDK has none, and a cap breaks hosts that only have a
-# newer Python when uv can't download one.
-uv venv .venv --python 'cpython>=3.12' --quiet
+# <3.14: otherwise uv may pick free-threaded 3.14t, where the SDK fails to install.
+uv venv .venv --python 'cpython>=3.12,<3.14' --quiet
 
 VENV_PYTHON=.venv/bin/python
 if [ ! -x "$VENV_PYTHON" ]; then
