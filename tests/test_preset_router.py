@@ -313,7 +313,7 @@ fi
 
         assert result.returncode == 0, result.stderr
         calls = uv_log.read_text().splitlines()
-        assert calls[0] == "venv .venv --python cpython>=3.12,<3.14 --quiet"
+        assert calls[0] == "venv .venv --python cpython>=3.12 --quiet"
         assert calls[1].startswith(f"pip install --python {venv_python} --quiet ")
         assert not ambient_mutated.exists()
         assert venv_verified.exists()
