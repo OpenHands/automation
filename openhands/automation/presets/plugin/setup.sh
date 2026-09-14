@@ -44,14 +44,29 @@ if [ -n "${AUTOMATION_PHASE_URL:-}" ] && [ -n "$PHASE_TOKEN" ]; then
 fi
 
 echo "[setup] Creating isolated virtual environment"
-# Pin >=3.12 so uv doesn't default to an older system Python (e.g. macOS
-# CommandLineTools 3.9), which can't satisfy openhands-sdk's requires-python.
-uv venv .venv --python '>=3.12' --quiet
+# Request regular CPython in the supported range. Excluding 3.14 also prevents
+# uv from selecting a free-threaded interpreter whose native SDK dependencies
+# may not provide compatible wheels yet.
+uv venv .venv --python 'cpython>=3.12,<3.14' --quiet
+
+VENV_PYTHON=.venv/bin/python
+if [ ! -x "$VENV_PYTHON" ]; then
+    VENV_PYTHON=.venv/Scripts/python.exe
+fi
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "[setup] ERROR: Python executable is missing from .venv" >&2
+    exit 1
+fi
 
 echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
-uv pip install --quiet \
+uv pip install --python "$VENV_PYTHON" --quiet \
   "openhands-sdk==${SDK_VERSION}" \
   "openhands-tools==${SDK_VERSION}" \
   "openhands-workspace==${SDK_VERSION}"
+
+if ! "$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools, openhands.workspace'; then
+    echo "[setup] ERROR: OpenHands SDK is not importable from .venv" >&2
+    exit 1
+fi
 
 echo "[setup] Done"
