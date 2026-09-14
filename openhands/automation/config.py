@@ -520,6 +520,11 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
             for terminal runs older than this (default: 604800 — 7 days).
 
+        # Sandbox cleanup (cloud mode only)
+        AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
+            its sandbox is deleted; it is paused meanwhile so the conversation
+            can be resumed (default: 0 — delete immediately).
+
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
         AUTOMATION_API_MAX_PAGE_SIZE: Max page size (default: 100)
@@ -619,6 +624,12 @@ class ServiceSettings(BaseSettings):
     # Workspace retention for local mode
     # Set to 0 to disable workspace purging.
     workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
+
+    # Cloud mode: how long after a run ends before its sandbox is deleted.
+    # 0 (the default) deletes at once. Above 0 the sandbox is paused instead
+    # and the watchdog deletes it once the delay has passed, so the run's
+    # conversation stays resumable in the UI meanwhile.
+    sandbox_cleanup_delay_seconds: int = Field(default=0, ge=0)
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable

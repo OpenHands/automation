@@ -7,6 +7,7 @@ from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.automation.utils.sandbox import (
     SandboxApiTransientError,
     get_sandbox_agent_url,
+    pause_sandbox,
     verify_run_status,
 )
 
@@ -98,3 +99,57 @@ async def test_verify_run_status_marks_rate_limit_as_transient(monkeypatch):
     assert result.error is not None and "HTTP 429" in result.error
     assert result.error_info is not None
     assert result.error_info.fingerprint == "sandbox_api:get_sandbox:rate_limited:429"
+
+
+def _accept(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"success": True}, request=request)
+
+
+def _not_found(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404, json={"detail": "Not Found"}, request=request)
+
+
+def _refuse(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("respond", "expected"),
+    [(_accept, True), (_not_found, False), (_refuse, False)],
+)
+async def test_pause_sandbox_reports_whether_the_api_accepted(
+    monkeypatch, respond, expected
+):
+    """pause_sandbox is best-effort: a non-2xx or a transport failure is False."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return respond(request)
+
+    transport = httpx.MockTransport(handler)
+
+    class TransportAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "openhands.automation.utils.sandbox.httpx.AsyncClient",
+        TransportAsyncClient,
+    )
+
+    result = await pause_sandbox(
+        api_url="https://app.example.com/",
+        api_key="test-key",
+        sandbox_id="sandbox-123",
+        run_id="run-123",
+    )
+
+    assert result is expected
+    assert seen[0].method == "POST"
+    assert (
+        str(seen[0].url) == "https://app.example.com/api/v1/sandboxes/sandbox-123/pause"
+    )
+    assert seen[0].headers["Authorization"] == "Bearer test-key"
