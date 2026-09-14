@@ -267,6 +267,9 @@ class TestSqliteMigrations:
             assert "execution_scope" in {
                 column["name"] for column in inspector.get_columns("automations")
             }
+            assert "subject_source" in run_columns
+            assert "conversation_turn" in run_columns
+            assert "conversation_wake_agent" in run_columns
 
             engine.dispose()
         finally:

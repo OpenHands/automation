@@ -12,11 +12,14 @@ from openhands.automation.backends.local import LocalAgentServerBackend
 from openhands.automation.models import AutomationRun
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils.agent_server import (
+    VerificationOutcome,
     VerificationResult,
     verify_run_on_agent_server,
 )
+from openhands.automation.utils.transient import classify_httpx_transient_error
 from openhands.sdk import RemoteConversationControl
 from openhands.sdk.conversation.request import StartConversationRequest
+from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.workspace import (
     AsyncRemoteWorkspace,
     LocalWorkspace,
@@ -41,8 +44,10 @@ class ConversationBackend(ExecutionBackend):
 
     @property
     def conversation_id(self) -> UUID:
+        if self.run.conversation_id:
+            return UUID(self.run.conversation_id)
         automation = self.run.automation
-        source = (automation.trigger or {}).get("source")
+        source = self.run.subject_source or (automation.trigger or {}).get("source")
         if self.run.subject_key and source:
             return UUID(
                 conversation_id_for(
@@ -148,6 +153,38 @@ class ConversationBackend(ExecutionBackend):
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:
+        if self.run.conversation_turn is not None:
+            try:
+                status = await asyncio.to_thread(self._get_execution_status)
+            except Exception as exc:
+                error_info = classify_httpx_transient_error(
+                    exc,
+                    source="agent_server",
+                    operation="conversation_status",
+                )
+                return VerificationResult(
+                    outcome=(
+                        VerificationOutcome.TRANSIENT_ERROR
+                        if error_info is not None
+                        else VerificationOutcome.VERIFICATION_ERROR
+                    ),
+                    detail=str(exc),
+                    error_info=error_info,
+                )
+            if status == ConversationExecutionStatus.FINISHED:
+                return VerificationResult(
+                    outcome=VerificationOutcome.COMPLETED, exit_code=0
+                )
+            if status is not None and status in (
+                ConversationExecutionStatus.ERROR,
+                ConversationExecutionStatus.STUCK,
+            ):
+                return VerificationResult(
+                    outcome=VerificationOutcome.FAILED,
+                    exit_code=1,
+                    stderr=f"Conversation ended with status {status.value}",
+                )
+            return VerificationResult(outcome=VerificationOutcome.STILL_RUNNING)
         return await verify_run_on_agent_server(
             agent_url=self.server.agent_server_url,
             session_key=self.server.api_key,
@@ -155,6 +192,19 @@ class ConversationBackend(ExecutionBackend):
             bash_command_id=self.run.bash_command_id,
             runtime_conversation_id=self.conversation_id,
         )
+
+    def _get_execution_status(self) -> ConversationExecutionStatus | None:
+        workspace = RemoteWorkspace(
+            host=self.server.agent_server_url,
+            api_key=self.server.api_key,
+            working_dir="/",
+        )
+        try:
+            return RemoteConversationControl(
+                workspace, self.conversation_id
+            ).get_execution_status()
+        finally:
+            workspace.reset_client()
 
     async def cleanup_after_verification(self, run_id: str) -> None:  # noqa: ARG002
         async with httpx.AsyncClient() as client:

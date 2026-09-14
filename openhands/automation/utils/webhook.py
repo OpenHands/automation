@@ -268,6 +268,9 @@ async def create_automation_run(
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
         subject_key=subject_key,
+        subject_source=(
+            (automation.trigger or {}).get("source") if subject_key else None
+        ),
     )
     session.add(run)
     return run

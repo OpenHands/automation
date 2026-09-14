@@ -12,8 +12,10 @@ from openhands.automation.backends.local import LocalAgentServerBackend
 from openhands.automation.execution import execute_in_context
 from openhands.automation.models import Automation, AutomationRun
 from openhands.automation.subjects import conversation_id_for
+from openhands.automation.utils.agent_server import VerificationOutcome
 from openhands.sdk import LLM, Agent
 from openhands.sdk.conversation.request import StartConversationRequest
+from openhands.sdk.conversation.state import ConversationExecutionStatus
 
 
 def _run(subject: str | None = None) -> AutomationRun:
@@ -29,6 +31,24 @@ def _run(subject: str | None = None) -> AutomationRun:
         agent_profile_id=uuid4(),
         execution_scope="conversation",
         subject_key=subject,
+    )
+
+
+def test_subject_source_defines_conversation_identity(tmp_path):
+    run = _run("repository-42/pr-7")
+    run.subject_source = "github-pr-reviewer"
+    backend = ConversationBackend(
+        LocalAgentServerBackend(
+            "http://server", "host-key", run, workspace_base=str(tmp_path)
+        ),
+        run,
+    )
+
+    assert str(backend.conversation_id) == conversation_id_for(
+        run.automation.org_id,
+        run.automation.id,
+        "github-pr-reviewer",
+        "repository-42/pr-7",
     )
 
 
@@ -166,3 +186,28 @@ def test_conversation_execution_requires_profile(monkeypatch):
             get_backend(run)
     finally:
         clear_config_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "outcome", "exit_code"),
+    [
+        (ConversationExecutionStatus.RUNNING, VerificationOutcome.STILL_RUNNING, None),
+        (ConversationExecutionStatus.FINISHED, VerificationOutcome.COMPLETED, 0),
+        (ConversationExecutionStatus.ERROR, VerificationOutcome.FAILED, 1),
+    ],
+)
+async def test_conversation_turn_verification_uses_execution_status(
+    monkeypatch, status, outcome, exit_code
+):
+    run = _run()
+    run.conversation_turn = "review this"
+    backend = ConversationBackend(
+        LocalAgentServerBackend("http://server", "host-key", run), run
+    )
+    monkeypatch.setattr(backend, "_get_execution_status", lambda: status)
+
+    result = await backend.verify_run(str(run.id))
+
+    assert result.outcome == outcome
+    assert result.exit_code == exit_code

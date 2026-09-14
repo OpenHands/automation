@@ -16,14 +16,18 @@ import json
 import logging
 import time
 from typing import Any, Final
+from uuid import UUID
 
 import httpx
 
 from openhands.automation.backends import get_backend
+from openhands.automation.backends.base import ExecutionContext
 from openhands.automation.config import get_config
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.log_context import log_extra
 from openhands.automation.utils.sandbox import get_sandbox_agent_url, resume_sandbox
+from openhands.sdk import RemoteConversationControl
+from openhands.sdk.workspace import RemoteWorkspace
 
 
 logger = logging.getLogger("automation.conversation_turn")
@@ -231,6 +235,44 @@ async def _resume_and_wait(
         await asyncio.sleep(RESUME_POLL_SECONDS)
 
 
+def _submit_turn(
+    agent_url: str,
+    session_key: str,
+    conversation_id: str,
+    text: str,
+    wake_agent: bool,
+) -> None:
+    workspace = RemoteWorkspace(
+        host=agent_url,
+        api_key=session_key,
+        working_dir="/",
+    )
+    try:
+        RemoteConversationControl(workspace, UUID(conversation_id)).send_message(
+            text, run=wake_agent
+        )
+    finally:
+        workspace.reset_client()
+
+
+async def submit_conversation_turn(
+    context: ExecutionContext,
+    conversation_id: str,
+    text: str,
+    *,
+    wake_agent: bool,
+) -> None:
+    """Submit one turn to an already provisioned conversation."""
+    await asyncio.to_thread(
+        _submit_turn,
+        context.agent_url,
+        context.session_key,
+        conversation_id,
+        text,
+        wake_agent,
+    )
+
+
 async def send_conversation_turn(
     run: AutomationRun,
     conversation_id: str,
@@ -261,27 +303,25 @@ async def send_conversation_turn(
                 CONVERSATION_WAIT_SECONDS if run.completed_at is None else 0
             )
             while True:
-                response = await client.post(
-                    f"{agent_url.rstrip('/')}/api/conversations/"
-                    f"{conversation_id}/events",
-                    json={
-                        "role": "user",
-                        "content": [{"type": "text", "text": text}],
-                        # False leaves the message in history unanswered. It
-                        # does not stop a loop already running from reading it.
-                        "run": wake_agent,
-                    },
-                    headers={"X-Session-API-Key": session_key},
-                )
-                if response.status_code != 404 or time.monotonic() >= deadline:
+                try:
+                    await asyncio.to_thread(
+                        _submit_turn,
+                        agent_url,
+                        session_key,
+                        conversation_id,
+                        text,
+                        wake_agent,
+                    )
                     break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404 or time.monotonic() >= deadline:
+                        raise
                 logger.info(
                     "Conversation %s is not open yet; waiting for it",
                     conversation_id,
                     extra=extra,
                 )
                 await asyncio.sleep(CONVERSATION_POLL_SECONDS)
-            response.raise_for_status()
     except Exception as exc:
         logger.info(
             "Could not send a turn to conversation %s: %s",

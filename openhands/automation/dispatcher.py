@@ -46,6 +46,7 @@ from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.conversation_turn import submit_conversation_turn
 from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.run import (
     disable_automation,
@@ -264,6 +265,17 @@ async def _execute_run(
             },
         )
 
+    async def _save_conversation_id() -> None:
+        """Expose a conversation only after it is ready to receive follow-up work."""
+        assert run.conversation_id is not None
+        async with session_factory() as link_session:
+            await link_session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run.id)
+                .values(conversation_id=run.conversation_id)
+            )
+            await link_session.commit()
+
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
     effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
@@ -322,6 +334,57 @@ async def _execute_run(
         ctx.agent_url,
         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
     )
+
+    if ctx.runtime_conversation_id is not None:
+        run.conversation_id = str(ctx.runtime_conversation_id)
+        if run.conversation_turn is None:
+            await _save_conversation_id()
+    if ctx.sandbox_id:
+        run.sandbox_id = ctx.sandbox_id
+        await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
+
+    if run.conversation_turn is not None:
+        assert run.conversation_id is not None
+        await update_run_current_phase(session_factory, run.id, "Agent is working")
+        try:
+            await submit_conversation_turn(
+                ctx,
+                run.conversation_id,
+                run.conversation_turn,
+                wake_agent=run.conversation_wake_agent is not False,
+            )
+        except Exception as exc:
+            run.subject_released_at = utcnow()
+            async with session_factory() as release_session:
+                await release_session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run.id)
+                    .values(subject_released_at=run.subject_released_at)
+                )
+                await release_session.commit()
+            await backend.release_context(client, ctx)
+            await _fail(
+                "Subject conversation failed",
+                status_detail=run_status_detail_from_exception(
+                    exc,
+                    phase=RunStatusPhase.EXECUTION,
+                    source="agent_server",
+                    operation="run_subject_turn",
+                ),
+            )
+            return
+        await _save_conversation_id()
+        if run.conversation_wake_agent is False:
+            await backend.release_context(client, ctx)
+            await mark_run_terminal(session_factory, run, AutomationRunStatus.COMPLETED)
+            await capture_automation_event(
+                "automation_run_completed",
+                automation=automation,
+                run=run,
+                session_factory=session_factory,
+                properties={"trigger_source": "subject_turn"},
+            )
+        return
 
     # 3. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
@@ -494,17 +557,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
-        if ctx.runtime_conversation_id is not None:
-            async with session_factory() as link_session:
-                await link_session.execute(
-                    update(AutomationRun)
-                    .where(AutomationRun.id == run.id)
-                    .values(conversation_id=env_vars["AUTOMATION_CONVERSATION_ID"])
-                )
-                await link_session.commit()
         await update_run_current_phase(session_factory, run.id, "Starting automation")
-        if ctx.sandbox_id:
-            await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
             # Persist the BashCommand id so the verifier can filter
             # BashOutput events by exactly this command (avoids

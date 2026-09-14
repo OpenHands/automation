@@ -1008,7 +1008,11 @@ async def test_completing_an_ordinary_run_still_cleans_up(
 
 @pytest.mark.asyncio
 async def test_continue_conversation_loads_the_run_s_automation(
-    org_id, async_session_factory, mock_authenticated_user, monkeypatch
+    org_id,
+    async_session_factory,
+    mock_authenticated_user,
+    monkeypatch,
+    sdk_http_transport,
 ):
     """Minting a cloud API key reads `run.automation`.
 
@@ -1055,17 +1059,11 @@ async def test_continue_conversation_loads_the_run_s_automation(
 
     posted: list[str] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         posted.append(request.url.path)
         return httpx.Response(200, json={"success": True})
 
-    def client_factory(**kwargs):
-        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    monkeypatch.setattr(
-        "openhands.automation.utils.conversation_turn.httpx",
-        SimpleNamespace(AsyncClient=client_factory),
-    )
+    sdk_http_transport(handler)
 
     subject_key = f"{TEAM}/C123/1.1"
     async with async_session_factory() as setup:
@@ -1080,6 +1078,7 @@ async def test_continue_conversation_loads_the_run_s_automation(
                 status=AutomationRunStatus.COMPLETED,
                 started_at=utcnow(),
                 sandbox_id="sbx-1",
+                subject_source="slack",
                 subject_key=subject_key,
             )
         )
@@ -1274,7 +1273,7 @@ async def test_the_subject_lock_orders_events_that_find_no_run(
 
     async def hold(name: str, work: float) -> None:
         async with async_session_factory() as session:
-            await _take_subject_lock(session, automation_id, "T1/C1/1.1")
+            await _take_subject_lock(session, automation_id, "slack", "T1/C1/1.1")
             order.append(f"{name} in")
             await asyncio.sleep(work)
             order.append(f"{name} out")
@@ -1310,7 +1309,7 @@ async def test_a_different_subject_is_not_blocked_by_a_held_lock(
 
     async def hold(name: str, subject_key: str, work: float) -> None:
         async with async_session_factory() as session:
-            await _take_subject_lock(session, automation_id, subject_key)
+            await _take_subject_lock(session, automation_id, "slack", subject_key)
             order.append(f"{name} in")
             await asyncio.sleep(work)
             order.append(f"{name} out")

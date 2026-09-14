@@ -152,6 +152,7 @@ def _clean_key(value: str, origin: str) -> str | None:
 async def _take_subject_lock(
     session: AsyncSession,
     automation_id: uuid.UUID,
+    source: str,
     subject_key: str,
 ) -> None:
     """Serialise every event for one subject, including those finding no run.
@@ -170,7 +171,7 @@ async def _take_subject_lock(
     # Hashed here, not with `hashtextextended`, so the key does not depend on
     # a server-side hash staying stable across versions.
     digest = hashlib.blake2b(
-        f"{automation_id}/{subject_key}".encode(), digest_size=8
+        f"{automation_id}/{source}/{subject_key}".encode(), digest_size=8
     ).digest()
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:key)").bindparams(
@@ -182,6 +183,7 @@ async def _take_subject_lock(
 async def _lock_subject_run(
     session: AsyncSession,
     automation_id: uuid.UUID,
+    source: str,
     subject_key: str,
 ) -> AutomationRun | None:
     """The most recent run holding this subject, started or not, locked.
@@ -199,6 +201,7 @@ async def _lock_subject_run(
         select(AutomationRun)
         .where(
             AutomationRun.automation_id == automation_id,
+            AutomationRun.subject_source == source,
             AutomationRun.subject_key == subject_key,
             AutomationRun.subject_released_at.is_(None),
         )
@@ -258,13 +261,15 @@ async def continue_conversation(
     The id is known before the first run finishes, so an event arriving
     mid-run continues that conversation instead of racing a second run.
     """
-    await _take_subject_lock(session, automation_id, subject_key)
+    await _take_subject_lock(session, automation_id, source, subject_key)
 
-    run = await _lock_subject_run(session, automation_id, subject_key)
+    run = await _lock_subject_run(session, automation_id, source, subject_key)
     if run is None:
         return ContinueResult()
 
-    conversation_id = conversation_id_for(org_id, automation_id, source, subject_key)
+    conversation_id = run.conversation_id or conversation_id_for(
+        org_id, automation_id, source, subject_key
+    )
     turn = compose_turn(source, event_key, event_payload, override=turn_text)
 
     if run.started_at is None:

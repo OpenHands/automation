@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -226,6 +227,15 @@ class AutomationRun(Base):
     # sandbox holding the conversation; the conversation id itself is derived.
     subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # Namespace of the external subject (for example ``github``). Event runs
+    # inherit it from their trigger; programmatic subject turns supply it.
+    subject_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # A service-owned conversation turn. The dispatcher runs this text
+    # in the provisioned conversation instead of starting the bundle entrypoint.
+    conversation_turn: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversation_wake_agent: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
     # When this run stopped being the subject's routing target -- its sandbox
     # was deleted, or a turn could not reach it. The key itself stays for the
     # historical record, so lookups filter on this instead of on its absence.
@@ -293,6 +303,7 @@ class AutomationRun(Base):
         Index(
             "ix_automation_runs_subject",
             "automation_id",
+            "subject_source",
             "subject_key",
             "created_at",
             postgresql_where=(subject_key.isnot(None))

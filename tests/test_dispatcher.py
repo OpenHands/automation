@@ -28,6 +28,7 @@ from openhands.automation.models import Automation, AutomationRun, AutomationRun
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
+    create_conversation_turn_run,
     mark_run_status,
     mark_run_terminal,
     update_run_current_phase,
@@ -72,6 +73,84 @@ class TestIsHttpUrl:
     def test_gs_url_is_not_http(self):
         """GCS URLs are not HTTP URLs (need special handling, not curl)."""
         assert is_http_url("gs://bucket/key.tar.gz") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("wake_agent", "expected_status"),
+    [
+        (True, AutomationRunStatus.RUNNING),
+        (False, AutomationRunStatus.COMPLETED),
+    ],
+)
+async def test_conversation_turn_skips_bundle_and_defers_running_agent_to_watchdog(
+    async_session_factory, mock_settings, mock_client, wake_agent, expected_status
+):
+    async with async_session_factory() as session:
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Developer scanner",
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path="https://example.com/scanner.tar.gz",
+            entrypoint="python scanner.py",
+        )
+        requester = AutomationRun(
+            automation=automation,
+            status=AutomationRunStatus.RUNNING,
+            agent_profile_id=uuid.uuid4(),
+        )
+        session.add(requester)
+        await session.flush()
+        run = create_conversation_turn_run(
+            requester,
+            source="github",
+            subject_key="repository-42/issue-9",
+            turn="Implement issue 9",
+            wake_agent=wake_agent,
+        )
+        run.status = AutomationRunStatus.RUNNING
+        run.started_at = utcnow()
+        conversation_id = uuid.UUID(
+            conversation_id_for(
+                automation.org_id, automation.id, "github", "repository-42/issue-9"
+            )
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+        await session.refresh(run, attribute_names=["automation"])
+
+    backend = AsyncMock()
+    backend.get_execution_context.return_value = ExecutionContext(
+        agent_url="http://agent.test",
+        session_key="runtime-key",
+        runtime_conversation_id=conversation_id,
+    )
+    with (
+        patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+        patch(
+            "openhands.automation.dispatcher.submit_conversation_turn",
+            new_callable=AsyncMock,
+        ) as submit_turn,
+        patch(
+            "openhands.automation.dispatcher.execute_in_context",
+            new_callable=AsyncMock,
+        ) as execute_bundle,
+    ):
+        await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+    submit_turn.assert_awaited_once()
+    if wake_agent:
+        backend.release_context.assert_not_awaited()
+    else:
+        backend.release_context.assert_awaited_once()
+    execute_bundle.assert_not_awaited()
+    async with async_session_factory() as session:
+        finished = await session.get(AutomationRun, run_id)
+        assert finished is not None
+        assert finished.status == expected_status
+        assert finished.conversation_id == str(conversation_id)
 
 
 class TestMarkRunStatus:

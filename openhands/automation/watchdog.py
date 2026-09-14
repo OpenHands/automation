@@ -564,9 +564,9 @@ async def mark_stale_runs(
 ) -> int:
     """Observe started commands and process stale RUNNING runs.
 
-    A run with a bash command can complete from process exit alone. A run
-    without one becomes eligible when ``timeout_at < now()``. Verification
-    and terminal updates use optimistic locking so concurrent callbacks win.
+    A run with a bash command or submitted conversation turn is polled on each
+    scan. Runs that have not started work are checked after their timeout.
+    Verification uses optimistic locking so concurrent callbacks win.
 
     Each run is processed in its own session so that row locks are released
     immediately after commit rather than held for the duration of the batch.
@@ -586,6 +586,10 @@ async def mark_stale_runs(
                 AutomationRun.timeout_at.isnot(None),
                 (
                     AutomationRun.bash_command_id.isnot(None)
+                    | (
+                        AutomationRun.conversation_turn.isnot(None)
+                        & AutomationRun.conversation_id.isnot(None)
+                    )
                     | (AutomationRun.timeout_at < now)
                 ),
             )

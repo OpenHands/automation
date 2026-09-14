@@ -30,6 +30,31 @@ FIRST_RUN_OUTCOME_STATUSES = (
 )
 
 
+def create_conversation_turn_run(
+    requester: AutomationRun,
+    *,
+    source: str,
+    subject_key: str,
+    turn: str,
+    wake_agent: bool,
+) -> AutomationRun:
+    """Build a conversation-scoped run selected by a run-scoped automation."""
+    if requester.agent_profile_id is None:
+        raise ValueError("Conversation turns require an agent profile")
+    return AutomationRun(
+        id=uuid.uuid4(),
+        automation_id=requester.automation_id,
+        agent_profile_id=requester.agent_profile_id,
+        execution_scope="conversation",
+        telemetry_distinct_id=requester.telemetry_distinct_id,
+        status=AutomationRunStatus.PENDING,
+        subject_source=source,
+        subject_key=subject_key,
+        conversation_turn=turn,
+        conversation_wake_agent=wake_agent,
+    )
+
+
 async def disable_automation(
     session_factory: async_sessionmaker[AsyncSession],
     automation_id: uuid.UUID,
