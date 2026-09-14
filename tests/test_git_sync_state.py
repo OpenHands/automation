@@ -5,6 +5,7 @@ are explicit, imports must reject contradictions just as API requests do.
 These tests use the real YAML decoder, importer, database, and scheduler query.
 """
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,11 +15,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode, using_sqlite
-from openhands.automation.git_sync.loop import _create_automation_from_git
+from openhands.automation.git_sync.loop import _create_automation_from_git, _Owner
 from openhands.automation.git_sync.serializer import deserialize_automation
 from openhands.automation.models import Automation, AutomationState, Base
 from openhands.automation.scheduler import _fetch_enabled_automations
 from openhands.automation.utils.time import utcnow
+
+
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
 
 @pytest.fixture
@@ -55,7 +60,13 @@ async def _import_automation(
     # Match the import loop's savepoint: rejected input cannot leave partial rows.
     async with session.begin_nested():
         await _create_automation_from_git(
-            session, "git-state-regression", deserialized, files, "test-head", []
+            session,
+            _Owner(TEST_USER_ID, TEST_ORG_ID),
+            "git-state-regression",
+            deserialized,
+            files,
+            "test-head",
+            [],
         )
     await session.flush()
     automation = await session.scalar(select(Automation))

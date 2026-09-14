@@ -4,10 +4,17 @@
 are wrapped here before storage; unwrapped, they would sit in cleartext in
 every DB dump and backup.
 
-The wrapping key is `AUTOMATION_KV_SECRET` when set, so a deployment manages
-one service secret rather than two. Otherwise one is generated on first use in
-a 0600 file under the workspace -- losing it just means re-entering the token.
-That file stays out of the git checkout, which could commit it to the repo.
+The wrapping key is `AUTOMATION_GIT_SYNC_SECRET`, or `AUTOMATION_KV_SECRET`
+when only that is set, so a deployment that already manages one service
+secret needn't add a second. In local mode, with neither, one is generated on
+first use in a 0600 file under the workspace -- losing it just means
+re-entering the token. That file stays out of the git checkout, which could
+commit it to the repo.
+
+Cloud mode never falls back to the file: replicas share a database but not a
+disk, so each pod would mint its own key and a token stored by one pod would
+be unreadable -- and silently dropped -- on the others. Without an env secret
+there, storing a secret is refused instead.
 """
 
 import logging
@@ -48,9 +55,17 @@ def _key_file_path() -> Path:
 
 
 def _load_or_create_key() -> str:
-    kv_secret = get_config().kv.kv_secret
-    if kv_secret:
-        return kv_secret
+    config = get_config()
+    if config.git_sync.git_sync_secret:
+        return config.git_sync.git_sync_secret
+    if config.kv.kv_secret:
+        return config.kv.kv_secret
+    if not config.service.is_local_mode:
+        raise GitSyncSecretStoreError(
+            "no wrapping key is configured. Set AUTOMATION_GIT_SYNC_SECRET so "
+            "the git token and encryption key can be encrypted at rest; a "
+            "per-pod key file would not be readable by the other replicas."
+        )
 
     path = _key_file_path()
     try:
