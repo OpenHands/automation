@@ -1,5 +1,6 @@
 """Tests for execution backends."""
 
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -277,16 +278,52 @@ class TestLocalAgentServerBackend:
                 bash_command_id="abc123def456",
             )
 
-    @pytest.mark.asyncio
-    async def test_cleanup_after_verification_is_noop(self, mock_run):
-        """cleanup_after_verification() is a no-op for local backend."""
-        backend = LocalAgentServerBackend(
+    def _cleanup_backend(self, mock_run, workspace_base):
+        return LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
             run=mock_run,
+            workspace_base=str(workspace_base),
         )
-        # Should not raise
-        await backend.cleanup_after_verification("run-123")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_only_this_runs_workspace(self, mock_run, tmp_path):
+        """#422: a finished run must not leave its uv environment behind."""
+        run_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        runs_root = local_runs_root(tmp_path)
+        for candidate in (run_id, other_id):
+            (runs_root / str(candidate)).mkdir(parents=True)
+            (runs_root / str(candidate) / "env.bin").write_bytes(b"x" * 32)
+
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification(str(run_id))
+
+        assert not (runs_root / str(run_id)).exists()
+        assert (runs_root / str(other_id) / "env.bin").exists()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_refuses_a_run_id_that_is_not_a_uuid(
+        self, mock_run, tmp_path
+    ):
+        """A traversing run id must never reach rmtree."""
+        runs_root = local_runs_root(tmp_path)
+        sibling = runs_root.parent / "evil"
+        sibling.mkdir(parents=True)
+        (sibling / "keep.txt").write_text("keep", encoding="utf-8")
+
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification("../evil")
+
+        assert (sibling / "keep.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_of_a_missing_workspace_does_not_raise(
+        self, mock_run, tmp_path
+    ):
+        """Cleanup runs after a crash too, where the directory may be gone."""
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification(str(uuid.uuid4()))
 
 
 class TestCloudSandboxBackend:

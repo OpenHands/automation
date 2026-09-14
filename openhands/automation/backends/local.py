@@ -5,10 +5,12 @@ Uses a pre-configured local agent server instead of creating Cloud sandboxes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import httpx
 
@@ -17,6 +19,7 @@ from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
 )
+from openhands.automation.utils.workspace import DeleteOutcome, delete_workspace
 
 
 if TYPE_CHECKING:
@@ -54,9 +57,10 @@ def local_runs_root(workspace_base: str | os.PathLike[str] | None) -> Path:
 class LocalAgentServerBackend(ExecutionBackend):
     """Execution backend for local/self-hosted deployments.
 
-    Uses a persistent, pre-configured agent server. No sandbox creation
-    or cleanup is performed — the agent server is assumed to be running
-    and managed externally.
+    Uses a persistent, pre-configured agent server: no sandbox is created or
+    deleted, and the server itself is assumed to be running and managed
+    externally. The one resource a run owns here is its isolated workspace
+    directory, which is removed once the run reaches a terminal state.
 
     This is suitable for:
     - Local development
@@ -194,12 +198,30 @@ class LocalAgentServerBackend(ExecutionBackend):
             bash_command_id=self._run.bash_command_id,
         )
 
-    async def cleanup_after_verification(
-        self,
-        run_id: str,  # noqa: ARG002
-    ) -> None:
-        """No-op — local agent server is persistent."""
-        logger.debug("Local mode: skipping cleanup (persistent server)")
+    async def cleanup_after_verification(self, run_id: str) -> None:
+        """Remove this run's isolated workspace directory.
+
+        The agent server itself is persistent and is left untouched; what a
+        local run owns is the directory ``get_work_dir`` handed it, which holds
+        the extracted tarball and the uv environment the run built there.
+        Deletion is guarded against a runs root or run directory that is a
+        link, and against anything resolving outside that root.
+        """
+        try:
+            parsed_run_id = UUID(run_id)
+        except ValueError:
+            logger.warning("Refusing workspace cleanup for non-UUID run %s", run_id)
+            return
+
+        result = await asyncio.to_thread(
+            delete_workspace, local_runs_root(self.workspace_base), parsed_run_id
+        )
+        if result.outcome is DeleteOutcome.DELETED:
+            logger.info(
+                "Removed workspace for run %s (%d bytes freed)",
+                run_id,
+                result.bytes_freed,
+            )
 
     def get_work_dir(self, run_id: str) -> str:
         """Get an isolated working directory for this run.
