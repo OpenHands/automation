@@ -211,6 +211,14 @@ class AutomationRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # When the janitor should delete this run's sandbox. Stamped on the
+    # terminal transition instead of deleting at once when the service runs
+    # with a cleanup delay; the sandbox is paused meanwhile so the run's
+    # conversation can be resumed. NULL when cleanup was immediate or is done.
+    sandbox_cleanup_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
@@ -268,6 +276,14 @@ class AutomationRun(Base):
             postgresql_where=(subject_key.isnot(None))
             & (subject_released_at.is_(None)),
             sqlite_where=(subject_key.isnot(None)) & (subject_released_at.is_(None)),
+        ),
+        # Partial: NULL on nearly every row (immediate cleanup never stamps,
+        # and the sweep clears it), so a full index would be almost all NULLs.
+        Index(
+            "ix_automation_runs_sandbox_cleanup_due",
+            "sandbox_cleanup_due_at",
+            postgresql_where=(sandbox_cleanup_due_at.isnot(None)),
+            sqlite_where=(sandbox_cleanup_due_at.isnot(None)),
         ),
     )
 
