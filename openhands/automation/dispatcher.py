@@ -452,6 +452,9 @@ async def _execute_run(
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
             runtime_conversation_id=ctx.runtime_conversation_id,
+            agent_profile_id=(
+                run.agent_profile_id if run.execution_scope == "run" else None
+            ),
         )
     except PermanentDispatchError as exc:
         logger.error(

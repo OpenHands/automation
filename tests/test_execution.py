@@ -7,6 +7,7 @@ Only tests pure logic that can run without a network.  The e2e flow
 import io
 import subprocess
 import tarfile
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -238,6 +239,7 @@ class TestExecuteInContextErrors:
     async def test_custom_timeout_is_passed_to_bash(self, mock_upload, mock_start_bash):
         """execute_in_context passes above-default custom timeouts to bash."""
         mock_start_bash.return_value = "cmd-1"
+        profile_id = uuid.uuid4()
 
         result = await execute_in_context(
             agent_url="https://agent.example.com",
@@ -246,11 +248,13 @@ class TestExecuteInContextErrors:
             tarball_source=b"test tarball",
             work_dir=DEFAULT_WORK_DIR,
             timeout=1200,
+            agent_profile_id=profile_id,
         )
 
         assert result.success is True
         mock_upload.assert_awaited_once()
         assert mock_start_bash.await_args.kwargs["timeout"] == 1200
+        assert mock_start_bash.await_args.kwargs["agent_profile_id"] == profile_id
 
     @pytest.mark.asyncio
     @patch("openhands.automation.execution._upload")

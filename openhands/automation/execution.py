@@ -217,6 +217,7 @@ async def _start_bash(
     command: str,
     timeout: int | None = None,
     runtime_conversation_id: UUID | None = None,
+    agent_profile_id: UUID | None = None,
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
@@ -227,7 +228,9 @@ async def _start_bash(
         working_dir="/",
         runtime_conversation_id=runtime_conversation_id,
     ) as workspace:
-        return await workspace.start_command(command, timeout=timeout)
+        return await workspace.start_command(
+            command, timeout=timeout, agent_profile_id=agent_profile_id
+        )
 
 
 def _is_permanent_http_error(stderr: str) -> bool:
@@ -342,6 +345,7 @@ async def execute_in_context(
     run_id: str | None = None,
     sandbox_id: str | None = None,
     runtime_conversation_id: UUID | None = None,
+    agent_profile_id: UUID | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -437,6 +441,7 @@ async def execute_in_context(
             cmd,
             timeout=timeout,
             runtime_conversation_id=runtime_conversation_id,
+            agent_profile_id=agent_profile_id,
         )
         env_path = None
         logger.info(
