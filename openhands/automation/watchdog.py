@@ -234,6 +234,9 @@ async def _verify_and_mark_run(
     now = utcnow()
     deadline = run.timeout_at
     deadline_reached = not isinstance(deadline, datetime) or ensure_utc(deadline) < now
+    subject_release = (
+        {"subject_released_at": now} if run.conversation_turn is not None else {}
+    )
 
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
@@ -255,6 +258,7 @@ async def _verify_and_mark_run(
             .values(
                 status=AutomationRunStatus.FAILED,
                 completed_at=now,
+                **subject_release,
                 error_detail=f"Timed out: verification failed: {e}",
                 status_detail=run_status_detail_from_exception(
                     e,
@@ -330,6 +334,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
+                    **subject_release,
                     error_detail=error_detail,
                     status_detail=make_run_status_detail(
                         phase=RunStatusPhase.EXECUTION,
@@ -368,6 +373,7 @@ async def _verify_and_mark_run(
                 .values(
                     status=AutomationRunStatus.FAILED,
                     completed_at=now,
+                    **subject_release,
                     error_detail=error_detail,
                     status_detail=make_run_status_detail(
                         phase=RunStatusPhase.EXECUTION,
@@ -516,6 +522,7 @@ async def _verify_and_mark_run(
         .values(
             status=AutomationRunStatus.FAILED,
             completed_at=now,
+            **subject_release,
             error_detail=f"Timed out: {error_msg}",
             status_detail=make_run_status_detail(
                 phase=RunStatusPhase.VERIFICATION,

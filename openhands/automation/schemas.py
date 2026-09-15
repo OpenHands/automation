@@ -950,6 +950,34 @@ class RunPhaseRequest(BaseModel):
         return " ".join(_PHASE_CONTROL_CHARS_RE.sub(" ", v).split())
 
 
+class SubjectTurnRequest(BaseModel):
+    """Conversation work selected by a running automation for an external subject."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., min_length=1, max_length=100)
+    subject_key: str = Field(..., min_length=1, max_length=500)
+    turn: str = Field(..., min_length=1, max_length=50000)
+    idempotency_key: str = Field(..., min_length=1, max_length=500)
+    wake_agent: bool = True
+
+    @field_validator("source", "subject_key", "turn", "idempotency_key")
+    @classmethod
+    def reject_whitespace_only(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must contain non-whitespace characters")
+        return value
+
+
+class SubjectTurnResponse(BaseModel):
+    """Accepted routing decision for a programmatic subject turn."""
+
+    disposition: Literal["created", "queued", "delivered", "deduplicated"]
+    run_id: uuid.UUID
+    conversation_id: uuid.UUID
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 

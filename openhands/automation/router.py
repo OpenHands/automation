@@ -884,6 +884,14 @@ async def cancel_run(
         )
 
     now = utcnow()
+    values = {
+        "status": AutomationRunStatus.CANCELLED,
+        "completed_at": now,
+        "error_detail": "Cancelled by user",
+        "status_detail": None,
+    }
+    if run.subject_key:
+        values["subject_released_at"] = now
     stmt = (
         update(AutomationRun)
         .where(
@@ -892,12 +900,7 @@ async def cancel_run(
                 [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
             ),
         )
-        .values(
-            status=AutomationRunStatus.CANCELLED,
-            completed_at=now,
-            error_detail="Cancelled by user",
-            status_detail=None,
-        )
+        .values(**values)
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
 
@@ -930,16 +933,8 @@ async def cancel_run(
                 "Runtime cleanup failed for cancelled run %s", run_id, exc_info=True
             )
 
-    # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
-    # unlike `complete_run` the sandbox goes even when the run owns a subject
-    # -- but the subject is released with it, or the next event would pick this
-    # run and pay a lookup for a sandbox we just deleted. The key stays on the
-    # row as the record of what this run was about.
+    # Clean up sandbox for runs that were RUNNING.
     if run.sandbox_id:
-        if run.subject_key and run.subject_released_at is None:
-            run.subject_released_at = utcnow()
-            await session.commit()
-
         from openhands.automation.config import get_settings
 
         settings = get_settings()

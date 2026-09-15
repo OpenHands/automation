@@ -54,6 +54,8 @@ async def test_cancel_pending_run(async_client, async_session):
     assert data["status"] == "CANCELLED"
     assert data["error_detail"] == "Cancelled by user"
     assert data["completed_at"] is not None
+    await async_session.refresh(run)
+    assert run.subject_released_at is None
 
 
 async def test_cancel_running_run(async_client, async_session):
@@ -181,8 +183,13 @@ async def test_cancel_conversation_run_without_cloud_id(
     )
     run.execution_scope = "conversation"
     run.agent_profile_id = uuid.uuid4()
+    run.subject_source = "github"
+    run.subject_key = "repository-42/pr-8"
+    run.conversation_turn = "Review PR 8"
     run_id = str(run.id)
     resp = await async_client.post(f"/api/automation/v1/runs/{run_id}/cancel")
     assert resp.status_code == 200
     assert resp.json()["status"] == "CANCELLED"
+    await async_session.refresh(run)
+    assert run.subject_released_at is not None
     backend.cleanup_after_verification.assert_awaited_once_with(run_id)

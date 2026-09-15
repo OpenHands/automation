@@ -9,7 +9,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +20,11 @@ from openhands.automation.filter_eval import (
     FilterEvaluationError,
     evaluate_expression,
 )
-from openhands.automation.models import AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    AutomationRun,
+    AutomationRunStatus,
+    AutomationSubjectTurn,
+)
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
@@ -28,6 +32,7 @@ from openhands.automation.utils.conversation_turn import (
     compose_turn,
     send_conversation_turn,
 )
+from openhands.automation.utils.run import create_conversation_turn_run
 
 
 logger = logging.getLogger("automation.conversations")
@@ -36,6 +41,12 @@ CONTINUE_CONVERSATION: Final[str] = "continue_conversation"
 
 _FINISHED = (
     AutomationRunStatus.COMPLETED,
+    AutomationRunStatus.FAILED,
+    AutomationRunStatus.CANCELLED,
+    AutomationRunStatus.SKIPPED,
+)
+
+_RETRYABLE = (
     AutomationRunStatus.FAILED,
     AutomationRunStatus.CANCELLED,
     AutomationRunStatus.SKIPPED,
@@ -68,6 +79,15 @@ class ContinueResult:
     @property
     def needs_run(self) -> bool:
         return self.conversation_id is None
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectTurnResult:
+    """Result returned to a poller that submitted work for one subject."""
+
+    disposition: Literal["created", "queued", "delivered", "deduplicated"]
+    run_id: uuid.UUID
+    conversation_id: str
 
 
 def resolve_subject_key(
@@ -146,6 +166,14 @@ def _clean_key(value: str, origin: str) -> str | None:
     if not key or len(key) > MAX_SUBJECT_KEY_LENGTH:
         logger.warning("%s yielded an unusable key of length %d", origin, len(key))
         return None
+    return key
+
+
+def clean_subject_key(value: str) -> str:
+    """Validate a caller-supplied subject key without changing its identity."""
+    key = _clean_key(value, "subject turn")
+    if key is None:
+        raise ValueError("subject_key must be 1 to 500 non-whitespace characters")
     return key
 
 
@@ -262,6 +290,32 @@ async def continue_conversation(
     mid-run continues that conversation instead of racing a second run.
     """
     await _take_subject_lock(session, automation_id, source, subject_key)
+    return await _continue_conversation_locked(
+        session,
+        org_id=org_id,
+        source=source,
+        subject_key=subject_key,
+        automation_id=automation_id,
+        event_key=event_key,
+        event_payload=event_payload,
+        turn_text=turn_text,
+        wake_agent=wake_agent,
+    )
+
+
+async def _continue_conversation_locked(
+    session: AsyncSession,
+    *,
+    org_id: uuid.UUID,
+    source: str,
+    subject_key: str,
+    automation_id: uuid.UUID,
+    event_key: str,
+    event_payload: dict[str, Any] | None,
+    turn_text: str | None,
+    wake_agent: bool,
+) -> ContinueResult:
+    """Continue one subject after the caller has acquired its transaction lock."""
 
     run = await _lock_subject_run(session, automation_id, source, subject_key)
     if run is None:
@@ -271,6 +325,12 @@ async def continue_conversation(
         org_id, automation_id, source, subject_key
     )
     turn = compose_turn(source, event_key, event_payload, override=turn_text)
+
+    if run.status in _FINISHED:
+        # A new execution needs its own run so the watchdog can observe and
+        # clean it. The derived conversation id still preserves the thread.
+        run.subject_released_at = utcnow()
+        return ContinueResult()
 
     if run.started_at is None:
         # No agent server yet, but this run opens the same derived
@@ -294,3 +354,126 @@ async def continue_conversation(
         return ContinueResult()
 
     return ContinueResult(conversation_id=conversation_id)
+
+
+async def submit_subject_turn(
+    session: AsyncSession,
+    *,
+    requester: AutomationRun,
+    source: str,
+    subject_key: str,
+    turn: str,
+    idempotency_key: str,
+    wake_agent: bool,
+) -> SubjectTurnResult:
+    """Create or continue conversation work selected by a running automation.
+
+    The requester chooses an external identity and prompt. The service owns
+    conversation identity, profile selection, runtime attachment, and
+    serialization. The transaction-scoped subject lock also orders duplicate
+    idempotency checks, so one retry cannot enqueue two conversations.
+    """
+    subject_key = clean_subject_key(subject_key)
+    await _take_subject_lock(session, requester.automation_id, source, subject_key)
+
+    duplicate = (
+        (
+            await session.execute(
+                select(AutomationSubjectTurn).where(
+                    AutomationSubjectTurn.automation_id == requester.automation_id,
+                    AutomationSubjectTurn.source == source,
+                    AutomationSubjectTurn.subject_key == subject_key,
+                    AutomationSubjectTurn.idempotency_key == idempotency_key,
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    retry_record: AutomationSubjectTurn | None = None
+    if duplicate is not None:
+        duplicate_run = await session.get(AutomationRun, duplicate.subject_run_id)
+        if duplicate_run is None:
+            raise RuntimeError("Subject-turn idempotency record has no run")
+        conversation_id = duplicate_run.conversation_id or conversation_id_for(
+            requester.automation.org_id,
+            requester.automation.id,
+            source,
+            subject_key,
+        )
+        can_retry = duplicate_run.status in _RETRYABLE and (
+            duplicate_run.started_at is None
+            or duplicate_run.subject_released_at is not None
+        )
+        if not can_retry:
+            return SubjectTurnResult(
+                disposition="deduplicated",
+                run_id=duplicate_run.id,
+                conversation_id=conversation_id,
+            )
+        # A run canceled before dispatch never owned a runtime, but excluding it
+        # from the subject lookup still requires the normal released marker.
+        if duplicate_run.started_at is None:
+            duplicate_run.subject_released_at = utcnow()
+        retry_record = duplicate
+
+    outcome = await _continue_conversation_locked(
+        session,
+        org_id=requester.automation.org_id,
+        source=source,
+        subject_key=subject_key,
+        automation_id=requester.automation_id,
+        event_key="subject.turn",
+        event_payload=None,
+        turn_text=turn,
+        wake_agent=wake_agent,
+    )
+
+    subject_run = await _lock_subject_run(
+        session, requester.automation_id, source, subject_key
+    )
+    if outcome.needs_run:
+        if subject_run is not None and subject_run.status not in _FINISHED:
+            raise RuntimeError("The subject conversation is not reachable yet")
+        subject_run = create_conversation_turn_run(
+            requester,
+            source=source,
+            subject_key=subject_key,
+            turn=turn,
+            wake_agent=wake_agent,
+        )
+        conversation_id = conversation_id_for(
+            requester.automation.org_id,
+            requester.automation.id,
+            source,
+            subject_key,
+        )
+        session.add(subject_run)
+        disposition = "created"
+    else:
+        assert subject_run is not None
+        conversation_id = outcome.conversation_id
+        assert conversation_id is not None
+        disposition = "queued" if outcome.coalesced else "delivered"
+
+    if retry_record is None:
+        retry_record = AutomationSubjectTurn(
+            automation_id=requester.automation_id,
+            requester_run_id=requester.id,
+            subject_run_id=subject_run.id,
+            source=source,
+            subject_key=subject_key,
+            idempotency_key=idempotency_key,
+        )
+        session.add(retry_record)
+    else:
+        # Keep the unique idempotency record and point it at the new attempt.
+        # The superseded run remains in run history for diagnosis.
+        retry_record.requester_run_id = requester.id
+        retry_record.subject_run_id = subject_run.id
+    await session.flush()
+    return SubjectTurnResult(
+        disposition=disposition,
+        run_id=subject_run.id,
+        conversation_id=conversation_id,
+    )

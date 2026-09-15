@@ -151,6 +151,112 @@ async def test_conversation_turn_skips_bundle_and_defers_running_agent_to_watchd
         assert finished is not None
         assert finished.status == expected_status
         assert finished.conversation_id == str(conversation_id)
+        assert finished.subject_released_at is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_context_failure_releases_subject(
+    async_session_factory, mock_settings, mock_client
+):
+    async with async_session_factory() as session:
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Reviewer scanner",
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path="https://example.com/scanner.tar.gz",
+            entrypoint="python scanner.py",
+        )
+        requester = AutomationRun(
+            automation=automation,
+            status=AutomationRunStatus.RUNNING,
+            agent_profile_id=uuid.uuid4(),
+        )
+        session.add(requester)
+        await session.flush()
+        run = create_conversation_turn_run(
+            requester,
+            source="github",
+            subject_key="repository-42/pr-9",
+            turn="Review PR 9",
+            wake_agent=True,
+        )
+        run.status = AutomationRunStatus.RUNNING
+        run.started_at = utcnow()
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+        await session.refresh(run, attribute_names=["automation"])
+
+    backend = MagicMock()
+    backend.provisions_agent_server = False
+    backend.get_execution_context = AsyncMock(side_effect=RuntimeError("unavailable"))
+    with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+        await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+    async with async_session_factory() as session:
+        finished = await session.get(AutomationRun, run_id)
+        assert finished is not None
+        assert finished.status == AutomationRunStatus.FAILED
+        assert finished.subject_released_at is not None
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_failure_releases_subject_when_cleanup_fails(
+    async_session_factory, mock_settings, mock_client
+):
+    async with async_session_factory() as session:
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Reviewer scanner",
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path="https://example.com/scanner.tar.gz",
+            entrypoint="python scanner.py",
+        )
+        requester = AutomationRun(
+            automation=automation,
+            status=AutomationRunStatus.RUNNING,
+            agent_profile_id=uuid.uuid4(),
+        )
+        session.add(requester)
+        await session.flush()
+        run = create_conversation_turn_run(
+            requester,
+            source="github",
+            subject_key="repository-42/pr-9",
+            turn="Review PR 9",
+            wake_agent=True,
+        )
+        run.status = AutomationRunStatus.RUNNING
+        run.started_at = utcnow()
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+        await session.refresh(run, attribute_names=["automation"])
+
+    backend = AsyncMock()
+    backend.get_execution_context.return_value = ExecutionContext(
+        agent_url="http://agent.test",
+        session_key="runtime-key",
+        runtime_conversation_id=uuid.uuid4(),
+    )
+    backend.release_context.side_effect = RuntimeError("runtime unavailable")
+    with (
+        patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+        patch(
+            "openhands.automation.dispatcher.submit_conversation_turn",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("turn rejected"),
+        ),
+    ):
+        await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+    async with async_session_factory() as session:
+        finished = await session.get(AutomationRun, run_id)
+        assert finished is not None
+        assert finished.status == AutomationRunStatus.FAILED
+        assert finished.subject_released_at is not None
 
 
 class TestMarkRunStatus:

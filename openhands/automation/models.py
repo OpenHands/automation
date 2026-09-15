@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     text,
 )
@@ -317,6 +318,47 @@ class AutomationRun(Base):
             "sandbox_cleanup_due_at",
             postgresql_where=(sandbox_cleanup_due_at.isnot(None)),
             sqlite_where=(sandbox_cleanup_due_at.isnot(None)),
+        ),
+    )
+
+
+class AutomationSubjectTurn(Base):
+    """Idempotency record for a programmatic subject turn."""
+
+    __tablename__ = "automation_subject_turns"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    requester_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    subject_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    subject_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "automation_id",
+            "source",
+            "subject_key",
+            "idempotency_key",
+            name="uq_automation_subject_turn_idempotency",
         ),
     )
 

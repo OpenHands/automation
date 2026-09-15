@@ -63,6 +63,12 @@ from openhands.automation.utils.run_status_detail import (
     make_run_status_detail,
     run_status_detail_from_exception,
 )
+from openhands.automation.utils.run_token import (
+    SUBMIT_SUBJECT_TURN,
+    RunTokenError,
+    create_run_token,
+    signing_secret,
+)
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -276,6 +282,18 @@ async def _execute_run(
             )
             await link_session.commit()
 
+    async def _release_conversation_subject() -> None:
+        """Release a child subject after its runtime is absent or released."""
+        assert run.conversation_turn is not None
+        run.subject_released_at = utcnow()
+        async with session_factory() as release_session:
+            await release_session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run.id)
+                .values(subject_released_at=run.subject_released_at)
+            )
+            await release_session.commit()
+
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
     effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
@@ -298,6 +316,8 @@ async def _execute_run(
             source="sandbox_api",
             operation="get_execution_context",
         )
+        if run.conversation_turn is not None:
+            await _release_conversation_subject()
         await mark_run_terminal(
             session_factory,
             run,
@@ -318,6 +338,8 @@ async def _execute_run(
     except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
         source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        if run.conversation_turn is not None:
+            await _release_conversation_subject()
         await _fail(
             "Failed to get execution context",
             status_detail=run_status_detail_from_exception(
@@ -354,15 +376,14 @@ async def _execute_run(
                 wake_agent=run.conversation_wake_agent is not False,
             )
         except Exception as exc:
-            run.subject_released_at = utcnow()
-            async with session_factory() as release_session:
-                await release_session.execute(
-                    update(AutomationRun)
-                    .where(AutomationRun.id == run.id)
-                    .values(subject_released_at=run.subject_released_at)
+            try:
+                await backend.release_context(client, ctx)
+            except Exception:
+                logger.exception(
+                    "Failed to release failed subject runtime",
+                    extra=_log_ctx(sandbox_id=ctx.sandbox_id),
                 )
-                await release_session.commit()
-            await backend.release_context(client, ctx)
+            await _release_conversation_subject()
             await _fail(
                 "Subject conversation failed",
                 status_detail=run_status_detail_from_exception(
@@ -424,6 +445,21 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+
+    try:
+        run_secret = signing_secret(settings)
+    except RunTokenError:
+        pass
+    else:
+        env_vars["AUTOMATION_RUN_TOKEN"] = create_run_token(
+            secret=run_secret,
+            automation_id=automation.id,
+            run_id=run.id,
+            scopes=(SUBMIT_SUBJECT_TURN,),
+        )
+        env_vars["AUTOMATION_SUBJECT_TURN_URL"] = (
+            f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/subject-turns"
+        )
 
     # Inject a KV token whenever the service has a KV secret configured.
     # The KV store is always available to automations — there is no per-

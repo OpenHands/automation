@@ -749,9 +749,9 @@ async def test_an_unreachable_conversation_degrades_to_a_run(
     reply = slack_envelope(ts="1755000009.000900", thread_ts="1755000000.000100")
     second = await _mention(async_session, org_id, reply, "Ev2")
 
-    assert unreachable_conversations == [
-        expected_conversation(org_id, automation.id, f"{TEAM}/C123/1755000000.000100")
-    ]
+    # A terminal run is not contacted: the new turn needs a tracked run of
+    # its own even if the old runtime still happens to be reachable.
+    assert unreachable_conversations == []
     assert len(second.run_ids) == 1
     assert second.conversation_ids == []
 
@@ -1075,7 +1075,7 @@ async def test_continue_conversation_loads_the_run_s_automation(
         setup.add(
             AutomationRun(
                 automation_id=automation.id,
-                status=AutomationRunStatus.COMPLETED,
+                status=AutomationRunStatus.RUNNING,
                 started_at=utcnow(),
                 sandbox_id="sbx-1",
                 subject_source="slack",

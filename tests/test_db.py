@@ -245,6 +245,7 @@ class TestSqliteMigrations:
             # Verify all expected tables exist
             assert "automations" in tables
             assert "automation_runs" in tables
+            assert "automation_subject_turns" in tables
             assert "tarball_uploads" in tables
             assert "custom_webhooks" in tables
             assert "alembic_version" in tables

@@ -232,6 +232,13 @@ class TestVerifyAndMarkRunExitCodes:
     ):
         """Non-zero exit code (not -1) means command failed."""
         run_id = automation_with_run["run_id"]
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.execution_scope = "conversation"
+            run.conversation_turn = "review this"
+            run.subject_key = "repository:pr:1"
+            run.sandbox_id = None
+            await session.commit()
 
         verification = VerificationResult(
             verified=True,
@@ -261,6 +268,7 @@ class TestVerifyAndMarkRunExitCodes:
             assert "exit_code=1" in run.error_detail
             assert "Timed out" not in run.error_detail
             assert "stderr: Error: something went wrong" in run.error_detail
+            assert run.subject_released_at is not None
 
     @pytest.mark.asyncio
     async def test_exit_code_127_marks_failed_without_timeout(
@@ -705,6 +713,46 @@ class TestDeferredSandboxCleanup:
                 await session.commit()
 
         mock_backend.cleanup_after_verification.assert_awaited_once_with(str(run_id))
+
+    @pytest.mark.asyncio
+    async def test_timed_out_conversation_runtime_releases_immediately(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        run_id = automation_with_run["run_id"]
+        settings = mock_settings.model_copy(
+            update={"sandbox_cleanup_delay_seconds": 600}
+        )
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.execution_scope = "conversation"
+            run.conversation_turn = "review this"
+            run.subject_key = "repository:pr:1"
+            run.sandbox_id = None
+            await session.commit()
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(verified=False, error="Conversation not available")
+        )
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch(
+                "openhands.automation.watchdog.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                assert await _verify_and_mark_run(session, run, settings) is True
+                await session.commit()
+
+        mock_backend.cleanup_after_verification.assert_awaited_once_with(str(run_id))
+        mock_pause.assert_not_awaited()
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+            assert run.sandbox_cleanup_due_at is None
+            assert run.subject_released_at is not None
 
     @pytest.mark.asyncio
     async def test_verified_exit_pauses_and_books_deletion_instead_of_deleting(
