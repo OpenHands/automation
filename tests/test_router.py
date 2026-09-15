@@ -227,6 +227,87 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
+    async def _other_users_automation(
+        self, async_session, *, enabled: bool = True
+    ) -> Automation:
+        """Persist an automation created by someone other than the caller."""
+        automation = Automation(
+            user_id=self._OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=enabled,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_update_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot edit another user's automation definition."""
+        # Arrange
+        automation = await self._other_users_automation(async_session)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Do something else"},
+        )
+
+        # Assert
+        assert response.status_code == 403
+        assert "creator" in response.json()["detail"]
+
+    async def test_disable_as_non_creator_manager_succeeds(
+        self, async_client, async_session
+    ):
+        """A manager can turn off another user's automation."""
+        # Arrange
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": False}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+
+    async def test_enable_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot turn another user's automation back on."""
+        # Arrange
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        # Assert
+        assert response.status_code == 403
+
+    async def test_disable_with_edits_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """Turning off cannot carry other edits along with it."""
+        # Arrange
+        automation = await self._other_users_automation(async_session)
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"enabled": False, "name": "Renamed"},
+        )
+
+        # Assert
+        assert response.status_code == 403
+
 
 class TestCreateAutomation:
     """Tests for POST /v1 endpoint."""
@@ -2716,6 +2797,111 @@ class TestCompleteRun:
 
         assert response.status_code == 200
         mock_cleanup.assert_awaited_once()
+
+    async def test_complete_run_with_cleanup_delay_pauses_and_stamps_due_at(
+        self, async_client, async_session, monkeypatch
+    ):
+        """A configured delay pauses the sandbox and books its deletion."""
+        import asyncio
+        from datetime import timedelta
+
+        from openhands.automation.config import get_config
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        monkeypatch.setattr(get_config().service, "sandbox_cleanup_delay_seconds", 600)
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Deferred Cleanup",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="sandbox-deferred",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with (
+            patch(
+                "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+            ) as mock_cleanup,
+            patch(
+                "openhands.automation.router.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+            await asyncio.sleep(0)
+
+        assert response.status_code == 200
+        mock_pause.assert_awaited_once_with(
+            api_url=get_config().service.openhands_api_base_url,
+            api_key="test-api-key",
+            sandbox_id="sandbox-deferred",
+            run_id=str(run.id),
+        )
+        mock_cleanup.assert_not_called()
+
+        await async_session.refresh(run)
+        assert run.completed_at is not None
+        assert run.sandbox_cleanup_due_at == run.completed_at + timedelta(seconds=600)
+
+    async def test_complete_run_keep_alive_true_ignores_cleanup_delay(
+        self, async_client, async_session, monkeypatch
+    ):
+        """keep_alive=true still leaves the sandbox alone: no pause, no booking."""
+        from openhands.automation.config import get_config
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        monkeypatch.setattr(get_config().service, "sandbox_cleanup_delay_seconds", 600)
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Keep Alive With Delay",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            keep_alive=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            sandbox_id="sandbox-kept",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with (
+            patch(
+                "openhands.automation.router.cleanup_sandbox", new_callable=AsyncMock
+            ) as mock_cleanup,
+            patch(
+                "openhands.automation.router.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+        mock_pause.assert_not_called()
+        mock_cleanup.assert_not_called()
+
+        await async_session.refresh(run)
+        assert run.sandbox_cleanup_due_at is None
 
     async def test_complete_run_not_running_returns_409(
         self, async_client, async_session

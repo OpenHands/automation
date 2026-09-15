@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from fastapi import (
@@ -66,7 +67,7 @@ from openhands.automation.utils.run import (
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
-from openhands.automation.utils.sandbox import cleanup_sandbox
+from openhands.automation.utils.sandbox import cleanup_sandbox, pause_sandbox
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -100,6 +101,9 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
+
+    ``update_automation`` narrows this further: only the creator may change
+    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -245,11 +249,26 @@ async def update_automation(
     # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Partially update an automation."""
+    """Partially update an automation.
+
+    Only the creator may edit the definition. Admins and owners may set
+    ``enabled`` to ``False`` (turn it off) but nothing else.
+    """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    # Automations run under their creator's identity (git tokens, secrets,
+    # MCP servers), so only the creator may change what they do. Anyone else
+    # who passed _assert_can_manage (admins/owners) may only turn it off.
+    if auto.user_id != user.user_id and update_data != {"enabled": False}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only the automation creator can edit it; admins and owners "
+                "can only turn it off or delete it"
+            ),
+        )
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
@@ -566,8 +585,10 @@ async def complete_run(
     parent automation.
 
     If keep_alive is not true, deletes the sandbox after updating the run
-    status. When post-run callbacks are configured, cleanup will happen after
-    callbacks instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
+    status, or -- when ``sandbox_cleanup_delay_seconds`` is set -- pauses it
+    and leaves deletion to the watchdog once the delay has passed. When
+    post-run callbacks are configured, cleanup will happen after callbacks
+    instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -586,6 +607,15 @@ async def complete_run(
     # Optimistic locking: only update if the run is still RUNNING.
     # This prevents races between the watchdog and the callback.
     now = utcnow()
+    from openhands.automation.config import get_settings
+
+    settings = get_settings()
+    cleanup_delay = settings.sandbox_cleanup_delay_seconds
+    # Same gate as the cleanup branch below; a delay only replaces deletion
+    # with a pause and stamps when the watchdog should delete instead.
+    defer_cleanup = (
+        cleanup_delay > 0 and bool(run.sandbox_id) and automation.keep_alive is not True
+    )
     new_status = (
         AutomationRunStatus.COMPLETED
         if body.status == "COMPLETED"
@@ -595,6 +625,8 @@ async def complete_run(
         "status": new_status,
         "completed_at": now,
     }
+    if defer_cleanup:
+        values["sandbox_cleanup_due_at"] = now + timedelta(seconds=cleanup_delay)
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
@@ -704,9 +736,6 @@ async def complete_run(
     # here without a second condition.
     if run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
-        from openhands.automation.config import get_settings
-
-        settings = get_settings()
         api_key = user.api_key
         if api_key is None:
             # Cookie-authenticated users don't carry an API key;
@@ -722,14 +751,26 @@ async def complete_run(
                 api_key = None
 
         if api_key is not None:
-            asyncio.create_task(
-                cleanup_sandbox(
-                    api_url=settings.openhands_api_base_url,
-                    api_key=api_key,
-                    sandbox_id=run.sandbox_id,
-                    run_id=str(run_id),
+            if cleanup_delay > 0:
+                # Deferred: pause now so the conversation stays resumable; the
+                # watchdog deletes the sandbox at sandbox_cleanup_due_at.
+                asyncio.create_task(
+                    pause_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
                 )
-            )
+            else:
+                asyncio.create_task(
+                    cleanup_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
+                )
 
     return AutomationRunResponse.model_validate(run)
 

@@ -2,29 +2,60 @@
 
 import asyncio
 import subprocess
+import uuid
+from dataclasses import replace
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation.app import app
+from openhands.automation.auth import authenticate_request
 from openhands.automation.config import (
     GitSyncSettings,
     ServiceSettings,
     clear_config_cache,
 )
+from openhands.automation.git_sync import SyncCycleResult
 from openhands.automation.git_sync.router import _background_sync_tasks
+from openhands.automation.models import AutomationGitSyncOrgConfig
+
+
+# The org `async_client` authenticates as (see conftest.py).
+ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+OTHER_ORG_ID = uuid.UUID("11111111-2222-4333-8444-555555555555")
 
 
 @pytest.fixture(autouse=True)
 def writable_workspace(tmp_path, monkeypatch):
-    """Point `workspace_base` at a temp dir for every test in this module.
+    """Point `workspace_base` at a temp dir and provide a wrapping secret.
 
-    Storing a git-sync secret provisions a wrapping key under the workspace,
-    and the default "/workspace" isn't writable outside a container.
+    The checkout lives under the workspace, and the default "/workspace"
+    isn't writable outside a container. Outside local mode -- these tests'
+    default -- storing a git-sync secret needs an env wrapping key, since a
+    per-pod key file is refused there.
     """
     monkeypatch.setenv("AUTOMATION_WORKSPACE_BASE", str(tmp_path))
+    monkeypatch.setenv("AUTOMATION_GIT_SYNC_SECRET", "test-wrapping-secret")
     clear_config_cache()
     yield
     clear_config_cache()
+
+
+@pytest.fixture
+def as_other_org(mock_authenticated_user):
+    """Re-point the client's auth at an admin of a different organization."""
+
+    def _switch():
+        other = replace(
+            mock_authenticated_user, org_id=OTHER_ORG_ID, user_id=uuid.uuid4()
+        )
+
+        async def override_authenticate():
+            return other
+
+        app.dependency_overrides[authenticate_request] = override_authenticate
+        return other
+
+    return _switch
 
 
 class TestGitSyncStatus:
@@ -217,6 +248,7 @@ class TestTriggerGitSync:
 
         async def slow_run_sync_cycle(*args, **kwargs):
             await asyncio.sleep(0.3)
+            return SyncCycleResult(head=None)
 
         monkeypatch.setattr(router_module, "run_sync_cycle", slow_run_sync_cycle)
 
@@ -249,8 +281,12 @@ class TestSyncInProgressReporting:
     """
 
     @pytest.fixture
-    async def running_cycle(self, monkeypatch):
-        """Hold a cycle open for the duration of a test."""
+    async def running_cycle(self, monkeypatch, async_session_factory):
+        """Hold a cycle open for the duration of a test.
+
+        The cycle body is replaced, but the lease it takes on the org's row is
+        real: that is what `/status` and the trigger read.
+        """
         import openhands.automation.git_sync.loop as loop_module
 
         started = asyncio.Event()
@@ -259,12 +295,13 @@ class TestSyncInProgressReporting:
         async def paused_cycle(*args, **kwargs):
             started.set()
             await finish.wait()
+            return SyncCycleResult(head=None)
 
-        monkeypatch.setattr(loop_module, "_run_sync_cycle_locked", paused_cycle)
-        # The cycle body is replaced above; these only satisfy the signature.
+        monkeypatch.setattr(loop_module, "_run_sync_cycle_leased", paused_cycle)
         cycle = asyncio.create_task(
             loop_module.run_sync_cycle(
-                async_sessionmaker(class_=AsyncSession),
+                async_session_factory,
+                ORG_ID,
                 GitSyncSettings(),
                 ServiceSettings(agent_server_url="http://localhost:3000"),
             )
@@ -293,8 +330,8 @@ class TestSyncInProgressReporting:
     async def test_trigger_is_a_no_op_while_a_cycle_is_running(
         self, async_client, monkeypatch, running_cycle
     ):
-        # `run_sync_cycle` serializes on a lock, so a second cycle would just
-        # queue behind the running one and repeat its work.
+        # The running cycle holds the org's lease, so a second one would only
+        # be skipped -- and it covers everything the new one would have.
         started, _, _ = running_cycle
         await started.wait()
         monkeypatch.setenv(
@@ -313,28 +350,50 @@ class TestSyncInProgressReporting:
 
 
 class TestGitSyncConfigOutsideLocalMode:
-    """Configuring a repo is what enables sync, but only where sync can run:
-    one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
-    Config is still accepted there -- it just never starts anything.
+    """Sync is per org, so a cloud deployment (not local mode) configures it
+    from the UI like any other: setting a repo enables the caller's org. Only
+    the env-level repo is ignored there, since it would apply to every org.
     """
 
-    async def test_configuring_is_accepted_outside_local_mode(self, async_client):
+    async def test_configuring_a_repo_enables_the_orgs_sync(self, async_client):
         response = await async_client.put(
             "/api/automation/v1/git-sync/config",
             json={"repo_url": "https://example.com/repo.git"},
         )
         assert response.status_code == 200
-        assert response.json()["enabled"] is False
+        assert response.json()["enabled"] is True
 
-    async def test_manual_sync_stays_unavailable_after_such_an_attempt(
-        self, async_client
+    async def test_manual_sync_is_available_once_configured(
+        self, async_client, monkeypatch
     ):
+        import openhands.automation.git_sync.router as router_module
+
+        async def fake_run_sync_cycle(*args, **kwargs):
+            return SyncCycleResult(head=None)
+
+        monkeypatch.setattr(router_module, "run_sync_cycle", fake_run_sync_cycle)
+
         await async_client.put(
             "/api/automation/v1/git-sync/config",
             json={"repo_url": "https://example.com/repo.git"},
         )
         response = await async_client.post("/api/automation/v1/git-sync/sync")
-        assert response.status_code == 503
+        assert response.status_code == 202
+
+    async def test_env_repo_url_is_ignored_outside_local_mode(
+        self, async_client, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/repo.git"
+        )
+        clear_config_cache()
+        try:
+            body = (await async_client.get("/api/automation/v1/git-sync/status")).json()
+        finally:
+            clear_config_cache()
+
+        assert body["enabled"] is False
+        assert body["repo_url"] == ""
 
     async def test_pausing_is_always_allowed(self, async_client):
         response = await async_client.put(
@@ -402,25 +461,19 @@ class TestGitSyncSecretsAtRest:
         self, async_client, async_session
     ):
         """Regression: the token and encryption key were persisted as cleartext
-        JSON in `automation_service_metadata`, readable in any DB dump."""
-        from openhands.automation.git_sync.config_override import (
-            GIT_SYNC_CONFIG_OVERRIDE_KEY,
-        )
-        from openhands.automation.utils.service_metadata import get_service_metadata
-
+        JSON, readable in any DB dump."""
         response = await async_client.put(
             "/api/automation/v1/git-sync/config",
             json={"token": "ghp_supersecrettoken", "encryption_key": "the-key"},
         )
         assert response.status_code == 200
 
-        raw = await get_service_metadata(async_session, GIT_SYNC_CONFIG_OVERRIDE_KEY)
-        assert raw is not None
-        assert "ghp_supersecrettoken" not in raw
-        assert "the-key" not in raw
+        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        assert row is not None
+        assert "ghp_supersecrettoken" not in row.overrides
+        assert "the-key" not in row.overrides
 
     async def test_stored_secrets_are_readable_again(self, async_client, async_session):
-        from openhands.automation.config import get_config
         from openhands.automation.git_sync.config_override import (
             resolve_effective_git_sync_settings,
         )
@@ -429,10 +482,111 @@ class TestGitSyncSecretsAtRest:
             "/api/automation/v1/git-sync/config",
             json={"token": "ghp_supersecrettoken"},
         )
-        effective = await resolve_effective_git_sync_settings(
-            async_session, get_config().git_sync
-        )
+        effective = await resolve_effective_git_sync_settings(async_session, ORG_ID)
         assert effective.git_sync_token == "ghp_supersecrettoken"
+
+    async def test_refused_without_a_wrapping_key_outside_local_mode(
+        self, async_client, monkeypatch
+    ):
+        """A per-pod key file would leave a token stored by one replica
+        unreadable on the others, so cloud mode needs the env secret."""
+        monkeypatch.delenv("AUTOMATION_GIT_SYNC_SECRET")
+        clear_config_cache()
+        try:
+            response = await async_client.put(
+                "/api/automation/v1/git-sync/config",
+                json={"token": "ghp_supersecrettoken"},
+            )
+        finally:
+            clear_config_cache()
+
+        assert response.status_code == 503
+        assert "AUTOMATION_GIT_SYNC_SECRET" in response.json()["detail"]
+
+
+class TestOrgScoping:
+    """Every endpoint acts on the caller's org, and two orgs never share a
+    repo path: each org's export writes `{path}/{slug}/` and its import reads
+    every directory there, so sharing would import each other's automations.
+    """
+
+    async def test_status_and_config_are_per_org(self, async_client, as_other_org):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/a.git", "branch": "release"},
+        )
+
+        as_other_org()
+        body = (await async_client.get("/api/automation/v1/git-sync/status")).json()
+
+        assert body["enabled"] is False
+        assert body["repo_url"] == ""
+        assert body["branch"] == "main"
+
+    async def test_refuses_a_repo_branch_and_path_another_org_syncs(
+        self, async_client, as_other_org
+    ):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/shared.git"},
+        )
+        as_other_org()
+
+        # The same repo, spelt differently.
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/shared"},
+        )
+
+        assert response.status_code == 409
+
+    async def test_allows_a_different_path_in_a_repo_another_org_syncs(
+        self, async_client, as_other_org
+    ):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/shared.git"},
+        )
+        as_other_org()
+
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/shared.git", "path": "other-org"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
+
+    async def test_concurrent_saves_of_the_same_repo_are_serialised(
+        self, async_session_factory
+    ):
+        """The 409 is a check followed by a write, so two orgs saving the same
+        repo at once could both pass the check. The repo-identity lock holds
+        the second until the first commits, so its check sees the row."""
+        from openhands.automation.git_sync.config_override import lock_repo_identity
+
+        candidate = GitSyncSettings(git_sync_repo_url="https://example.com/shared.git")
+        async with async_session_factory() as first, async_session_factory() as second:
+            await lock_repo_identity(first, candidate)
+            waiter = asyncio.create_task(lock_repo_identity(second, candidate))
+            await asyncio.sleep(0.2)
+
+            assert not waiter.done(), "second writer did not wait for the first"
+
+            await first.commit()
+            await asyncio.wait_for(waiter, timeout=5)
+            await second.commit()
+
+    async def test_records_who_configured_the_org(
+        self, async_client, async_session, mock_authenticated_user
+    ):
+        await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"branch": "develop"}
+        )
+
+        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        assert row is not None
+        assert row.configured_by_user_id == mock_authenticated_user.user_id
 
 
 class TestGitSyncConfigCheck:
@@ -530,10 +684,13 @@ class TestGitSyncConfigCheck:
         self, async_client, captured_check, monkeypatch
     ):
         """Clearing a field reverts it to the env var, so that -- not a blank
-        -- is what the check must report on."""
+        -- is what the check must report on. Env-level repo config only
+        applies in local mode; elsewhere it is ignored (see
+        `base_git_sync_settings`)."""
         monkeypatch.setenv(
             "AUTOMATION_GIT_SYNC_REPO_URL", "https://example.com/from-env.git"
         )
+        monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
         clear_config_cache()
         try:
             await async_client.put(
