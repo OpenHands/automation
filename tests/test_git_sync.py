@@ -1821,7 +1821,34 @@ class TestTarballUploadLifecycle:
             )
 
         await self._push_yaml_edit(
-            origin, "editor-yaml", "enabled: true", "enabled: false"
+            origin,
+            "editor-yaml",
+            "\n".join(
+                [
+                    "enabled: true",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: ACTIVE",
+                ]
+            ),
+            "\n".join(
+                [
+                    "enabled: false",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: INACTIVE",
+                ]
+            ),
         )
         await run_sync_cycle(
             sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
