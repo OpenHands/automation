@@ -66,14 +66,22 @@ def is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite")
 
 
-def normalize_sqlite_url_for_alembic(url: str) -> str:
-    """Convert async SQLite URL to sync version for Alembic.
+ALEMBIC_SYNC_DRIVERS = {
+    "sqlite+aiosqlite": "sqlite",
+    "postgresql+asyncpg": "postgresql+pg8000",
+}
 
-    Alembic doesn't support async drivers, so we need to convert
-    sqlite+aiosqlite:// URLs to plain sqlite:// URLs.
+
+def normalize_url_for_alembic(url: str) -> str:
+    """Convert an async database URL to the sync driver Alembic uses.
+
+    Alembic runs synchronously and cannot drive aiosqlite or asyncpg, so
+    sqlite+aiosqlite:// becomes sqlite:// and postgresql+asyncpg:// becomes
+    postgresql+pg8000://. Any other URL is returned unchanged.
     """
-    if url.startswith("sqlite+aiosqlite"):
-        return url.replace("sqlite+aiosqlite", "sqlite", 1)
+    for async_driver, sync_driver in ALEMBIC_SYNC_DRIVERS.items():
+        if url.startswith(async_driver):
+            return url.replace(async_driver, sync_driver, 1)
     return url
 
 
