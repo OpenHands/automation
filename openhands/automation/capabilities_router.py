@@ -19,6 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
+from openhands.automation.draft_schemas import (
+    FINAL_DRAFT_MODELS,
+    normalize_draft_body,
+)
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.github import (
     get_supported_event_patterns,
@@ -26,15 +30,10 @@ from openhands.automation.event_schemas.github import (
 )
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.models import CustomWebhook
-from openhands.automation.preset_router import (
-    CreatePluginAutomationRequest,
-    CreatePromptAutomationRequest,
-)
 from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
-    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
@@ -56,26 +55,10 @@ router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
 _require_view_automations = require_permission("view_automations")
 
-DraftModel = (
-    CreateAutomationRequest
-    | CreatePromptAutomationRequest
-    | CreatePluginAutomationRequest
-)
-
-# Draft models keyed by the endpoint they would be posted to. Validating with
-# the model creation itself uses is what keeps preflight from drifting.
-# "/v1" is the raw create path, used by an entry shipping its own tarball. Its
-# tarball_path is checked for scheme here and for ownership only at creation:
-# preflight validates the body, not the upload behind it.
-_DRAFT_MODELS: dict[str, type[DraftModel]] = {
-    "/v1": CreateAutomationRequest,
-    "/v1/preset/prompt": CreatePromptAutomationRequest,
-    "/v1/preset/plugin": CreatePluginAutomationRequest,
-}
-
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
@@ -164,7 +147,8 @@ async def validate_draft(
     )
 
     try:
-        draft = _DRAFT_MODELS[body.endpoint].model_validate(body.draft)
+        normalized_draft = normalize_draft_body(body.endpoint, body.draft)
+        draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
 

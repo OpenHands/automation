@@ -29,6 +29,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
+    AutomationDraft,
     AutomationRun,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
@@ -131,6 +132,48 @@ def _assert_can_update_fields(
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only the automation creator can change its definition",
+    )
+
+
+async def _get_draft_for_materialized_automation(
+    session: AsyncSession, automation: Automation
+) -> AutomationDraft | None:
+    result = await session.execute(
+        select(AutomationDraft).where(
+            AutomationDraft.materialized_automation_id == automation.id,
+            AutomationDraft.org_id == automation.org_id,
+            AutomationDraft.deleted_at.is_(None),
+        )
+    )
+    return result.scalars().first()
+
+
+def _draft_not_dispatchable_error(draft: AutomationDraft) -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "message": "Draft is not dispatchable",
+            "errors": draft.validation_errors or [],
+        },
+    )
+
+
+async def _assert_normal_api_can_use_draft_artifact(
+    session: AsyncSession, automation: Automation
+) -> None:
+    if automation.state != ModelAutomationState.DRAFT:
+        return
+
+    draft = await _get_draft_for_materialized_automation(session, automation)
+    if draft is not None and not draft.dispatchable:
+        raise _draft_not_dispatchable_error(draft)
+
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail=(
+            "Draft automation artifacts must be dispatched or activated through "
+            "the draft API so the current draft is validated and materialized"
+        ),
     )
 
 
@@ -291,6 +334,9 @@ async def update_automation(
         update_data["enabled"] = automation_state_enabled(state)
     elif "enabled" in update_data:
         update_data["state"] = model_automation_state(None, update_data["enabled"])
+
+    if auto.state == ModelAutomationState.DRAFT and update_data.get("enabled") is True:
+        await _assert_normal_api_can_use_draft_artifact(session, auto)
 
     # Same rule CreateAutomationRequest enforces, applied to the merged view:
     # either half of the pair can arrive alone in a partial update.
@@ -520,6 +566,7 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
+    await _assert_normal_api_can_use_draft_artifact(session, auto)
 
     run = await create_pending_run(
         session,
