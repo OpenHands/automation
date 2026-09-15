@@ -76,6 +76,61 @@ class TestSqliteModeFlag:
 class TestCreateSqliteEngine:
     """Tests for SQLite engine creation."""
 
+    @pytest.mark.asyncio
+    async def test_create_engine_uses_configured_pool_settings(self, monkeypatch):
+        """SQLite engine receives the configured pool limits."""
+        captured: dict[str, Any] = {}
+        fake_engine: Any = object()
+
+        def fake_create_async_engine(*args: Any, **kwargs: Any) -> Any:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return fake_engine
+
+        monkeypatch.setattr(db_module, "create_async_engine", fake_create_async_engine)
+        settings = ServiceSettings(
+            db_url="sqlite+aiosqlite:///test.db",
+            db_pool_size=17,
+            db_max_overflow=4,
+            db_pool_timeout=9,
+        )
+
+        result = await db_module.create_engine(settings)
+
+        assert result.engine is fake_engine
+        assert captured["kwargs"]["pool_size"] == 17
+        assert captured["kwargs"]["max_overflow"] == 4
+        assert captured["kwargs"]["pool_timeout"] == 9
+
+    @pytest.mark.parametrize(
+        "db_url",
+        [
+            "sqlite+aiosqlite:///:memory:",
+            "sqlite+aiosqlite:///file::memory:?cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:memdb1?mode=memory&cache=shared&uri=true",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_create_engine_preserves_in_memory_pool_defaults(
+        self, monkeypatch, db_url
+    ):
+        """In-memory SQLite URLs keep SQLAlchemy's StaticPool defaults."""
+        captured: dict[str, Any] = {}
+        fake_engine: Any = object()
+
+        def fake_create_async_engine(*args: Any, **kwargs: Any) -> Any:
+            captured["kwargs"] = kwargs
+            return fake_engine
+
+        monkeypatch.setattr(db_module, "create_async_engine", fake_create_async_engine)
+
+        result = await db_module.create_engine(ServiceSettings(db_url=db_url))
+
+        assert result.engine is fake_engine
+        assert "pool_size" not in captured["kwargs"]
+        assert "max_overflow" not in captured["kwargs"]
+        assert "pool_timeout" not in captured["kwargs"]
+
     def test_creates_engine_with_aiosqlite_driver(self):
         """Engine is created with aiosqlite driver."""
         result = _create_sqlite_engine("sqlite:///test.db")
