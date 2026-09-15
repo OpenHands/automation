@@ -1,5 +1,7 @@
 """Helpers for resolving and validating model profile selections."""
 
+import uuid
+
 from fastapi import HTTPException, status
 
 from openhands.automation.auth import AuthenticatedUser
@@ -37,3 +39,17 @@ def resolve_model_profile_for_user(
     model_profile = requested_profile or user.active_model_profile_name
     validate_model_profile_for_user(model_profile, user)
     return model_profile
+
+
+def validate_agent_profile_selection(
+    agent_profile_id: uuid.UUID | None, model: str | None
+) -> None:
+    """An agent profile owns its model and is resolved by the configured server."""
+    if agent_profile_id is None:
+        return
+    from openhands.automation.config import get_config
+
+    if not get_config().service.is_local_mode:
+        raise HTTPException(422, "Agent profiles require a configured Agent Server")
+    if model:
+        raise HTTPException(422, "An agent profile already specifies the model")

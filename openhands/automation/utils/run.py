@@ -181,6 +181,7 @@ async def create_pending_run(
     now = utcnow()
 
     run = AutomationRun(
+        agent_profile_id=automation.agent_profile_id,
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
