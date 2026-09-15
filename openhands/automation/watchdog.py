@@ -1,10 +1,11 @@
-"""Staleness watchdog for stuck RUNNING automation runs.
+"""Completion and staleness watchdog for RUNNING automation runs.
 
-Periodically scans for runs stuck in RUNNING state past their pre-computed
-``timeout_at`` deadline. Before marking as FAILED, attempts to verify the
-actual run status by querying the execution environment. A verification
-result that means "the bash command may still be executing" defers the
-deadline (bounded by a hard cap) instead of terminalizing the run.
+Periodically verifies runs once their exact bash command is known, so ordinary
+process exit can complete a run without callback boilerplate in the entrypoint.
+Runs that have not produced a command are checked after their pre-computed
+``timeout_at`` deadline. Before that deadline, a nonterminal verification
+result leaves the run alone. After it, a command that may still be executing
+defers the deadline (bounded by a hard cap) instead of terminalizing the run.
 
 The ``timeout_at`` column is set to a provisioning-phase deadline when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``), then
@@ -231,6 +232,8 @@ async def _verify_and_mark_run(
     sandbox_id = run.sandbox_id
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
+    deadline = run.timeout_at
+    deadline_reached = not isinstance(deadline, datetime) or ensure_utc(deadline) < now
 
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
@@ -241,6 +244,8 @@ async def _verify_and_mark_run(
         verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
+        if not deadline_reached:
+            return False
         stmt = (
             update(AutomationRun)
             .where(
@@ -452,12 +457,24 @@ async def _verify_and_mark_run(
     # (enforced by the agent-server) has not fired yet, so defer instead of
     # destroying a live run. Must happen before any cleanup below.
     if verification.outcome == VerificationOutcome.STILL_RUNNING:
+        if not deadline_reached:
+            return False
         if await _defer_still_running(session, run, settings, now):
             return False
         logger.warning(
             "Still-running grace exhausted, proceeding to terminal timeout",
             extra=extra,
         )
+
+    # Before the deadline, an unavailable environment or inconclusive result
+    # is not proof of failure. The next watchdog pass will try again.
+    if not deadline_reached:
+        logger.info(
+            "Verification was inconclusive before the run deadline: %s",
+            verification.detail,
+            extra=extra,
+        )
+        return False
 
     # This likely means the sandbox crashed, was cleaned up, or verification
     # failed in a way that is not known to be transient.
@@ -545,11 +562,11 @@ async def mark_stale_runs(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> int:
-    """Find and process stale RUNNING runs.
+    """Observe started commands and process stale RUNNING runs.
 
-    A run is stale if ``timeout_at < now()``. Before marking as FAILED,
-    attempts to verify the actual status by querying the sandbox. Uses
-    optimistic locking so concurrent callbacks win.
+    A run with a bash command can complete from process exit alone. A run
+    without one becomes eligible when ``timeout_at < now()``. Verification
+    and terminal updates use optimistic locking so concurrent callbacks win.
 
     Each run is processed in its own session so that row locks are released
     immediately after commit rather than held for the duration of the batch.
@@ -561,24 +578,21 @@ async def mark_stale_runs(
     marked = 0
 
     async with session_factory() as session:
-        # Fetch stale run IDs only — close this session before doing any
+        # Fetch candidate run IDs only — close this session before doing any
         # per-run work so we don't hold locks across slow verify calls.
         result = await session.execute(
             select(AutomationRun.id).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
                 AutomationRun.timeout_at.isnot(None),
                 (
-                    (
-                        (AutomationRun.execution_scope == "conversation")
-                        & AutomationRun.bash_command_id.isnot(None)
-                    )
+                    AutomationRun.bash_command_id.isnot(None)
                     | (AutomationRun.timeout_at < now)
                 ),
             )
         )
-        stale_run_ids = list(result.scalars().all())
+        candidate_run_ids = list(result.scalars().all())
 
-    for run_id in stale_run_ids:
+    for run_id in candidate_run_ids:
         async with session_factory() as session:
             # Re-fetch with automation relationship inside a fresh session.
             result = await session.execute(
@@ -593,7 +607,7 @@ async def mark_stale_runs(
             extra = log_extra(run_id=str(run_id), sandbox_id=run.sandbox_id)
 
             logger.info(
-                "Processing stale run (timeout_at=%s, now=%s)",
+                "Processing run candidate (timeout_at=%s, now=%s)",
                 run.timeout_at,
                 now,
                 extra=extra,

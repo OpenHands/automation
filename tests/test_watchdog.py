@@ -20,7 +20,10 @@ from openhands.automation.models import (
     IntegrationEvent,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.utils.agent_server import (
+    VerificationOutcome,
+    VerificationResult,
+)
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_runtime_after_terminal,
@@ -929,7 +932,7 @@ async def test_conversation_command_completes_before_timeout(
 
 
 @pytest.mark.asyncio
-async def test_run_scoped_command_still_waits_for_timeout(
+async def test_run_scoped_command_completes_before_timeout(
     async_session_factory, automation_with_run, mock_settings
 ):
     run_id = automation_with_run["run_id"]
@@ -946,8 +949,37 @@ async def test_run_scoped_command_still_waits_for_timeout(
         )
     )
     with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
+        assert await mark_stale_runs(async_session_factory, mock_settings) == 1
+    mock_backend.verify_run.assert_awaited_once_with(str(run_id))
+
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        assert run.status == AutomationRunStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_run_scoped_command_still_running_before_timeout_is_unchanged(
+    async_session_factory, automation_with_run, mock_settings
+):
+    run_id = automation_with_run["run_id"]
+    deadline = utcnow() + timedelta(minutes=30)
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        run.execution_scope = "run"
+        run.bash_command_id = "command-123"
+        run.timeout_at = deadline
+        await session.commit()
+
+    mock_backend = _create_mock_backend(
+        VerificationResult(outcome=VerificationOutcome.STILL_RUNNING)
+    )
+    with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
         assert await mark_stale_runs(async_session_factory, mock_settings) == 0
-    mock_backend.verify_run.assert_not_awaited()
+
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        assert run.status == AutomationRunStatus.RUNNING
+        assert run.timeout_at == deadline
 
 
 @pytest.mark.asyncio
