@@ -217,6 +217,36 @@ async def test_ignored_envelope_is_still_acked(provider):
 
 
 @pytest.mark.asyncio
+async def test_reply_to_bot_message_is_acked_before_it_is_routed(provider):
+    client = FakeSocketClient()
+    payload = envelope(
+        type="message",
+        text="Can you explain that?",
+        thread_ts="1755000000.000100",
+        parent_user_id=BOT_USER_ID,
+    )
+
+    await provider.handle(client, request(payload), client.emit)
+
+    assert client.calls == ["ack:env-1", "emit:message"]
+
+
+@pytest.mark.asyncio
+async def test_human_rooted_thread_reply_is_acked_before_it_is_routed(provider):
+    client = FakeSocketClient()
+    payload = envelope(
+        type="message",
+        text="Can you explain that?",
+        thread_ts="1755000000.000100",
+        parent_user_id="U456",
+    )
+
+    await provider.handle(client, request(payload), client.emit)
+
+    assert client.calls == ["ack:env-1", "emit:message"]
+
+
+@pytest.mark.asyncio
 async def test_non_events_api_request_is_acked_only(provider):
     client = FakeSocketClient()
 
@@ -236,6 +266,55 @@ def test_app_mention_becomes_an_accepted_event(provider):
     assert event.event_key == "app_mention"
     assert event.payload["team_id"] == TEAM_ID
     assert event.provider_event_id == "Ev0001"
+
+
+def test_reply_to_bot_message_becomes_an_accepted_event(provider):
+    event = provider.accepted_event(
+        envelope(
+            type="message",
+            text="Can you explain that?",
+            thread_ts="1755000000.000100",
+            parent_user_id=BOT_USER_ID,
+        )
+    )
+
+    assert event is not None
+    assert event.source == "slack"
+    assert event.event_key == "message"
+    assert event.payload["event"]["parent_user_id"] == BOT_USER_ID
+    assert event.provider_event_id == "Ev0001"
+    assert event.existing_subject_only is False
+
+
+def test_human_rooted_thread_reply_requires_an_existing_subject(provider):
+    event = provider.accepted_event(
+        envelope(
+            type="message",
+            text="Can you explain that?",
+            thread_ts="1755000000.000100",
+            parent_user_id="U456",
+        )
+    )
+
+    assert event is not None
+    assert event.event_key == "message"
+    assert event.existing_subject_only is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"type": "message"},
+        {
+            "type": "message",
+            "thread_ts": "1755000000.000100",
+            "parent_user_id": BOT_USER_ID,
+            "bot_id": "B123",
+        },
+    ],
+)
+def test_bare_or_bot_authored_messages_are_dropped(provider, overrides: dict[str, Any]):
+    assert provider.accepted_event(envelope(**overrides)) is None
 
 
 def test_the_run_payload_matches_the_webhook_path_exactly(provider):
@@ -284,7 +363,7 @@ def test_bot_messages_are_dropped(provider, overrides: dict):
 
 
 def test_other_event_types_are_dropped(provider):
-    assert provider.accepted_event(envelope(type="message")) is None
+    assert provider.accepted_event(envelope(type="reaction_added")) is None
 
 
 def test_other_teams_are_dropped(provider):
