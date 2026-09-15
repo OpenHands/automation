@@ -260,7 +260,11 @@ class TestSqliteMigrations:
             }
             assert "cost" in run_columns
             assert "agent_profile_id" in run_columns
+            assert "execution_scope" in run_columns
             assert "agent_profile_id" in {
+                column["name"] for column in inspector.get_columns("automations")
+            }
+            assert "execution_scope" in {
                 column["name"] for column in inspector.get_columns("automations")
             }
 

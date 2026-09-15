@@ -10,6 +10,7 @@ import logging
 import re
 import tarfile
 from typing import Any
+from uuid import UUID
 
 import httpx
 from pydantic.dataclasses import dataclass
@@ -27,6 +28,7 @@ from openhands.automation.exceptions import PermanentDispatchError, TarballNotFo
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.sandbox import delete_sandbox
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.sdk.workspace import AsyncRemoteWorkspace
 
 
 # Default working directory for cloud/container mode
@@ -166,11 +168,11 @@ async def _create_and_wait(
 
 
 async def _upload(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     data: bytes,
     dest: str,
+    runtime_conversation_id: UUID | None = None,
 ) -> None:
     """Upload bytes to the sandbox via the agent-server file API.
 
@@ -178,59 +180,54 @@ async def _upload(
     with proxies that collapse double-slashes (e.g. //tmp -> /tmp).
     See: https://github.com/All-Hands-AI/OpenHands/commit/a14158e
     """
-    # Use query param instead of path param to avoid double-slash normalization
-    from urllib.parse import urlencode
-
-    params = urlencode({"path": dest})
-    resp = await client.post(
-        f"{agent_url}/api/file/upload?{params}",
-        files={"file": ("upload", data)},
-        headers={"X-Session-API-Key": session_key},
-    )
-    resp.raise_for_status()
+    async with AsyncRemoteWorkspace(
+        host=agent_url,
+        api_key=session_key,
+        working_dir="/",
+        runtime_conversation_id=runtime_conversation_id,
+    ) as workspace:
+        result = await workspace.file_upload(data, dest)
+        if not result.success:
+            raise RuntimeError(result.error or "Automation bundle upload failed")
 
 
 async def _bash(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     command: str,
     timeout: int | None = None,
+    runtime_conversation_id: UUID | None = None,
 ) -> tuple[int | None, str, str]:
     """Run a bash command synchronously. Returns ``(exit_code, stdout, stderr)``."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    resp = await client.post(
-        f"{agent_url}/api/bash/execute_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=httpx.Timeout(timeout + 30),
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    return body.get("exit_code"), body.get("stdout") or "", body.get("stderr") or ""
+    async with AsyncRemoteWorkspace(
+        host=agent_url,
+        api_key=session_key,
+        working_dir="/",
+        runtime_conversation_id=runtime_conversation_id,
+    ) as workspace:
+        result = await workspace.execute_command(command, timeout=timeout)
+        return result.exit_code, result.stdout, result.stderr
 
 
 async def _start_bash(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     command: str,
     timeout: int | None = None,
+    runtime_conversation_id: UUID | None = None,
 ) -> str:
     """Start a bash command in the background. Returns the command ID."""
     if timeout is None:
         timeout = resolve_automation_timeout_seconds(None)
-    http_timeout = get_config().http.http_timeout
-    resp = await client.post(
-        f"{agent_url}/api/bash/start_bash_command",
-        json={"command": command, "timeout": timeout},
-        headers={"X-Session-API-Key": session_key},
-        timeout=http_timeout,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    return body.get("id")
+    async with AsyncRemoteWorkspace(
+        host=agent_url,
+        api_key=session_key,
+        working_dir="/",
+        runtime_conversation_id=runtime_conversation_id,
+    ) as workspace:
+        return await workspace.start_command(command, timeout=timeout)
 
 
 def _is_permanent_http_error(stderr: str) -> bool:
@@ -252,13 +249,13 @@ def _is_permanent_http_error(stderr: str) -> bool:
 
 
 async def _download_in_sandbox(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     tarball_url: str,
     dest: str,
     timeout: int | None = None,
     max_filesize: int | None = None,
+    runtime_conversation_id: UUID | None = None,
 ) -> None:
     """Download a tarball directly inside the sandbox using curl.
 
@@ -292,7 +289,11 @@ async def _download_in_sandbox(
     )
 
     exit_code, stdout, stderr = await _bash(
-        client, agent_url, session_key, cmd, timeout=timeout + 30
+        agent_url,
+        session_key,
+        cmd,
+        timeout=timeout + 30,
+        runtime_conversation_id=runtime_conversation_id,
     )
 
     if exit_code != 0:
@@ -331,7 +332,6 @@ class DispatchResult:
 
 
 async def execute_in_context(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     entrypoint: str,
@@ -341,6 +341,7 @@ async def execute_in_context(
     timeout: int | None = None,
     run_id: str | None = None,
     sandbox_id: str | None = None,
+    runtime_conversation_id: UUID | None = None,
 ) -> DispatchResult:
     """Execute automation code in an existing execution context.
 
@@ -383,28 +384,40 @@ async def execute_in_context(
         if run_id and "/" not in run_id
         else TARBALL_PATH
     )
+    if runtime_conversation_id is not None:
+        tarball_path = f"{work_dir}/automation-{run_id or 'run'}.tar.gz"
     env_path: str | None = None
 
     try:
         # Get tarball into environment: upload bytes or download from URL
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
-            await _upload(client, agent_url, session_key, tarball_source, tarball_path)
+            await _upload(
+                agent_url,
+                session_key,
+                tarball_source,
+                tarball_path,
+                runtime_conversation_id=runtime_conversation_id,
+            )
         else:
             logger.info("Downloading tarball from URL", extra=_log_ctx())
             await _download_in_sandbox(
-                client, agent_url, session_key, tarball_source, tarball_path
+                agent_url,
+                session_key,
+                tarball_source,
+                tarball_path,
+                runtime_conversation_id=runtime_conversation_id,
             )
 
         env_prefix = ""
         if env_vars:
             env_path = f"{tarball_path}.env"
             await _upload(
-                client,
                 agent_url,
                 session_key,
                 _serialize_env_vars(env_vars),
                 env_path,
+                runtime_conversation_id=runtime_conversation_id,
             )
             env_prefix = _env_command_prefix(env_path)
 
@@ -419,7 +432,11 @@ async def execute_in_context(
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(
-            client, agent_url, session_key, cmd, timeout=timeout
+            agent_url,
+            session_key,
+            cmd,
+            timeout=timeout,
+            runtime_conversation_id=runtime_conversation_id,
         )
         env_path = None
         logger.info(
@@ -444,10 +461,10 @@ async def execute_in_context(
         if env_path is not None:
             try:
                 exit_code, _, stderr = await _bash(
-                    client,
                     agent_url,
                     session_key,
                     f"rm -f -- {_shell_quote(env_path)}",
+                    runtime_conversation_id=runtime_conversation_id,
                     timeout=int(get_config().http.http_timeout),
                 )
                 if exit_code != 0:
@@ -553,20 +570,17 @@ async def run_automation(
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
                 logger.info("Uploading tarball to sandbox", extra=_log_ctx())
-                await _upload(
-                    client, agent_url, session_key, tarball_source, TARBALL_PATH
-                )
+                await _upload(agent_url, session_key, tarball_source, TARBALL_PATH)
             else:
                 logger.info("Downloading tarball in sandbox from URL", extra=_log_ctx())
                 await _download_in_sandbox(
-                    client, agent_url, session_key, tarball_source, TARBALL_PATH
+                    agent_url, session_key, tarball_source, TARBALL_PATH
                 )
 
             env_prefix = ""
             if env_vars:
                 env_path = f"{TARBALL_PATH}.env"
                 await _upload(
-                    client,
                     agent_url,
                     session_key,
                     _serialize_env_vars(env_vars),
@@ -584,7 +598,10 @@ async def run_automation(
 
             logger.info("Executing entrypoint: %s", entrypoint, extra=_log_ctx())
             exit_code, stdout, stderr = await _bash(
-                client, agent_url, session_key, cmd, timeout=timeout
+                agent_url,
+                session_key,
+                cmd,
+                timeout=timeout,
             )
 
             success = exit_code == 0

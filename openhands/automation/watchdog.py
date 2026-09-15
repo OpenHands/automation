@@ -166,15 +166,17 @@ def _loaded_automation(run: AutomationRun) -> Automation | None:
     return run.automation
 
 
-def _should_cleanup_sandbox_after_terminal(
+def _should_cleanup_runtime_after_terminal(
     run: AutomationRun, keep_alive: bool | None
 ) -> bool:
-    """Return whether watchdog should explicitly delete this run's sandbox.
+    """Return whether watchdog should release this run's execution runtime.
 
     A `continue_conversation` automation is forced keep_alive at creation, so
     the sandbox carrying a live conversation is already excluded here.
     """
-    return bool(run.sandbox_id) and keep_alive is not True
+    return (
+        bool(run.sandbox_id) or run.execution_scope == "conversation"
+    ) and keep_alive is not True
 
 
 async def _defer_sandbox_cleanup(
@@ -399,8 +401,8 @@ async def _verify_and_mark_run(
             )
         if result.rowcount > 0:
             keep_alive = await _get_automation_keep_alive(session, run)
-            if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-                if settings.sandbox_cleanup_delay_seconds > 0:
+            if _should_cleanup_runtime_after_terminal(run, keep_alive):
+                if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
                     await _defer_sandbox_cleanup(session, run, backend, settings, now)
                 else:
                     try:
@@ -468,8 +470,8 @@ async def _verify_and_mark_run(
     # Clean up resources via backend only when the automation owns explicit
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
     keep_alive = await _get_automation_keep_alive(session, run)
-    if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-        if settings.sandbox_cleanup_delay_seconds > 0:
+    if _should_cleanup_runtime_after_terminal(run, keep_alive):
+        if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
             await _defer_sandbox_cleanup(session, run, backend, settings, now)
         else:
             try:
@@ -565,7 +567,13 @@ async def mark_stale_runs(
             select(AutomationRun.id).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
                 AutomationRun.timeout_at.isnot(None),
-                AutomationRun.timeout_at < now,
+                (
+                    (
+                        (AutomationRun.execution_scope == "conversation")
+                        & AutomationRun.bash_command_id.isnot(None)
+                    )
+                    | (AutomationRun.timeout_at < now)
+                ),
             )
         )
         stale_run_ids = list(result.scalars().all())

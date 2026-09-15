@@ -184,6 +184,10 @@ async def _resolve_agent_server(
 ) -> tuple[str, str] | None:
     """Find the agent server holding this run's conversation."""
     backend = get_backend(run)
+    from openhands.automation.backends.conversation import ConversationBackend
+
+    if isinstance(backend, ConversationBackend):
+        backend = backend.server
     if backend.is_local_mode:
         # Side-effect free here; the cloud backend's version creates a sandbox.
         ctx = await backend.get_execution_context(client)

@@ -19,6 +19,15 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 
 ## Development
 
+### Conversation-scoped execution
+
+Definitions default to `execution_scope: "run"`. A definition with
+`execution_scope: "conversation"` and an `agent_profile_id` runs its bundle in
+that Agent Server conversation. The server decides whether the conversation
+workspace is local or Docker-backed; the bundle receives the same environment
+in either case. Docker-backed bundles receive only the conversation runtime key,
+and the watchdog releases the runtime after the command finishes.
+
 ### Prerequisites
 
 - Python 3.12+

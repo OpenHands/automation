@@ -172,6 +172,7 @@ async def create_automation(
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
+        execution_scope=body.execution_scope,
         name=body.name,
         model=model,
         agent_profile_id=body.agent_profile_id,
@@ -916,6 +917,18 @@ async def cancel_run(
         run=run,
         properties={"trigger_source": "manual"},
     )
+
+    if run.execution_scope == "conversation":
+        from openhands.automation.backends import get_backend
+
+        # Release the transaction before waiting for Docker to stop.
+        await session.commit()
+        try:
+            await get_backend(run).cleanup_after_verification(str(run_id))
+        except Exception:
+            logger.warning(
+                "Runtime cleanup failed for cancelled run %s", run_id, exc_info=True
+            )
 
     # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
     # unlike `complete_run` the sandbox goes even when the run owns a subject

@@ -503,6 +503,9 @@ async def _validate_and_resolve_fields(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
+    execution_scope = fields.get("execution_scope", "run")
+    if execution_scope not in {"run", "conversation"}:
+        raise ValueError("execution_scope must be 'run' or 'conversation'")
     agent_profile_id = (
         uuid.UUID(fields["agent_profile_id"])
         if fields.get("agent_profile_id")
@@ -518,6 +521,7 @@ async def _validate_and_resolve_fields(
 
     return {
         "name": name,
+        "execution_scope": execution_scope,
         "model": fields.get("model"),
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),

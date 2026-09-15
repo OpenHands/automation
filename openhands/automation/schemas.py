@@ -423,6 +423,7 @@ class TemplateProvenance(BaseModel):
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    execution_scope: Literal["run", "conversation"] = "run"
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description="Agent profile selected for this automation.",
@@ -528,6 +529,7 @@ class UpdateAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    execution_scope: Literal["run", "conversation"] | None = None
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description="Agent profile selected for this automation.",
@@ -872,6 +874,7 @@ class TelemetryConsentResponse(BaseModel):
 
 
 class AutomationResponse(BaseModel):
+    execution_scope: Literal["run", "conversation"] = "run"
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
@@ -950,6 +953,7 @@ class RunPhaseRequest(BaseModel):
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 
+    execution_scope: Literal["run", "conversation"] = "run"
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     automation_id: uuid.UUID

@@ -23,7 +23,7 @@ from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
-    _should_cleanup_sandbox_after_terminal,
+    _should_cleanup_runtime_after_terminal,
     _verify_and_mark_run,
     cleanup_due_sandboxes,
     mark_stale_runs,
@@ -675,6 +675,35 @@ class TestDeferredSandboxCleanup:
     """With a cleanup delay the watchdog pauses now and deletes later."""
 
     @pytest.mark.asyncio
+    async def test_conversation_runtime_releases_without_a_sandbox_id(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        run_id = automation_with_run["run_id"]
+        settings = mock_settings.model_copy(
+            update={"sandbox_cleanup_delay_seconds": 600}
+        )
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.execution_scope = "conversation"
+            run.sandbox_id = None
+            await session.commit()
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(
+                verified=True, success=True, exit_code=0, stdout="ok", stderr=""
+            )
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                assert await _verify_and_mark_run(session, run, settings) is True
+                await session.commit()
+
+        mock_backend.cleanup_after_verification.assert_awaited_once_with(str(run_id))
+
+    @pytest.mark.asyncio
     async def test_verified_exit_pauses_and_books_deletion_instead_of_deleting(
         self, async_session_factory, automation_with_run, mock_settings
     ):
@@ -829,13 +858,13 @@ class TestSubjectOwningRunsKeepTheirSandbox:
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = "T06P212QSEA/C123/1755000000.000100"
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=True) is False
+        assert _should_cleanup_runtime_after_terminal(run, keep_alive=True) is False
 
     def test_an_ordinary_run_is_still_cleaned_up(self):
         run = MagicMock(spec=AutomationRun)
         run.sandbox_id = "sbx-1"
         run.subject_key = None
-        assert _should_cleanup_sandbox_after_terminal(run, keep_alive=False) is True
+        assert _should_cleanup_runtime_after_terminal(run, keep_alive=False) is True
 
     @pytest.mark.asyncio
     async def test_watchdog_does_not_delete_the_conversations_sandbox(
@@ -872,6 +901,53 @@ class TestSubjectOwningRunsKeepTheirSandbox:
             # about, and nothing has released it.
             assert run.subject_key == "T06P212QSEA/C123/1755000000.000100"
             assert run.subject_released_at is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_command_completes_before_timeout(
+    async_session_factory, automation_with_run, mock_settings
+):
+    run_id = automation_with_run["run_id"]
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        run.execution_scope = "conversation"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=30)
+        await session.commit()
+
+    mock_backend = _create_mock_backend(
+        VerificationResult(
+            verified=True, success=True, exit_code=0, stdout="done", stderr=""
+        )
+    )
+    with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
+        assert await mark_stale_runs(async_session_factory, mock_settings) == 1
+
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        assert run.status == AutomationRunStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_run_scoped_command_still_waits_for_timeout(
+    async_session_factory, automation_with_run, mock_settings
+):
+    run_id = automation_with_run["run_id"]
+    async with async_session_factory() as session:
+        run = await session.get(AutomationRun, run_id)
+        run.execution_scope = "run"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=30)
+        await session.commit()
+
+    mock_backend = _create_mock_backend(
+        VerificationResult(
+            verified=True, success=True, exit_code=0, stdout="done", stderr=""
+        )
+    )
+    with patch("openhands.automation.watchdog.get_backend", return_value=mock_backend):
+        assert await mark_stale_runs(async_session_factory, mock_settings) == 0
+    mock_backend.verify_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

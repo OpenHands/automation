@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import httpx
 
@@ -28,6 +29,7 @@ class ExecutionContext:
     sandbox_id: str | None = None
     api_url: str | None = None
     api_key: str | None = None
+    runtime_conversation_id: UUID | None = None
 
 
 class ExecutionBackend(ABC):

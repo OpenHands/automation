@@ -203,3 +203,28 @@ def mock_settings():
         service_key="test-service-key",
         base_url="http://localhost:8000",
     )
+
+
+@pytest.fixture
+def sdk_http_transport(monkeypatch):
+    """Intercept SDK-owned HTTP pools without borrowing a caller's client."""
+    import httpx
+
+    async_init = httpx.AsyncClient.__init__
+    sync_init = httpx.Client.__init__
+
+    def install(handler):
+        transport = httpx.MockTransport(handler)
+
+        def init_async(self, *args, **kwargs):
+            kwargs.setdefault("transport", transport)
+            async_init(self, *args, **kwargs)
+
+        def init_sync(self, *args, **kwargs):
+            kwargs.setdefault("transport", transport)
+            sync_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", init_async)
+        monkeypatch.setattr(httpx.Client, "__init__", init_sync)
+
+    return install

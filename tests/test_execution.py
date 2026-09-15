@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from openhands.automation.config import get_config
@@ -160,59 +161,32 @@ class TestUploadUsesQueryParams:
     """
 
     @pytest.mark.asyncio
-    async def test_upload_uses_query_param_for_path(self):
-        """_upload should use ?path= query param, not path in URL."""
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
+    @pytest.mark.parametrize(
+        "destination", ["/tmp/automation.tar.gz", "/workspace/file.txt"]
+    )
+    async def test_upload_preserves_path_in_query(
+        self, destination, sdk_http_transport
+    ):
+        """Exercise the SDK transport through the dispatcher's upload entrypoint."""
+        requests = []
 
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={})
 
+        sdk_http_transport(respond)
         await _upload(
-            client=mock_client,
             agent_url="https://agent.example.com",
             session_key="test-session-key",
             data=b"test data",
-            dest="/tmp/automation.tar.gz",
+            dest=destination,
         )
 
-        # Verify post was called with query param, not path param
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-
-        url = call_args[0][0]
-        # URL should use query param format
-        assert "?path=" in url, f"Expected query param in URL, got: {url}"
-        assert "/tmp/automation.tar.gz" not in url.split("?")[0], (
-            f"Path should not be in URL path segment: {url}"
-        )
-        # Verify the path is properly encoded in query string
-        assert (
-            "path=%2Ftmp%2Fautomation.tar.gz" in url
-            or "path=/tmp/automation.tar.gz" in url
-        )
-
-    @pytest.mark.asyncio
-    async def test_upload_preserves_absolute_path(self):
-        """_upload should preserve leading slash in path via query param."""
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-
-        await _upload(
-            client=mock_client,
-            agent_url="https://agent.example.com",
-            session_key="test-session-key",
-            data=b"test data",
-            dest="/workspace/file.txt",
-        )
-
-        url = mock_client.post.call_args[0][0]
-        # The path in query param should preserve the leading slash
-        # (either URL-encoded as %2F or literal /)
-        assert "%2Fworkspace" in url or "/workspace" in url.split("?")[1]
+        assert len(requests) == 1
+        assert requests[0].method == "POST"
+        assert requests[0].url.path == "/api/file/upload"
+        assert requests[0].url.params["path"] == destination
+        assert requests[0].headers["X-Session-API-Key"] == "test-session-key"
 
 
 class TestExecuteInContextErrors:
@@ -226,10 +200,8 @@ class TestExecuteInContextErrors:
             "External tarball URL is not accessible"
         )
 
-        mock_client = AsyncMock()
         with pytest.raises(TarballNotFoundError) as exc_info:
             await execute_in_context(
-                client=mock_client,
                 agent_url="https://agent.example.com",
                 session_key="test-session-key",
                 entrypoint="python main.py",
@@ -247,9 +219,7 @@ class TestExecuteInContextErrors:
         """Non-permanent errors return DispatchResult with success=False."""
         mock_download_in_sandbox.side_effect = RuntimeError("Connection timeout")
 
-        mock_client = AsyncMock()
         result = await execute_in_context(
-            client=mock_client,
             agent_url="https://agent.example.com",
             session_key="test-session-key",
             entrypoint="python main.py",
@@ -270,7 +240,6 @@ class TestExecuteInContextErrors:
         mock_start_bash.return_value = "cmd-1"
 
         result = await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="test-session-key",
             entrypoint="python main.py",
@@ -289,10 +258,8 @@ class TestExecuteInContextErrors:
         """PermanentDispatchError during upload is also re-raised."""
         mock_upload.side_effect = PermanentDispatchError("Upload permanently failed")
 
-        mock_client = AsyncMock()
         with pytest.raises(PermanentDispatchError) as exc_info:
             await execute_in_context(
-                client=mock_client,
                 agent_url="https://agent.example.com",
                 session_key="test-session-key",
                 entrypoint="python main.py",
@@ -310,9 +277,7 @@ class TestExecuteInContextErrors:
         mock_upload.return_value = None
         mock_start_bash.return_value = "cmd-123"
 
-        mock_client = AsyncMock()
         result = await execute_in_context(
-            client=mock_client,
             agent_url="https://agent.example.com",
             session_key="test-session-key",
             entrypoint="python main.py",
@@ -400,7 +365,6 @@ class TestPrivateEnvironmentInjection:
         mock_start_bash.return_value = "cmd-123"
 
         result = await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="session-key",
             entrypoint="python main.py",
@@ -413,10 +377,10 @@ class TestPrivateEnvironmentInjection:
         assert result.success is True
         assert mock_upload.await_count == 2
         env_upload = mock_upload.await_args_list[1]
-        assert env_upload.args[4] == f"/tmp/automation-{run_id}.tar.gz.env"
-        assert secret.encode() in env_upload.args[3]
+        assert env_upload.args[3] == f"/tmp/automation-{run_id}.tar.gz.env"
+        assert secret.encode() in env_upload.args[2]
 
-        command = mock_start_bash.await_args.args[3]
+        command = mock_start_bash.await_args.args[2]
         assert secret not in command
         assert "it's $private" not in command
         assert "set +x" in command
@@ -436,7 +400,6 @@ class TestPrivateEnvironmentInjection:
         mock_start_bash.return_value = "cmd-123"
 
         result = await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="session-key",
             entrypoint="python main.py",
@@ -459,14 +422,12 @@ class TestPrivateEnvironmentInjection:
         mock_start_bash,
         mock_bash,
     ):
-        client = AsyncMock()
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         env_path = f"/tmp/automation-{run_id}.tar.gz.env"
         mock_start_bash.side_effect = RuntimeError("command startup failed")
         mock_bash.return_value = (0, "", "")
 
         result = await execute_in_context(
-            client=client,
             agent_url="https://agent.example.com",
             session_key="session-key",
             entrypoint="python main.py",
@@ -480,10 +441,10 @@ class TestPrivateEnvironmentInjection:
         assert result.error == "command startup failed"
         assert mock_upload.await_count == 2
         mock_bash.assert_awaited_once_with(
-            client,
             "https://agent.example.com",
             "session-key",
             f"rm -f -- '{env_path}'",
+            runtime_conversation_id=None,
             timeout=int(get_config().http.http_timeout),
         )
 
@@ -503,7 +464,6 @@ class TestPrivateEnvironmentInjection:
 
         with pytest.raises(PermanentDispatchError) as exc_info:
             await execute_in_context(
-                client=AsyncMock(),
                 agent_url="https://agent.example.com",
                 session_key="session-key",
                 entrypoint="python main.py",
@@ -550,8 +510,8 @@ class TestPrivateEnvironmentInjection:
 
         assert result.success is True
         assert mock_upload.await_count == 2
-        assert session_key.encode() in mock_upload.await_args_list[1].args[3]
-        command = mock_bash.await_args.args[3]
+        assert session_key.encode() in mock_upload.await_args_list[1].args[2]
+        command = mock_bash.await_args.args[2]
         assert session_key not in command
         assert f"{TARBALL_PATH}.env" in command
 
@@ -579,7 +539,6 @@ class TestPerRunTarballPath:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
         await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="key",
             entrypoint="python main.py",
@@ -588,7 +547,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        uploaded_dest = mock_upload.call_args.args[4]  # (client, url, key, data, dest)
+        uploaded_dest = mock_upload.call_args.args[3]  # (url, key, data, dest)
         assert uploaded_dest == f"/tmp/automation-{run_id}.tar.gz"
         assert uploaded_dest != TARBALL_PATH
 
@@ -604,7 +563,6 @@ class TestPerRunTarballPath:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
         await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="key",
             entrypoint="python main.py",
@@ -613,7 +571,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        download_dest = mock_download_in_sandbox.call_args.args[4]
+        download_dest = mock_download_in_sandbox.call_args.args[3]
         assert download_dest == f"/tmp/automation-{run_id}.tar.gz"
         assert download_dest != TARBALL_PATH
 
@@ -630,7 +588,6 @@ class TestPerRunTarballPath:
         expected_path = f"/tmp/automation-{run_id}.tar.gz"
 
         await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="key",
             entrypoint="python main.py",
@@ -639,7 +596,7 @@ class TestPerRunTarballPath:
             run_id=run_id,
         )
 
-        bash_cmd = mock_start_bash.call_args.args[3]  # (client, url, key, command)
+        bash_cmd = mock_start_bash.call_args.args[2]  # (url, key, command)
         assert f"tar xzf {expected_path}" in bash_cmd
         assert f"rm -f {expected_path}" in bash_cmd
         assert TARBALL_PATH not in bash_cmd
@@ -655,7 +612,6 @@ class TestPerRunTarballPath:
         mock_start_bash.return_value = "cmd-abc"
 
         await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="key",
             entrypoint="python main.py",
@@ -664,9 +620,9 @@ class TestPerRunTarballPath:
             run_id=None,
         )
 
-        uploaded_dest = mock_upload.call_args.args[4]
+        uploaded_dest = mock_upload.call_args.args[3]
         assert uploaded_dest == TARBALL_PATH
-        bash_cmd = mock_start_bash.call_args.args[3]
+        bash_cmd = mock_start_bash.call_args.args[2]
         assert f"tar xzf {TARBALL_PATH}" in bash_cmd
 
     @pytest.mark.asyncio
@@ -691,7 +647,6 @@ class TestPerRunTarballPath:
 
         await asyncio.gather(
             execute_in_context(
-                client=AsyncMock(),
                 agent_url="https://agent.example.com",
                 session_key="key",
                 entrypoint="python main.py",
@@ -700,7 +655,6 @@ class TestPerRunTarballPath:
                 run_id=run_id_a,
             ),
             execute_in_context(
-                client=AsyncMock(),
                 agent_url="https://agent.example.com",
                 session_key="key",
                 entrypoint="python main.py",
@@ -710,7 +664,7 @@ class TestPerRunTarballPath:
             ),
         )
 
-        upload_dests = {c.args[4] for c in mock_upload.call_args_list}
+        upload_dests = {c.args[3] for c in mock_upload.call_args_list}
         assert f"/tmp/automation-{run_id_a}.tar.gz" in upload_dests
         assert f"/tmp/automation-{run_id_b}.tar.gz" in upload_dests
         assert len(upload_dests) == 2, "Each run must upload to its own unique path"
@@ -726,7 +680,6 @@ class TestPerRunTarballPath:
         mock_start_bash.return_value = "cmd-abc"
 
         await execute_in_context(
-            client=AsyncMock(),
             agent_url="https://agent.example.com",
             session_key="key",
             entrypoint="python main.py",
@@ -735,6 +688,63 @@ class TestPerRunTarballPath:
             run_id="../../etc/passwd",
         )
 
-        uploaded_dest = mock_upload.call_args.args[4]
+        uploaded_dest = mock_upload.call_args.args[3]
         assert uploaded_dest == TARBALL_PATH
         assert "etc/passwd" not in uploaded_dest
+
+
+@pytest.mark.asyncio
+async def test_sdk_upload_failure_never_starts_entrypoint(sdk_http_transport):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(403, json={"detail": "Upload denied"})
+
+    sdk_http_transport(respond)
+    result = await execute_in_context(
+        agent_url="http://server",
+        session_key="key",
+        entrypoint="python main.py",
+        tarball_source=b"bundle",
+        work_dir="/workspace",
+    )
+    assert result.success is False
+    assert result.error and "403" in result.error
+    assert all(request.url.path == "/api/file/upload" for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_sdk_command_failure_never_starts_entrypoint(sdk_http_transport):
+    commands = []
+
+    def respond(request):
+        if request.method == "POST":
+            commands.append(request.content)
+            return httpx.Response(200, json={"id": "download-command"})
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "kind": "BashOutput",
+                        "exit_code": 7,
+                        "stderr": "connection failed",
+                    }
+                ]
+            },
+        )
+
+    sdk_http_transport(respond)
+    result = await execute_in_context(
+        agent_url="http://server",
+        session_key="key",
+        entrypoint="python main.py",
+        tarball_source="https://bundles.example/automation.tar.gz",
+        work_dir="/workspace",
+    )
+    assert result.success is False
+    assert result.error and "connection failed" in result.error
+    assert len(commands) == 1
+    assert b"curl" in commands[0]
+    assert b"python main.py" not in commands[0]

@@ -82,6 +82,10 @@ async def fetch_latest_finish_tool_response_for_run(
     """Best-effort lookup of the latest raw FinishTool response for a run."""
     try:
         backend = get_backend(run)
+        from openhands.automation.backends.conversation import ConversationBackend
+
+        if isinstance(backend, ConversationBackend):
+            backend = backend.server
         async with httpx.AsyncClient(timeout=60.0) as client:
             if backend.is_local_mode:
                 ctx = await backend.get_execution_context(client)

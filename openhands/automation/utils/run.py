@@ -182,6 +182,7 @@ async def create_pending_run(
 
     run = AutomationRun(
         agent_profile_id=automation.agent_profile_id,
+        execution_scope=automation.execution_scope,
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,

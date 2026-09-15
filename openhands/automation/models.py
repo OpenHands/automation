@@ -48,6 +48,13 @@ class AutomationRunStatus(enum.Enum):
     SKIPPED = "SKIPPED"
 
 
+class AutomationExecutionScope(enum.StrEnum):
+    """Object that owns an automation run's workspace and lifecycle."""
+
+    RUN = "run"
+    CONVERSATION = "conversation"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -75,6 +82,10 @@ class Automation(Base):
 
     # Profile IDs belong to the configured Agent Server, not to this database.
     agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    execution_scope: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=AutomationExecutionScope.RUN.value
+    )
 
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
@@ -173,6 +184,11 @@ class AutomationRun(Base):
 
     # Snapshot the selection so definition edits affect only future runs.
     agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    # Snapshot how the definition executes so edits affect only future runs.
+    execution_scope: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=AutomationExecutionScope.RUN.value
+    )
 
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)

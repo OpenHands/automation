@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -143,7 +143,6 @@ async def _poll_pending_runs(
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
-
     # Apply row locking for PostgreSQL only (SQLite doesn't support it)
     if not using_sqlite():
         select_query = select_query.with_for_update(skip_locked=True)
@@ -207,8 +206,9 @@ async def _execute_run(
     4. Execute in context (upload tarball, start entrypoint)
     5. Store sandbox_id for watchdog verification (if applicable)
 
-    The SDK inside the execution environment fires the completion callback on exit.
-    The watchdog will verify status if the callback is missed.
+    Legacy backends receive SDK completion callbacks, with watchdog fallback.
+    Profile-backed conversations use watchdog verification through the SDK
+    runtime so workers do not need the shared Automation callback credential.
     """
     run_id = str(run.id)
     automation = run.automation
@@ -326,10 +326,17 @@ async def _execute_run(
     # 3. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
-    env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
-    env_vars["AUTOMATION_PHASE_URL"] = (
-        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
-    )
+    # Callbacks are optional. A restricted backend without callback credentials
+    # uses the existing runtime watchdog instead of receiving the service key.
+    if (
+        env_vars.get("AUTOMATION_CALLBACK_API_KEY")
+        or env_vars.get("OPENHANDS_API_KEY")
+        or not settings.local_api_key
+    ):
+        env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+        env_vars["AUTOMATION_PHASE_URL"] = (
+            f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+        )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -435,7 +442,6 @@ async def _execute_run(
     work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
@@ -445,6 +451,7 @@ async def _execute_run(
             timeout=effective_timeout,
             run_id=run_id,
             sandbox_id=ctx.sandbox_id,
+            runtime_conversation_id=ctx.runtime_conversation_id,
         )
     except PermanentDispatchError as exc:
         logger.error(
@@ -487,6 +494,14 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        if ctx.runtime_conversation_id is not None:
+            async with session_factory() as link_session:
+                await link_session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run.id)
+                    .values(conversation_id=env_vars["AUTOMATION_CONVERSATION_ID"])
+                )
+                await link_session.commit()
         await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
@@ -511,7 +526,7 @@ async def _execute_run(
             ),
         )
         logger.info(
-            "Automation dispatched successfully, waiting for callback",
+            "Automation dispatched successfully, waiting for completion",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         return
