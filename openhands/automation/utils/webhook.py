@@ -260,6 +260,7 @@ async def create_automation_run(
         The created AutomationRun instance
     """
     run = AutomationRun(
+        agent_profile_id=automation.agent_profile_id,
         id=uuid.uuid4(),
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,

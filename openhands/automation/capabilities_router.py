@@ -46,7 +46,10 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
-from openhands.automation.utils.model_profiles import validate_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_selection,
+    validate_model_profile_for_user,
+)
 from openhands.automation.utils.webhook import get_webhook_config
 
 
@@ -119,6 +122,8 @@ async def get_capabilities(
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
     features = [*_STATIC_FEATURES]
+    if config.service.is_local_mode:
+        features.append("agentProfiles")
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -178,6 +183,17 @@ async def validate_draft(
             DraftValidationError(
                 field="model",
                 code="model_profile_not_found",
+                message=str(e.detail),
+            )
+        )
+
+    try:
+        validate_agent_profile_selection(draft.agent_profile_id, draft.model)
+    except HTTPException as e:
+        errors.append(
+            DraftValidationError(
+                field="agent_profile_id",
+                code="invalid_agent_profile",
                 message=str(e.detail),
             )
         )
