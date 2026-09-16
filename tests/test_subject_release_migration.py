@@ -88,10 +88,17 @@ def test_subject_release_upgrade_preserves_runs(schema, tmp_path, monkeypatch):
             "subject_key IS NOT NULL AND subject_released_at IS NULL"
         )
         command.downgrade(config, "022")
+        # Current ORM models include fields from later migrations, so inspect
+        # revision 022 with SQL instead of trying to load it through the model.
+        with engine.connect() as connection:
+            downgraded = connection.execute(
+                sa.text("SELECT subject_released_at FROM automation_runs")
+            ).scalar_one()
+        assert (downgraded is None) == (released_at is None)
+        command.upgrade(config, "head")
         with Session(engine) as session:
             run = session.get(AutomationRun, run_id)
             assert run is not None
             assert run.subject_released_at == released_at
-        command.upgrade(config, "head")
     finally:
         engine.dispose()

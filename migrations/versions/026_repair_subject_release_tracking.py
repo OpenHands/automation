@@ -1,7 +1,7 @@
 """Repair databases that applied 022 before subject release tracking was added.
 
-Revision ID: 023
-Revises: 022
+Revision ID: 026
+Revises: 025
 Create Date: 2026-09-13
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "023"
-down_revision: str = "022"
+revision: str = "026"
+down_revision: str = "025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
