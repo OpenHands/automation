@@ -950,6 +950,8 @@ class AutomationRunResponse(BaseModel):
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    source_tarball_path: str | None = None
+    source_commit: str | None = None
     run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None

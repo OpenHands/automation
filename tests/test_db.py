@@ -312,6 +312,8 @@ class TestSqliteMigrations:
                 column["name"] for column in inspector.get_columns("automation_runs")
             }
             assert "cost" in run_columns
+            assert "source_tarball_path" in run_columns
+            assert "source_commit" in run_columns
 
             engine.dispose()
         finally:

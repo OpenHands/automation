@@ -7,7 +7,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationGitSyncState,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.scheduler import (
     POLL_INTERVAL_SECONDS,
     poll_and_schedule,
@@ -941,6 +946,66 @@ class TestCreatePendingRun:
             assert run.automation_id == automation.id
             assert run.status == AutomationRunStatus.PENDING
             assert run.error_detail is None
+            assert run.source_tarball_path == "s3://bucket/code.tar.gz"
+            assert run.source_commit is None
+
+    async def test_stamps_clean_git_source_commit(self, async_session_factory):
+        """A reconciled git state identifies the exact source commit."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Git Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="oh-internal://uploads/source-v2",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationGitSyncState(
+                    automation_id=automation.id,
+                    slug="git-automation",
+                    last_synced_commit="a" * 40,
+                    dirty=False,
+                )
+            )
+            await session.flush()
+
+            run = await create_pending_run(session, automation)
+
+            assert run.source_tarball_path == "oh-internal://uploads/source-v2"
+            assert run.source_commit == "a" * 40
+
+    async def test_does_not_stamp_stale_dirty_git_commit(self, async_session_factory):
+        """A dirty state means its previous commit is not run provenance."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Edited Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="oh-internal://uploads/edited-source",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationGitSyncState(
+                    automation_id=automation.id,
+                    slug="edited-automation",
+                    last_synced_commit="b" * 40,
+                    dirty=True,
+                )
+            )
+            await session.flush()
+
+            run = await create_pending_run(session, automation)
+
+            assert run.source_tarball_path == "oh-internal://uploads/edited-source"
+            assert run.source_commit is None
 
     async def test_updates_last_triggered_at(self, async_session_factory):
         """Updates automation's last_triggered_at timestamp."""

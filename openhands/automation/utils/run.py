@@ -12,6 +12,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
+    AutomationGitSyncState,
     AutomationRun,
     AutomationRunStatus,
 )
@@ -28,6 +29,40 @@ FIRST_RUN_OUTCOME_STATUSES = (
     AutomationRunStatus.COMPLETED,
     AutomationRunStatus.FAILED,
 )
+
+
+async def get_run_source_commit(
+    session: AsyncSession, automation_id: uuid.UUID
+) -> str | None:
+    """Return git provenance only when it identifies the current DB source.
+
+    ``last_synced_commit`` becomes stale as soon as an API-side automation
+    edit marks its sync state dirty.  Recording that stale SHA on a new run
+    would overstate reproducibility, so dirty and never-synced automations have
+    no source commit until the next successful reconciliation.
+    """
+    result = await session.execute(
+        select(AutomationGitSyncState.last_synced_commit).where(
+            AutomationGitSyncState.automation_id == automation_id,
+            AutomationGitSyncState.dirty.is_(False),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def snapshot_run_source(
+    session: AsyncSession,
+    run: AutomationRun,
+    automation: Automation,
+) -> None:
+    """Record the source revision that this run is expected to execute.
+
+    Calling this again while a run is still PENDING is intentional: the
+    dispatcher uses it immediately before claiming the run so provenance and
+    execution resolve the same automation revision.
+    """
+    run.source_tarball_path = automation.tarball_path
+    run.source_commit = await get_run_source_commit(session, automation.id)
 
 
 async def disable_automation(
@@ -179,7 +214,6 @@ async def create_pending_run(
         The created AutomationRun
     """
     now = utcnow()
-
     run = AutomationRun(
         id=uuid.uuid4(),
         automation_id=automation.id,
@@ -188,6 +222,7 @@ async def create_pending_run(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),
     )
+    await snapshot_run_source(session, run, automation)
     session.add(run)
 
     await session.execute(

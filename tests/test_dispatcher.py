@@ -23,7 +23,12 @@ from openhands.automation.dispatcher import (
     dispatcher_loop,
 )
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationGitSyncState,
+    AutomationRun,
+    AutomationRunStatus,
+)
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
@@ -380,6 +385,48 @@ class TestDispatchPendingRuns:
             )
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatch_refreshes_source_snapshot_when_claiming_run(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A queued run executes the revision current when dispatch claims it."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Changed while pending",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/current.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.flush()
+            session.add(
+                AutomationGitSyncState(
+                    automation_id=automation.id,
+                    slug="changed-while-pending",
+                    last_synced_commit="d" * 40,
+                    dirty=False,
+                )
+            )
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                source_tarball_path="https://example.com/previous.tar.gz",
+                source_commit="c" * 40,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.source_tarball_path == "https://example.com/current.tar.gz"
+            assert updated.source_commit == "d" * 40
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_dispatch_sets_initial_phase(
@@ -917,6 +964,7 @@ class TestExecuteRunPhaseReporting:
                 automation_id=automation.id,
                 status=AutomationRunStatus.RUNNING,
                 started_at=utcnow(),
+                source_tarball_path="https://example.com/snapshotted.tar.gz",
             )
             session.add(run)
             await session.commit()
@@ -962,6 +1010,20 @@ class TestExecuteRunPhaseReporting:
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_executes_snapshotted_tarball_source(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Execution reads the immutable run snapshot, not mutable automation state."""
+        await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        assert (
+            mock_execute.await_args.kwargs["tarball_source"]
+            == "https://example.com/snapshotted.tar.gz"
+        )
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_marks_starting_automation_phase_after_bash_dispatch(

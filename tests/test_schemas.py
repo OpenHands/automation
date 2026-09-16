@@ -122,6 +122,8 @@ class TestAutomationRunResponseUtcSerialisation:
             timeout_at=None,
             sandbox_id=None,
             bash_command_id=None,
+            source_tarball_path=None,
+            source_commit=None,
             run_metadata=None,
             created_at=_NAIVE,
             started_at=_NAIVE,
@@ -155,6 +157,17 @@ class TestAutomationRunResponseUtcSerialisation:
             "kind": "rate_limited",
             "transient": True,
         }
+
+    def test_source_provenance_serialises(self):
+        run = self._make_run(
+            source_tarball_path="oh-internal://uploads/source-v2",
+            source_commit="a" * 40,
+        )
+
+        data = run.model_dump(mode="json")
+
+        assert data["source_tarball_path"] == "oh-internal://uploads/source-v2"
+        assert data["source_commit"] == "a" * 40
 
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
