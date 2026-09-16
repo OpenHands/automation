@@ -312,6 +312,9 @@ class TestSqliteMigrations:
                 column["name"] for column in inspector.get_columns("automation_runs")
             }
             assert "cost" in run_columns
+            assert "agent_profile_id" in {
+                column["name"] for column in inspector.get_columns("automations")
+            }
 
             engine.dispose()
         finally:

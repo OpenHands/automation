@@ -423,6 +423,11 @@ class TemplateProvenance(BaseModel):
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Agent profile selected for this automation.",
+    )
+
     name: str = Field(..., min_length=1, max_length=500)
     model: str | None = Field(
         default=None,
@@ -522,6 +527,11 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Agent profile selected for this automation.",
+    )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
     model: str | None = Field(
@@ -862,6 +872,7 @@ class TelemetryConsentResponse(BaseModel):
 
 
 class AutomationResponse(BaseModel):
+    agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID

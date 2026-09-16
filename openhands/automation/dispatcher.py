@@ -337,6 +337,8 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    if automation.agent_profile_id:
+        env_vars["AUTOMATION_AGENT_PROFILE_ID"] = str(automation.agent_profile_id)
     # A subject-owning run must create its conversation under the id
     # `continue_conversation` addresses later, or every follow-up 404s and
     # silently starts a fresh thread.

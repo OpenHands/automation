@@ -73,6 +73,9 @@ class Automation(Base):
     # None is only used for legacy/local fallback.
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Profile IDs belong to the configured Agent Server, not to this database.
+    agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
