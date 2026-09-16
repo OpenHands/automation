@@ -435,7 +435,6 @@ async def _execute_run(
     work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
