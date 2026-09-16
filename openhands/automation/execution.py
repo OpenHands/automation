@@ -312,7 +312,6 @@ async def execute_in_context(
     3. Return immediately without waiting for the entrypoint to complete.
 
     Args:
-        client: HTTP client for making requests
         agent_url: URL of the agent server
         session_key: API key for the agent server
         entrypoint: Command to run
