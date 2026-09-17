@@ -20,6 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
+from openhands.automation.models import AutomationState
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
     is_builtin_source,
@@ -338,14 +339,6 @@ class RunStatus(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     SKIPPED = "SKIPPED"
-
-
-class AutomationState(StrEnum):
-    """State of an automation definition."""
-
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-    DRAFT = "DRAFT"
 
 
 def normalize_automation_state_enabled(data: Any) -> Any:

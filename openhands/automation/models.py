@@ -3,6 +3,7 @@
 import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -48,7 +49,7 @@ class AutomationRunStatus(enum.Enum):
     SKIPPED = "SKIPPED"
 
 
-class AutomationState(enum.Enum):
+class AutomationState(StrEnum):
     """State of an automation definition."""
 
     ACTIVE = "ACTIVE"
