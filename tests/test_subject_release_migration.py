@@ -42,6 +42,9 @@ def test_subject_release_upgrade_preserves_runs(schema, tmp_path, monkeypatch):
                     postgresql_where=sa.text("subject_key IS NOT NULL"),
                 )
             command.stamp(config, "022")
+            # This is the deployed failure state: later migrations applied,
+            # but Alembic could not see that revision 022's schema was stale.
+            command.upgrade(config, "025")
             with Session(engine) as session:
                 with pytest.raises(OperationalError, match="subject_released_at"):
                     session.scalars(sa.select(AutomationRun)).all()
