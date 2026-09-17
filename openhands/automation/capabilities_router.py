@@ -34,6 +34,7 @@ from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
+    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
