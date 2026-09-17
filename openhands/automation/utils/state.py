@@ -35,6 +35,4 @@ def model_automation_state(
 
 
 def automation_state_enabled(state: AutomationState | str | Enum | None) -> bool:
-    if state is None:
-        return True
-    return AutomationState(_state_value(state)) == AutomationState.ACTIVE
+    return AutomationState(_state_value(state)) == AutomationState.ACTIVE if state else True
