@@ -508,21 +508,23 @@ async def _validate_and_resolve_fields(
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
 
-    enabled = parse_automation_enabled(fields.get("enabled"))
-    if enabled is None:
-        enabled = True
-    automation_state = model_automation_state(fields.get("state"), enabled)
-    if (
-        existing is not None
-        and automation_state == AutomationState.DRAFT
-        and existing.state != AutomationState.DRAFT
-    ):
+    raw_state = fields.get("state")
+    raw_enabled = fields.get("enabled")
+
+    requested_enabled = parse_automation_enabled(raw_enabled)
+    if requested_enabled is None:
+        requested_enabled = True
+    state = model_automation_state(raw_state, requested_enabled)
+    enabled = automation_state_enabled(state)
+
+    if existing is not None and state == AutomationState.DRAFT != existing.state:
         raise ValueError("existing automations cannot be moved to draft state")
-    expected_enabled = automation_state_enabled(automation_state)
-    if fields.get("state") is not None and fields.get("enabled") is not None:
-        if enabled != expected_enabled:
-            raise ValueError("enabled must be true only when state is ACTIVE")
-    enabled = expected_enabled
+    if (
+        raw_state is not None
+        and raw_enabled is not None
+        and requested_enabled != enabled
+    ):
+        raise ValueError("enabled must be true only when state is ACTIVE")
 
     tarball_path = await _resolve_tarball_path(
         session, fields, deserialized, slug, existing, pending_storage_deletes, owner
@@ -537,7 +539,7 @@ async def _validate_and_resolve_fields(
         "timeout": timeout,
         "keep_alive": fields.get("keep_alive"),
         "enabled": enabled,
-        "state": automation_state,
+        "state": state,
         "prompt": fields.get("prompt"),
         "preset_metadata": fields.get("preset_metadata"),
         "tarball_path": tarball_path,

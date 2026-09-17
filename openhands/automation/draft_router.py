@@ -618,10 +618,16 @@ async def dispatch_draft(
             },
         )
 
+    event_payload = body.event_payload if body is not None else None
+    if event_payload is not None and not isinstance(parsed.trigger, EventTrigger):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="event_payload can only be used with event-triggered drafts",
+        )
+
     automation = await _materialize_draft(
         draft, parsed, user, request, session, file_store
     )
-    event_payload = body.event_payload if body is not None else None
     run = await create_pending_run(
         session,
         automation,

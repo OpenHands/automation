@@ -67,6 +67,23 @@ async def _dispatch(client: httpx.AsyncClient, draft_id: str) -> dict:
     return response.json()
 
 
+async def test_cron_draft_rejects_synthetic_event_payload(async_client, async_session):
+    draft_id = await _create_draft(async_client)
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch",
+        json={"event_payload": {"type": "synthetic"}},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "event_payload can only be used with event-triggered drafts"
+    )
+
+    runs = (await async_session.execute(select(AutomationRun))).scalars().all()
+    assert runs == []
+
+
 @pytest.mark.parametrize("operation", ["dispatch", "activate"])
 async def test_normal_api_cannot_bypass_current_draft_validation(
     async_client, operation
