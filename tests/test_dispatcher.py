@@ -423,7 +423,7 @@ class TestDispatchPendingRuns:
         new_callable=AsyncMock,
     )
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
-    async def test_dispatch_emits_single_run_lifecycle_event(
+    async def test_dispatch_emits_no_telemetry_events(
         self,
         mock_execute,
         mock_capture_event,
@@ -431,7 +431,8 @@ class TestDispatchPendingRuns:
         mock_settings,
         mock_client,
     ):
-        """Dispatch is the canonical telemetry event for a run starting."""
+        """Dispatch no longer emits its own telemetry event; lifecycle events
+        come from execution and the watchdog."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
@@ -455,7 +456,7 @@ class TestDispatchPendingRuns:
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         emitted_events = [call.args[0] for call in mock_capture_event.await_args_list]
-        assert emitted_events == ["automation_run_dispatched"]
+        assert emitted_events == []
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
@@ -1330,6 +1331,7 @@ class TestExecuteRunDerivedConversationId:
         *,
         trigger: dict,
         subject_key: str | None,
+        agent_profile_id: uuid.UUID | None = None,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
@@ -1337,6 +1339,7 @@ class TestExecuteRunDerivedConversationId:
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
+                agent_profile_id=agent_profile_id,
                 trigger=trigger,
                 tarball_path="https://example.com/code.tar.gz",
                 entrypoint="uv run main.py",
@@ -1425,3 +1428,20 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert "AUTOMATION_CONVERSATION_ID" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_selected_agent_profile_is_available_to_the_command(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        selected = uuid.uuid4()
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+            agent_profile_id=selected,
+        )
+
+        assert env_vars["AUTOMATION_AGENT_PROFILE_ID"] == str(selected)

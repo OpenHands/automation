@@ -288,7 +288,7 @@ async def verify_run_status(
 
         # Get last bash command result, scoped to this run's command if known
         bash_result = await get_last_bash_command_result(
-            client, agent_url, session_key, command_id=bash_command_id
+            agent_url, session_key, command_id=bash_command_id
         )
 
         if not bash_result.found:

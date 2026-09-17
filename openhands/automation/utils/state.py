@@ -3,19 +3,35 @@
 from enum import Enum
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from openhands.automation.models import AutomationState
+
+
+_BOOL_ADAPTER: TypeAdapter[bool] = TypeAdapter(bool)
 
 
 def _state_value(state: Any) -> Any:
     return state.value if isinstance(state, Enum) else state
 
 
+def parse_automation_enabled(enabled: Any) -> bool | None:
+    """Parse the deprecated enabled flag using Pydantic bool coercion."""
+    if enabled is None:
+        return None
+    return _BOOL_ADAPTER.validate_python(enabled)
+
+
 def model_automation_state(
-    state: AutomationState | str | Enum | None, enabled: bool
+    state: AutomationState | str | Enum | None, enabled: Any
 ) -> AutomationState:
     if state is not None:
         return AutomationState(_state_value(state))
-    return AutomationState.ACTIVE if enabled else AutomationState.INACTIVE
+    return (
+        AutomationState.ACTIVE
+        if parse_automation_enabled(enabled)
+        else AutomationState.INACTIVE
+    )
 
 
 def automation_state_enabled(state: AutomationState | str | Enum | None) -> bool:

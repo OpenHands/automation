@@ -60,7 +60,10 @@ from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    resolve_model_profile_for_user,
+    validate_agent_profile_selection,
+)
 from openhands.automation.utils.run import (
     create_pending_run,
     record_first_run_outcome,
@@ -217,7 +220,12 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    model = resolve_model_profile_for_user(body.model, user)
+    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
 
     preset_metadata: dict[str, Any] | None = None
     if body.template is not None:
@@ -230,6 +238,7 @@ async def create_automation(
         org_id=user.org_id,
         name=body.name,
         model=model,
+        agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
@@ -330,6 +339,14 @@ async def update_automation(
         state = model_automation_state(
             requested_state, update_data.get("enabled", auto.enabled)
         )
+        if (
+            state == ModelAutomationState.DRAFT
+            and auto.state != ModelAutomationState.DRAFT
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Existing automations cannot be moved to draft state",
+            )
         update_data["state"] = state
         update_data["enabled"] = automation_state_enabled(state)
     elif "enabled" in update_data:
@@ -384,8 +401,13 @@ async def update_automation(
                 source="manual",
             )
 
-    if "model" in update_data:
-        update_data["model"] = resolve_model_profile_for_user(body.model, user)
+    if "agent_profile_id" in update_data or "model" in update_data:
+        selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
+        validate_agent_profile_selection(selected_profile, body.model)
+        if selected_profile:
+            update_data["model"] = None
+        elif "model" in update_data:
+            update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
     original_prompt = auto.prompt
     for field, value in update_data.items():

@@ -213,14 +213,6 @@ async def accept_event(
             "event_key": event.event_key,
         }
         await capture_automation_event(
-            "automation_run_scheduled",
-            request=request,
-            session_factory=session_factory,
-            automation=automation,
-            run=run,
-            properties=run_properties,
-        )
-        await capture_automation_event(
             "automation_run_created",
             request=request,
             session_factory=session_factory,

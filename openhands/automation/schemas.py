@@ -30,7 +30,10 @@ from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
 )
-from openhands.automation.utils.state import automation_state_enabled
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    parse_automation_enabled,
+)
 from openhands.automation.utils.time import UtcDatetime
 from openhands.automation.utils.timeout import (
     build_automation_timeout_description,
@@ -372,8 +375,10 @@ def normalize_automation_state_enabled(data: Any) -> Any:
         expected_enabled = automation_state_enabled(state_value)
     except ValueError:
         return data
-    if "enabled" in data and bool(data["enabled"]) != expected_enabled:
-        raise ValueError("enabled must be true only when state is ACTIVE")
+    if "enabled" in data:
+        enabled = parse_automation_enabled(data["enabled"])
+        if enabled is not None and enabled != expected_enabled:
+            raise ValueError("enabled must be true only when state is ACTIVE")
     data = dict(data)
     data["enabled"] = expected_enabled
     return data
@@ -478,6 +483,11 @@ class TemplateProvenance(BaseModel):
 
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Agent profile selected for this automation.",
+    )
 
     name: str = Field(..., min_length=1, max_length=500)
     model: str | None = Field(
@@ -603,6 +613,11 @@ class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: uuid.UUID | None = Field(
+        default=None,
+        description="Agent profile selected for this automation.",
+    )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
     model: str | None = Field(
@@ -960,6 +975,7 @@ class TelemetryConsentResponse(BaseModel):
 
 
 class AutomationResponse(BaseModel):
+    agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
     org_id: uuid.UUID

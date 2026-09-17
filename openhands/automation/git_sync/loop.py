@@ -69,6 +69,7 @@ from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
+    parse_automation_enabled,
 )
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -506,17 +507,26 @@ async def _validate_and_resolve_fields(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
-    tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
-    )
 
-    enabled = True if fields.get("enabled") is None else bool(fields["enabled"])
+    enabled = parse_automation_enabled(fields.get("enabled"))
+    if enabled is None:
+        enabled = True
     automation_state = model_automation_state(fields.get("state"), enabled)
+    if (
+        existing is not None
+        and automation_state == AutomationState.DRAFT
+        and existing.state != AutomationState.DRAFT
+    ):
+        raise ValueError("existing automations cannot be moved to draft state")
     expected_enabled = automation_state_enabled(automation_state)
     if fields.get("state") is not None and fields.get("enabled") is not None:
         if enabled != expected_enabled:
             raise ValueError("enabled must be true only when state is ACTIVE")
     enabled = expected_enabled
+
+    tarball_path = await _resolve_tarball_path(
+        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
+    )
 
     return {
         "name": name,

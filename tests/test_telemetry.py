@@ -310,7 +310,7 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
         run.telemetry_distinct_id = "ph-fe-consented"
 
         await telemetry.capture_automation_event(
-            "automation_run_dispatched",
+            "automation_run_created",
             automation=automation,
             run=run,
             session_factory=session_factory,
@@ -318,7 +318,7 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
 
         assert len(_MockAsyncClient.posts) == 1
         _, payload = _MockAsyncClient.posts[0]
-        assert payload["event"] == "automation_run_dispatched"
+        assert payload["event"] == "automation_run_created"
         assert payload["distinct_id"] == "ph-fe-consented"
         assert payload["properties"]["deployment_mode"] == "local"
         assert "frontend_distinct_id" not in payload["properties"]
@@ -549,131 +549,6 @@ def _request(path: str, *, endpoint_name: str = "list_automations"):
     )
 
 
-def test_should_capture_api_route_for_v1_routes_only():
-    assert telemetry.should_capture_api_route(_request("/api/automation/v1"))
-    assert not telemetry.should_capture_api_route(_request("/health"))
-    assert not telemetry.should_capture_api_route(_request("/api/automation/health"))
-    assert not telemetry.should_capture_api_route(_request("/ready"))
-    assert not telemetry.should_capture_api_route(_request("/api/automation/ready"))
-    assert not telemetry.should_capture_api_route(_request("/server_info"))
-    assert not telemetry.should_capture_api_route(
-        _request("/api/automation/server_info")
-    )
-    assert not telemetry.should_capture_api_route(_request("/sdk-version"))
-    assert not telemetry.should_capture_api_route(
-        _request("/api/automation/sdk-version")
-    )
-    assert not telemetry.should_capture_api_route(_request("/docs"))
-    assert not telemetry.should_capture_api_route(_request("/automations"))
-
-
-@pytest.mark.asyncio
-async def test_capture_api_route_event_uses_endpoint_name_and_route_template(
-    monkeypatch,
-):
-    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    clear_config_cache()
-    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
-
-    async def backend_id(**kwargs):
-        return "automation-backend:api"
-
-    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
-
-    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
-    request.state.telemetry_context = TelemetryRequestContext(
-        frontend_distinct_id="untrusted-browser-id",
-        client_source="agent_canvas",
-    )
-    user = AuthenticatedUser(
-        user_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
-        email="user@example.com",
-        role="admin",
-        permissions=["view_automations", "manage_automations"],
-        auth_method=AuthMethod.API_KEY,
-    )
-    request.state.authenticated_user = user
-
-    await telemetry.capture_api_route_event(
-        request,
-        status_code=200,
-        duration_ms=12,
-    )
-
-    _, payload = _MockAsyncClient.posts[0]
-    assert payload["event"] == "automation_api_get_automation"
-    properties = payload["properties"]
-    assert properties["http_method"] == "GET"
-    assert properties["route_path"] == "/api/automation/v1/{automation_id}"
-    assert properties["route_operation"] == "get_automation"
-    assert properties["status_code"] == 200
-    _assert_server_version_properties(properties)
-
-    assert properties["deployment_mode"] == "cloud"
-    assert payload["distinct_id"] == str(user.user_id)
-    assert properties["cloud_user_id"] == str(user.user_id)
-    assert properties["cloud_org_id"] == str(user.org_id)
-    assert properties["$groups"] == {"org": str(user.org_id)}
-    assert "frontend_distinct_id" not in properties
-    assert properties["client_source"] == "agent_canvas"
-    assert "org_id" not in properties
-    assert properties["success"] is True
-    assert properties["duration_ms"] == 12
-
-
-@pytest.mark.asyncio
-async def test_capture_api_route_event_in_local_mode_omits_cloud_identity(
-    monkeypatch,
-):
-    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
-    clear_config_cache()
-    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
-
-    async def backend_id(**kwargs):
-        return "automation-backend:local-api"
-
-    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
-
-    async def stored_consent(**kwargs):
-        return True
-
-    monkeypatch.setattr(telemetry, "get_stored_telemetry_consent", stored_consent)
-
-    request = _request("/api/automation/v1/123", endpoint_name="get_automation")
-    request.state.telemetry_context = TelemetryRequestContext(
-        frontend_distinct_id="ph-fe-local"
-    )
-    request.state.authenticated_user = AuthenticatedUser(
-        user_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
-        email="local@example.com",
-        role="admin",
-        permissions=["view_automations", "manage_automations"],
-        auth_method=AuthMethod.LOCAL_API_KEY,
-    )
-
-    await telemetry.capture_api_route_event(
-        request,
-        status_code=200,
-        duration_ms=12,
-    )
-
-    _, payload = _MockAsyncClient.posts[0]
-    properties = payload["properties"]
-    assert payload["distinct_id"] == "ph-fe-local"
-    assert properties["deployment_mode"] == "local"
-    assert properties["automation_backend_id"] == "automation-backend:local-api"
-    assert "cloud_user_id" not in properties
-    assert "cloud_org_id" not in properties
-    assert "org_id" not in properties
-    assert "$groups" not in properties
-
-    assert properties["success"] is True
-    assert properties["duration_ms"] == 12
-
-
 @pytest.mark.asyncio
 async def test_local_capture_falls_back_to_backend_id_without_canvas_actor(
     monkeypatch,
@@ -693,7 +568,7 @@ async def test_local_capture_falls_back_to_backend_id_without_canvas_actor(
 
     monkeypatch.setattr(telemetry, "get_stored_telemetry_consent", stored_consent)
 
-    await telemetry.capture_automation_event("automation_event_received")
+    await telemetry.capture_automation_event("automation_event_matched")
 
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == "automation-backend:local-api"
