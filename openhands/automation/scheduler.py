@@ -210,13 +210,6 @@ async def poll_and_schedule(
                     else None,
                 }
                 await capture_automation_event(
-                    "automation_run_scheduled",
-                    automation=automation,
-                    run=run,
-                    properties=schedule_properties,
-                    session=session,
-                )
-                await capture_automation_event(
                     "automation_run_created",
                     automation=automation,
                     run=run,

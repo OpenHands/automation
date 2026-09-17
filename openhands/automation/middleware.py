@@ -1,11 +1,9 @@
 """ASGI middleware for the automations service."""
 
 from dataclasses import dataclass
-from time import perf_counter
 
-from fastapi import Request
 from starlette.middleware.cors import CORSMiddleware
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 TELEMETRY_DISTINCT_ID_HEADER = "x-openhands-telemetry-distinct-id"
@@ -45,7 +43,7 @@ def build_telemetry_request_context(scope: Scope) -> TelemetryRequestContext:
 
 
 class TelemetryContextMiddleware:
-    """Capture request context and route telemetry after response cleanup."""
+    """Attach request telemetry context to request state for downstream use."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -55,43 +53,10 @@ class TelemetryContextMiddleware:
             await self.app(scope, receive, send)
             return
 
-        from openhands.automation.telemetry import (
-            capture_api_route_event,
-            should_capture_api_route,
-        )
-
         scope.setdefault("state", {})["telemetry_context"] = (
             build_telemetry_request_context(scope)
         )
-        request = Request(scope)
-        should_capture = should_capture_api_route(request)
-        started_at = perf_counter()
-        status_code = 500
-        exception_type = None
-
-        async def capture_status(message: Message) -> None:
-            nonlocal status_code
-            if message["type"] == "http.response.start":
-                status_code = message["status"]
-            await send(message)
-
-        try:
-            await self.app(scope, receive, capture_status)
-        except Exception as exc:
-            status_code = 500
-            exception_type = type(exc).__name__
-            raise
-        finally:
-            # FastAPI's request-scoped database sessions close after the
-            # response. Finish that cleanup before telemetry opens a session
-            # from the same pool, or concurrent requests can exhaust it.
-            if should_capture:
-                await capture_api_route_event(
-                    request,
-                    status_code=status_code,
-                    duration_ms=int((perf_counter() - started_at) * 1000),
-                    exception_type=exception_type,
-                )
+        await self.app(scope, receive, send)
 
 
 # Header names (lowercase) that carry an explicit API key. Cookie auth is

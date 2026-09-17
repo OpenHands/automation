@@ -418,7 +418,7 @@ class TestDispatchPendingRuns:
         new_callable=AsyncMock,
     )
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
-    async def test_dispatch_emits_single_run_lifecycle_event(
+    async def test_dispatch_emits_no_telemetry_events(
         self,
         mock_execute,
         mock_capture_event,
@@ -426,7 +426,8 @@ class TestDispatchPendingRuns:
         mock_settings,
         mock_client,
     ):
-        """Dispatch is the canonical telemetry event for a run starting."""
+        """Dispatch no longer emits its own telemetry event; lifecycle events
+        come from execution and the watchdog."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
@@ -450,7 +451,7 @@ class TestDispatchPendingRuns:
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         emitted_events = [call.args[0] for call in mock_capture_event.await_args_list]
-        assert emitted_events == ["automation_run_dispatched"]
+        assert emitted_events == []
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
