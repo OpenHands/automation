@@ -1,17 +1,22 @@
 """Draft execution regressions that use SQLite instead of Docker."""
 
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from openhands.automation.app import app
 from openhands.automation.db import set_sqlite_mode, using_sqlite
-from openhands.automation.models import Base
+from openhands.automation.models import Automation, AutomationDraft, AutomationRun, Base
 from openhands.automation.storage import get_file_store
 from openhands.automation.storage.local import LocalFileStore
+
+
+OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
 @pytest.fixture
@@ -91,3 +96,54 @@ async def test_normal_api_cannot_bypass_current_draft_validation(
         f"although the current draft is incomplete: {response.status_code}"
     )
     assert response.json()["detail"] == rejected.json()["detail"]
+
+
+async def test_only_draft_creator_can_mutate_or_dispatch_materialized_draft(
+    async_client, async_session, mock_authenticated_user
+):
+    draft_id = await _create_draft(async_client)
+    first_run = await _dispatch(async_client, draft_id)
+    automation_id = first_run["automation_id"]
+
+    draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
+    automation = await async_session.get(Automation, uuid.UUID(automation_id))
+    assert draft is not None
+    assert automation is not None
+    assert draft.user_id == mock_authenticated_user.user_id
+    assert automation.user_id == mock_authenticated_user.user_id
+
+    mock_authenticated_user.user_id = OTHER_USER_ID
+
+    edited = await async_client.patch(
+        f"/api/automation/v1/drafts/{draft_id}",
+        json={"draft": _raw_body("second")},
+    )
+    assert edited.status_code == 403, edited.text
+
+    dispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch"
+    )
+    assert dispatched.status_code == 403, dispatched.text
+
+    deleted = await async_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+    assert deleted.status_code == 403, deleted.text
+
+    await async_session.refresh(draft)
+    await async_session.refresh(automation)
+    assert draft.deleted_at is None
+    assert draft.draft_body == _raw_body()
+    assert automation.tarball_path == _raw_body()["tarball_path"]
+    assert automation.user_id != mock_authenticated_user.user_id
+
+    runs = (
+        (
+            await async_session.execute(
+                select(AutomationRun).where(
+                    AutomationRun.automation_id == automation.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [run.id for run in runs] == [uuid.UUID(first_run["id"])]

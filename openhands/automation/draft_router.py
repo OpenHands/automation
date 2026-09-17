@@ -127,6 +127,15 @@ async def _get_org_draft(
     return draft
 
 
+def _assert_draft_creator(draft: AutomationDraft, user: AuthenticatedUser) -> None:
+    if draft.user_id == user.user_id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only the draft creator can modify or dispatch it",
+    )
+
+
 async def _get_live_materialized_draft_automation(
     session: AsyncSession, draft: AutomationDraft
 ) -> Automation | None:
@@ -136,6 +145,8 @@ async def _get_live_materialized_draft_automation(
     if automation is None:
         return None
     if automation.org_id != draft.org_id or automation.deleted_at is not None:
+        return None
+    if automation.user_id != draft.user_id:
         return None
     if automation.state != AutomationState.DRAFT:
         return None
@@ -540,6 +551,7 @@ async def update_draft(
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
+    _assert_draft_creator(draft, user)
     endpoint = cast(DraftEndpoint, body.endpoint or draft.endpoint)
     draft_body = body.draft if body.draft is not None else draft.draft_body
     draft_body = _normalize_draft_body_or_422(endpoint, draft_body)
@@ -562,6 +574,7 @@ async def delete_draft(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
+    _assert_draft_creator(draft, user)
     deleted_at = utcnow()
     draft.deleted_at = deleted_at
 
@@ -593,6 +606,7 @@ async def dispatch_draft(
 ) -> AutomationRunResponse:
     del background_tasks
     draft = await _get_org_draft(session, draft_id, user.org_id)
+    _assert_draft_creator(draft, user)
     parsed = await _refresh_validation(draft, user, session)
     if parsed is None:
         await session.flush()
