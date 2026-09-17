@@ -507,9 +507,6 @@ async def _validate_and_resolve_fields(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
-    tarball_path = await _resolve_tarball_path(
-        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
-    )
 
     enabled = parse_automation_enabled(fields.get("enabled"))
     if enabled is None:
@@ -526,6 +523,10 @@ async def _validate_and_resolve_fields(
         if enabled != expected_enabled:
             raise ValueError("enabled must be true only when state is ACTIVE")
     enabled = expected_enabled
+
+    tarball_path = await _resolve_tarball_path(
+        session, fields, deserialized, slug, existing, pending_storage_deletes, owner
+    )
 
     return {
         "name": name,

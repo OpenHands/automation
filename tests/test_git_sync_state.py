@@ -26,6 +26,7 @@ from openhands.automation.models import (
     AutomationGitSyncState,
     AutomationState,
     Base,
+    TarballUpload,
 )
 from openhands.automation.scheduler import _fetch_enabled_automations
 from openhands.automation.utils.time import utcnow
@@ -113,6 +114,52 @@ async def test_import_rejects_conflicting_state_and_enabled(
     with pytest.raises(ValueError, match="enabled.*state|state.*enabled"):
         await _import_automation(state_session, lifecycle_fields)
     assert await state_session.scalar(select(Automation.id)) is None
+
+
+async def test_invalid_state_metadata_rejects_before_tarball_upload(
+    state_session, monkeypatch
+):
+    upload_attempted = False
+
+    async def fail_if_upload_attempted(*args, **kwargs):
+        nonlocal upload_attempted
+        upload_attempted = True
+        raise AssertionError("tarball upload should not run before state validation")
+
+    monkeypatch.setattr(
+        "openhands.automation.git_sync.loop._write_tarball_upload",
+        fail_if_upload_attempted,
+    )
+    fields = {
+        "name": "Git state regression",
+        "entrypoint": "python main.py",
+        "trigger": {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+        "state": "ACTIVE",
+        "enabled": False,
+    }
+    files = {
+        "automation.yaml": yaml.safe_dump(fields).encode(),
+        "tarball/main.py": b"print('hello')\n",
+    }
+    deserialized = deserialize_automation(files)
+    assert deserialized is not None
+    assert deserialized.tarball_bytes is not None
+
+    with pytest.raises(ValueError, match="enabled must be true"):
+        async with state_session.begin_nested():
+            await _create_automation_from_git(
+                state_session,
+                _Owner(TEST_USER_ID, TEST_ORG_ID),
+                "git-state-regression",
+                deserialized,
+                files,
+                "test-head",
+                [],
+            )
+
+    assert upload_attempted is False
+    assert await state_session.scalar(select(Automation.id)) is None
+    assert await state_session.scalar(select(TarballUpload.id)) is None
 
 
 @pytest.mark.parametrize(
