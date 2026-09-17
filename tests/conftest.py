@@ -99,7 +99,12 @@ def mock_authenticated_user():
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
         email="test@example.com",
         role="owner",
-        permissions=["view_org_settings", "view_automations", "manage_automations"],
+        permissions=[
+            "view_org_settings",
+            "view_automations",
+            "manage_automations",
+            "manage_all_automations",
+        ],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )
@@ -107,7 +112,12 @@ def mock_authenticated_user():
 
 @pytest.fixture
 def mock_readonly_user():
-    """Return a mock authenticated user without manage_automations permission."""
+    """Return a mock authenticated user (member role).
+    
+    Members have manage_automations but NOT manage_all_automations,
+    so they can create and manage their own automations but cannot
+    edit/delete/dispatch other users' automations.
+    """
     import uuid
 
     return AuthenticatedUser(
@@ -115,7 +125,7 @@ def mock_readonly_user():
         org_id=uuid.UUID("87654321-4321-8765-4321-876543218765"),
         email="test@example.com",
         role="member",
-        permissions=["view_org_settings", "view_automations"],
+        permissions=["view_org_settings", "view_automations", "manage_automations"],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )

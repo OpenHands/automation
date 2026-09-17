@@ -95,18 +95,18 @@ _require_manage_automations = require_permission("manage_automations")
 async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
     """Authorize a write operation on a specific automation.
 
-    Admins and owners carry ``manage_automations`` and are always allowed.
-    A member (view-only) is allowed only when they are the creator of the
-    automation being modified — the ticket calls this the "creator escape
-    hatch."  ``require_permission`` can't express this because it has no
-    access to the automation row, so the check lives here in the handler
-    path instead of in the dependency.
+    All roles (member, admin, owner) carry ``manage_automations`` permission.
+    This function checks that basic permission, plus the "creator escape hatch"
+    that allows the automation creator to manage their own automation even if
+    they lack broader permissions.
+
+    Individual endpoints (update, delete, dispatch, cancel) narrow this further
+    based on ``manage_all_automations`` permission:
+    - Members can only modify their own automations (creator check)
+    - Admins/owners can modify any automation in their org (manage_all_automations)
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
-
-    ``update_automation`` narrows this further: only the creator may change
-    an automation's definition; everyone else may only turn it off.
     """
     if "manage_automations" in user.permissions:
         return
@@ -260,24 +260,25 @@ async def update_automation(
 ) -> AutomationResponse:
     """Partially update an automation.
 
-    Only the creator may edit the definition. Admins and owners may set
-    ``enabled`` to ``False`` (turn it off) but nothing else.
+    Creators and users with manage_all_automations permission (admins/owners)
+    may edit the definition. Members without that permission may only set
+    ``enabled`` to ``False`` (turn it off).
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
     # Automations run under their creator's identity (git tokens, secrets,
-    # MCP servers), so only the creator may change what they do. Anyone else
-    # who passed _assert_can_manage (admins/owners) may only turn it off.
+    # MCP servers), so only the creator may change what they do. Admins/owners
+    # with manage_all_automations permission may also edit. Members may only
+    # turn it off.
     if auto.user_id != user.user_id and update_data != {"enabled": False}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Only the automation creator can edit it; admins and owners "
-                "can only turn it off or delete it"
-            ),
-        )
+        # Non-creator editing - check if they have admin/owner privileges
+        if "manage_all_automations" not in user.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own automations",
+            )
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
@@ -387,6 +388,15 @@ async def delete_automation(
     """Soft delete an automation."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
+    
+    # Only creator or admin/owner can delete
+    if auto.user_id != user.user_id:
+        if "manage_all_automations" not in user.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own automations",
+            )
+    
     was_enabled = auto.enabled
     auto.enabled = False
     deleted_at = utcnow()
@@ -505,6 +515,15 @@ async def dispatch_automation(
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
+    
+    # Only creator or admin/owner can dispatch
+    if auto.user_id != user.user_id:
+        if "manage_all_automations" not in user.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only dispatch your own automations",
+            )
+    
     if not auto.enabled:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -871,6 +890,14 @@ async def cancel_run(
     if automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
     await _assert_can_manage(automation, user)
+    
+    # Only creator or admin/owner can cancel
+    if automation.user_id != user.user_id:
+        if "manage_all_automations" not in user.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only cancel runs of your own automations",
+            )
 
     # Only PENDING and RUNNING runs can be cancelled
     if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
