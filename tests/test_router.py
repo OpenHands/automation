@@ -138,10 +138,13 @@ def _automation_for_permission_tests(async_session):
 class TestPermissionEnforcement:
     """Tests for permission enforcement on mutating endpoints.
 
-    With the split permission model, write endpoints on a specific automation
-    require either ``manage_automations`` (admins/owners) OR that the caller is
-    the automation's creator.  The ``readonly_client`` fixture is a member with
-    ``view_automations`` only, so it must be the *non-creator* to get a 403.
+    With the three-tier permission model:
+    - All roles have ``manage_automations`` (can create and manage own)
+    - Only admins/owners have ``manage_all_automations`` (can manage any)
+    
+    The ``readonly_client`` fixture is a member (has manage_automations but NOT
+    manage_all_automations), so it can only modify automations it created.
+    The ``async_client`` fixture is an owner with manage_all_automations.
     """
 
     _OTHER_USER_ID = uuid.UUID("99999999-9999-9999-9999-999999999999")
@@ -244,10 +247,10 @@ class TestPermissionEnforcement:
         await async_session.commit()
         return automation
 
-    async def test_update_as_non_creator_manager_returns_403(
+    async def test_update_as_non_creator_manager_succeeds(
         self, async_client, async_session
     ):
-        """A manager cannot edit another user's automation definition."""
+        """A manager (admin/owner) can edit another user's automation definition."""
         # Arrange
         automation = await self._other_users_automation(async_session)
 
@@ -258,8 +261,8 @@ class TestPermissionEnforcement:
         )
 
         # Assert
-        assert response.status_code == 403
-        assert "creator" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["prompt"] == "Do something else"
 
     async def test_disable_as_non_creator_manager_succeeds(
         self, async_client, async_session
@@ -277,10 +280,10 @@ class TestPermissionEnforcement:
         assert response.status_code == 200
         assert response.json()["enabled"] is False
 
-    async def test_enable_as_non_creator_manager_returns_403(
+    async def test_enable_as_non_creator_manager_succeeds(
         self, async_client, async_session
     ):
-        """A manager cannot turn another user's automation back on."""
+        """A manager (admin/owner) can turn another user's automation back on."""
         # Arrange
         automation = await self._other_users_automation(async_session, enabled=False)
 
@@ -290,12 +293,13 @@ class TestPermissionEnforcement:
         )
 
         # Assert
-        assert response.status_code == 403
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
 
-    async def test_disable_with_edits_as_non_creator_manager_returns_403(
+    async def test_disable_with_edits_as_non_creator_manager_succeeds(
         self, async_client, async_session
     ):
-        """Turning off cannot carry other edits along with it."""
+        """A manager (admin/owner) can disable and edit at the same time."""
         # Arrange
         automation = await self._other_users_automation(async_session)
 
@@ -306,7 +310,9 @@ class TestPermissionEnforcement:
         )
 
         # Assert
-        assert response.status_code == 403
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+        assert response.json()["name"] == "Renamed"
 
 
 class TestCreateAutomation:
