@@ -26,7 +26,6 @@ from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
     ApiKeyAwareCORSMiddleware,
     TelemetryContextMiddleware,
-    api_route_telemetry_middleware,
 )
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
@@ -259,7 +258,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.11.1",  # x-release-please-version
+        version="1.13.1",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -268,9 +267,6 @@ def _create_app() -> FastAPI:
 
 
 app = _create_app()
-
-
-app.middleware("http")(api_route_telemetry_middleware)
 
 
 app.add_middleware(TelemetryContextMiddleware)
