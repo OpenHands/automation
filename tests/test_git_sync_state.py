@@ -92,6 +92,10 @@ async def test_inactive_state_without_enabled_is_not_scheduled(state_session):
     [
         pytest.param({"state": "INACTIVE", "enabled": True}, id="inactive-enabled"),
         pytest.param({"state": "ACTIVE", "enabled": False}, id="active-disabled"),
+        pytest.param(
+            {"state": "ACTIVE", "enabled": "false"},
+            id="active-string-disabled",
+        ),
     ],
 )
 async def test_import_rejects_conflicting_state_and_enabled(
@@ -126,10 +130,22 @@ async def test_import_rejects_conflicting_state_and_enabled(
             id="consistent-inactive",
         ),
         pytest.param(
+            {"state": "INACTIVE", "enabled": "false"},
+            AutomationState.INACTIVE,
+            False,
+            id="consistent-inactive-string",
+        ),
+        pytest.param(
             {"state": "DRAFT", "enabled": False},
             AutomationState.DRAFT,
             False,
             id="consistent-draft",
+        ),
+        pytest.param(
+            {"state": "DRAFT", "enabled": "false"},
+            AutomationState.DRAFT,
+            False,
+            id="consistent-draft-string",
         ),
     ],
 )
