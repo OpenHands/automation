@@ -319,6 +319,30 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
+    async def test_create_automation_allows_initial_draft_materialization(
+        self, async_client, async_session
+    ):
+        """Draft state is only accepted when first materializing an automation."""
+        payload = {
+            "name": "Draft Automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "state": "DRAFT",
+            "enabled": False,
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["state"] == "DRAFT"
+        assert data["enabled"] is False
+        automation = await async_session.get(Automation, uuid.UUID(data["id"]))
+        assert automation is not None
+        assert automation.state == AutomationState.DRAFT
+        assert automation.enabled is False
+
     async def test_create_automation_preset_metadata_is_null(self, async_client):
         """Custom SDK automations are created without preset metadata."""
         payload = {
@@ -1279,6 +1303,36 @@ class TestUpdateAutomation:
         assert events[0].reason == "manual"
         assert events[0].detail == {"reason": "manual", "source": "user"}
         assert events[0].source == "manual"
+
+    async def test_update_automation_rejects_active_to_draft(
+        self, async_client, async_session
+    ):
+        """A materialized active automation cannot be moved back to draft."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+            state=AutomationState.ACTIVE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "DRAFT"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Existing automations cannot be moved to draft state"
+        )
+        await async_session.refresh(automation)
+        assert automation.state == AutomationState.ACTIVE
+        assert automation.enabled is True
 
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""

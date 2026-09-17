@@ -15,9 +15,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from openhands.automation.db import set_sqlite_mode, using_sqlite
-from openhands.automation.git_sync.loop import _create_automation_from_git, _Owner
+from openhands.automation.git_sync.loop import (
+    _create_automation_from_git,
+    _Owner,
+    _update_automation_from_git,
+)
 from openhands.automation.git_sync.serializer import deserialize_automation
-from openhands.automation.models import Automation, AutomationState, Base
+from openhands.automation.models import (
+    Automation,
+    AutomationGitSyncState,
+    AutomationState,
+    Base,
+)
 from openhands.automation.scheduler import _fetch_enabled_automations
 from openhands.automation.utils.time import utcnow
 
@@ -155,3 +164,44 @@ async def test_import_preserves_legacy_and_consistent_state_inputs(
     automation = await _import_automation(state_session, lifecycle_fields)
     assert automation.state == expected_state
     assert automation.enabled is expected_enabled
+
+
+async def test_import_update_rejects_moving_existing_automation_to_draft(
+    state_session,
+):
+    automation = await _import_automation(state_session, {})
+    state = await state_session.scalar(
+        select(AutomationGitSyncState).where(
+            AutomationGitSyncState.automation_id == automation.id
+        )
+    )
+    assert state is not None
+
+    fields = {
+        "name": "Git state regression",
+        "entrypoint": "python main.py",
+        "trigger": {"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+        "tarball_source": {
+            "type": "external",
+            "url": "https://example.com/automation.tar.gz",
+        },
+        "state": "DRAFT",
+        "enabled": False,
+    }
+    files = {"automation.yaml": yaml.safe_dump(fields).encode()}
+    deserialized = deserialize_automation(files)
+    assert deserialized is not None
+
+    with pytest.raises(ValueError, match="cannot be moved to draft"):
+        await _update_automation_from_git(
+            state_session,
+            state,
+            deserialized,
+            files,
+            "new-head",
+            [],
+        )
+
+    await state_session.refresh(automation)
+    assert automation.state == AutomationState.ACTIVE
+    assert automation.enabled is True

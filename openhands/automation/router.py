@@ -287,6 +287,14 @@ async def update_automation(
         state = model_automation_state(
             requested_state, update_data.get("enabled", auto.enabled)
         )
+        if (
+            state == ModelAutomationState.DRAFT
+            and auto.state != ModelAutomationState.DRAFT
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Existing automations cannot be moved to draft state",
+            )
         update_data["state"] = state
         update_data["enabled"] = automation_state_enabled(state)
     elif "enabled" in update_data:

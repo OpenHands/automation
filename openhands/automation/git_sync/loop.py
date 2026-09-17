@@ -515,6 +515,12 @@ async def _validate_and_resolve_fields(
     if enabled is None:
         enabled = True
     automation_state = model_automation_state(fields.get("state"), enabled)
+    if (
+        existing is not None
+        and automation_state == AutomationState.DRAFT
+        and existing.state != AutomationState.DRAFT
+    ):
+        raise ValueError("existing automations cannot be moved to draft state")
     expected_enabled = automation_state_enabled(automation_state)
     if fields.get("state") is not None and fields.get("enabled") is not None:
         if enabled != expected_enabled:
