@@ -2269,8 +2269,8 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", specifier = "==1.49.0" },
-    { name = "openhands-workspace", specifier = "==1.49.0" },
+    { name = "openhands-sdk", specifier = "==1.49.1" },
+    { name = "openhands-workspace", specifier = "==1.49.1" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
     { name = "pydantic", specifier = ">=2" },
@@ -2301,7 +2301,7 @@ dev = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.49.0"
+version = "1.49.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -2323,23 +2323,23 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0b/8a/024237a9be15f6f89aadfa3d7d5df4d10c8c5aa5c30c31615b752c2984a3/openhands_sdk-1.49.0.tar.gz", hash = "sha256:88ca7e363c49f09b348b296a5b133ace55b82a9a4c2406930f8238f0341d441a", size = 722731, upload-time = "2026-09-16T21:29:53.271Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/b5/9a474548d4e7888293637a3beaff45ebdedcc638ff39b7602ddc6aac2a1e/openhands_sdk-1.49.1.tar.gz", hash = "sha256:66d86b46e573eed2fb5c9832cd886e681861f14ce029e9d88f0064baf3b8b340", size = 722927, upload-time = "2026-09-17T04:36:10.513Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/96/8ee89fa05af6be533cfe31b194cf0fa2886d6407edb31d6870816d2a7047/openhands_sdk-1.49.0-py3-none-any.whl", hash = "sha256:51977419216004c1895606706293f9ea35d52c6ec9e8299ecfcdb7d5b0e6b3c6", size = 859356, upload-time = "2026-09-16T21:29:48.288Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/97/650af8eae35e14bb8793ce888c893a08b1c66e178d31fe30106a0b59a52f/openhands_sdk-1.49.1-py3-none-any.whl", hash = "sha256:3186b3810fe46b7cb1ef52d04a17d9b80e4730f1db7b8737f454fa208636211f", size = 859357, upload-time = "2026-09-17T04:36:06.376Z" },
 ]
 
 [[package]]
 name = "openhands-workspace"
-version = "1.49.0"
+version = "1.49.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0b/9a/bec0e4e9a9c785d588b5b0bacb12d1fdd867e95419a69cfed63f280bbb65/openhands_workspace-1.49.0.tar.gz", hash = "sha256:2e629935119e9c7c7270e5daeb7b810c9a15c0036cecfd97e7d7c4893fbca154", size = 29975, upload-time = "2026-09-16T21:29:55.035Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/c8/4704d13b163a05c0610509324b66f367fcf36ed9ff9d2f4a8668cee840e9/openhands_workspace-1.49.1.tar.gz", hash = "sha256:32658694378b38b04203ae9a1558920b22fd84d2c5dccf1ff3ea31af707c9515", size = 29964, upload-time = "2026-09-17T04:36:12.14Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/68/8c37782b18448790e9b267b294e2c9c60984f0f1e6f3b8bb07efc21078ca/openhands_workspace-1.49.0-py3-none-any.whl", hash = "sha256:f9afa5ca4ca55bddb11bd0253a41dcac1fb1d566904e30a63317e79408e3e074", size = 36877, upload-time = "2026-09-16T21:29:50.949Z" },
+    { url = "https://files.pythonhosted.org/packages/13/13/63248dde5567eec3316224017292a3b34de44bffb5889735d8660b1dd790/openhands_workspace-1.49.1-py3-none-any.whl", hash = "sha256:dd28bf164b01afa3ab2206acdb9445c17e9eea32f73d284226d421787cccb7d2", size = 36877, upload-time = "2026-09-17T04:36:08.801Z" },
 ]
 
 [[package]]
