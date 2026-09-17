@@ -19,6 +19,7 @@ def parse_automation_enabled(enabled: Any) -> bool | None:
     """Parse the deprecated enabled flag using Pydantic bool coercion."""
     return _BOOL_ADAPTER.validate_python(enabled) if enabled is not None else None
 
+
 def model_automation_state(
     state: AutomationState | str | Enum | None, enabled: Any
 ) -> AutomationState:
@@ -32,4 +33,8 @@ def model_automation_state(
 
 
 def automation_state_enabled(state: AutomationState | str | Enum | None) -> bool:
-    return AutomationState(_state_value(state)) == AutomationState.ACTIVE if state else True
+    return (
+        AutomationState(_state_value(state)) == AutomationState.ACTIVE
+        if state
+        else True
+    )
