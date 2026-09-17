@@ -31,6 +31,7 @@ from openhands.automation.capabilities_router import (
 from openhands.automation.db import get_session
 from openhands.automation.draft_schemas import (
     FINAL_DRAFT_MODELS,
+    DraftModel,
     normalize_draft_body,
 )
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -184,7 +185,7 @@ async def _validate_draft_body(
     draft_body: dict[str, Any],
     user: AuthenticatedUser,
     session: AsyncSession,
-) -> tuple[BaseModel | None, list[DraftValidationError]]:
+) -> tuple[DraftModel | None, list[DraftValidationError]]:
     try:
         normalized_draft = normalize_draft_body(endpoint, draft_body)
         draft = FINAL_DRAFT_MODELS[endpoint].model_validate(normalized_draft)
@@ -261,7 +262,7 @@ async def _refresh_validation(
     draft: AutomationDraft,
     user: AuthenticatedUser,
     session: AsyncSession,
-) -> BaseModel | None:
+) -> DraftModel | None:
     parsed, errors = await _validate_draft_body(
         cast(DraftEndpoint, draft.endpoint), draft.draft_body, user, session
     )
