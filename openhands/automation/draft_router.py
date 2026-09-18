@@ -143,13 +143,13 @@ async def _get_live_materialized_draft_automation(
     if draft.materialized_automation_id is None:
         return None
     automation = await session.get(Automation, draft.materialized_automation_id)
-    if automation is None:
-        return None
-    if automation.org_id != draft.org_id or automation.deleted_at is not None:
-        return None
-    if automation.user_id != draft.user_id:
-        return None
-    if automation.state != AutomationState.DRAFT:
+    if (
+        automation is None
+        or automation.org_id != draft.org_id
+        or automation.deleted_at is not None
+        or automation.user_id != draft.user_id
+        or automation.state != AutomationState.DRAFT
+    ):
         return None
     return automation
 

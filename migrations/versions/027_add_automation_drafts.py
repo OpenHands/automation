@@ -1,7 +1,7 @@
 """Add automation_drafts table.
 
-Revision ID: 026
-Revises: 025
+Revision ID: 027
+Revises: 026
 Create Date: 2026-09-10
 """
 
