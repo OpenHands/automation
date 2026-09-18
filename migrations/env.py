@@ -15,7 +15,8 @@ SQLite mode:
 
 Note: Uses pg8000 (sync driver) while the application uses asyncpg (async driver).
 This is intentional - Alembic runs synchronously, and both drivers produce
-identical DDL/schema operations.
+identical DDL/schema operations. An AUTOMATION_DB_URL naming an async driver is
+rewritten to its sync equivalent by normalize_url_for_alembic().
 """
 
 import os
@@ -23,7 +24,10 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, text
 
-from openhands.automation.db import _build_pg8000_connect_args
+from openhands.automation.db import (
+    _build_pg8000_connect_args,
+    normalize_url_for_alembic,
+)
 from openhands.automation.models import Base
 
 
@@ -66,11 +70,13 @@ def get_engine(database_name=DB_NAME):
     """
     # SQLite or explicit PostgreSQL URL
     if DB_URL:
-        url = DB_URL
-        # For SQLite, remove async driver prefix if present (Alembic is sync)
-        if url.startswith("sqlite+aiosqlite"):
-            url = url.replace("sqlite+aiosqlite", "sqlite", 1)
-        return create_engine(url, pool_pre_ping=True)
+        url = normalize_url_for_alembic(DB_URL)
+        connect_args = (
+            _build_pg8000_connect_args(DB_SSL_MODE)
+            if url.startswith("postgresql+pg8000")
+            else {}
+        )
+        return create_engine(url, connect_args=connect_args, pool_pre_ping=True)
 
     # GCP Cloud SQL
     if GCP_DB_INSTANCE:
@@ -104,9 +110,7 @@ def get_engine(database_name=DB_NAME):
 
 def run_migrations_offline():
     if DB_URL:
-        url = DB_URL
-        if url.startswith("sqlite+aiosqlite"):
-            url = url.replace("sqlite+aiosqlite", "sqlite", 1)
+        url = normalize_url_for_alembic(DB_URL)
     else:
         url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
