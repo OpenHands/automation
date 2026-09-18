@@ -2,8 +2,6 @@
 
 import uuid
 
-from sqlalchemy import select
-
 from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
 from openhands.automation.utils import utcnow
 
@@ -170,10 +168,12 @@ async def test_cancel_ordinary_run_touches_no_subject(async_client, async_sessio
 async def test_cancelled_subject_no_longer_blocks_resubmission(
     async_client, async_session
 ):
-    """After cancel, no unreleased run holds the subject, so a resubmission
-    routes to a new run instead of deduplicating against the cancelled one."""
-    _, run = await _create_automation_with_run(
-        async_session, status=AutomationRunStatus.RUNNING
+    """After cancel, a resubmitted event routes to a new run instead of being
+    folded into the cancelled run that still holds the subject."""
+    from openhands.automation.conversations import continue_conversation
+
+    automation, run = await _create_automation_with_run(
+        async_session, status=AutomationRunStatus.PENDING
     )
     run.subject_key = "team/C123/1755000000.000100"
     await async_session.commit()
@@ -181,19 +181,16 @@ async def test_cancelled_subject_no_longer_blocks_resubmission(
     resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
     assert resp.status_code == 200
 
-    holders = (
-        (
-            await async_session.execute(
-                select(AutomationRun).where(
-                    AutomationRun.subject_key == "team/C123/1755000000.000100",
-                    AutomationRun.subject_released_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    result = await continue_conversation(
+        async_session,
+        org_id=TEST_ORG_ID,
+        source="slack",
+        subject_key="team/C123/1755000000.000100",
+        automation_id=automation.id,
+        event_key="Ev2",
+        event_payload={},
     )
-    assert holders == []
+    assert result.needs_run is True
 
 
 async def test_cancel_same_org_other_users_run(async_client, async_session):
