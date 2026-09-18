@@ -1,7 +1,16 @@
 """Async wrapper around the `git` CLI.
 
-Commands run via `create_subprocess_exec` with an argument list, never a shell
-string. The auth token goes per-invocation through `-c http.extraHeader`, so it
+Commands run as a blocking `subprocess.run` inside a thread-pool executor, via
+an argument list, never a shell string. This is deliberate, not incidental:
+`asyncio.create_subprocess_exec` reliably stalls at 0 bytes transferred for
+`clone`/`fetch` over an SSH remote on this stack (reproduced with both PIPE
+and real file-handle stdout/stderr -- small commands like `ls-remote` are
+unaffected, so it is specific to the long-lived duplex data stream a git
+child process keeps open through its own `ssh` child). A classic blocking
+subprocess in a worker thread sidesteps that class of bug entirely and is
+what a plain shell invocation does under the hood anyway.
+
+The auth token goes per-invocation through `-c http.extraHeader`, so it
 reaches neither the checkout nor a log line; credentials an operator embeds in
 the repo URL are ordinary arguments, so `redact_url_credentials` strips those
 from everything this module raises or logs. The token itself is persisted
@@ -13,6 +22,7 @@ import base64
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Final
 
@@ -80,35 +90,38 @@ async def _run_git(
     logged_args = ["git", *(redact_url_credentials(arg) for arg in args)]
     logger.debug("Running: %s (cwd=%s)", " ".join(logged_args), cwd)
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *full_args,
+    def _blocking_run() -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            full_args,
             cwd=str(cwd) if cwd else None,
             env=_non_interactive_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
         )
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _blocking_run)
     except FileNotFoundError as e:
         raise GitSyncError("git executable not found") from e
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+    except subprocess.TimeoutExpired:
+        # subprocess.run already killed the process before raising this.
         raise GitSyncError(
             f"git command timed out after {timeout}s: {' '.join(logged_args)}"
         ) from None
 
-    if proc.returncode != 0:
+    if result.returncode != 0:
         # git echoes the remote URL back in its own failure messages, so stderr
         # needs the same redaction as the argv.
-        details = redact_url_credentials(stderr.decode(errors="replace").strip())
+        details = redact_url_credentials(
+            result.stderr.decode(errors="replace").strip()
+        )
         raise GitSyncError(
-            f"git command failed ({proc.returncode}): {' '.join(logged_args)}\n"
+            f"git command failed ({result.returncode}): {' '.join(logged_args)}\n"
             f"{details}"
         )
-    return stdout.decode(errors="replace")
+    return result.stdout.decode(errors="replace")
 
 
 async def check_remote_access(
