@@ -341,6 +341,12 @@ class RunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+type PublicAutomationState = Literal[AutomationState.ACTIVE, AutomationState.INACTIVE]
+
+
+DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
+
+
 def normalize_automation_state_enabled(data: Any) -> Any:
     """Keep automation state and enabled compatible in request bodies.
 
@@ -369,6 +375,18 @@ def normalize_automation_state_enabled(data: Any) -> Any:
     data = dict(data)
     data["enabled"] = expected_enabled
     return data
+
+
+PUBLIC_DRAFT_STATE_ERROR: Final[str] = (
+    "state=DRAFT is reserved for automation draft test artifacts. "
+    "Use the /v1/drafts API endpoints to create drafts."
+)
+
+
+def reject_public_draft_state(state: Any) -> Any:
+    if state in (AutomationState.DRAFT, AutomationState.DRAFT.value):
+        raise ValueError(PUBLIC_DRAFT_STATE_ERROR)
+    return state
 
 
 def validate_command_string(
@@ -505,16 +523,15 @@ class CreateAutomationRequest(BaseModel):
         default=True,
         deprecated=True,
         description=(
-            "Deprecated: use state instead. Backward-compatible "
-            "active flag; false creates INACTIVE unless state is "
-            "DRAFT. Will be removed in a future release."
+            "Deprecated: use state instead. Backward-compatible active flag; "
+            "false creates INACTIVE. Will be removed in a future release."
         ),
     )
-    state: AutomationState | None = Field(
+    state: PublicAutomationState | None = Field(
         default=None,
         description=(
-            "First-class automation state. DRAFT/INACTIVE rows are not "
-            "triggered automatically."
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
         ),
     )
     template: TemplateProvenance | None = Field(
@@ -530,6 +547,11 @@ class CreateAutomationRequest(BaseModel):
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -621,12 +643,17 @@ class UpdateAutomationRequest(BaseModel):
             "Deprecated: use state instead. Will be removed in a future release."
         ),
     )
-    state: AutomationState | None = None
+    state: PublicAutomationState | None = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_automation_state_enabled(cls, data: Any) -> Any:
         return normalize_automation_state_enabled(data)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
 
     @field_validator("tarball_path")
     @classmethod
@@ -977,6 +1004,64 @@ class AutomationResponse(BaseModel):
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
     total: int
+
+
+class CreateAutomationDraftRequest(BaseModel):
+    """Create a server-backed automation setup draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: DraftEndpoint
+    draft: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+    source_automation_id: uuid.UUID | None = None
+
+
+class UpdateAutomationDraftRequest(BaseModel):
+    """Partially update a server-backed automation setup draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: DraftEndpoint | None = None
+    draft: dict[str, Any] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class AutomationDraftResponse(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    org_id: uuid.UUID
+    endpoint: DraftEndpoint
+    name: str | None
+    draft: dict[str, Any] = Field(validation_alias="draft_body")
+    validation_errors: list[dict[str, Any]] | None = None
+    dispatchable: bool
+    source_automation_id: uuid.UUID | None = None
+    materialized_automation_id: uuid.UUID | None = None
+    last_test_run_id: uuid.UUID | None = None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class AutomationDraftListResponse(BaseModel):
+    drafts: list[AutomationDraftResponse]
+    total: int
+
+
+class DraftDispatchRequest(BaseModel):
+    """Optional body for dispatching a draft as a test run.
+
+    ``event_payload`` lets an authenticated user supply a synthetic webhook
+    payload for event-triggered draft automations, bypassing signature
+    verification — the caller is already authenticated, so the payload is
+    trusted as test input rather than a real delivery.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_payload: dict[str, Any] | None = None
 
 
 # --- Run schemas ---
