@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
-_require_manage_automations = require_permission("manage_automations")
+_require_view_automations = require_permission("view_automations")
 
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
@@ -453,7 +453,7 @@ async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -856,7 +856,7 @@ async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:

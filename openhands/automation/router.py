@@ -89,7 +89,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 
 async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
@@ -128,7 +127,7 @@ async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Create a new automation.

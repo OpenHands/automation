@@ -227,6 +227,23 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
+    async def test_create_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation."""
+        # Arrange
+        payload = {
+            "name": "Member Automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        # Act
+        response = await readonly_client.post("/api/automation/v1", json=payload)
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
     async def _other_users_automation(
         self, async_session, *, enabled: bool = True
     ) -> Automation:
