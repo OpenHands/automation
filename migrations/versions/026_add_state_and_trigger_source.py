@@ -1,7 +1,7 @@
 """Add automation state and run trigger_source.
 
-Revision ID: 025
-Revises: 024
+Revision ID: 026
+Revises: 025
 Create Date: 2026-09-10
 """
 
