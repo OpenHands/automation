@@ -249,6 +249,7 @@ def _base_properties(
     settings = get_config().service
     properties: dict[str, Any] = {
         "deployment_mode": "local" if settings.is_local_mode else "cloud",
+        "deployment_kind": "local" if settings.is_local_mode else "remote",
         "automation_service": "openhands_automation",
         **get_server_version_info(missing_sdk_version="unknown"),
     }
