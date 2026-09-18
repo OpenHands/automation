@@ -39,11 +39,17 @@ from openhands.automation.auth import (
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
-from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.models import (
+    Automation,
+    TarballUpload,
+    UploadStatus,
+)
 from openhands.automation.schemas import (
     AutomationResponse,
+    AutomationState,
     TemplateProvenance,
     Trigger,
+    normalize_automation_state_enabled,
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
@@ -52,6 +58,10 @@ from openhands.automation.telemetry import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -73,6 +83,7 @@ from openhands.workspace import RepoSource
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
+
 
 _require_manage_automations = require_permission("manage_automations")
 
@@ -202,6 +213,13 @@ class CreatePromptAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: AutomationState | None = Field(
+        default=None,
+        description=(
+            "First-class automation state. DRAFT/INACTIVE rows are not "
+            "triggered automatically."
+        ),
+    )
 
     @field_validator("timeout")
     @classmethod
@@ -212,6 +230,7 @@ class CreatePromptAutomationRequest(BaseModel):
     @classmethod
     def normalize_repos(cls, data: Any) -> Any:
         """Normalize repos to always be a list if provided."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict) and "repos" in data and data["repos"] is not None:
             repos = data["repos"]
             if isinstance(repos, (str, dict)):
@@ -482,6 +501,7 @@ async def create_automation_from_prompt(
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -551,7 +571,8 @@ async def create_automation_from_prompt(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -706,6 +727,13 @@ class CreatePluginAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: AutomationState | None = Field(
+        default=None,
+        description=(
+            "First-class automation state. DRAFT/INACTIVE rows are not "
+            "triggered automatically."
+        ),
+    )
 
     @field_validator("timeout")
     @classmethod
@@ -716,6 +744,7 @@ class CreatePluginAutomationRequest(BaseModel):
     @classmethod
     def normalize_plugins_and_repos(cls, data: dict) -> dict:  # type: ignore[type-arg]
         """Normalize plugins and repos to always be lists."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict):
             # Normalize plugins
             if "plugins" in data and data["plugins"] is not None:
@@ -892,6 +921,7 @@ async def create_automation_from_plugin(
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -984,7 +1014,8 @@ async def create_automation_from_plugin(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,

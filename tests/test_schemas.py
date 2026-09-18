@@ -9,7 +9,7 @@ underlying ensure_utc helper) fix this at the serialisation layer.
 
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -17,9 +17,12 @@ from pydantic import ValidationError
 from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
+    AutomationState,
+    CreateAutomationRequest,
     CronTrigger,
     RunCompleteRequest,
     RunStatus,
+    UpdateAutomationRequest,
 )
 from openhands.automation.utils.time import ensure_utc
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
@@ -66,6 +69,43 @@ class TestCronTriggerValidation:
     def test_rejects_invalid_timezone(self):
         with pytest.raises(ValidationError, match="Invalid timezone"):
             CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
+
+
+class TestAutomationStateEnabledValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "State validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_string_false_for_inactive_state(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {**base_payload, "state": "INACTIVE", "enabled": "false"}
+        )
+
+        assert request.state == AutomationState.INACTIVE
+        assert request.enabled is False
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_string_false_for_active_state(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="enabled must be true"):
+            request_cls.model_validate(
+                {**base_payload, "state": "ACTIVE", "enabled": "false"}
+            )
 
 
 class TestRunCompleteRequest:
