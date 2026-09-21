@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final, NamedTuple
 
+from fastapi import HTTPException
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -64,6 +65,7 @@ from openhands.automation.models import (
 from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -501,6 +503,15 @@ async def _validate_and_resolve_fields(
         fields.get("setup_script_path"), "setup_script_path"
     )
     timeout = validate_automation_timeout(fields.get("timeout"))
+    agent_profile_id = (
+        uuid.UUID(fields["agent_profile_id"])
+        if fields.get("agent_profile_id")
+        else None
+    )
+    try:
+        validate_agent_profile_selection(agent_profile_id, fields.get("model"))
+    except HTTPException as exc:
+        raise ValueError(exc.detail) from exc
     tarball_path = await _resolve_tarball_path(
         session, fields, deserialized, slug, existing, pending_storage_deletes, owner
     )
@@ -508,6 +519,7 @@ async def _validate_and_resolve_fields(
     return {
         "name": name,
         "model": fields.get("model"),
+        "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
