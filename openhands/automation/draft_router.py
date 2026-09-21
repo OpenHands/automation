@@ -1,4 +1,4 @@
-"""Server-backed automation drafts.
+"""API routes for saved automation setup drafts.
 
 Draft rows hold partial setup UI state. A draft is materialized into a disabled
 Automation only when it validates and the user manually dispatches it for a test

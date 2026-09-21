@@ -164,10 +164,10 @@ def _draft_not_dispatchable_error(draft: AutomationDraft) -> HTTPException:
 async def _assert_normal_api_can_use_draft_artifact(
     session: AsyncSession, automation: Automation
 ) -> None:
-    if automation.state != ModelAutomationState.DRAFT:
+    draft = await _get_draft_for_materialized_automation(session, automation)
+    if automation.state != ModelAutomationState.DRAFT and draft is None:
         return
 
-    draft = await _get_draft_for_materialized_automation(session, automation)
     if draft is not None and not draft.dispatchable:
         raise _draft_not_dispatchable_error(draft)
 
@@ -352,7 +352,11 @@ async def update_automation(
     elif "enabled" in update_data:
         update_data["state"] = model_automation_state(None, update_data["enabled"])
 
-    if auto.state == ModelAutomationState.DRAFT and update_data.get("enabled") is True:
+    if auto.state == ModelAutomationState.DRAFT and (
+        "state" in update_data or "enabled" in update_data
+    ):
+        await _assert_normal_api_can_use_draft_artifact(session, auto)
+    elif update_data.get("enabled") is True:
         await _assert_normal_api_can_use_draft_artifact(session, auto)
 
     # Same rule CreateAutomationRequest enforces, applied to the merged view:

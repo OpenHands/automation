@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from openhands.automation.app import app
 from openhands.automation.db import set_sqlite_mode, using_sqlite
-from openhands.automation.models import Automation, AutomationDraft, AutomationRun, Base
+from openhands.automation.models import (
+    Automation,
+    AutomationDraft,
+    AutomationRun,
+    AutomationState,
+    Base,
+)
 from openhands.automation.storage import get_file_store
 from openhands.automation.storage.local import LocalFileStore
 
@@ -113,6 +119,51 @@ async def test_normal_api_cannot_bypass_current_draft_validation(
         f"although the current draft is incomplete: {response.status_code}"
     )
     assert response.json()["detail"] == rejected.json()["detail"]
+
+
+async def test_normal_api_cannot_make_draft_artifact_inactive_then_active(
+    async_client, async_session
+):
+    draft_id = await _create_draft(async_client)
+    first_run = await _dispatch(async_client, draft_id)
+    automation_id = first_run["automation_id"]
+
+    direct_activation = await async_client.patch(
+        f"/api/automation/v1/{automation_id}", json={"state": "ACTIVE"}
+    )
+    assert direct_activation.status_code == 409, direct_activation.text
+
+    changed = await async_client.patch(
+        f"/api/automation/v1/drafts/{draft_id}", json={"draft": {"name": "Incomplete"}}
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["dispatchable"] is False
+
+    inactive = await async_client.patch(
+        f"/api/automation/v1/{automation_id}", json={"state": "INACTIVE"}
+    )
+    assert inactive.status_code == 422, inactive.text
+
+    active = await async_client.patch(
+        f"/api/automation/v1/{automation_id}", json={"state": "ACTIVE"}
+    )
+    assert active.status_code == 422, active.text
+
+    draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
+    automation = await async_session.get(Automation, uuid.UUID(automation_id))
+    assert draft is not None
+    assert automation is not None
+    assert draft.materialized_automation_id == automation.id
+    assert automation.state == AutomationState.DRAFT
+
+    deleted = await async_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+    assert deleted.status_code == 204, deleted.text
+
+    await async_session.refresh(draft)
+    await async_session.refresh(automation)
+    assert draft.deleted_at is not None
+    assert automation.deleted_at == draft.deleted_at
+    assert automation.state == AutomationState.DRAFT
 
 
 async def test_only_draft_creator_can_mutate_or_dispatch_materialized_draft(
