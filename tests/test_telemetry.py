@@ -185,6 +185,7 @@ async def test_local_capture_uses_canvas_distinct_id(monkeypatch):
     assert properties["automation_id"] == str(automation.id)
     assert properties["run_id"] == str(run.id)
     assert properties["deployment_mode"] == "local"
+    assert properties["deployment_kind"] == "local"
     assert "cloud_user_id" not in properties
     assert "cloud_org_id" not in properties
     assert "org_id" not in properties
@@ -218,6 +219,7 @@ async def test_cloud_capture_uses_user_id_and_org_properties(monkeypatch):
     assert payload["distinct_id"] == str(automation.user_id)
     properties = payload["properties"]
     assert properties["deployment_mode"] == "cloud"
+    assert properties["deployment_kind"] == "remote"
     assert properties["cloud_user_id"] == str(automation.user_id)
     assert properties["cloud_org_id"] == str(automation.org_id)
     assert properties["$groups"] == {"org": str(automation.org_id)}
@@ -282,6 +284,7 @@ async def test_cloud_capture_does_not_require_frontend_distinct_id(monkeypatch):
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == str(automation.user_id)
     assert payload["properties"]["deployment_mode"] == "cloud"
+    assert payload["properties"]["deployment_kind"] == "remote"
 
 
 @pytest.mark.asyncio
@@ -321,6 +324,7 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
         assert payload["event"] == "automation_run_created"
         assert payload["distinct_id"] == "ph-fe-consented"
         assert payload["properties"]["deployment_mode"] == "local"
+        assert payload["properties"]["deployment_kind"] == "local"
         assert "frontend_distinct_id" not in payload["properties"]
     finally:
         await engine.dispose()
@@ -447,6 +451,7 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
         assert properties["frontend_distinct_id"] == "ph-fe-link"
         assert properties["client_source"] == "agent_canvas"
         assert properties["client_version"] == "1.2.3"
+        assert properties["deployment_kind"] == "local"
     finally:
         await engine.dispose()
 
