@@ -387,3 +387,11 @@ class TestCanonicalTarballBytes:
             {"b.py": (b"y", 0o755), "a.py": (b"x", 0o644)}
         )
         assert canonical_tarball_bytes(first) == canonical_tarball_bytes(second)
+
+
+def test_profile_reference_survives_git_round_trip():
+    selected = uuid.uuid4()
+    automation = _make_automation(agent_profile_id=selected)
+    restored = deserialize_automation(serialize_automation(automation, None))
+    assert restored is not None
+    assert restored.fields["agent_profile_id"] == str(selected)
