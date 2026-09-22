@@ -808,6 +808,24 @@ class TestCreateAutomationFromPrompt:
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
 
+    async def test_create_from_prompt_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from a prompt."""
+        # Arrange
+        payload = {
+            "name": "Member Prompt Automation",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        # Act
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
     async def test_create_from_prompt_stores_preset_metadata(self, async_client):
         """Prompt preset records preset metadata without repos when none given."""
         test_prompt = "Summarize open PRs"
@@ -1937,6 +1955,25 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from plugins."""
+        # Arrange
+        payload = {
+            "name": "Member Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        # Act
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_plugin_stores_preset_metadata(self, async_client):
         """Plugin preset records plugins and repos in preset metadata."""

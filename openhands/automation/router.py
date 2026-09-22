@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 from datetime import timedelta
-from typing import Any, Final
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -94,11 +94,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
 
-_STATE_ONLY_UPDATE_FIELDS: Final[frozenset[str]] = frozenset({"state", "enabled"})
-
-
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 
 async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
@@ -124,16 +120,32 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     )
 
 
+def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
+    fields = set(update_data)
+    if not fields or not fields <= {"enabled", "state"}:
+        return False
+    if "state" in update_data:
+        state = model_automation_state(update_data["state"], update_data.get("enabled"))
+        return (
+            state == ModelAutomationState.INACTIVE
+            and update_data.get("enabled", False) is False
+        )
+    return update_data.get("enabled") is False
+
+
 def _assert_can_update_fields(
-    automation: Automation, user: AuthenticatedUser, requested_fields: set[str]
+    automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
 ) -> None:
     if automation.user_id == user.user_id:
         return
-    if requested_fields <= _STATE_ONLY_UPDATE_FIELDS:
+    if _is_disable_only_update(update_data):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Only the automation creator can change its definition",
+        detail=(
+            "Only the automation creator can edit it; admins and owners can only "
+            "turn it off or delete it"
+        ),
     )
 
 
@@ -147,7 +159,7 @@ async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Create a new automation.
@@ -281,12 +293,16 @@ async def update_automation(
     # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Partially update an automation."""
+    """Partially update an automation.
+
+    Only the creator may edit the definition. Admins and owners may turn an
+    automation off but cannot reactivate it or change what it runs.
+    """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
-    _assert_can_update_fields(auto, user, set(update_data))
+    _assert_can_update_fields(auto, user, update_data)
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
