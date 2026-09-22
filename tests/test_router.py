@@ -228,55 +228,118 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
-    async def test_admin_non_creator_cannot_update_definition(
-        self, async_client, async_session
-    ):
-        """Admins cannot edit code/config that runs as another user."""
+    async def test_create_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation."""
+        payload = {
+            "name": "Member Automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await readonly_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
+    async def _other_users_automation(
+        self, async_session, *, enabled: bool = True
+    ) -> Automation:
+        """Persist an automation created by someone other than the caller."""
         automation = Automation(
             user_id=self._OTHER_USER_ID,
             org_id=TEST_ORG_ID,
-            name="Owned by someone else",
+            name="Teammate Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
+            enabled=enabled,
+            state=AutomationState.ACTIVE if enabled else AutomationState.INACTIVE,
         )
         async_session.add(automation)
         await async_session.commit()
+        return automation
+
+    async def test_update_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot edit another user's automation definition."""
+        automation = await self._other_users_automation(async_session)
 
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"name": "Hijacked definition"},
+            json={"prompt": "Do something else"},
         )
 
         assert response.status_code == 403
         assert "creator" in response.json()["detail"]
 
-    async def test_admin_non_creator_can_update_state(
+    async def test_disable_as_non_creator_manager_succeeds(
         self, async_client, async_session
     ):
-        """Admins can activate or deactivate automations they do not own."""
-        automation = Automation(
-            user_id=self._OTHER_USER_ID,
-            org_id=TEST_ORG_ID,
-            name="Owned by someone else",
-            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-            tarball_path="s3://bucket/code.tar.gz",
-            entrypoint="uv run script.py",
-            enabled=True,
-            state=AutomationState.ACTIVE,
-        )
-        async_session.add(automation)
-        await async_session.commit()
+        """A manager can turn off another user's automation."""
+        automation = await self._other_users_automation(async_session, enabled=True)
 
         response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}",
-            json={"state": "INACTIVE"},
+            f"/api/automation/v1/{automation.id}", json={"enabled": False}
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["state"] == "INACTIVE"
         assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
+
+    async def test_set_inactive_state_as_non_creator_manager_succeeds(
+        self, async_client, async_session
+    ):
+        """A manager can use the state API to turn off another user's automation."""
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"state": "INACTIVE"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
+
+    async def test_enable_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot turn another user's automation back on."""
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        assert response.status_code == 403
+
+    async def test_activate_state_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot reactivate another user's automation via state."""
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"state": "ACTIVE"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_disable_with_edits_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """Turning off cannot carry other edits along with it."""
+        automation = await self._other_users_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"enabled": False, "name": "Renamed"},
+        )
+
+        assert response.status_code == 403
 
 
 class TestCreateAutomation:
@@ -377,6 +440,21 @@ class TestCreateAutomation:
 
         assert response.status_code == 201
         assert response.json()["preset_metadata"] is None
+
+    async def test_create_automation_honors_explicit_enabled_state(self, async_client):
+        """Custom SDK automations can be created disabled for a test run."""
+        payload = {
+            "name": "Test Before Enabling",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "enabled": False,
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["enabled"] is False
 
     async def test_create_automation_stores_template_provenance(self, async_client):
         """A catalog entry shipping its own tarball records where it came from."""

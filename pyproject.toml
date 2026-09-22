@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.13.2"
+version = "1.14.0"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -25,8 +25,8 @@ dependencies = [
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.49.2",
-  "openhands-workspace==1.49.2",
+  "openhands-sdk==1.49.4",
+  "openhands-workspace==1.49.4",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
   "pydantic>=2",
