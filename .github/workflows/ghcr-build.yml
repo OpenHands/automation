@@ -77,7 +77,7 @@ jobs:
 
             - name: Build and push Docker image
               if: '!github.event.pull_request.head.repo.fork'
-              uses: docker/build-push-action@v5
+              uses: docker/build-push-action@v7
               with:
                   context: .
                   file: containers/Dockerfile
@@ -93,7 +93,7 @@ jobs:
       # Forked repos can't push to GHCR, so we just build to verify the image builds
             - name: Build Docker image (fork)
               if: github.event.pull_request.head.repo.fork
-              uses: docker/build-push-action@v5
+              uses: docker/build-push-action@v7
               with:
                   context: .
                   file: containers/Dockerfile
