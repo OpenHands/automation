@@ -31,8 +31,10 @@ __all__ = [
     "get_last_bash_command_result",
     "SandboxApiTransientError",
     "get_sandbox_agent_url",
+    "resume_sandbox",
     "delete_sandbox",
     "cleanup_sandbox",
+    "pause_sandbox",
     "verify_run_status",
 ]
 
@@ -114,6 +116,31 @@ async def get_sandbox_agent_url(
         return None
 
 
+async def resume_sandbox(
+    client: httpx.AsyncClient,
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+) -> bool:
+    """Resume a paused sandbox. Returns True if the API accepted the resume.
+
+    True only means the sandbox exists and is starting; the caller still has to
+    wait for it to report RUNNING. A 404 is ordinary -- the sandbox is gone.
+    """
+    try:
+        resp = await client.post(
+            f"{api_url}/api/v1/sandboxes/{sandbox_id}/resume",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        if resp.status_code >= 300:
+            logger.info("Resume sandbox %s failed: %s", sandbox_id, resp.text)
+            return False
+        return True
+    except Exception as e:
+        logger.info("Error resuming sandbox %s: %s", sandbox_id, e)
+        return False
+
+
 async def delete_sandbox(
     client: httpx.AsyncClient,
     api_url: str,
@@ -169,6 +196,37 @@ async def cleanup_sandbox(
             return deleted
     except Exception:
         logger.exception("Error deleting sandbox", extra=extra)
+        return False
+
+
+async def pause_sandbox(
+    api_url: str,
+    api_key: str,
+    sandbox_id: str,
+    run_id: str | None = None,
+) -> bool:
+    """Pause a sandbox (best-effort, creates its own HTTP client).
+
+    Used in place of ``cleanup_sandbox`` when sandbox deletion is deferred: a
+    paused sandbox keeps the run's conversation resumable without holding a
+    running-sandbox slot. A 404 is ordinary -- the sandbox is already gone.
+    """
+    api_url = api_url.rstrip("/")
+    extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{api_url}/api/v1/sandboxes/{sandbox_id}/pause",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        if resp.status_code >= 300:
+            logger.info("Pause sandbox failed: %s", resp.text, extra=extra)
+            return False
+        logger.info("Sandbox paused", extra=extra)
+        return True
+    except Exception:
+        logger.exception("Error pausing sandbox", extra=extra)
         return False
 
 
@@ -230,7 +288,7 @@ async def verify_run_status(
 
         # Get last bash command result, scoped to this run's command if known
         bash_result = await get_last_bash_command_result(
-            client, agent_url, session_key, command_id=bash_command_id
+            agent_url, session_key, command_id=bash_command_id
         )
 
         if not bash_result.found:

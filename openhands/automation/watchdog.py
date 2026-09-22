@@ -14,20 +14,30 @@ reset to bash-start + run budget + margin once the bash command starts
 The watchdog is mode-agnostic — all mode-specific logic is encapsulated
 in the ExecutionBackend (see automation/backends/).
 
-The same loop prunes ``integration_events``: it is the service's only periodic
-janitor, and a second loop buys nothing for one bounded DELETE.
+The same loop prunes ``integration_events`` and local-mode run workspaces, and
+deletes sandboxes whose deferred cleanup is due: it is the service's only
+periodic janitor, and a second loop buys nothing for one bounded DELETE.
 """
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+import os
+import shutil
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from pathlib import Path
+from typing import Final
+from uuid import UUID
 
 from sqlalchemy import delete, inspect, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.backends import get_backend
+from openhands.automation.backends import ExecutionBackend, get_backend
+from openhands.automation.backends.local import local_runs_root
 from openhands.automation.config import Settings, get_config
 from openhands.automation.models import (
     Automation,
@@ -46,8 +56,12 @@ from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_exception,
     run_status_detail_from_transient_error,
 )
+from openhands.automation.utils.sandbox import pause_sandbox
 from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.watchdog")
@@ -56,6 +70,13 @@ logger = logging.getLogger("automation.watchdog")
 # a table the receive path writes to; the loop runs again a minute later, so a
 # backlog drains rather than being dropped.
 PRUNE_BATCH_SIZE = 5000
+WORKSPACE_PURGE_BATCH_SIZE: Final[int] = 50
+WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR: Final[int] = 3
+# Deferred sandbox deletions attempted per scan; each costs one API round trip.
+SANDBOX_CLEANUP_BATCH_SIZE: Final[int] = 50
+
+# Roots already reported as missing, so the warning does not repeat every scan.
+_missing_root_warned: set[str] = set()
 
 
 async def _get_automation_keep_alive(
@@ -148,8 +169,49 @@ def _loaded_automation(run: AutomationRun) -> Automation | None:
 def _should_cleanup_sandbox_after_terminal(
     run: AutomationRun, keep_alive: bool | None
 ) -> bool:
-    """Return whether watchdog should explicitly delete this run's sandbox."""
+    """Return whether watchdog should explicitly delete this run's sandbox.
+
+    A `continue_conversation` automation is forced keep_alive at creation, so
+    the sandbox carrying a live conversation is already excluded here.
+    """
     return bool(run.sandbox_id) and keep_alive is not True
+
+
+async def _defer_sandbox_cleanup(
+    session: AsyncSession,
+    run: AutomationRun,
+    backend: ExecutionBackend,
+    settings: Settings,
+    now: datetime,
+) -> None:
+    """Stamp when the janitor should delete the sandbox, and pause it meanwhile.
+
+    Runs in the same transaction as the terminal UPDATE (``mark_stale_runs``
+    commits both), so the stamp cannot be lost once the run is terminal. The
+    pause is best-effort: a sandbox that is gone or refuses to pause is still
+    deleted by ``cleanup_due_sandboxes`` when the stamp is due.
+    """
+    sandbox_id = run.sandbox_id
+    if not sandbox_id:
+        return
+    extra = log_extra(run_id=str(run.id), sandbox_id=sandbox_id)
+    await session.execute(
+        update(AutomationRun)
+        .where(AutomationRun.id == run.id)
+        .values(
+            sandbox_cleanup_due_at=now
+            + timedelta(seconds=settings.sandbox_cleanup_delay_seconds)
+        )
+    )
+    try:
+        await pause_sandbox(
+            api_url=settings.openhands_api_base_url,
+            api_key=await backend.get_api_key(),
+            sandbox_id=sandbox_id,
+            run_id=str(run.id),
+        )
+    except Exception as e:
+        logger.warning("Pause after terminal verification failed: %s", e, extra=extra)
 
 
 async def _verify_and_mark_run(
@@ -338,14 +400,17 @@ async def _verify_and_mark_run(
         if result.rowcount > 0:
             keep_alive = await _get_automation_keep_alive(session, run)
             if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-                try:
-                    await backend.cleanup_after_verification(run_id)
-                except Exception as e:
-                    logger.warning(
-                        "Cleanup after terminal verification failed: %s",
-                        e,
-                        extra=extra,
-                    )
+                if settings.sandbox_cleanup_delay_seconds > 0:
+                    await _defer_sandbox_cleanup(session, run, backend, settings, now)
+                else:
+                    try:
+                        await backend.cleanup_after_verification(run_id)
+                    except Exception as e:
+                        logger.warning(
+                            "Cleanup after terminal verification failed: %s",
+                            e,
+                            extra=extra,
+                        )
         return result.rowcount > 0
 
     # Verification failed - execution environment not available or command still running
@@ -404,10 +469,13 @@ async def _verify_and_mark_run(
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
     keep_alive = await _get_automation_keep_alive(session, run)
     if _should_cleanup_sandbox_after_terminal(run, keep_alive):
-        try:
-            await backend.cleanup_after_verification(run_id)
-        except Exception as e:
-            logger.warning("Cleanup after verification failed: %s", e, extra=extra)
+        if settings.sandbox_cleanup_delay_seconds > 0:
+            await _defer_sandbox_cleanup(session, run, backend, settings, now)
+        else:
+            try:
+                await backend.cleanup_after_verification(run_id)
+            except Exception as e:
+                logger.warning("Cleanup after verification failed: %s", e, extra=extra)
 
     error_msg = verification.detail or "no completion callback received"
 
@@ -530,6 +598,12 @@ async def mark_stale_runs(
                 await session.commit()
                 if terminal:
                     marked += 1
+                    # Watchdog-authored timeouts never reached the auto-disable
+                    # before, so automations that only ever time out ran
+                    # forever.
+                    await maybe_disable_unhealthy_automation_after_run(
+                        session_factory, run.automation_id
+                    )
                 else:
                     logger.info(
                         "Run not terminal (completed concurrently or deferred)",
@@ -539,6 +613,337 @@ async def mark_stale_runs(
                 logger.exception("Error processing stale run", extra=extra)
 
     return marked
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeResult:
+    """Result of a workspace purge run."""
+
+    candidates_found: int
+    deleted: int
+    missing: int
+    refused: int
+    errors: int
+    bytes_freed: int
+
+
+class DeleteOutcome(StrEnum):
+    """Outcome of one bounded workspace deletion attempt."""
+
+    DELETED = "deleted"
+    MISSING = "missing"
+    REFUSED = "refused"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceDeleteResult:
+    outcome: DeleteOutcome
+    bytes_freed: int
+
+
+def _empty_result(candidates_found: int = 0) -> PurgeResult:
+    return PurgeResult(candidates_found, 0, 0, 0, 0, 0)
+
+
+def _workspace_root(workspace_base: str | os.PathLike[str] | None) -> Path:
+    """Return the configured root that owns all automation run directories."""
+    return local_runs_root(workspace_base)
+
+
+def _workspace_path(
+    workspace_base: str | os.PathLike[str] | None, run_id: UUID
+) -> Path:
+    """Build a run path from a typed UUID, never from raw path input."""
+    return _workspace_root(workspace_base) / str(run_id)
+
+
+def _scan_candidates(runs_root: Path) -> dict[UUID, float]:
+    """Find direct, canonical UUID workspace directories under runs_root."""
+    if _is_link_or_junction(runs_root):
+        logger.warning("Refusing linked workspace root during scan: %s", runs_root)
+        return {}
+
+    try:
+        if not runs_root.is_dir():
+            if str(runs_root) not in _missing_root_warned:
+                _missing_root_warned.add(str(runs_root))
+                # Silence here reads as "nothing to purge". When the agent
+                # server runs in its own container, workspace_base names a
+                # path this process cannot see and the purge never acts.
+                logger.warning(
+                    "Workspace retention is enabled but the configured root "
+                    "%s does not exist on this host; no workspace will be "
+                    "purged.",
+                    runs_root,
+                )
+            return {}
+        _missing_root_warned.discard(str(runs_root))
+        candidates: list[tuple[UUID, float]] = []
+        with os.scandir(runs_root) as entries:
+            for entry in entries:
+                with suppress(OSError, ValueError):
+                    # The name test costs no syscall, so it goes first: a root
+                    # holding a backlog is walked in full on every sweep.
+                    run_id = UUID(entry.name)
+                    if str(run_id) != entry.name:
+                        continue
+                    if entry.is_symlink() or Path(entry.path).is_junction():
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # No resolve() here. A non-link direct child of the root
+                    # always resolves back under it, and _delete_workspace
+                    # re-checks containment anyway, which is what closes the
+                    # scan-to-delete window.
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                    candidates.append((run_id, mtime))
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning("Failed to scan workspace root %s: %s", runs_root, exc)
+        return {}
+
+    candidates.sort(key=lambda item: (item[1], str(item[0])))
+    return dict(candidates)
+
+
+def _dir_size(path: Path) -> int:
+    """Best-effort reclaimed-space estimate; may undercount on races."""
+    total = 0
+    with suppress(OSError):
+        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+            # Unlike symlinks, os.walk descends Windows junctions even with
+            # followlinks=False; prune them so external targets are not counted.
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not _is_link_or_junction(Path(dirpath) / name)
+            ]
+            for filename in filenames:
+                # Read the link itself rather than its target.
+                with suppress(OSError):
+                    total += (
+                        (Path(dirpath) / filename).stat(follow_symlinks=False).st_size
+                    )
+    return total
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    """Return whether path is a symlink or Windows directory junction."""
+    return path.is_symlink() or path.is_junction()
+
+
+def _is_expired(timestamp: datetime | float, cutoff: datetime) -> bool:
+    """Return whether a trusted timestamp is older than cutoff."""
+    try:
+        if isinstance(timestamp, datetime):
+            return ensure_utc(timestamp) < cutoff
+        return datetime.fromtimestamp(timestamp, tz=UTC) < cutoff
+    except (OverflowError, OSError, ValueError):
+        return False
+
+
+def _is_terminal(status: AutomationRunStatus) -> bool:
+    return status in {
+        AutomationRunStatus.COMPLETED,
+        AutomationRunStatus.FAILED,
+        AutomationRunStatus.CANCELLED,
+        AutomationRunStatus.SKIPPED,
+    }
+
+
+def _delete_workspace(
+    workspace_base: str | os.PathLike[str] | None,
+    run_id: UUID,
+) -> WorkspaceDeleteResult:
+    """Delete one verified run directory without following root reparse points."""
+    runs_root = _workspace_root(workspace_base)
+    workspace_path = _workspace_path(workspace_base, run_id)
+
+    if _is_link_or_junction(runs_root):
+        logger.warning("Refusing linked workspace root: %s", runs_root)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
+    if _is_link_or_junction(workspace_path):
+        logger.warning("Refusing linked workspace path: %s", workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
+    if not workspace_path.exists():
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
+
+    try:
+        resolved_root = runs_root.resolve(strict=True)
+        resolved_path = workspace_path.resolve(strict=True)
+    except FileNotFoundError:
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
+    except OSError as exc:
+        logger.warning("Failed to resolve workspace %s: %s", workspace_path, exc)
+        return WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+
+    if resolved_path.parent != resolved_root or not resolved_path.is_dir():
+        logger.warning("Refusing workspace outside expected root: %s", workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.REFUSED, 0)
+
+    size = _dir_size(workspace_path)
+    try:
+        shutil.rmtree(workspace_path)
+        return WorkspaceDeleteResult(DeleteOutcome.DELETED, size)
+    except FileNotFoundError:
+        return WorkspaceDeleteResult(DeleteOutcome.MISSING, 0)
+    except OSError as exc:
+        logger.warning("Failed to delete workspace %s: %s", workspace_path, exc)
+        return WorkspaceDeleteResult(DeleteOutcome.ERROR, 0)
+
+
+async def purge_terminal_workspaces(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_base: str | os.PathLike[str] | None,
+    retention_seconds: int,
+    batch_size: int = WORKSPACE_PURGE_BATCH_SIZE,
+    shutdown_event: asyncio.Event | None = None,
+    deferred_last_cycle: set[UUID] | None = None,
+) -> PurgeResult:
+    """Purge expired terminal and inactive orphan workspace directories.
+
+    The module batch constant bounds both the successful deletions and the
+    classification candidate set. Failed/refused attempts and candidates that
+    are not actionable are remembered for the current sweep and moved behind
+    fresh candidates until every stable candidate has been considered.
+    """
+    if retention_seconds < 0:
+        raise ValueError("retention_seconds must be non-negative")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if retention_seconds == 0 or (
+        shutdown_event is not None and shutdown_event.is_set()
+    ):
+        return _empty_result()
+
+    cutoff = utcnow() - timedelta(seconds=retention_seconds)
+    candidates = await asyncio.to_thread(
+        _scan_candidates, _workspace_root(workspace_base)
+    )
+    if shutdown_event is not None and shutdown_event.is_set():
+        return _empty_result(len(candidates))
+
+    candidate_window_size = batch_size * WORKSPACE_PURGE_CANDIDATE_WINDOW_FACTOR
+    deferred_in_sweep = (
+        deferred_last_cycle if deferred_last_cycle is not None else set()
+    )
+    ordered_candidates = sorted(
+        candidates.items(),
+        key=lambda item: (
+            item[0] in deferred_in_sweep,
+            item[1],
+            str(item[0]),
+        ),
+    )[:candidate_window_size]
+
+    by_id: dict[UUID, tuple[AutomationRunStatus, datetime | None]] = {}
+    candidate_ids = [run_id for run_id, _root_mtime in ordered_candidates]
+    if candidate_ids:
+        # The single query is safe because the candidate list is bounded by
+        # the classification window (150 entries with the default settings).
+        async with session_factory() as session:
+            stmt = select(
+                AutomationRun.id,
+                AutomationRun.status,
+                AutomationRun.completed_at,
+            ).where(AutomationRun.id.in_(candidate_ids))
+            rows = (await session.execute(stmt)).all()
+            by_id.update(
+                (run_id, (status, completed_at))
+                for run_id, status, completed_at in rows
+            )
+
+    deleted = missing = refused = errors = bytes_freed = 0
+    deferred_this_cycle: set[UUID] = set()
+    failed_this_cycle: set[UUID] = set()
+    for run_id, root_mtime in ordered_candidates:
+        if deleted >= batch_size:
+            break
+        if shutdown_event is not None and shutdown_event.is_set():
+            break
+
+        row = by_id.get(run_id)
+        if row is not None:
+            status, completed_at = row
+            if not _is_terminal(status):
+                deferred_this_cycle.add(run_id)
+                continue
+        else:
+            completed_at = None
+
+        # Service-owned live runs retain an AutomationRun row. Orphans and
+        # terminal rows without completed_at use the scandir-captured root mtime
+        # as their inactivity guard.
+        age = completed_at if completed_at is not None else root_mtime
+        if not _is_expired(age, cutoff):
+            deferred_this_cycle.add(run_id)
+            continue
+        if shutdown_event is not None and shutdown_event.is_set():
+            break
+
+        delete_result = await asyncio.to_thread(
+            _delete_workspace, workspace_base, run_id
+        )
+        match delete_result.outcome:
+            case DeleteOutcome.MISSING:
+                missing += 1
+            case DeleteOutcome.REFUSED:
+                refused += 1
+                deferred_this_cycle.add(run_id)
+                failed_this_cycle.add(run_id)
+            case DeleteOutcome.ERROR:
+                errors += 1
+                deferred_this_cycle.add(run_id)
+                failed_this_cycle.add(run_id)
+            case DeleteOutcome.DELETED:
+                deleted += 1
+                bytes_freed += delete_result.bytes_freed
+                logger.info(
+                    "Purged workspace for run %s (%d bytes freed)",
+                    run_id,
+                    delete_result.bytes_freed,
+                )
+
+    if deferred_last_cycle is not None:
+        # Keep the sweep state across cycles so a large non-actionable prefix
+        # cannot make the bounded candidate window oscillate forever. Entries
+        # that vanished since the preceding scan are discarded, bounding this
+        # in-memory state by the current candidate set.
+        deferred_last_cycle.intersection_update(candidates)
+        deferred_last_cycle.update(deferred_this_cycle)
+        if len(deferred_last_cycle) == len(candidates):
+            # A completed sweep restarts, but a workspace whose deletion just
+            # failed stays behind the fresh candidates. Promoting it back to
+            # the front would spend the next cycle re-attempting a directory
+            # that is already known to be undeletable.
+            deferred_last_cycle.clear()
+            deferred_last_cycle.update(failed_this_cycle)
+
+    result = PurgeResult(
+        len(candidates), deleted, missing, refused, errors, bytes_freed
+    )
+    if result.deleted:
+        logger.info(
+            "Purge complete: %d deleted, %d missing, %d refused, %d errors, "
+            "%d bytes freed (%d candidates scanned)",
+            result.deleted,
+            result.missing,
+            result.refused,
+            result.errors,
+            result.bytes_freed,
+            result.candidates_found,
+        )
+    else:
+        logger.debug(
+            "Purge no-op: %d missing, %d refused, %d errors (%d candidates scanned)",
+            result.missing,
+            result.refused,
+            result.errors,
+            result.candidates_found,
+        )
+    return result
 
 
 async def prune_integration_events(
@@ -563,6 +968,63 @@ async def prune_integration_events(
     return result.rowcount
 
 
+async def cleanup_due_sandboxes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Delete sandboxes whose deferred cleanup is due, one bounded batch per scan.
+
+    Rows are stamped by ``complete_run`` and ``_verify_and_mark_run`` when the
+    service runs with a cleanup delay. The stamp is cleared after one attempt
+    whatever the outcome: deletion is best-effort here exactly as on the
+    immediate path (which never retries either), and the runtime's own TTL
+    reaper is the backstop, so a sandbox that will not delete cannot pin the
+    sweep forever.
+    """
+    now = utcnow()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(AutomationRun.id)
+            .where(
+                AutomationRun.sandbox_cleanup_due_at.isnot(None),
+                AutomationRun.sandbox_cleanup_due_at <= now,
+            )
+            .order_by(AutomationRun.sandbox_cleanup_due_at)
+            .limit(SANDBOX_CLEANUP_BATCH_SIZE)
+        )
+        due_run_ids = list(result.scalars().all())
+
+    cleaned = 0
+    for run_id in due_run_ids:
+        async with session_factory() as session:
+            # Re-fetch with the automation relationship so the backend can
+            # mint the per-user API key it deletes with.
+            result = await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.id == run_id)
+            )
+            run = result.scalars().first()
+            if run is None:
+                continue
+            extra = log_extra(run_id=str(run_id), sandbox_id=run.sandbox_id)
+            try:
+                if run.sandbox_id:
+                    await get_backend(run).cleanup_after_verification(str(run_id))
+            except Exception as e:
+                logger.warning("Deferred sandbox cleanup failed: %s", e, extra=extra)
+            try:
+                await session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run_id)
+                    .values(sandbox_cleanup_due_at=None)
+                )
+                await session.commit()
+                cleaned += 1
+            except Exception:
+                logger.exception("Error clearing sandbox cleanup stamp", extra=extra)
+    return cleaned
+
+
 async def watchdog_loop(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -581,6 +1043,7 @@ async def watchdog_loop(
         "Watchdog started, scanning every %ds",
         interval,
     )
+    deferred_workspace_ids: set[UUID] = set()
 
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
@@ -600,6 +1063,26 @@ async def watchdog_loop(
                 logger.info("Pruned %d expired integration event(s)", pruned)
         except Exception:
             logger.exception("Error pruning integration events")
+
+        if not settings.is_local_mode:
+            try:
+                cleaned = await cleanup_due_sandboxes(session_factory)
+                if cleaned:
+                    logger.info("Deleted %d deferred sandbox(es)", cleaned)
+            except Exception:
+                logger.exception("Error cleaning up deferred sandboxes")
+
+        if settings.is_local_mode and settings.workspace_retention_seconds > 0:
+            try:
+                await purge_terminal_workspaces(
+                    session_factory=session_factory,
+                    workspace_base=settings.workspace_base,
+                    retention_seconds=settings.workspace_retention_seconds,
+                    shutdown_event=shutdown_event,
+                    deferred_last_cycle=deferred_workspace_ids,
+                )
+            except Exception:
+                logger.exception("Error purging workspace directories")
 
         if shutdown_event is not None:
             try:

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import parse_event
@@ -46,13 +46,18 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
-from openhands.automation.utils.model_profiles import validate_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_selection,
+    validate_model_profile_for_user,
+)
 from openhands.automation.utils.webhook import get_webhook_config
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Capabilities"])
+
+_require_view_automations = require_permission("view_automations")
 
 DraftModel = (
     CreateAutomationRequest
@@ -89,7 +94,7 @@ _TRIGGER_TAGS = frozenset({"cron", "event"})
 
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
@@ -117,6 +122,8 @@ async def get_capabilities(
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
     features = [*_STATIC_FEATURES]
+    if config.service.is_local_mode:
+        features.append("agentProfiles")
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -148,7 +155,7 @@ async def get_capabilities(
 @router.post("/validate")
 async def validate_draft(
     body: ValidateDraftRequest,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> ValidateDraftResponse:
     """Validate a draft automation without creating it.
@@ -179,6 +186,18 @@ async def validate_draft(
                 message=str(e.detail),
             )
         )
+
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            validate_agent_profile_selection(draft.agent_profile_id, draft.model)
+        except HTTPException as e:
+            errors.append(
+                DraftValidationError(
+                    field="agent_profile_id",
+                    code="invalid_agent_profile",
+                    message=str(e.detail),
+                )
+            )
 
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):

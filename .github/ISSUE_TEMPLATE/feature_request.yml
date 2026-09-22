@@ -1,0 +1,40 @@
+---
+name: Feature Request
+description: Propose an enhancement to the automation service
+title: '[Feature]: '
+labels: [enhancement]
+body:
+    - type: textarea
+      id: problem
+      attributes:
+          label: Problem or Use Case
+          description: What problem does this solve, or what use case does it enable?
+      validations:
+          required: true
+
+    - type: textarea
+      id: desired-behavior
+      attributes:
+          label: Desired Behavior
+          description: Describe the behavior you want, including API surface or configuration changes if relevant.
+      validations:
+          required: true
+
+    - type: textarea
+      id: acceptance-criteria
+      attributes:
+          label: Acceptance Criteria
+          description: List the testable checklist item(s) that would prove this enhancement is complete.
+          placeholder: |
+              - [ ] The new behavior is covered by unit tests
+              - [ ] `uv run pytest tests/` passes
+      validations:
+          required: false
+
+    - type: textarea
+      id: additional-context
+      attributes:
+          label: Additional Context
+          description: Alternatives considered, related issues, or anything else that helps.
+      validations:
+          required: false

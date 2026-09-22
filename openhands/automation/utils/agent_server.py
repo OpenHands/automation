@@ -8,7 +8,6 @@ local agent servers.
 import logging
 from enum import StrEnum
 
-import httpx
 from pydantic.dataclasses import dataclass
 
 from openhands.automation.utils.log_context import log_extra
@@ -16,6 +15,7 @@ from openhands.automation.utils.transient import (
     TransientErrorInfo,
     classify_httpx_transient_error,
 )
+from openhands.sdk.workspace import AsyncRemoteWorkspace
 
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,6 @@ class BashCommandResult:
 
 
 async def get_last_bash_command_result(
-    client: httpx.AsyncClient,
     agent_url: str,
     session_key: str,
     command_id: str | None = None,
@@ -53,7 +52,6 @@ async def get_last_bash_command_result(
     output behavior. Callers that have a command id should always pass it.
 
     Args:
-        client: HTTP client
         agent_url: Agent server URL
         session_key: API key for the agent server
         command_id: Optional BashCommand id (hex) to filter by
@@ -62,31 +60,14 @@ async def get_last_bash_command_result(
         BashCommandResult with found=True if command result was retrieved
     """
     try:
-        # Search for the most recent BashOutput event, scoped to this run's
-        # bash command whenever we know which one it is. The agent-server's
-        # search endpoint accepts ``command_id__eq`` and only matches
-        # BashOutput files whose embedded command_id matches.
-        params: dict[str, str | int] = {
-            "kind__eq": "BashOutput",
-            "sort_order": "TIMESTAMP_DESC",
-            "limit": 1,
-        }
-        if command_id:
-            params["command_id__eq"] = command_id
-        resp = await client.get(
-            f"{agent_url}/api/bash/bash_events/search",
-            params=params,
-            headers={"X-Session-API-Key": session_key},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        page = resp.json()
-
-        items = page.get("items", [])
-        if not items:
+        async with AsyncRemoteWorkspace(
+            host=agent_url,
+            api_key=session_key,
+            working_dir="/",
+        ) as workspace:
+            output = await workspace.get_command_output(command_id)
+        if output is None:
             return BashCommandResult(found=False, error="No bash output found")
-
-        output = items[0]
         exit_code = output.get("exit_code")
 
         # If exit_code is None, the command is still running
@@ -231,51 +212,50 @@ async def verify_run_on_agent_server(
     agent_url = agent_url.rstrip("/")
     extra = log_extra(run_id=run_id)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        # Get last bash command result, scoped to this run's command if known
-        bash_result = await get_last_bash_command_result(
-            client, agent_url, session_key, command_id=bash_command_id
-        )
+    # Get last bash command result, scoped to this run's command if known.
+    bash_result = await get_last_bash_command_result(
+        agent_url, session_key, command_id=bash_command_id
+    )
 
-        if not bash_result.found:
-            logger.warning(
-                "Could not find bash command result: %s",
-                bash_result.error,
-                extra=extra,
-            )
-            if bash_result.error_info is not None:
-                return VerificationResult(
-                    outcome=VerificationOutcome.TRANSIENT_ERROR,
-                    detail=bash_result.error,
-                    error_info=bash_result.error_info,
-                )
-            return VerificationResult(
-                outcome=VerificationOutcome.STILL_RUNNING
-                if bash_result.error == "No bash output found"
-                else VerificationOutcome.VERIFICATION_ERROR,
-                detail=bash_result.error,
-            )
-
-        if bash_result.exit_code is None:
-            logger.info("Bash command still running", extra=extra)
-            return VerificationResult(
-                outcome=VerificationOutcome.STILL_RUNNING,
-                detail="Command still running",
-            )
-
-        success = bash_result.exit_code == 0
-        logger.info(
-            "Verified run status: exit_code=%s, success=%s",
-            bash_result.exit_code,
-            success,
+    if not bash_result.found:
+        logger.warning(
+            "Could not find bash command result: %s",
+            bash_result.error,
             extra=extra,
         )
-
+        if bash_result.error_info is not None:
+            return VerificationResult(
+                outcome=VerificationOutcome.TRANSIENT_ERROR,
+                detail=bash_result.error,
+                error_info=bash_result.error_info,
+            )
         return VerificationResult(
-            outcome=VerificationOutcome.COMPLETED
-            if success
-            else VerificationOutcome.FAILED,
-            exit_code=bash_result.exit_code,
-            stdout=bash_result.stdout,
-            stderr=bash_result.stderr,
+            outcome=VerificationOutcome.STILL_RUNNING
+            if bash_result.error == "No bash output found"
+            else VerificationOutcome.VERIFICATION_ERROR,
+            detail=bash_result.error,
         )
+
+    if bash_result.exit_code is None:
+        logger.info("Bash command still running", extra=extra)
+        return VerificationResult(
+            outcome=VerificationOutcome.STILL_RUNNING,
+            detail="Command still running",
+        )
+
+    success = bash_result.exit_code == 0
+    logger.info(
+        "Verified run status: exit_code=%s, success=%s",
+        bash_result.exit_code,
+        success,
+        extra=extra,
+    )
+
+    return VerificationResult(
+        outcome=VerificationOutcome.COMPLETED
+        if success
+        else VerificationOutcome.FAILED,
+        exit_code=bash_result.exit_code,
+        stdout=bash_result.stdout,
+        stderr=bash_result.stderr,
+    )

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 import uuid
 from typing import Any
 
@@ -33,7 +32,6 @@ POSTHOG_CAPTURE_PATH = "/capture/"
 TELEMETRY_CONSENT_METADATA_KEY = "posthog_frontend_consent_by_distinct_id"
 TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
-API_EVENT_PREFIX = "automation_api"
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
 
 
@@ -191,61 +189,6 @@ def get_request_authenticated_user(request: Request) -> AuthenticatedUser | None
     return user if isinstance(user, AuthenticatedUser) else None
 
 
-def _clean_event_suffix(value: str | None) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", value or "unknown").strip("_")
-    return cleaned.lower() or "unknown"
-
-
-def _route_template(request: Request) -> str:
-    route = request.scope.get("route")
-    route_path = getattr(route, "path", None)
-    if isinstance(route_path, str) and route_path:
-        return route_path
-    return request.url.path
-
-
-def _route_operation(request: Request) -> str:
-    endpoint = request.scope.get("endpoint")
-    endpoint_name = getattr(endpoint, "__name__", None)
-    if isinstance(endpoint_name, str) and endpoint_name:
-        return endpoint_name
-    route = request.scope.get("route")
-    route_name = getattr(route, "name", None)
-    return route_name if isinstance(route_name, str) else "unknown"
-
-
-def should_capture_api_route(request: Request) -> bool:
-    path = request.url.path
-    settings = get_config().service
-    base_path = settings.base_path.rstrip("/")
-
-    return path.startswith(f"{base_path}/v1")
-
-
-async def capture_api_route_event(
-    request: Request,
-    *,
-    status_code: int,
-    duration_ms: int,
-    exception_type: str | None = None,
-) -> None:
-    operation = _clean_event_suffix(_route_operation(request))
-    await capture_automation_event(
-        f"{API_EVENT_PREFIX}_{operation}",
-        request=request,
-        user=get_request_authenticated_user(request),
-        properties={
-            "http_method": request.method,
-            "route_path": _route_template(request),
-            "route_operation": operation,
-            "status_code": status_code,
-            "success": status_code < 400,
-            "duration_ms": duration_ms,
-            **({"exception_type": exception_type} if exception_type else {}),
-        },
-    )
-
-
 def _trigger_type(automation: Automation | None) -> str | None:
     trigger = automation.trigger if automation is not None else None
     if isinstance(trigger, dict):
@@ -306,6 +249,7 @@ def _base_properties(
     settings = get_config().service
     properties: dict[str, Any] = {
         "deployment_mode": "local" if settings.is_local_mode else "cloud",
+        "deployment_kind": "local" if settings.is_local_mode else "remote",
         "automation_service": "openhands_automation",
         **get_server_version_info(missing_sdk_version="unknown"),
     }

@@ -571,12 +571,11 @@ class TestProviderDescriptors:
             assert provider is not None
             assert provider.event_id_header is None
 
-    def test_reserved_hooks_are_unset_on_every_builtin(self):
-        """Both hooks are reserved and deliberately unwired, not forgotten."""
+    def test_handshake_is_unset_on_every_builtin(self):
+        """The hook is reserved and deliberately unwired, not forgotten."""
         for source in sorted(BUILTIN_PROVIDER_SOURCES):
             provider = get_provider(source)
             assert provider is not None
-            assert provider.subject is None
             assert provider.handshake is None
 
     def test_descriptors_are_frozen(self):

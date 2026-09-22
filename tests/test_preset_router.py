@@ -3,8 +3,10 @@
 import ast
 import io
 import json
+import os
 import re
 import socket
+import subprocess
 import tarfile
 import uuid
 from collections.abc import Callable
@@ -144,6 +146,34 @@ class TestPresetFileSyntax:
             "setup.sh doesn't look like a valid shell script"
         )
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_creates_its_conversation_under_the_derived_id(self, preset_name):
+        """The other half of the `continue_conversation` contract.
+
+        The dispatcher exports AUTOMATION_CONVERSATION_ID for a subject-owning
+        run, but that only matters if the script actually creates its
+        conversation with it. Exporting it and never reading it looks exactly
+        like the feature working, right up until the first follow-up event
+        404s and the thread silently restarts.
+        """
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert "AUTOMATION_CONVERSATION_ID" in source, (
+            f"{preset_name} preset ignores AUTOMATION_CONVERSATION_ID, so a "
+            "continued thread would get a fresh conversation every event"
+        )
+        assert '"conversation_id"' in source, (
+            f"{preset_name} preset must pass conversation_id to Conversation()"
+        )
+
+    def test_shared_finish_tool_hook_syntax(self):
+        """Verify shared finish-tool hook helper has valid Python syntax."""
+        helper_path = PRESETS_DIR / "finish_tool_hook.py"
+        assert helper_path.exists(), f"Preset file not found: {helper_path}"
+
+        source = helper_path.read_text()
+        compile(source, str(helper_path), "exec")
+
     def test_prompt_setup_sh_fetches_sdk_version_from_api(self):
         """Prompt setup.sh fetches SDK version from the automation service API."""
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
@@ -174,6 +204,32 @@ class TestPresetFileSyntax:
         assert "finish_tool_response_schema=TaskOutcome" in content
         assert 'Tool(name="FinishTool"' not in content
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_requires_finish_tool_via_stop_hook(self, preset_name):
+        """Preset conversations nudge text-only endings to call FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        helper_content = (PRESETS_DIR / "finish_tool_hook.py").read_text()
+
+        assert (
+            "from finish_tool_hook import finish_tool_required_hook_config" in content
+        )
+        assert "def _finish_tool_marker_path(script_dir: str) -> str:" not in content
+        assert (
+            "def finish_tool_required_hook_config(script_dir: str) -> HookConfig:"
+            in helper_content
+        )
+        assert '".openhands_automation_runtime"' in helper_content
+        assert "session_start=[" in helper_content
+        assert "post_tool_use=[" in helper_content
+        assert 'matcher="/(?:finish|FinishTool)/"' in helper_content
+        assert "stop=[" in helper_content
+        assert "session_end=[" in helper_content
+        assert "shutil.rmtree" in helper_content
+        assert '"hook_config": finish_tool_required_hook_config(SCRIPT_DIR),' in content
+        assert "Please call the finish tool now" in helper_content
+
 
 class TestPresetEntrypoint:
     def test_get_preset_entrypoint_posix(self, monkeypatch):
@@ -197,6 +253,70 @@ class TestPresetEntrypoint:
         assert "command -v python3" in content
         assert "command -v python" in content
         assert "command -v py" in content
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize(
+        "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
+    )
+    def test_setup_targets_run_venv_despite_ambient_uv_python(
+        self, tmp_path, preset_name, venv_python
+    ):
+        """An inherited UV_PYTHON cannot redirect the preset installation."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        uv_log = tmp_path / "uv.log"
+        ambient_mutated = tmp_path / "ambient-mutated"
+        venv_verified = tmp_path / "venv-verified"
+
+        fake_curl = bin_dir / "curl"
+        fake_curl.write_text('#!/bin/sh\nprintf \'{"version": "1.46.0"}\\n\'\n')
+        fake_curl.chmod(0o755)
+
+        fake_uv = bin_dir / "uv"
+        fake_uv.write_text(
+            """#!/bin/sh
+printf '%s\\n' "$*" >> "$UV_CALL_LOG"
+if [ "$1" = "venv" ]; then
+    mkdir -p "$(dirname "$FAKE_VENV_PYTHON")"
+    printf '#!/bin/sh\\ntouch "$VENV_VERIFIED"\\n' > "$FAKE_VENV_PYTHON"
+    chmod +x "$FAKE_VENV_PYTHON"
+elif [ "$1" = "pip" ]; then
+    case " $* " in
+        *" --python $FAKE_VENV_PYTHON "*) ;;
+        *) touch "$AMBIENT_MUTATED" ;;
+    esac
+fi
+"""
+        )
+        fake_uv.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "UV_PYTHON": "/ambient/agent-server/python",
+            "UV_CALL_LOG": str(uv_log),
+            "FAKE_VENV_PYTHON": venv_python,
+            "AMBIENT_MUTATED": str(ambient_mutated),
+            "VENV_VERIFIED": str(venv_verified),
+            "AUTOMATION_API_URL": "https://automation.invalid",
+        }
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+
+        result = subprocess.run(
+            ["bash", str(setup_sh_path)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        calls = uv_log.read_text().splitlines()
+        assert calls[0] == "venv .venv --python cpython>=3.12,<3.14 --quiet"
+        assert calls[1].startswith(f"pip install --python {venv_python} --quiet ")
+        assert not ambient_mutated.exists()
+        assert venv_verified.exists()
 
 
 @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
@@ -350,6 +470,7 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -474,6 +595,7 @@ class TestReplacePromptInTarball:
         assert new_files["prompt.txt"].decode() == "New prompt"
         for name in (
             "main.py",
+            "finish_tool_hook.py",
             "setup.sh",
             "plugins_config.json",
             "repos_config.json",
@@ -676,6 +798,7 @@ class TestCreateAutomationFromPrompt:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
             assert "automation_model.py" not in tar.getnames()
@@ -684,6 +807,24 @@ class TestCreateAutomationFromPrompt:
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from a prompt."""
+        # Arrange
+        payload = {
+            "name": "Member Prompt Automation",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        # Act
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_prompt_stores_preset_metadata(self, async_client):
         """Prompt preset records preset metadata without repos when none given."""
@@ -1210,6 +1351,7 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -1661,6 +1803,7 @@ class TestExperimentTarball:
             assert "experiment_config.json" in names
             assert "plugins_config.json" not in names
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 
@@ -1799,6 +1942,7 @@ class TestCreateAutomationFromPlugin:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "plugins_config.json" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
@@ -1811,6 +1955,25 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from plugins."""
+        # Arrange
+        payload = {
+            "name": "Member Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        # Act
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_plugin_stores_preset_metadata(self, async_client):
         """Plugin preset records plugins and repos in preset metadata."""

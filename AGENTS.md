@@ -1,6 +1,40 @@
 # Automations Service
 
-Self-contained microservice that schedules and dispatches automation runs inside OpenHands Cloud sandboxes.
+Self-contained microservice that schedules and dispatches automation runs inside OpenHands sandboxes.
+
+## Cross-Repository Boundaries
+
+This repository owns the Automation Service: automation definitions, cron scheduling, webhooks, run history, dispatch, and sandbox lifecycle orchestration. It manages when work runs and dispatches conversations to the Agent Server/SDK, which owns agent/tool behavior, conversations, workspaces, events, and API endpoints.
+
+Related repositories have different responsibilities:
+
+- [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk) owns the Python SDK, Agent Server, canonical API, execution behavior, and the browser-compatible TypeScript client under `clients/typescript/`.
+- [`OpenHands/OpenHands`](https://github.com/OpenHands/OpenHands) owns Agent Canvas UI, frontend integration, and local-stack orchestration.
+- [`OpenHands/extensions`](https://github.com/OpenHands/extensions) owns reusable skills, plugins, automations, and integrations.
+
+If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
+
+## Review-Facing Implementation Checklist
+
+Before opening a PR that changes scheduling, dispatch, run state, or sandbox
+lifecycle:
+
+- Enumerate the affected run-state transitions and competing actors (scheduler,
+  dispatcher, callback, watchdog, retry, and cleanup). Make claims and terminal
+  writes idempotent, release leases on every exit, and make persisted status
+  reflect the real sandbox or process outcome.
+- Compare maximum duration, schedule interval, retry policy, and per-user sandbox
+  capacity. Prevent self-overlap or apply explicit backpressure without pausing
+  or evicting the user's interactive sandbox.
+- Authorize organization, automation, upload, callback, and execution ownership
+  independently. Forward only the secrets required by the sandboxed workload and
+  validate webhook, tarball, entrypoint, and git-sync paths before filesystem use.
+- Keep PostgreSQL and SQLite behavior aligned. A schema change should use one
+  coherent migration with one Alembic head and a complete upgrade path from the
+  released schema.
+- Trace schema, environment, preset, callback, and catalog changes through their
+  real producer and consumer in the SDK, Canvas, or extensions repository. Do
+  not document or test against variables and endpoints production never supplies.
 
 ## Repository Structure
 
@@ -22,12 +56,16 @@ automation/
 │       ├── schemas.py          # Pydantic request/response schemas
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
-│       ├── git_sync/           # Bidirectional git sync (local mode only, see below)
+│       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
 │       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
 │       │   ├── router.py       # Git sync status/trigger API
 │       │   ├── schemas.py      # Git sync request/response schemas
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
+│       ├── streams/            # Stream sources (Slack Socket Mode, see below)
+│       │   ├── base.py         # StreamProvider protocol, per-source health
+│       │   ├── slack.py        # Slack Socket Mode provider
+│       │   └── supervisor.py   # Source registry, supervised task per source
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
 │       │   └── google_cloud.py # GCS implementation
@@ -46,8 +84,7 @@ automation/
 │   └── test_tarball/       # Tarball contents uploaded to sandbox during test
 │       ├── main.py         # Test script run inside sandbox (SDK workspace test)
 │       └── setup.sh        # Installs SDK inside sandbox
-├── tests/                   # Unit tests (flat structure, no external deps)
-│   ├── integration/        # Integration tests (require OPENHANDS_API_KEY)
+├── tests/                   # Unit and container-backed integration tests
 │   ├── test_auth.py
 │   ├── test_dispatcher.py
 │   ├── test_execution.py
@@ -57,28 +94,12 @@ automation/
 └── pyproject.toml
 ```
 
-## Cross-Repo Coordination
-
-Three repos work together:
-
-| Repo | Branch | Purpose |
-|------|--------|---------|
-| `OpenHands/automation` | `dispatch-phase1b` | Automation service (this repo) |
-| `OpenHands/deploy` (aka `All-Hands-AI/deploy`) | `dispatch-phase1b` | Deploys automation as a sidecar |
-| `OpenHands/software-agent-sdk` | `feat/saas-runtime-mode` | SDK changes for in-sandbox execution |
-
-**AUTOMATION_SHA linking**: The deploy repo references a specific automation commit in two workflow files:
-- `.github/workflows/deploy.yaml` → `AUTOMATION_SHA: "<full-sha>"`
-- `.github/workflows/deploy-automation.yaml` → `AUTOMATION_SHA: "<full-sha>"`
-
-After pushing to the automation repo, update both files in the deploy repo.
-
 ## Configuration
 
 Configuration is centralized in `config.py` using a composed `AppConfig` with typed sections:
 
 ```python
-from automation.config import get_config
+from openhands.automation.config import get_config
 
 config = get_config()
 config.service.db_host          # ServiceSettings (AUTOMATION_ prefix)
@@ -100,15 +121,12 @@ config.log.log_level            # LogSettings (no prefix)
 
 ```bash
 # Pre-commit (run from repo root)
-pre-commit run --files openhands/**/*.py scripts/**/*.py tests/**/*.py --show-diff-on-failure
+uv run pre-commit run --all-files --show-diff-on-failure
 
-# Unit tests (no external deps, skips Docker-dependent tests)
-uv run pytest tests/ -v --ignore=tests/integration
+# Test suite (requires Docker for the PostgreSQL fixture; some tests also use MinIO or fake-gcs-server containers)
+uv run python -m pytest tests/
 
-# Integration test (requires OPENHANDS_API_KEY)
-OPENHANDS_API_KEY=sk-oh-... uv run pytest tests/integration/ -v
-
-# E2E test script (live sandbox, ~80s)
+# E2E test script (requires OPENHANDS_API_KEY and a live sandbox service)
 OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url https://staging.all-hands.dev
 ```
 
@@ -132,13 +150,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. Fork PRs must remove `.pr/` manually before merge.
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
-- For fork PRs, remove `.pr/` manually before merging.
+- Cleanup PRs follow the normal review and required-check protections for `main`.
 
 
 ## Dispatch Pipeline
@@ -169,6 +187,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
+| `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 
@@ -176,7 +195,7 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 - **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses standard API key auth — the per-user `OPENHANDS_API_KEY` passed into the sandbox is validated via `authenticate_request`, and ownership is verified against the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
-- **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`). On dispatch failure, the dispatcher deletes the sandbox immediately.
+- **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
 ## Database
 
@@ -258,8 +277,8 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 ### Notes
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
-- The generated tarball uses `python main.py` as the entrypoint and `setup.sh` as the setup script
-- Future presets (e.g., plugins) can be added as additional subdirectories under `openhands/automation/presets/`
+- Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
+- Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
 
 ## Catalog Bundles
 
@@ -287,95 +306,164 @@ clone; it fetches what it needs itself.
 
 ## Git Sync
 
-Local/self-hosted deployments can mirror their automations to a git repo for
-visibility, versioning, and backup — see issue #300. **Only active in local
-mode** (`AUTOMATION_AGENT_SERVER_URL` set): a single repo maps to a single
-agent server, which doesn't make sense for the multi-tenant SaaS deployment.
+Deployments can mirror automations to a git repo for visibility, versioning,
+and backup — see issue #300. Sync is **scoped to an organization**: each org
+syncs its own automations to its own repo, configured from the Git Sync page
+by an org admin/owner (`manage_automations`) and stored on that org's
+`automation_git_sync_org_config` row. Local mode is the same code path with
+exactly one org, the deterministic local org from `auth.py`'s
+`_get_local_user()`.
 
-- Configuring a repo is what enables sync — there is no separate feature
-  flag. The repo URL may come either from `AUTOMATION_GIT_SYNC_REPO_URL` or
-  from the Git Sync page, and nothing syncs until one is set. The background
-  loop and the `dirty` CRUD hook start in every local-mode deployment
-  (`is_git_sync_supported`), idle, so a repo configured from the UI syncs
-  without a restart. See `GitSyncSettings` in
-  `config.py` for the full list of env vars.
+- Configuring a repo is what enables sync for an org — there is no separate
+  feature flag. In local mode the repo URL may also come from
+  `AUTOMATION_GIT_SYNC_REPO_URL`; outside local mode the env-level repo URL,
+  token and encryption key are ignored (`base_git_sync_settings` in
+  `git_sync/config_override.py`), since a shared deployment must not sync
+  every org into one repo. The background loop and the `dirty` CRUD hook run
+  in every deployment, idle until an org is configured, so a repo configured
+  from the UI syncs without a restart. See `GitSyncSettings` in `config.py`
+  for the env vars.
+- The loop ticks every 15 s, reads every org's config, and runs a cycle for
+  the orgs that are enabled, have a positive interval and are due — their
+  interval has elapsed since their last success *or* failure, so a broken
+  repo isn't retried every tick. Orgs sync one after another within a tick.
+- **Cross-replica lease**: the cloud runs several replicas, each with the
+  loop, and none shares a disk. A cycle first claims the org's
+  `sync_started_at` with a conditional UPDATE and clears it in `finally`; a
+  replica that loses the race skips (`SyncCycleResult.skipped`). A crashed
+  cycle's lease expires after `max(300 s, 5 × git timeout)`. `GET /status`
+  reads the same column for `sync_in_progress`, so every replica reports the
+  same thing, and `POST /sync` returns `triggered: false` while it is live —
+  that cycle covers everything the new one would.
+- Each org's checkout lives at `{workspace_base}/git-sync/{org_id}` (local
+  mode keeps the historical `{workspace_base}/git-sync`, or
+  `AUTOMATION_GIT_SYNC_LOCAL_WORKDIR`). It is a cache: cloud pods have no
+  persistent disk, so a fresh pod re-clones on its first cycle.
 - Each automation is stored under `{git_sync_path}/{slug}/` as `automation.yaml`
   (metadata) plus its tarball contents extracted under `tarball/**`. Those are
   the only paths the exporter owns (`is_generated_path`): other files committed
   in the same directory are left alone. `automation.yaml` carries a
   `tarball_executables` list when any tarball member is executable, since the
   extracted files are committed as plain content and the mode would otherwise
-  be lost on the way back in.
+  be lost on the way back in. Slugs are unique per org
+  (`AutomationGitSyncState`, `(org_id, slug)`), not globally.
 - `git_sync_path` is validated by `normalize_git_sync_path`: repo-relative, no
   `..`, no leading/trailing slashes, never empty. It is joined onto the local
   checkout and passed to `git add -- <path>`, and each slug directory under it
   is pruned during export, so a traversing value would delete host directories.
 - `git_sync/router.py` exposes `GET /v1/git-sync/status`,
   `PUT /v1/git-sync/config`, `POST /v1/git-sync/sync` (manual trigger), and
-  `POST /v1/git-sync/check`.
+  `POST /v1/git-sync/check`. Every endpoint acts on the caller's org
+  (`user.org_id`); status needs `view_automations`, the rest
+  `manage_automations`.
 - `POST /v1/git-sync/check` takes the same body as `PUT /config` and reports
   whether *that* configuration can reach its repo, without saving it or
   syncing: `resolve_candidate_git_sync_settings` merges the update in memory,
   and `check_remote_access` runs a single `git ls-remote`. Keep it that way —
   validating by running a cycle would clone, import whatever the repo holds
-  into the local automations, and push every dirty automation to a URL nobody
+  into the org's automations, and push every dirty automation to a URL nobody
   has vetted yet, which for a mistyped URL is the damage rather than the
   diagnosis. It proves read access only: a token with no write scope passes
   and still fails at push time, and the encryption key is never exercised. A
   branch that doesn't exist yet is reported as `branch_exists: false`, not a
   failure — the first cycle creates it. A bad configuration comes back as
   `200 {"ok": false, "detail": ...}`, since the request itself succeeded.
-- **Sync is manual by default**: the interval defaults to `0`, meaning a
+- **Sync is manual by default**: an org's interval defaults to `0`, meaning a
   cycle runs only when `POST /v1/git-sync/sync` is called. Set a positive
   `interval_seconds` via `PUT /v1/git-sync/config` (the UI) to also sync
   automatically. Unlike every other git-sync setting it has **no environment
-  variable** — it is runtime-only config, stored with the other overrides
-  (see `DEFAULT_SYNC_INTERVAL_SECONDS` in `git_sync/config_override.py`).
-  The background loop always runs so a newly-set interval takes effect
-  without a restart; while the interval is 0 it idles without syncing.
-  Either way one cycle is the same bidirectional pull → import → export →
-  push; there's no way to run a single direction.
+  variable** — it is runtime-only config, stored with the org's other
+  overrides (see `DEFAULT_SYNC_INTERVAL_SECONDS` in
+  `git_sync/config_override.py`). The background loop always runs so a
+  newly-set interval takes effect without a restart. Either way one cycle is
+  the same bidirectional pull → import → export → push; there's no way to run
+  a single direction.
 - Conflict policy: an automation is marked `dirty` (in `AutomationGitSyncState`)
   on every create/update/delete via the API; the sync loop treats a dirty
   automation as authoritative over a conflicting git-side change for the same
-  cycle — the VM always wins until its change has been pushed. The import skips
-  a dirty slug and the export then compares against what is actually on disk,
-  not against `state.content_hash`: a git-side edit leaves the DB row untouched,
-  so a hash comparison would skip the write and strand the two versions.
+  cycle — the service always wins until its change has been pushed. The import
+  skips a dirty slug and the export then compares against what is actually on
+  disk, not against `state.content_hash`: a git-side edit leaves the DB row
+  untouched, so a hash comparison would skip the write and strand the two
+  versions.
 - Automations that predate git sync being switched on have no state row, and the
   export only reads dirty ones. `_backfill_missing_states` creates them (dirty)
-  at the start of every cycle, so the first sync exports everything rather than
-  reporting success against an empty repo.
-- Automations created directly in git (e.g. via a PR) are imported and
-  stamped with the deterministic local-mode user/org IDs from `auth.py`'s
-  `_get_local_user()`.
-- **Encryption**: set `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY` to encrypt file
-  contents (via the SDK's Fernet-based `Cipher`, same primitive as the KV
-  store) before they're committed. Reading a repo written before encryption
-  was turned on still works — plaintext files pass through unchanged.
-- **Runtime config**: `PUT /v1/git-sync/config` reconfigures or pauses/resumes
-  an already-running sync (repo/branch/path/token/encryption key/author)
+  for the org at the start of every cycle, so the first sync exports everything
+  rather than reporting success against an empty repo.
+- Automations created directly in git (e.g. via a PR) are imported into the org
+  and stamped with the user who last saved the org's Git Sync config
+  (`configured_by_user_id`). They run as that user — in cloud mode that means
+  minting their API key, so they must stay a member of the org; re-saving the
+  config re-stamps the owner. Local mode falls back to `_get_local_user()`.
+  Outside local mode an org row that was never saved from the UI has no such
+  user, so new directories are skipped (logged) while already-synced
+  automations keep updating. Anything pushed to the configured repo becomes an
+  automation that runs under that user: treat write access to the repo like
+  admin access to the org.
+- **Encryption**: set the org's encryption key (or, in local mode,
+  `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
+  SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're
+  committed. Reading a repo written before encryption was turned on still
+  works — plaintext files pass through unchanged.
+- **Runtime config**: `PUT /v1/git-sync/config` configures, reconfigures or
+  pauses/resumes the org's sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as
-  JSON in `automation_service_metadata`). Setting a repo URL there enables
-  sync without a restart; only a deployment that can't sync at all (not local
-  mode) is refused, on both the config endpoint (409) and the manual trigger
-  (503).
+  JSON on the org's `automation_git_sync_org_config` row). Setting a repo URL
+  there enables sync without a restart. It is refused with a 409 when another
+  org already syncs the same repository, branch and path — each org's export
+  writes `{path}/{slug}/` and its import reads every directory there, so the
+  two would import each other's automations. That check is a read followed
+  by a write, so on PostgreSQL the request first takes a transaction-scoped
+  advisory lock on the repo identity (`lock_repo_identity`); a concurrent
+  save of the same repo by another org waits for the commit and then sees
+  the row. It is refused with a 503 when no wrapping secret is available
+  (below). `POST /sync` returns 503 while the org's sync
+  is not enabled.
 - The token and encryption key in that blob are encrypted at rest by
-  `git_sync/secret_store.py`, wrapped with `AUTOMATION_KV_SECRET` when the
-  deployment sets one and otherwise with a key generated into a 0600 file
-  under the workspace. If neither can be obtained, `PUT /config` fails with a
-  503 rather than storing the secret in the clear.
+  `git_sync/secret_store.py`, wrapped with `AUTOMATION_GIT_SYNC_SECRET`,
+  falling back to `AUTOMATION_KV_SECRET`, and in local mode only to a key
+  generated into a 0600 file under the workspace. Cloud mode requires one of
+  the env secrets: replicas don't share a disk, so a per-pod key file would
+  make a token stored by one pod unreadable on the others. If no key can be
+  obtained, `PUT /config` fails with a 503 rather than storing the secret in
+  the clear.
 - `GET /v1/git-sync/status` also reports `last_error`/`last_error_at` from
-  the most recent failed cycle, cleared on the next successful one.
-- **In-flight cycles**: a cycle writes its outcome only when it ends, so
-  `/status` also reports `sync_in_progress`/`sync_started_at` — otherwise a
-  caller can't tell a running sync from one that never started, and a cycle
-  the periodic loop began is invisible to the UI. The flag is in-process
-  state (`get_sync_started_at`), scoped like the `_sync_cycle_lock` it
-  shadows: a crash mid-cycle can't strand it the way a persisted flag would.
-  `POST /v1/git-sync/sync` returns `triggered: false` instead of scheduling
-  when one is already running — that cycle covers everything the new one
-  would, and the lock would only queue it behind anyway.
+  the org's most recent failed cycle, cleared on the next successful one.
+
+## Stream Sources
+
+Events that arrive over a connection this service holds open instead of an
+inbound HTTP request — today only Slack Socket Mode. Past `emit()` nothing is
+special: the event goes through `accept_event()` like any webhook, so it
+matches **unmodified automation definitions** and is deduplicated on the
+provider's delivery id.
+
+- **Configuring an app is the switch**: the supervisor starts when
+  `AUTOMATION_SLACK_APPS` is non-empty, so a deployment that configures none is
+  unchanged and there is no second var to flip. `AUTOMATION_STREAMS_ENABLED`
+  defaults on and exists only as a kill switch. Self-hosted only: Slack does
+  not allow Socket Mode apps in its public Marketplace, and a pinned connection
+  does not fit a stateless autoscaled tier.
+- **Configured from the environment**, not a table — `AUTOMATION_SLACK_APPS`,
+  a JSON list of `{org_id, app_token, bot_token, team_id, bot_user_id}`. Per-org
+  socket configuration is a multi-tenant requirement; taking it now would cost
+  a migration and a credential-encryption surface first. See `StreamSettings`.
+- **A provider owns its loop.** `run(emit, shutdown)` holds the connection and
+  pushes events out; it is not polled, because `slack_sdk` already reconnects
+  correctly and a `receive()` shape would reimplement that badly.
+- **The supervisor catches per source**, restarting with exponential backoff,
+  so one bad provider cannot take down the others or any other loop. A
+  `StreamConfigError` is terminal — nothing a restart can fix.
+- **Slack rules**: ack before any other work (unacked envelopes are
+  redelivered), drop the bot's own messages (`bot_id`/`subtype`), check
+  `team_id` on every envelope, and assert `team_id` *and* `bot_user_id` against
+  `auth.test` before connecting, so a mis-pasted token fails loudly instead of
+  bridging the wrong workspace.
+- **Health** is process-local (`stream_health()`): `last_connected_at`,
+  `last_event_at`, `consecutive_failures`. Nothing renders it yet.
+- Slack distributes payloads across up to 10 connections per app, so this one
+  provider is safe active-active — a Slack guarantee, not a general one, hence
+  `Capabilities.tolerates_multiple_connections` in `providers.py`.
 
 ## Release Procedure
 
@@ -437,6 +525,3 @@ When bumping `openhands-sdk` / `openhands-workspace` pins:
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
    release-please handles the version bump and release.
-4. After the release publishes, update `AUTOMATION_SHA` in the deploy repo:
-   - `.github/workflows/deploy.yaml`
-   - `.github/workflows/deploy-automation.yaml`

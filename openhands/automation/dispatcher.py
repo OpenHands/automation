@@ -28,6 +28,7 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
@@ -41,6 +42,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     TarballUpload,
 )
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -50,6 +52,7 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_current_phase,
     update_run_timeout_at,
     update_sandbox_id,
 )
@@ -65,6 +68,9 @@ from openhands.automation.utils.tarball_validation import (
 )
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
+)
 
 
 logger = logging.getLogger("automation.dispatcher")
@@ -127,8 +133,13 @@ async def _poll_pending_runs(
     """
     select_query = (
         select(AutomationRun)
+        .join(AutomationRun.automation)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            Automation.enabled.is_(True),
+            Automation.deleted_at.is_(None),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -167,8 +178,15 @@ def _build_event_payload(
         "automation_id": str(automation.id),
         "automation_name": automation.name,
     }
-    if run.event_payload:
-        payload["event"] = run.event_payload
+    # Events that arrived on this subject while the run was still queued are
+    # parked on the payload. Lift them into a field of our own, so the script
+    # still reads the provider's payload exactly as it arrived.
+    event = dict(run.event_payload or {})
+    follow_up_turns = event.pop(COALESCED_TURNS_KEY, None)
+    if event:
+        payload["event"] = event
+    if follow_up_turns:
+        payload["follow_up_turns"] = follow_up_turns
     if automation.model:
         payload["model"] = automation.model
     return payload
@@ -216,6 +234,24 @@ async def _execute_run(
             error,
             status_detail=status_detail,
         )
+        automation_disabled = disable
+        if disable:
+            automation_disabled = await disable_automation(
+                session_factory,
+                automation.id,
+                error,
+                disabled_detail={"status_detail": status_detail}
+                if status_detail is not None
+                else None,
+                run_id=run.id,
+            )
+        else:
+            # Evaluate whether the automation has failed consecutively and may never
+            # succeed
+            automation_disabled = await maybe_disable_unhealthy_automation_after_run(
+                session_factory,
+                automation.id,
+            )
         await capture_automation_event(
             "automation_run_failed",
             automation=automation,
@@ -224,11 +260,9 @@ async def _execute_run(
             properties={
                 "trigger_source": "dispatcher",
                 "failure_kind": "dispatch_error",
-                "automation_disabled": disable,
+                "automation_disabled": automation_disabled,
             },
         )
-        if disable:
-            await disable_automation(session_factory, automation.id, error)
 
     # 1. Calculate effective timeout (doesn't depend on ctx). This same value
     # drives both the bash command timeout and the watchdog cleanup deadline.
@@ -293,6 +327,9 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_PHASE_URL"] = (
+        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+    )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -300,6 +337,20 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    if automation.agent_profile_id:
+        env_vars["AUTOMATION_AGENT_PROFILE_ID"] = str(automation.agent_profile_id)
+    # A subject-owning run must create its conversation under the id
+    # `continue_conversation` addresses later, or every follow-up 404s and
+    # silently starts a fresh thread.
+    if run.subject_key:
+        trigger_source = (automation.trigger or {}).get("source")
+        if trigger_source:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = conversation_id_for(
+                automation.org_id,
+                automation.id,
+                trigger_source,
+                run.subject_key,
+            )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
@@ -386,7 +437,6 @@ async def _execute_run(
     work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
@@ -438,6 +488,7 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
@@ -535,6 +586,7 @@ async def dispatch_pending_runs(
                     run,
                     AutomationRunStatus.RUNNING,
                     max_duration=timedelta(seconds=provisioning_deadline),
+                    current_phase="Preparing environment",
                 )
                 dispatched_runs.append(run)
             except Exception:
@@ -550,13 +602,6 @@ async def dispatch_pending_runs(
         await session.commit()
 
         for run in dispatched_runs:
-            await capture_automation_event(
-                "automation_run_dispatched",
-                automation=run.automation,
-                run=run,
-                properties={"trigger_source": "dispatcher"},
-                session_factory=session_factory,
-            )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",

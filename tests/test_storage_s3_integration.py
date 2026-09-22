@@ -20,6 +20,9 @@ from openhands.automation.storage import ObjectNotFoundError, S3FileStore
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
+MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z"
+
+
 @pytest.fixture(scope="module")
 def minio_container():
     """Start a MinIO container for integration tests.
@@ -27,7 +30,7 @@ def minio_container():
     This fixture is module-scoped for efficiency - the container is
     reused across all tests in the module.
     """
-    with MinioContainer() as minio:
+    with MinioContainer(image=MINIO_IMAGE) as minio:
         yield minio
 
 

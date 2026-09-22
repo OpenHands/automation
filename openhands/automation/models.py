@@ -73,6 +73,9 @@ class Automation(Base):
     # None is only used for legacy/local fallback.
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Profile IDs belong to the configured Agent Server, not to this database.
+    agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -96,6 +99,13 @@ class Automation(Base):
 
     # Whether the automation is enabled (can be triggered)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    # Current disabled-state metadata. AutomationDisableEvent keeps history.
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -127,6 +137,11 @@ class Automation(Base):
     # Relationship to runs
     runs: Mapped[list["AutomationRun"]] = relationship(
         "AutomationRun", back_populates="automation", cascade="all, delete-orphan"
+    )
+    disable_events: Mapped[list["AutomationDisableEvent"]] = relationship(
+        "AutomationDisableEvent",
+        back_populates="automation",
+        cascade="all, delete-orphan",
     )
 
 
@@ -164,6 +179,13 @@ class AutomationRun(Base):
     # remains PENDING/RUNNING.
     status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Human-readable live progress phase ("Cloning repositories", tool-call
+    # summaries, ...) written by the dispatcher and by the run's entrypoint
+    # via POST /v1/runs/{id}/phase. Only written while PENDING/RUNNING, and
+    # deliberately never cleared on completion (unlike status_detail) — the
+    # UI renders it only for in-flight runs.
+    current_phase: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -180,6 +202,25 @@ class AutomationRun(Base):
 
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # The external subject this run is about (a Slack thread, a PR). Finds the
+    # sandbox holding the conversation; the conversation id itself is derived.
+    subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # When this run stopped being the subject's routing target -- its sandbox
+    # was deleted, or a turn could not reach it. The key itself stays for the
+    # historical record, so lookups filter on this instead of on its absence.
+    subject_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # When the janitor should delete this run's sandbox. Stamped on the
+    # terminal transition instead of deleting at once when the service runs
+    # with a cleanup delay; the sandbox is paused meanwhile so the run's
+    # conversation can be resumed. NULL when cleanup was immediate or is done.
+    sandbox_cleanup_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
@@ -206,6 +247,7 @@ class AutomationRun(Base):
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -227,7 +269,61 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        # Partial: only live subjects are ever looked up, and only
+        # `continue_conversation` runs set one.
+        Index(
+            "ix_automation_runs_subject",
+            "automation_id",
+            "subject_key",
+            "created_at",
+            postgresql_where=(subject_key.isnot(None))
+            & (subject_released_at.is_(None)),
+            sqlite_where=(subject_key.isnot(None)) & (subject_released_at.is_(None)),
+        ),
+        # Partial: NULL on nearly every row (immediate cleanup never stamps,
+        # and the sweep clears it), so a full index would be almost all NULLs.
+        Index(
+            "ix_automation_runs_sandbox_cleanup_due",
+            "sandbox_cleanup_due_at",
+            postgresql_where=(sandbox_cleanup_due_at.isnot(None)),
+            sqlite_where=(sandbox_cleanup_due_at.isnot(None)),
+        ),
     )
+
+
+class AutomationDisableEvent(Base):
+    """Historical record of an automation being disabled."""
+
+    __tablename__ = "automation_disable_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+        index=True,
+    )
+
+    automation: Mapped["Automation"] = relationship(
+        "Automation",
+        back_populates="disable_events",
+    )
+    run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
 
 
 class TarballUpload(Base):
@@ -534,9 +630,14 @@ class AutomationGitSyncState(Base):
         primary_key=True,
     )
 
+    # Denormalized from the automation so the sync loop can select one org's
+    # rows without a join, and so the slug uniqueness below is per org.
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
     # Directory name within the sync path, e.g. "automations/{slug}/" in the
-    # repo. Stable once assigned.
-    slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    # repo. Stable once assigned. Unique per org, not globally: each org syncs
+    # to its own repo, so two orgs may both have a "daily-standup".
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # SHA-256 of the last-synced content (metadata + tarball files), used to
     # detect no-op sync cycles.
@@ -551,6 +652,68 @@ class AutomationGitSyncState(Base):
     # Set on every API create/update/delete, cleared once exported. While
     # dirty, the DB side wins over a conflicting git-side change.
     dirty: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_automation_git_sync_state_org_slug", "org_id", "slug", unique=True),
+    )
+
+
+class AutomationGitSyncOrgConfig(Base):
+    """One organization's git sync: runtime config plus sync bookkeeping.
+
+    See ``openhands/automation/git_sync/``. Sync is org-scoped -- each org
+    mirrors its own automations to its own repo -- so everything that used to
+    be service-wide (the config override blob and the last commit/run/error)
+    lives here, keyed by ``org_id``. Local mode has exactly one row, for the
+    deterministic local org from ``auth.py``.
+
+    ``overrides`` is the JSON blob of runtime config saved from the Git Sync
+    page (``git_sync/config_override.py``), merged over the env defaults at
+    read time. Its secret fields are wrapped at rest (``secret_store.py``).
+
+    ``sync_started_at`` doubles as a cross-replica lease: a cycle claims it
+    with a conditional UPDATE and clears it when done, so two replicas never
+    sync the same org at once and every replica reports the same
+    ``sync_in_progress``. A crash mid-cycle leaves it set; the loop treats it
+    as expired after its lease TTL rather than blocking the org forever.
+    """
+
+    __tablename__ = "automation_git_sync_org_config"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    overrides: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
+
+    # Who last saved the config. Automations imported from git are created as
+    # this user: an automation runs as its owner, and in cloud mode that means
+    # minting the owner's API key, so it has to be a real member of the org.
+    configured_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

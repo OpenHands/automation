@@ -134,6 +134,9 @@ def _automation_yaml_fields(
     fields: dict[str, Any] = {
         "name": automation.name,
         "model": automation.model,
+        "agent_profile_id": str(automation.agent_profile_id)
+        if automation.agent_profile_id
+        else None,
         "trigger": automation.trigger,
         "setup_script_path": automation.setup_script_path,
         "entrypoint": automation.entrypoint,

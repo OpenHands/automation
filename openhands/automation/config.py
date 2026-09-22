@@ -43,13 +43,14 @@ different values, use monkeypatching or reload the affected modules.
 """
 
 import os
+import uuid
 import warnings
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -341,8 +342,14 @@ class GitSyncSettings(BaseSettings):
     """Git sync configuration for backing up/versioning automations in git.
 
     When enabled, automations are serialized to files and pushed to a git repo,
-    and changes pushed there (e.g. via a PR) are pulled back. Local mode only:
-    one repo maps to one agent server, which doesn't fit multi-tenant SaaS.
+    and changes pushed there (e.g. via a PR) are pulled back. Sync is scoped
+    to an organization: each org syncs its own automations to its own repo,
+    configured from the Git Sync page and stored per org (see
+    `git_sync/config_override.py`). These env vars are the defaults that
+    per-org config is merged over. In local mode they configure the one local
+    org outright; in cloud mode the repo URL, token and encryption key are
+    ignored (a shared deployment must not sync every org into one repo) and
+    only the neutral defaults apply.
 
     Configuring a repo is what turns sync on: there is no separate enable
     flag, so nothing syncs until a repo URL is set here or from the UI.
@@ -350,7 +357,7 @@ class GitSyncSettings(BaseSettings):
     Environment variables (AUTOMATION_ prefix):
         AUTOMATION_GIT_SYNC_REPO_URL: Git repo URL to sync to, e.g.
             https://github.com/org/repo.git. Setting it enables sync; empty
-            (the default) leaves it off.
+            (the default) leaves it off. Local mode only.
         AUTOMATION_GIT_SYNC_BRANCH: Branch to sync (default: "main").
         AUTOMATION_GIT_SYNC_PATH: Directory within the repo automations are
             stored under, no leading/trailing slash (default: "automations").
@@ -369,6 +376,11 @@ class GitSyncSettings(BaseSettings):
             clone. Defaults to "{workspace_base}/git-sync" when empty.
         AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
             subprocess invocations (default: 60).
+        AUTOMATION_GIT_SYNC_SECRET: Key that wraps the per-org git token and
+            encryption key at rest (see `git_sync/secret_store.py`). Falls
+            back to AUTOMATION_KV_SECRET, then (local mode only) to a key
+            file under the workspace. Required in cloud mode, where replicas
+            share a database but not a disk.
     """
 
     # The sync interval is deliberately not here: it is runtime-only, set from
@@ -388,6 +400,7 @@ class GitSyncSettings(BaseSettings):
     git_sync_author_email: str = "automation@openhands.dev"
     git_sync_local_workdir: str = ""
     git_sync_git_timeout_seconds: float = 60.0
+    git_sync_secret: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
@@ -400,6 +413,51 @@ class GitSyncSettings(BaseSettings):
         deployment on a bad env var. app.py warns once it knows the mode.
         """
         return bool(self.git_sync_repo_url and self.git_sync_enabled)
+
+
+class SlackAppSettings(BaseModel):
+    """One Slack app this deployment holds a Socket Mode connection for.
+
+    `team_id` and `bot_user_id` are asserted against `auth.test` before the
+    socket opens, so a mis-pasted token fails loudly instead of silently
+    bridging the wrong workspace into this organization.
+    """
+
+    org_id: uuid.UUID
+    # App-level token (xapp-), which opens the socket.
+    app_token: str
+    # Bot token (xoxb-), used only to assert identity at startup.
+    bot_token: str
+    team_id: str
+    bot_user_id: str
+
+
+class StreamSettings(BaseSettings):
+    """Stream sources: long-lived inbound connections, supervised in-process.
+
+    Configuring an app is what turns this on: `enabled` needs a source too, so
+    a deployment that sets no `AUTOMATION_SLACK_APPS` starts nothing either
+    way. Still self-hosted only, for two independent reasons: Slack does not
+    allow Socket Mode apps in the public Marketplace, and connection-scoped
+    state does not fit a stateless autoscaled tier. Webhooks remain the cloud
+    path.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_STREAMS_ENABLED: Kill switch (default: true). Set it false
+            to keep the supervisor down while the apps stay configured.
+        AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
+            {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
+    """
+
+    streams_enabled: bool = True
+    slack_apps: list[SlackAppSettings] = Field(default_factory=list)
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether to start the supervisor: a source is configured, not killed."""
+        return bool(self.streams_enabled and self.slack_apps)
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +507,23 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
+            auto-disabling an automation (default: 3, <=0 disables auto-disable)
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD: Consecutive failures
+            before auto-disabling. Unset (the default) turns the rule off;
+            setting a number turns it on and uses that number.
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_WINDOW_HOURS: The rule only fires
+            if nothing has succeeded in this many hours, which is what makes it
+            ignore provider outages shorter than the window (default: 24)
+
+        # Workspace retention (local mode only)
+        AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
+            for terminal runs older than this (default: 604800 — 7 days).
+
+        # Sandbox cleanup (cloud mode only)
+        AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
+            its sandbox is deleted; it is paused meanwhile so the conversation
+            can be resumed (default: 0 — delete immediately).
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
@@ -532,6 +607,29 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+
+    # Auto-disable rules. `failure_disable_threshold` is the fast path for
+    # unambiguous config faults (bad key, revoked token) and needs no time
+    # guard. The two rules below catch automations that merely fail forever;
+    # their span/window guards are what keep a provider outage from pausing
+    # healthy automations en masse, so both must exceed any tolerable outage.
+    failure_disable_threshold: int = 3
+
+    # Setting a threshold at all is what turns the consecutive rule on; it is
+    # off by default. The window only applies once the rule is on, and must
+    # exceed any outage you would rather ride out than pause for.
+    consecutive_failure_disable_threshold: int | None = None
+    consecutive_failure_disable_window_hours: float = 24.0
+
+    # Workspace retention for local mode
+    # Set to 0 to disable workspace purging.
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
+
+    # Cloud mode: how long after a run ends before its sandbox is deleted.
+    # 0 (the default) deletes at once. Above 0 the sandbox is paused instead
+    # and the watchdog deletes it once the delay has passed, so the run's
+    # conversation stays resumable in the UI meanwhile.
+    sandbox_cleanup_delay_seconds: int = Field(default=0, ge=0)
 
     # How long an accepted event stays in `integration_events`. It bounds two
     # things: the dedupe window (a redelivery older than this is indistinguishable
@@ -640,6 +738,7 @@ class AppConfig:
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
         git_sync: Git sync settings (repo, branch, credentials)
+        streams: Stream source settings (Slack Socket Mode)
 
     Example:
         config = get_config()
@@ -684,6 +783,11 @@ class AppConfig:
     def git_sync(self) -> GitSyncSettings:
         """Git sync configuration (AUTOMATION_ prefix)."""
         return GitSyncSettings()
+
+    @cached_property
+    def streams(self) -> StreamSettings:
+        """Stream source configuration (AUTOMATION_ prefix)."""
+        return StreamSettings()
 
 
 @lru_cache
