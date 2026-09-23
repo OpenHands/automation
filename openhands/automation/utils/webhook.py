@@ -81,6 +81,7 @@ async def get_webhook_config(
                 is_builtin=True,
                 signature_header=provider.signature_header,
                 signature_scheme=provider.verifier,
+                event_id_header=provider.event_id_header,
             )
         return None
 
@@ -101,6 +102,8 @@ async def get_webhook_config(
             signature_header=webhook.signature_header,
             # A cleared column reads as the default.
             signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
+            # NULL means this source does not identify deliveries.
+            event_id_header=webhook.event_id_header,
         )
     return None
 

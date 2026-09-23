@@ -693,6 +693,10 @@ class WebhookConfig(BaseModel):
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
     signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
+    # HTTP header carrying the provider's own delivery id, or None when the
+    # source does not identify its deliveries. Built-in providers take it from
+    # their descriptor; a custom webhook takes it from its row.
+    event_id_header: str | None = None
 
 
 class EventResponse(BaseModel):
@@ -739,6 +743,16 @@ def _validate_signature_scheme(v: str) -> str:
         raise ValueError(
             f"Invalid signature_scheme '{v}'. Must be one of: "
             f"{', '.join(sorted(schemes))}"
+        )
+    return v
+
+
+def _validate_header_name(v: str) -> str:
+    """Validate an HTTP header name, shared by every configurable header."""
+    if not _HEADER_NAME_RE.match(v):
+        raise ValueError(
+            "Header must be alphanumeric with hyphens, 1-100 chars, "
+            "starting with a letter"
         )
     return v
 
@@ -793,6 +807,16 @@ class CustomWebhookCreate(BaseModel):
             "deliveries outside a 5-minute replay window."
         ),
     )
+    event_id_header: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Optional HTTP header name carrying the provider's own delivery id, "
+            "used to drop redelivered events (e.g. 'X-GitHub-Delivery'). "
+            "Omit it for a source that does not identify its deliveries: its "
+            "events are recorded and routed, but never deduplicated."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -843,12 +867,15 @@ class CustomWebhookCreate(BaseModel):
     @classmethod
     def validate_signature_header(cls, v: str) -> str:
         """Validate HTTP header name format."""
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookUpdate(BaseModel):
@@ -860,6 +887,7 @@ class CustomWebhookUpdate(BaseModel):
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
     signature_scheme: str | None = Field(default=None, max_length=50)
+    event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
     @field_validator("signature_scheme")
@@ -891,12 +919,15 @@ class CustomWebhookUpdate(BaseModel):
         """Validate HTTP header name format if provided."""
         if v is None:
             return v
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookResponse(BaseModel):
@@ -910,6 +941,7 @@ class CustomWebhookResponse(BaseModel):
     event_key_expr: str
     signature_header: str
     signature_scheme: str
+    event_id_header: str | None = None
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime

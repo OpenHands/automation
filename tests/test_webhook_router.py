@@ -143,6 +143,25 @@ class TestCustomWebhookCreateSchema:
                 signature_header="123-Header",
             )
 
+    def test_event_id_header_defaults_to_none(self):
+        """A webhook that names no delivery header opts out of deduplication."""
+        assert CustomWebhookCreate(name="Test", source="test").event_id_header is None
+
+    def test_event_id_header_is_validated(self):
+        """A configured delivery header can be named, but must be a valid one."""
+        data = CustomWebhookCreate(
+            name="Canvas",
+            source="github-events",
+            event_id_header="X-GitHub-Delivery",
+        )
+        assert data.event_id_header == "X-GitHub-Delivery"
+
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(
+                name="Test", source="test", event_id_header="Invalid Header!"
+            )
+        assert "alphanumeric" in str(exc_info.value).lower()
+
     def test_user_provided_secret(self):
         """User can provide their own webhook secret."""
         data = CustomWebhookCreate(
@@ -200,6 +219,25 @@ class TestCustomWebhookUpdateSchema:
         """Invalid signature header in update is rejected."""
         with pytest.raises(ValidationError) as exc_info:
             CustomWebhookUpdate(signature_header="Invalid Header!")
+        assert "alphanumeric" in str(exc_info.value).lower()
+
+    def test_event_id_header_set_clear_and_omit(self):
+        """Omitted leaves it alone, a name sets it, null clears it."""
+        assert "event_id_header" not in CustomWebhookUpdate(name="W").model_dump(
+            exclude_unset=True
+        )
+        assert (
+            CustomWebhookUpdate(event_id_header="X-GitHub-Delivery").event_id_header
+            == "X-GitHub-Delivery"
+        )
+        assert CustomWebhookUpdate(event_id_header=None).model_dump(
+            exclude_unset=True
+        ) == {"event_id_header": None}
+
+    def test_invalid_event_id_header_update(self):
+        """An invalid delivery header in update is rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookUpdate(event_id_header="Invalid Header!")
         assert "alphanumeric" in str(exc_info.value).lower()
 
 
@@ -302,3 +340,32 @@ class TestWebhookUrlGeneration:
 
         # Restore cache
         clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_event_id_header_flows_through_the_api(async_client):
+    """Create persists it, PATCH sets it, and explicit null clears it."""
+    created = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={
+            "name": "Canvas GitHub Events",
+            "source": "github-events",
+            "event_id_header": "X-GitHub-Delivery",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["event_id_header"] == "X-GitHub-Delivery"
+    webhook_id = created.json()["id"]
+
+    cleared = await async_client.patch(
+        f"/api/automation/v1/webhooks/{webhook_id}",
+        json={"event_id_header": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["event_id_header"] is None
+
+    invalid = await async_client.post(
+        "/api/automation/v1/webhooks",
+        json={"name": "Bad", "source": "bad", "event_id_header": "Invalid Header!"},
+    )
+    assert invalid.status_code == 422
