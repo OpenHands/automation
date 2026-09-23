@@ -18,6 +18,7 @@ from openhands.automation.db import (
     set_sqlite_mode,
 )
 from openhands.automation.dispatcher import dispatcher_loop
+from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
 from openhands.automation.git_sync import git_sync_loop
 from openhands.automation.git_sync.router import router as git_sync_router
@@ -258,7 +259,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.13.2",  # x-release-please-version
+        version="1.14.0",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -287,6 +288,7 @@ _base_path = get_settings().base_path
 app.include_router(uploads_router, prefix=_base_path)
 app.include_router(capabilities_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
+app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)

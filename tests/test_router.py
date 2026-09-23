@@ -12,6 +12,7 @@ from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
     AutomationRun,
+    AutomationState,
     TarballUpload,
     UploadStatus,
 )
@@ -227,6 +228,20 @@ class TestPermissionEnforcement:
 
         assert response.status_code == 204
 
+    async def test_create_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation."""
+        payload = {
+            "name": "Member Automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+        }
+
+        response = await readonly_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
     async def _other_users_automation(
         self, async_session, *, enabled: bool = True
     ) -> Automation:
@@ -239,6 +254,7 @@ class TestPermissionEnforcement:
             tarball_path="s3://bucket/code.tar.gz",
             entrypoint="uv run script.py",
             enabled=enabled,
+            state=AutomationState.ACTIVE if enabled else AutomationState.INACTIVE,
         )
         async_session.add(automation)
         await async_session.commit()
@@ -248,16 +264,13 @@ class TestPermissionEnforcement:
         self, async_client, async_session
     ):
         """A manager cannot edit another user's automation definition."""
-        # Arrange
         automation = await self._other_users_automation(async_session)
 
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
             json={"prompt": "Do something else"},
         )
 
-        # Assert
         assert response.status_code == 403
         assert "creator" in response.json()["detail"]
 
@@ -265,47 +278,67 @@ class TestPermissionEnforcement:
         self, async_client, async_session
     ):
         """A manager can turn off another user's automation."""
-        # Arrange
         automation = await self._other_users_automation(async_session, enabled=True)
 
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}", json={"enabled": False}
         )
 
-        # Assert
         assert response.status_code == 200
-        assert response.json()["enabled"] is False
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
+
+    async def test_set_inactive_state_as_non_creator_manager_succeeds(
+        self, async_client, async_session
+    ):
+        """A manager can use the state API to turn off another user's automation."""
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"state": "INACTIVE"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
 
     async def test_enable_as_non_creator_manager_returns_403(
         self, async_client, async_session
     ):
         """A manager cannot turn another user's automation back on."""
-        # Arrange
         automation = await self._other_users_automation(async_session, enabled=False)
 
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        # Assert
+        assert response.status_code == 403
+
+    async def test_activate_state_as_non_creator_manager_returns_403(
+        self, async_client, async_session
+    ):
+        """A manager cannot reactivate another user's automation via state."""
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"state": "ACTIVE"}
+        )
+
         assert response.status_code == 403
 
     async def test_disable_with_edits_as_non_creator_manager_returns_403(
         self, async_client, async_session
     ):
         """Turning off cannot carry other edits along with it."""
-        # Arrange
         automation = await self._other_users_automation(async_session)
 
-        # Act
         response = await async_client.patch(
             f"/api/automation/v1/{automation.id}",
             json={"enabled": False, "name": "Renamed"},
         )
 
-        # Assert
         assert response.status_code == 403
 
 
@@ -379,6 +412,21 @@ class TestCreateAutomation:
         assert automation is not None
         assert automation.telemetry_distinct_id == "ph-fe-creator"
 
+    async def test_create_automation_rejects_draft_state(self, async_client):
+        """Normal automation creation cannot create draft test artifacts."""
+        payload = {
+            "name": "Draft via public API",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
     async def test_create_automation_preset_metadata_is_null(self, async_client):
         """Custom SDK automations are created without preset metadata."""
         payload = {
@@ -392,6 +440,21 @@ class TestCreateAutomation:
 
         assert response.status_code == 201
         assert response.json()["preset_metadata"] is None
+
+    async def test_create_automation_honors_explicit_enabled_state(self, async_client):
+        """Custom SDK automations can be created disabled for a test run."""
+        payload = {
+            "name": "Test Before Enabling",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 5", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/path/to/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "enabled": False,
+        }
+
+        response = await async_client.post("/api/automation/v1", json=payload)
+
+        assert response.status_code == 201
+        assert response.json()["enabled"] is False
 
     async def test_create_automation_stores_template_provenance(self, async_client):
         """A catalog entry shipping its own tarball records where it came from."""
@@ -1340,6 +1403,32 @@ class TestUpdateAutomation:
         assert events[0].detail == {"reason": "manual", "source": "user"}
         assert events[0].source == "manual"
 
+    async def test_update_automation_rejects_draft_state(
+        self, async_client, async_session
+    ):
+        """Normal automation updates cannot move rows into DRAFT."""
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=True,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"state": "DRAFT"},
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+        await async_session.refresh(automation)
+        assert automation.enabled is True
+
     async def test_update_automation_model_profile(self, async_client, async_session):
         """PATCH can update the selected model profile."""
         automation = Automation(
@@ -1806,10 +1895,10 @@ class TestDispatchAutomation:
         assert response.status_code == 404
         assert "Automation not found" in response.json()["detail"]
 
-    async def test_dispatch_disabled_automation_returns_reason(
+    async def test_dispatch_disabled_automation_creates_manual_run(
         self, async_client, async_session
     ):
-        """Dispatching a disabled automation returns its blocking reason."""
+        """Manual dispatch is allowed for inactive automations."""
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -1828,11 +1917,11 @@ class TestDispatchAutomation:
             f"/api/automation/v1/{automation.id}/dispatch"
         )
 
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert detail["message"] == "Automation is disabled"
-        assert detail["disabled_reason"] == "auth: Invalid API key"
-        assert detail["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert response.status_code == 201
+        data = response.json()
+        assert data["automation_id"] == str(automation.id)
+        assert data["status"] == "PENDING"
+        assert data["trigger_source"] == "manual"
 
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""
