@@ -44,43 +44,68 @@ automation/
 │   └── automation/          # Main application package (openhands.automation namespace)
 │       ├── app.py              # FastAPI app, lifespan, background tasks
 │       ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
-│       ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
+│       ├── capabilities_router.py  # Capability discovery and preflight validation
+│       ├── config.py           # Pydantic settings (AppConfig sections, env prefix AUTOMATION_)
 │       ├── constants.py        # Timeouts, polling intervals, sandbox constants
+│       ├── conversations.py    # Routes an event to its subject's conversation
 │       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
 │       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── event_router.py     # Receives webhook events, triggers automations
+│       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
+│       ├── ingest.py           # Transport-neutral event ingestion (accept_event)
+│       ├── kv_router.py        # Per-automation KV store API (+ kv_helpers/kv_metrics/kv_schemas)
 │       ├── logger.py           # JSON structured logging configuration
+│       ├── middleware.py       # ASGI middleware
 │       ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
+│       ├── preset_router.py    # Preset-based automation creation
+│       ├── providers.py        # Event provider descriptors and signature verifiers
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
 │       ├── schemas.py          # Pydantic request/response schemas
+│       ├── subjects.py         # Maps an external subject to a conversation id
+│       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
+│       ├── trigger_matcher.py  # Trigger matching for event-based automations
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── webhook_router.py   # Custom webhook CRUD
+│       ├── backends/           # Execution backends (Cloud, Local)
+│       ├── event_schemas/      # Typed event payloads (GitHub, Jira DC, Bitbucket DC, custom)
 │       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
+│       │   ├── config_override.py  # Per-org runtime config overrides
 │       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
 │       │   ├── router.py       # Git sync status/trigger API
 │       │   ├── schemas.py      # Git sync request/response schemas
+│       │   ├── secret_store.py # At-rest encryption for org tokens/keys
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
+│       ├── presets/            # Preset tarball templates (prompt/, plugin/)
 │       ├── streams/            # Stream sources (Slack Socket Mode, see below)
 │       │   ├── base.py         # StreamProvider protocol, per-source health
 │       │   ├── slack.py        # Slack Socket Mode provider
 │       │   └── supervisor.py   # Source registry, supervised task per source
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
-│       │   └── google_cloud.py # GCS implementation
+│       │   ├── factory.py      # Storage backend selection
+│       │   ├── google_cloud.py # GCS implementation
+│       │   ├── local.py        # Local filesystem implementation
+│       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
-│           └── time.py         # UTC time helpers
+│           ├── time.py         # UTC time helpers
+│           └── ...             # agent_server, kv, log_context, templates, webhook, ...
 ├── containers/
 │   └── Dockerfile          # Container image definition
+├── docs/                    # Design docs (KV store, run-phase reporting)
 ├── migrations/              # Alembic migrations
 ├── scripts/
 │   ├── test_automation.py  # E2E test (sandbox lifecycle with live streaming)
+│   ├── test_kv_e2e.py      # KV store E2E test
 │   └── test_tarball/       # Tarball contents uploaded to sandbox during test
 │       ├── main.py         # Test script run inside sandbox (SDK workspace test)
 │       └── setup.sh        # Installs SDK inside sandbox
