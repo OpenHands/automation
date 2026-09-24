@@ -1,4 +1,6 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
+
+ARG DEBIAN_SNAPSHOT=20260913T000000Z
 
 WORKDIR /app
 ENV PYTHONPATH='/app'
@@ -7,8 +9,24 @@ ENV PYTHONPATH='/app'
 LABEL com.datadoghq.tags.service="automation"
 
 # Install system deps for asyncpg + uv + git (for SDK git dependencies)
-RUN apt-get update && \
+RUN printf '%s\n' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" \
+        'Suites: trixie' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        '' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/" \
+        'Suites: bookworm-security' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        > /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
     apt-get install -y --no-install-recommends libpq-dev git && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir uv ddtrace
 
