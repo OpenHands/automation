@@ -3,15 +3,19 @@
 import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     Uuid,
@@ -19,6 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from openhands.automation.providers import DEFAULT_VERIFIER as DEFAULT_SIGNATURE_SCHEME
 from openhands.automation.utils import utcnow
 
 
@@ -43,6 +48,14 @@ class AutomationRunStatus(enum.Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     SKIPPED = "SKIPPED"
+
+
+class AutomationState(StrEnum):
+    """State of an automation definition."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DRAFT = "DRAFT"
 
 
 class Automation(Base):
@@ -70,6 +83,9 @@ class Automation(Base):
     # None is only used for legacy/local fallback.
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Profile IDs belong to the configured Agent Server, not to this database.
+    agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -91,8 +107,25 @@ class Automation(Base):
     # means the automation service owns explicit cleanup.
     keep_alive: Mapped[bool | None] = mapped_column(default=None, nullable=True)
 
-    # Whether the automation is enabled (can be triggered)
+    # Deprecated: use state instead. Kept for backwards
+    # compatibility; only ACTIVE rows have enabled=True. Will be removed in a
+    # future release.
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    state: Mapped[AutomationState] = mapped_column(
+        Enum(AutomationState, native_enum=False, length=20),
+        nullable=False,
+        default=AutomationState.ACTIVE,
+        server_default=AutomationState.ACTIVE.value,
+        index=True,
+    )
+
+    # Current disabled-state metadata. AutomationDisableEvent keeps history.
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
@@ -125,6 +158,11 @@ class Automation(Base):
     runs: Mapped[list["AutomationRun"]] = relationship(
         "AutomationRun", back_populates="automation", cascade="all, delete-orphan"
     )
+    disable_events: Mapped[list["AutomationDisableEvent"]] = relationship(
+        "AutomationDisableEvent",
+        back_populates="automation",
+        cascade="all, delete-orphan",
+    )
 
 
 class AutomationRun(Base):
@@ -156,6 +194,18 @@ class AutomationRun(Base):
     # Error details if status is FAILED
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Structured current/last run lifecycle detail. Unlike error_detail, this
+    # can describe non-terminal transient infrastructure issues while the run
+    # remains PENDING/RUNNING.
+    status_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # Human-readable live progress phase ("Cloning repositories", tool-call
+    # summaries, ...) written by the dispatcher and by the run's entrypoint
+    # via POST /v1/runs/{id}/phase. Only written while PENDING/RUNNING, and
+    # deliberately never cleared on completion (unlike status_detail) — the
+    # UI renders it only for in-flight runs.
+    current_phase: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # Conversation created by the SDK script (set by completion callback)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -173,12 +223,36 @@ class AutomationRun(Base):
     # The sandbox ID used for execution (for status verification)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # The external subject this run is about (a Slack thread, a PR). Finds the
+    # sandbox holding the conversation; the conversation id itself is derived.
+    subject_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # When this run stopped being the subject's routing target -- its sandbox
+    # was deleted, or a turn could not reach it. The key itself stays for the
+    # historical record, so lookups filter on this instead of on its absence.
+    subject_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # When the janitor should delete this run's sandbox. Stamped on the
+    # terminal transition instead of deleting at once when the service runs
+    # with a cleanup delay; the sandbox is paused meanwhile so the run's
+    # conversation can be resumed. NULL when cleanup was immediate or is done.
+    sandbox_cleanup_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # The agent-server BashCommand id for this run's dispatched bash chain.
     # Stored so the verifier can filter BashOutput events by this specific
     # command and avoid sampling output from concurrent bash activity on a
     # shared agent server (e.g., the agent's TerminalTool or other runs in
     # local mode). Set immediately after `_start_bash` returns.
     bash_command_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # How this run was created: manual, cron, event, or null for legacy rows.
+    trigger_source: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
 
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
@@ -187,12 +261,18 @@ class AutomationRun(Base):
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     event_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Additional metadata captured during run execution.
+    # For preset automations this may include the semantic task outcome parsed
+    # from the final conversation action.
+    run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
+
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -214,7 +294,124 @@ class AutomationRun(Base):
         Index("ix_automation_runs_status", "status"),
         Index("ix_automation_runs_status_created_at", "status", "created_at"),
         Index("ix_automation_runs_status_timeout_at", "status", "timeout_at"),
+        Index("ix_automation_runs_status_trigger_source", "status", "trigger_source"),
+        # Partial: only live subjects are ever looked up, and only
+        # `continue_conversation` runs set one.
+        Index(
+            "ix_automation_runs_subject",
+            "automation_id",
+            "subject_key",
+            "created_at",
+            postgresql_where=(subject_key.isnot(None))
+            & (subject_released_at.is_(None)),
+            sqlite_where=(subject_key.isnot(None)) & (subject_released_at.is_(None)),
+        ),
+        # Partial: NULL on nearly every row (immediate cleanup never stamps,
+        # and the sweep clears it), so a full index would be almost all NULLs.
+        Index(
+            "ix_automation_runs_sandbox_cleanup_due",
+            "sandbox_cleanup_due_at",
+            postgresql_where=(sandbox_cleanup_due_at.isnot(None)),
+            sqlite_where=(sandbox_cleanup_due_at.isnot(None)),
+        ),
     )
+
+
+class AutomationDraft(Base):
+    """Editable automation setup state, including incomplete form drafts."""
+
+    __tablename__ = "automation_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Creation endpoint this draft body targets: /v1, /v1/preset/prompt, etc.
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Partial request body owned by the setup UI. It may be incomplete and is
+    # only promoted to an Automation after full endpoint-schema validation.
+    draft_body: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    dispatchable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    source_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    materialized_automation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automations.id", ondelete="SET NULL"), nullable=True
+    )
+    last_test_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("automation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_automation_drafts_org_updated_at", "org_id", "updated_at"),
+        Index("ix_automation_drafts_org_deleted_at", "org_id", "deleted_at"),
+        Index("ix_automation_drafts_source_automation_id", "source_automation_id"),
+        Index(
+            "ix_automation_drafts_materialized_automation_id",
+            "materialized_automation_id",
+        ),
+        Index("ix_automation_drafts_last_test_run_id", "last_test_run_id"),
+    )
+
+
+class AutomationDisableEvent(Base):
+    """Historical record of an automation being disabled."""
+
+    __tablename__ = "automation_disable_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("automation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+        index=True,
+    )
+
+    automation: Mapped["Automation"] = relationship(
+        "Automation",
+        back_populates="disable_events",
+    )
+    run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
 
 
 class TarballUpload(Base):
@@ -326,6 +523,15 @@ class CustomWebhook(Base):
         String(100), nullable=False, default="X-Signature-256"
     )
 
+    # Names a verifier in `providers.VERIFIERS`. Nullable because a PATCH may
+    # clear it; NULL reads as the default.
+    signature_scheme: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        default=DEFAULT_SIGNATURE_SCHEME,
+        server_default=DEFAULT_SIGNATURE_SCHEME,
+    )
+
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -343,6 +549,71 @@ class CustomWebhook(Base):
 
     __table_args__ = (
         Index("ix_custom_webhooks_org_source", "org_id", "source", unique=True),
+    )
+
+
+class IntegrationEvent(Base):
+    """One accepted delivery, written in the same transaction as its runs.
+
+    The dedupe key for redeliveries, and the only trace an event that matched
+    nothing leaves.
+    """
+
+    __tablename__ = "integration_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    # Provider slug, matching AutomationRun's trigger source: "github" for a
+    # builtin, or the custom webhook's own source name.
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The provider's id for this delivery, when the transport can supply one:
+    # GitHub's X-GitHub-Delivery, Slack's envelope event_id. NULL for providers
+    # and custom webhooks that send none -- those events are still recorded,
+    # they are just not deduplicated. See the partial index below.
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    event_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The payload trigger filters ran against, kept verbatim so a mismatched
+    # JMESPath filter can be evaluated against the real thing after the fact.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    # How many automations this event started a run for. Zero is the
+    # interesting value: the event arrived and matched nothing.
+    matched_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Deduplication key. Partial, because a NULL provider_event_id means
+        # "this provider does not identify its deliveries" rather than "the id
+        # is unknown" -- under a plain unique index every such event past the
+        # first would collide with the others.
+        #
+        # Scoped by org, unlike the sketch in #361: `source` is only unique per
+        # org for custom webhooks (see ix_custom_webhooks_org_source), so two
+        # orgs each running a webhook they both call "ci" would deduplicate
+        # against each other's ids. No provider is weakened by the extra
+        # column, since a delivery belongs to exactly one org either way.
+        Index(
+            "ix_integration_events_dedupe",
+            "org_id",
+            "source",
+            "provider_event_id",
+            unique=True,
+            postgresql_where=text("provider_event_id IS NOT NULL"),
+            sqlite_where=text("provider_event_id IS NOT NULL"),
+        ),
+        # Drives pruning, which is the only query this phase issues.
+        Index("ix_integration_events_received_at", "received_at"),
     )
 
 
@@ -426,4 +697,120 @@ class AutomationKV(Base):
             "automation_id",
             unique=True,
         ),
+    )
+
+
+class AutomationGitSyncState(Base):
+    """Per-automation git sync bookkeeping, one row per synced automation.
+
+    See ``openhands/automation/git_sync/``. Tracks the repo directory name and
+    whether the DB side has changed since it was last written to git.
+
+    ``dirty`` is a plain boolean column, not a JSON field, so the sync loop can
+    query ``WHERE dirty = true`` identically on SQLite and PostgreSQL.
+    """
+
+    __tablename__ = "automation_git_sync_state"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # Denormalized from the automation so the sync loop can select one org's
+    # rows without a join, and so the slug uniqueness below is per org.
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Directory name within the sync path, e.g. "automations/{slug}/" in the
+    # repo. Stable once assigned. Unique per org, not globally: each org syncs
+    # to its own repo, so two orgs may both have a "daily-standup".
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # SHA-256 of the last-synced content (metadata + tarball files), used to
+    # detect no-op sync cycles.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Git commit SHA this automation was last reconciled against.
+    last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Set on every API create/update/delete, cleared once exported. While
+    # dirty, the DB side wins over a conflicting git-side change.
+    dirty: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_automation_git_sync_state_org_slug", "org_id", "slug", unique=True),
+    )
+
+
+class AutomationGitSyncOrgConfig(Base):
+    """One organization's git sync: runtime config plus sync bookkeeping.
+
+    See ``openhands/automation/git_sync/``. Sync is org-scoped -- each org
+    mirrors its own automations to its own repo -- so everything that used to
+    be service-wide (the config override blob and the last commit/run/error)
+    lives here, keyed by ``org_id``. Local mode has exactly one row, for the
+    deterministic local org from ``auth.py``.
+
+    ``overrides`` is the JSON blob of runtime config saved from the Git Sync
+    page (``git_sync/config_override.py``), merged over the env defaults at
+    read time. Its secret fields are wrapped at rest (``secret_store.py``).
+
+    ``sync_started_at`` doubles as a cross-replica lease: a cycle claims it
+    with a conditional UPDATE and clears it when done, so two replicas never
+    sync the same org at once and every replica reports the same
+    ``sync_in_progress``. A crash mid-cycle leaves it set; the loop treats it
+    as expired after its lease TTL rather than blocking the org forever.
+    """
+
+    __tablename__ = "automation_git_sync_org_config"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    overrides: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
+
+    # Who last saved the config. Automations imported from git are created as
+    # this user: an automation runs as its owner, and in cloud mode that means
+    # minting the owner's API key, so it has to be a real member of the org.
+    configured_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+    last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
     )

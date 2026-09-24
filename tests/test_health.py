@@ -27,9 +27,6 @@ class _ReadyConnection:
     async def __aexit__(self, exc_type, exc, tb):
         pass
 
-    async def execute(self, statement):
-        pass
-
 
 class _ReadyEngine:
     def connect(self):

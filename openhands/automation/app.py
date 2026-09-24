@@ -8,7 +8,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 
 from openhands.automation.auth import create_http_client
 from openhands.automation.capabilities_router import router as capabilities_router
@@ -19,17 +18,20 @@ from openhands.automation.db import (
     set_sqlite_mode,
 )
 from openhands.automation.dispatcher import dispatcher_loop
+from openhands.automation.draft_router import router as draft_router
 from openhands.automation.event_router import router as event_router
+from openhands.automation.git_sync import git_sync_loop
+from openhands.automation.git_sync.router import router as git_sync_router
 from openhands.automation.kv_router import router as kv_router
 from openhands.automation.logger import setup_all_loggers
 from openhands.automation.middleware import (
     ApiKeyAwareCORSMiddleware,
     TelemetryContextMiddleware,
-    api_route_telemetry_middleware,
 )
 from openhands.automation.preset_router import router as preset_router
 from openhands.automation.router import router
 from openhands.automation.scheduler import scheduler_loop
+from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
 from openhands.automation.utils.version import get_sdk_version, get_server_version_info
@@ -91,8 +93,9 @@ async def lifespan(app: FastAPI):
         migrations_path = package_dir / "migrations"
 
         if not migrations_path.is_dir():
-            # Fallback: check if running from source (migrations at repo root)
-            repo_root_migrations = package_dir.parent / "migrations"
+            # Fallback: a source checkout keeps migrations at the repo root --
+            # two levels up from openhands/automation, not one.
+            repo_root_migrations = package_dir.parent.parent / "migrations"
             if repo_root_migrations.is_dir():
                 migrations_path = repo_root_migrations
             else:
@@ -149,7 +152,7 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher_task = dispatcher_task
     logger.info("Background dispatcher started")
 
-    # Watchdog: marks stale RUNNING runs as FAILED
+    # Watchdog: marks stale RUNNING runs as FAILED and runs periodic janitors
     watchdog_task = asyncio.create_task(
         watchdog_loop(
             app.state.session_factory,
@@ -160,6 +163,51 @@ async def lifespan(app: FastAPI):
     app.state.watchdog_task = watchdog_task
     logger.info("Background watchdog started")
 
+    # Git sync: mirrors each org's automations to/from its own git repo.
+    config = get_config()
+    if config.git_sync.git_sync_repo_url:
+        # Only once a repo exists: without one the loop is idle, and warning
+        # about pushing to a repo that isn't configured is noise on the start
+        # of every deployment.
+        if settings.is_local_mode:
+            logger.warning(
+                "Git sync is enabled — automation prompts and metadata will be "
+                "pushed to %s. Make sure that repo is private, since it may "
+                "contain sensitive automation content.",
+                config.git_sync.git_sync_repo_url,
+            )
+        else:
+            logger.warning(
+                "AUTOMATION_GIT_SYNC_REPO_URL is set but the service is not in "
+                "local mode; env-level repo config is ignored there. Each "
+                "organization configures its own repo from the Git Sync page."
+            )
+    # Started in every deployment, configured or not: each org's repo comes
+    # from the UI, and gating on it left the loop (and mark_git_sync_dirty)
+    # off for the process lifetime, reporting a healthy sync while exporting
+    # nothing.
+    #
+    # Started even while every org is manual-only, since this task is what
+    # notices a newly set interval. It idles without syncing until then.
+    git_sync_task = asyncio.create_task(
+        git_sync_loop(app.state.session_factory, shutdown_event=shutdown_event)
+    )
+    app.state.git_sync_task = git_sync_task
+    logger.info("Background git sync started")
+
+    # Stream sources: long-lived inbound connections (Slack Socket Mode),
+    # one supervised task each. Starts only once an app is configured.
+    streams_task = None
+    if config.streams.enabled:
+        streams_task = asyncio.create_task(
+            stream_supervisor_loop(
+                app.state.session_factory,
+                shutdown_event=shutdown_event,
+            )
+        )
+        app.state.streams_task = streams_task
+        logger.info("Background stream supervisor started")
+
     yield
 
     # Shutdown
@@ -167,11 +215,16 @@ async def lifespan(app: FastAPI):
     shutdown_event.set()
 
     # Wait for all tasks to exit gracefully
-    for task_name, task in [
+    shutdown_tasks: list[tuple[str, asyncio.Task]] = [
         ("scheduler", scheduler_task),
         ("dispatcher", dispatcher_task),
         ("watchdog", watchdog_task),
-    ]:
+        ("git_sync", git_sync_task),
+    ]
+    if streams_task is not None:
+        shutdown_tasks.append(("streams", streams_task))
+
+    for task_name, task in shutdown_tasks:
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except TimeoutError:
@@ -206,7 +259,7 @@ def _create_app() -> FastAPI:
         description=(
             "Scheduled and event-driven automation execution for OpenHands Cloud"
         ),
-        version="1.7.1",  # x-release-please-version
+        version="1.15.0",  # x-release-please-version
         lifespan=lifespan,
         docs_url=f"{base_path}/docs",
         openapi_url=f"{base_path}/openapi.json",
@@ -215,9 +268,6 @@ def _create_app() -> FastAPI:
 
 
 app = _create_app()
-
-
-app.middleware("http")(api_route_telemetry_middleware)
 
 
 app.add_middleware(TelemetryContextMiddleware)
@@ -238,9 +288,11 @@ _base_path = get_settings().base_path
 app.include_router(uploads_router, prefix=_base_path)
 app.include_router(capabilities_router, prefix=_base_path)
 app.include_router(preset_router, prefix=_base_path)
+app.include_router(draft_router, prefix=_base_path)
 app.include_router(event_router, prefix=_base_path)
 app.include_router(webhook_router, prefix=_base_path)
 app.include_router(telemetry_router, prefix=_base_path)
+app.include_router(git_sync_router, prefix=_base_path)
 
 app.include_router(kv_router, prefix=_base_path)
 app.include_router(router, prefix=_base_path)
@@ -263,9 +315,8 @@ async def readiness():
     Returns 503 when the DB is unreachable so Kubernetes stops routing traffic.
     """
     try:
-        async with app.state.engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        async with app.state.engine.connect():
+            return {"status": "ready"}
     except Exception as e:
         logger.error("Readiness check failed: %s", e, exc_info=True)
         return JSONResponse(

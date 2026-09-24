@@ -80,7 +80,7 @@ def mock_authenticated_user():
         org_id=TEST_ORG_ID,
         email="test@example.com",
         role="owner",
-        permissions=["view_org_settings", "manage_automations"],
+        permissions=["view_org_settings", "view_automations", "manage_automations"],
         auth_method=AuthMethod.API_KEY,
         api_key="test-api-key",
     )

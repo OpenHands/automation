@@ -204,11 +204,14 @@ class CloudSandboxBackend(ExecutionBackend):
         """Verify run status via sandbox discovery."""
         sandbox_id = self._run.sandbox_id
         if not sandbox_id:
-            from openhands.automation.utils.agent_server import VerificationResult
+            from openhands.automation.utils.agent_server import (
+                VerificationOutcome,
+                VerificationResult,
+            )
 
             return VerificationResult(
-                verified=False,
-                error="No sandbox_id available for verification",
+                outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+                detail="No sandbox_id available for verification",
             )
 
         async def _do_verify() -> VerificationResult:

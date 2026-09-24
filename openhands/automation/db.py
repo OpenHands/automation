@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
+from sqlalchemy import event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -28,6 +29,7 @@ from openhands.automation.config import ServiceSettings, get_config
 
 logger = logging.getLogger("automation.db")
 SUPPORTED_DB_SSL_MODES = {"prefer", "require", "disable"}
+SQLITE_BUSY_TIMEOUT_SECONDS = 30
 
 
 def _normalize_db_ssl_mode(db_ssl_mode: str | None) -> str | None:
@@ -163,10 +165,24 @@ def _create_sqlite_engine(db_url: str) -> EngineResult:
     engine = create_async_engine(
         db_url,
         # SQLite-specific settings
-        connect_args={"check_same_thread": False},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
+        },
         # No pooling for SQLite - it handles this internally
         pool_pre_ping=True,
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def configure_sqlite_connection(dbapi_connection: Any, _: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_SECONDS * 1000}")
+        finally:
+            cursor.close()
+
     logger.info("Created SQLite engine: %s", db_url.split("?")[0])
     return EngineResult(engine=engine, is_sqlite=True)
 

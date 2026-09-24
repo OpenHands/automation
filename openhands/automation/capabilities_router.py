@@ -26,11 +26,16 @@ from openhands.automation.auth import (
     SESSION_COOKIE_NAME,
     AuthenticatedUser,
     AuthMethod,
-    authenticate_request,
     get_http_client,
+    require_permission,
 )
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
+from openhands.automation.draft_schemas import (
+    FINAL_DRAFT_MODELS,
+    DraftModel,
+    normalize_draft_body,
+)
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.github import (
     get_supported_event_patterns,
@@ -38,13 +43,11 @@ from openhands.automation.event_schemas.github import (
 )
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.models import CustomWebhook
-from openhands.automation.preset_router import (
-    CreatePluginAutomationRequest,
-    CreatePromptAutomationRequest,
-)
+from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
+    CreateAutomationRequest,
     CronCapabilities,
     CronTrigger,
     DraftValidationError,
@@ -58,27 +61,27 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
-from openhands.automation.utils.model_profiles import validate_model_profile_for_user
-from openhands.automation.utils.webhook import BUILTIN_SOURCES, get_webhook_config
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_selection,
+    validate_model_profile_for_user,
+)
+from openhands.automation.utils.webhook import get_webhook_config
+from openhands.sdk.settings import OpenHandsAgentSettings
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
-DraftModel = CreatePromptAutomationRequest | CreatePluginAutomationRequest
-
-# Draft models keyed by the endpoint they would be posted to. Validating with
-# the model creation itself uses is what keeps preflight from drifting.
-_DRAFT_MODELS: dict[str, type[DraftModel]] = {
-    "/v1/preset/prompt": CreatePromptAutomationRequest,
-    "/v1/preset/plugin": CreatePluginAutomationRequest,
-}
+_require_view_automations = require_permission("view_automations")
 
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDrafts",
     "conversationDispatch",
+    # Can run a client-supplied tarball, so an entry may ship a script bundle.
+    "customTarball",
     "mcpTools",
     "presetPlugin",
     "presetPrompt",
@@ -131,7 +134,7 @@ class _StoredMCPServer:
 
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
@@ -155,12 +158,12 @@ async def get_capabilities(
             features=[],
         )
 
-    builtin_sources = sorted(BUILTIN_SOURCES) if config.service.webhook_secret else []
-    event_sources = sorted(
-        {*builtin_sources, *await _custom_sources(user.org_id, session)}
-    )
+    builtin = builtin_sources() if config.service.webhook_secret else []
+    event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
     features = [*_STATIC_FEATURES]
+    if config.service.is_local_mode:
+        features.append("agentProfiles")
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -171,9 +174,7 @@ async def get_capabilities(
         max_automation_timeout_seconds=config.sandbox.max_run_duration,
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
-        event_types=(
-            get_supported_event_patterns() if "github" in builtin_sources else []
-        ),
+        event_types=(get_supported_event_patterns() if "github" in builtin else []),
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
                 min_interval_seconds=_cron_interval_floor(),
@@ -195,7 +196,7 @@ async def get_capabilities(
 async def validate_draft(
     body: ValidateDraftRequest,
     request: Request,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ValidateDraftResponse:
@@ -210,7 +211,8 @@ async def validate_draft(
     )
 
     try:
-        draft = _DRAFT_MODELS[body.endpoint].model_validate(body.draft)
+        normalized_draft = normalize_draft_body(body.endpoint, body.draft)
+        draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
 
@@ -254,6 +256,18 @@ async def _validated_draft_response(
                 message=str(e.detail),
             )
         )
+
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            validate_agent_profile_selection(draft.agent_profile_id, draft.model)
+        except HTTPException as e:
+            errors.append(
+                DraftValidationError(
+                    field="agent_profile_id",
+                    code="invalid_agent_profile",
+                    message=str(e.detail),
+                )
+            )
 
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
@@ -330,7 +344,8 @@ async def _deployment_preflight_errors(
         for alternative in requirement.alternatives
         for name in alternative.secret_names
     }
-    if target.local and draft.repos:
+    repos = [] if isinstance(draft, CreateAutomationRequest) else draft.repos
+    if target.local and repos:
         requested_secret_names.update(_LOCAL_REPOSITORY_SECRET_NAMES.values())
 
     available_secret_names = await _available_secret_names(
@@ -353,8 +368,8 @@ async def _deployment_preflight_errors(
                 )
             )
 
-    if draft.repos:
-        for index, repository in enumerate(draft.repos):
+    if repos:
+        for index, repository in enumerate(repos):
             errors.extend(
                 await _repository_errors(
                     repository=repository,
@@ -538,8 +553,11 @@ async def _stored_mcp_servers(
     servers: list[_StoredMCPServer] = []
     for name, raw in raw_config.items():
         if not isinstance(name, str) or not isinstance(raw, dict):
-            raise _DependencyUnavailable
-        servers.append(_parse_stored_mcp_server(name, raw))
+            continue
+        try:
+            servers.append(_parse_stored_mcp_server(name, raw))
+        except _DependencyUnavailable:
+            continue
     return servers
 
 
@@ -551,6 +569,8 @@ def _parse_stored_mcp_server(name: str, raw: dict[str, Any]) -> _StoredMCPServer
     raw_transport = raw.get("transport", raw.get("type"))
     if raw_transport is None:
         raw_transport = "stdio" if isinstance(raw.get("command"), str) else "http"
+    if not isinstance(raw_transport, str):
+        raise _DependencyUnavailable
     if raw_transport == "stdio":
         transport: Literal["stdio", "shttp", "sse"] = "stdio"
         locator = name
@@ -565,16 +585,21 @@ def _parse_stored_mcp_server(name: str, raw: dict[str, Any]) -> _StoredMCPServer
     if not isinstance(locator, str) or not locator:
         raise _DependencyUnavailable
 
-    raw_auth = raw.get("auth")
-    if raw_auth is None:
-        auth_strategy = "none"
-    elif isinstance(raw_auth, dict) and isinstance(raw_auth.get("strategy"), str):
-        auth_strategy = raw_auth["strategy"]
-    else:
-        raise _DependencyUnavailable
+    try:
+        server = OpenHandsAgentSettings.from_persisted(
+            {"mcp_config": {name: raw}}
+        ).mcp_config[name]
+    except (TypeError, ValueError):
+        raise _DependencyUnavailable from None
+    auth_strategy = server.auth.strategy if server.auth is not None else "none"
     return _StoredMCPServer(
         name=name,
-        raw=raw,
+        raw=server.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+            context={"expose_secrets": "plaintext"},
+        ),
         transport=transport,
         locator=locator,
         auth_strategy=auth_strategy,
@@ -1032,8 +1057,12 @@ async def _cloud_repository_errors(
     return [
         DraftValidationError(
             field=f"repos[{index}].ref",
-            code="repository_ref_not_accessible",
-            message=f"The Git reference '{ref}' could not be accessed.",
+            code="repository_ref_unverified",
+            message=(
+                "This deployment could not verify the Git reference. "
+                "Branch search cannot verify tags or arbitrary commits; "
+                "select an accessible branch or omit the reference."
+            ),
         )
     ]
 

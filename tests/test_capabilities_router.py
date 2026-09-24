@@ -42,6 +42,13 @@ EVENT_DRAFT = {
     },
 }
 
+BUNDLE_DRAFT = {
+    "name": "PR reviewer",
+    "tarball_path": "oh-internal://uploads/12345678-1234-1234-1234-123456789abc",
+    "entrypoint": "uv run main.py",
+    "trigger": {"type": "cron", "schedule": "*/15 * * * *", "timezone": "UTC"},
+}
+
 GITHUB_USER = {"id": 3, "login": "someone"}
 
 
@@ -51,7 +58,7 @@ def with_trigger(draft: dict, **overrides: str) -> dict:
 
 
 def preflight(draft: dict, **extra: object) -> dict:
-    """Build a preflight request body for the prompt-preset endpoint."""
+    """Build a preflight request body, defaulting to the prompt-preset endpoint."""
     return {
         "automationId": "github-pr-reviewer",
         "endpoint": "/v1/preset/prompt",
@@ -172,6 +179,7 @@ class TestGetCapabilities:
         assert "UTC" in body["triggers"]["cron"]["timezones"]
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
+        assert "customTarball" in body["features"]
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
@@ -410,6 +418,189 @@ class TestValidateDraft:
         body = response.json()
         assert body["valid"] is False
         assert addressed_errors(body) == [("model", "model_profile_not_found")]
+
+    @pytest.mark.parametrize("requirements", [None, {"integrations": []}])
+    async def test_valid_bundle_draft_reports_no_errors(
+        self, async_client, requirements
+    ):
+        """A catalog entry shipping its own tarball can preflight its draft too."""
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(BUNDLE_DRAFT, endpoint="/v1", requirements=requirements),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+    async def test_bundle_draft_checks_integration_requirements(self, async_client):
+        def outbound(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/v1/settings"
+            return httpx.Response(200, json={"agent_settings": {"mcp_config": {}}})
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                BUNDLE_DRAFT,
+                endpoint="/v1",
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "postgres", transport="stdio", locator="postgres"
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        assert addressed_errors(response.json()) == [
+            (None, "integration_not_configured")
+        ]
+
+    async def test_validation_requires_view_permission(
+        self, async_client, mock_authenticated_user
+    ):
+        user = dataclasses.replace(mock_authenticated_user, permissions=[])
+        app.dependency_overrides[authenticate_request] = lambda: user
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("Unauthorized validation must not probe dependencies")
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(CRON_DRAFT, requirements={"integrations": []}),
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.parametrize(
+        ("auth_fields", "auth_strategy"),
+        [
+            ({"auth": "legacy-token"}, "bearer"),
+            ({"auth": "oauth"}, "oauth2"),
+            ({"api_key": "legacy-token"}, "api_key"),
+            ({"headers": {"Authorization": "Bearer legacy-token"}}, "bearer"),
+        ],
+    )
+    async def test_legacy_mcp_auth_does_not_block_preflight(
+        self, async_client, auth_fields, auth_strategy
+    ):
+        mcp_url = "https://mcp.example.test/legacy"
+        probes = []
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/settings":
+                return httpx.Response(
+                    200,
+                    json={
+                        "agent_settings": {
+                            "mcp_config": {"legacy": {"url": mcp_url, **auth_fields}}
+                        }
+                    },
+                )
+            assert request.url.path == "/api/v1/settings/mcp/legacy/test"
+            probes.append(request)
+            assert "legacy-token" not in request.content.decode()
+            return httpx.Response(200, json={"ok": True})
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "repos": None},
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "legacy",
+                            transport="shttp",
+                            locator=mcp_url,
+                            auth_strategy=auth_strategy,
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert len(probes) == 1
+        assert "legacy-token" not in response.text
+
+    @pytest.mark.parametrize("include_usable", [True, False])
+    @pytest.mark.parametrize(
+        "invalid_fields",
+        [
+            {"auth": ["invalid-secret"]},
+            {"transport": []},
+            {"enabled": "true"},
+        ],
+    )
+    async def test_invalid_stored_mcp_entry_is_isolated(
+        self, async_client, include_usable, invalid_fields
+    ):
+        mcp_url = "https://mcp.example.test/usable"
+        config = {"broken": {"url": mcp_url, **invalid_fields}}
+        if include_usable:
+            config["usable"] = {"url": mcp_url}
+
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/settings":
+                return httpx.Response(
+                    200, json={"agent_settings": {"mcp_config": config}}
+                )
+            assert include_usable
+            assert request.url.path == "/api/v1/settings/mcp/usable/test"
+            return httpx.Response(200, json={"ok": True})
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "repos": None},
+                requirements={
+                    "integrations": [
+                        integration_requirement(
+                            "usable", transport="shttp", locator=mcp_url
+                        )
+                    ]
+                },
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is include_usable
+        assert addressed_errors(response.json()) == (
+            [] if include_usable else [(None, "integration_not_configured")]
+        )
+        assert "invalid-secret" not in response.text
+
+    async def test_bundle_draft_reports_schema_errors(self, async_client):
+        """A body the raw create endpoint would 422 is caught before creation."""
+        draft = {**BUNDLE_DRAFT}
+        del draft["entrypoint"]
+
+        response = await async_client.post(
+            VALIDATE_URL, json=preflight(draft, endpoint="/v1")
+        )
+
+        body = response.json()
+        assert body["valid"] is False
+        assert ("entrypoint", "missing") in addressed_errors(body)
+
+    async def test_bundle_draft_is_checked_against_the_cron_floor(self, async_client):
+        """Trigger checks are model-agnostic, so a bundle gets them unchanged."""
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                with_trigger(BUNDLE_DRAFT, schedule="*/10 * * * * *"), endpoint="/v1"
+            ),
+        )
+
+        body = response.json()
+        assert body["valid"] is False
+        assert addressed_errors(body) == [("trigger.schedule", "interval_too_short")]
 
     async def test_unknown_creation_endpoint_is_rejected(self, async_client):
         """Preflight only validates drafts for the endpoints it may name."""
@@ -819,7 +1010,7 @@ class TestValidateDraft:
                     }
                 ],
                 [],
-                ("repos[0].ref", "repository_ref_not_accessible"),
+                ("repos[0].ref", "repository_ref_unverified"),
                 id="ref",
             ),
         ],
@@ -855,6 +1046,35 @@ class TestValidateDraft:
 
         assert response.status_code == 200
         assert addressed_errors(response.json()) == [expected_error]
+
+    @pytest.mark.parametrize("ref", ["v1.0.0", "a" * 40, "missing-branch"])
+    async def test_branch_search_miss_does_not_claim_ref_is_missing(
+        self, async_client, ref
+    ):
+        def outbound(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/git/repositories/search":
+                return httpx.Response(
+                    200,
+                    json={"items": [{"full_name": "OpenHands/agent-server-gui"}]},
+                )
+            assert request.url.path == "/api/v1/git/branches/search"
+            return httpx.Response(200, json={"items": []})
+
+        await install_outbound_transport(outbound)
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "repos": [{**CRON_DRAFT["repos"][0], "ref": ref}]},
+                requirements={"integrations": []},
+            ),
+        )
+
+        assert response.status_code == 200
+        assert addressed_errors(response.json()) == [
+            ("repos[0].ref", "repository_ref_unverified")
+        ]
+        assert "tag" in response.json()["errors"][0]["message"]
+        assert "commit" in response.json()["errors"][0]["message"]
 
     async def test_local_preflight_uses_names_and_encrypted_mcp_configuration(
         self, async_client, monkeypatch

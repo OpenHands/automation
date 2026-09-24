@@ -7,6 +7,17 @@ from collections.abc import AsyncIterator
 BUCKET_PREFIX = "automation"
 
 
+class ObjectNotFoundError(FileNotFoundError):
+    """The storage object at the given path genuinely does not exist.
+
+    Backends raise this only on confirmed absence (S3 404/NoSuchKey, GCS
+    NotFound, a missing local file). Transient and access errors keep raising
+    plain FileNotFoundError, so callers that must distinguish "gone forever"
+    from "unreadable right now" can catch this subclass while existing
+    ``except FileNotFoundError`` handlers keep working unchanged.
+    """
+
+
 class FileStore(ABC):
     """Abstract base class for file storage operations."""
 
@@ -25,7 +36,8 @@ class FileStore(ABC):
         """Read and return the contents of the file at the given path.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            ObjectNotFoundError: If the file does not exist.
+            FileNotFoundError: For other storage errors (backend-dependent).
         """
         pass
 
@@ -36,7 +48,12 @@ class FileStore(ABC):
 
     @abstractmethod
     def delete(self, path: str) -> None:
-        """Delete the file at the given path."""
+        """Delete the file at the given path.
+
+        Raises:
+            ObjectNotFoundError: If the file does not exist (LocalFileStore is
+                silently idempotent instead).
+        """
         pass
 
     @abstractmethod
