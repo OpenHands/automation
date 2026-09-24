@@ -6,6 +6,7 @@ import re
 import uuid
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -569,10 +570,19 @@ async def download_automation_tarball(
                 detail="Failed to retrieve tarball from storage",
             )
         safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        if safe_name.isascii():
+            disposition = f'attachment; filename="{safe_name}.tar"'
+        else:
+            fallback = safe_name.encode("ascii", errors="ignore").decode().strip()
+            fallback = fallback or "automation"
+            disposition = (
+                f'attachment; filename="{fallback}.tar"; '
+                f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"
+            )
         return Response(
             content=data,
             media_type="application/x-tar",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.tar"'},
+            headers={"Content-Disposition": disposition},
         )
 
     if is_http_url(auto.tarball_path):

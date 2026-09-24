@@ -1,9 +1,11 @@
 """Tests for API router endpoints."""
 
 import io
+import re
 import tarfile
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote_to_bytes
 
 import pytest
 from sqlalchemy import select
@@ -3514,6 +3516,92 @@ class TestReportRunPhase:
 
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
+
+    @pytest.mark.parametrize(
+        ("name", "sanitized_name"),
+        [
+            ("My Automation", "My Automation"),
+            ("Monday — review", "Monday — review"),
+            ("Robot 🤖", "Robot 🤖"),
+            ("自动化", "自动化"),
+            ("Café", "Café"),
+            ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'"),
+            ('"\\/\x00\n\r\t\x1f\x7f', "automation"),
+        ],
+        ids=["ascii", "em-dash", "emoji", "cjk", "latin-1", "mixed", "empty"],
+    )
+    async def test_internal_url_encodes_download_filename(
+        self, name, sanitized_name, mock_authenticated_user
+    ):
+        """Download names round-trip safely without changing the stored archive."""
+        from openhands.automation.router import download_automation_tarball
+
+        upload = TarballUpload(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="test-tarball",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/download.tar",
+        )
+        automation = Automation(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=build_internal_url(upload.id),
+            entrypoint="python main.py",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            content = b'print("hello")\n'
+            member = tarfile.TarInfo("main.py")
+            member.size = len(content)
+            tar.addfile(member, io.BytesIO(content))
+        tarball_bytes = archive.getvalue()
+        store = MagicMock()
+        store.read.return_value = tarball_bytes
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = upload
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        with patch(
+            "openhands.automation.router._get_org_automation",
+            new_callable=AsyncMock,
+            return_value=automation,
+        ):
+            response = await download_automation_tarball(
+                automation_id=automation.id,
+                user=mock_authenticated_user,
+                session=session,
+                file_store=store,
+            )
+
+        assert response.status_code == 200
+        assert response.body == tarball_bytes
+        assert response.headers["content-type"] == "application/x-tar"
+        store.read.assert_called_once_with(upload.storage_path)
+        disposition = response.headers["content-disposition"]
+        assert disposition.isascii()
+        fallback_part, separator, extended = disposition.partition("; filename*=")
+        fallback = re.fullmatch(r'attachment; filename="([^"\\/]+)"', fallback_part)
+        assert fallback is not None
+        assert all(32 <= ord(char) < 127 for char in fallback.group(1))
+        assert fallback.group(1).endswith(".tar")
+        assert fallback.group(1) != ".tar"
+        if sanitized_name.isascii():
+            assert fallback.group(1) == f"{sanitized_name}.tar"
+            assert separator == ""
+        else:
+            assert separator
+            charset, language, encoded = extended.split("'", 2)
+            assert charset.lower() == "utf-8"
+            assert language == ""
+            assert unquote_to_bytes(encoded).decode("utf-8") == f"{sanitized_name}.tar"
+            if not any(char.isascii() for char in sanitized_name):
+                assert fallback.group(1) == "automation.tar"
 
     async def test_internal_url_returns_tarball_bytes(
         self, async_client, async_session
