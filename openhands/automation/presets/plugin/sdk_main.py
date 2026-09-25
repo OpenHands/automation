@@ -59,7 +59,7 @@ Common env vars:
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
 
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
-  AUTOMATION_SESSION_URL     - direct URL to this conversation in the OpenHands UI
+  AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
                                (Cloud mode only; built from conversation.id)
 
 """
@@ -585,7 +585,7 @@ More activity arrived on the same subject while this run was queued:
     # Build session URL from conversation ID and inject as a secret so
     # the agent can use $AUTOMATION_SESSION_URL in bash commands.
     if not IS_LOCAL_MODE and api_url:
-        session_url = f"{api_url}/conversations/{conversation.id}"
+        session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
