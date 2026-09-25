@@ -5,7 +5,7 @@ redelivered events. Nullable with no server default: existing rows keep the
 current behavior (recorded and routed, never deduplicated), and a source opts
 in through the normal create/update API.
 
-Revision ID: 028
+Revision ID: 029
 Revises: 027
 Create Date: 2026-09-23
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "028"
+revision: str = "029"
 down_revision: str = "027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
