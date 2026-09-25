@@ -12,7 +12,7 @@ It is a one-shot transactional conversion: it decrypts each legacy document,
 writes the per-key rows and the metadata row, and only then drops the legacy
 table. There is no lazy or dual-read compatibility path afterwards.
 
-Revision ID: 028
+Revision ID: 030
 Revises: 027
 Create Date: 2026-09-25
 """
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "028"
+revision: str = "030"
 down_revision: str = "027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
