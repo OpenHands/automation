@@ -505,6 +505,11 @@ async def authenticate_request(
             else "Invalid or expired session cookie"
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+    if resp.status_code == 403:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied by OpenHands API",
+        )
     if resp.status_code == 429:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
