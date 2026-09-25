@@ -64,8 +64,8 @@ class Automation(Base):
     __tablename__ = "automations"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(
         String(256), nullable=True
@@ -110,7 +110,7 @@ class Automation(Base):
     # Deprecated: use state instead. Kept for backwards
     # compatibility; only ACTIVE rows have enabled=True. Will be removed in a
     # future release.
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
 
     state: Mapped[AutomationState] = mapped_column(
         Enum(AutomationState, native_enum=False, length=20),
@@ -129,7 +129,7 @@ class Automation(Base):
 
     # Soft delete timestamp (NULL = not deleted)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
     # Last time the scheduler fired this automation
@@ -139,7 +139,7 @@ class Automation(Base):
 
     # Last time the scheduler polled/checked this automation
     last_polled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -217,7 +217,7 @@ class AutomationRun(Base):
     # Pre-computed deadline: started_at + max_duration. Set when transitioning
     # to RUNNING, used by the staleness watchdog for efficient indexed queries.
     timeout_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        DateTime(timezone=True), nullable=True
     )
 
     # The sandbox ID used for execution (for status verification)
