@@ -9,6 +9,7 @@ on:
 
 permissions:
     contents: write
+    packages: read
     pull-requests: write
 
 jobs:
@@ -26,6 +27,13 @@ jobs:
 
             - name: Install deps
               run: uv sync --frozen --group dev
+
+            - name: Login to GHCR
+              uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.repository_owner }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Run unit tests with coverage
               run: |
