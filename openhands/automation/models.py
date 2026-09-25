@@ -637,25 +637,62 @@ class AutomationServiceMetadata(Base):
     )
 
 
+class AutomationKVMeta(Base):
+    """Per-automation metadata row for the KV store.
+
+    One row per automation, holding the single global ``version`` counter that
+    backs the API's ``$version`` / ``if_version`` optimistic concurrency
+    semantics. It is deliberately a separate row from the per-key values so
+    that every write to an automation's state can take a single, well-known
+    lock first (see ``AutomationKV`` and ``openhands/automation/kv_router.py``).
+
+    The row is created lazily on the automation's first write.
+    """
+
+    __tablename__ = "automation_kv_meta"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # Global per-automation state version. Incremented once per successful
+    # write (batch or single-key) and returned to clients as ``$version``.
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class AutomationKV(Base):
-    """Single-document state store for automation persistence.
+    """Per-key state store for automation persistence.
 
-    Each automation has exactly ONE row containing its entire state as an
-    encrypted JSON document. The API presents a key-value interface, but
-    "keys" are top-level fields within this single document.
+    One row per ``(automation_id, key)`` pair, holding that key's value as an
+    encrypted JSON document. The API exposes an independent key-value
+    interface, so the storage scales by key: a value is limited by
+    ``KVSettings.kv_max_value_size`` on its own, never by the combined size of
+    every key an automation owns.
 
-    Single-Document Design (Deadlock Prevention):
-        By storing all state in one row per automation, we eliminate multi-key
-        deadlock scenarios. All operations on an automation's state serialize
-        through a single row lock. There's no possibility of lock ordering
-        issues because there's only one lock to acquire.
-
-        Trade-off: Every operation reads/writes the entire state blob. This is
-        acceptable because automation state is intended to be small (cursors,
-        counters, configs) and access is infrequent (scheduled runs).
+    Concurrency and atomicity:
+        A write takes the automation's ``AutomationKVMeta`` row lock first, then
+        locks the affected key rows in sorted-key order. Locking the metadata
+        row first serializes all writers for one automation, and the sorted key
+        order gives multi-key batch operations a deterministic lock order, so
+        batch writes stay all-or-nothing and deadlock-safe without collapsing
+        every value into one document.
 
     Storage Design:
-        We store encrypted state as a Fernet token (URL-safe base64 text)
+        We store each encrypted value as a Fernet token (URL-safe base64 text)
         produced by the SDK's :class:`Cipher`. See
         ``openhands/automation/utils/kv.py`` for the full encryption rationale.
     """
@@ -667,15 +704,16 @@ class AutomationKV(Base):
         Uuid,
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,  # ONE row per automation
     )
 
-    # Fernet token (URL-safe base64 text) containing the entire state document
-    # as JSON. Produced by openhands.sdk.utils.cipher.Cipher.encrypt and
-    # consumed by Cipher.decrypt. The decrypted JSON is a dict where keys are
-    # the "KV keys" exposed via the API.
-    # Example decrypted: {"config": {...}, "counter": 42, "queue": [...]}
-    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # The user-visible KV key (1-255 chars). System keys such as ``$version``
+    # live on AutomationKVMeta.version, not here.
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Fernet token (URL-safe base64 text) containing this key's value as JSON.
+    # Produced by openhands.sdk.utils.cipher.Cipher.encrypt and consumed by
+    # Cipher.decrypt. Decrypted example: {"database": {"host": "localhost"}}
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -690,11 +728,12 @@ class AutomationKV(Base):
     )
 
     __table_args__ = (
-        # Index for efficient lookup by automation_id (unique constraint
-        # is already defined on the column, this ensures index exists)
+        # One row per (automation, key) and the index that drives point reads,
+        # range scans and paginated key listings for one automation.
         Index(
-            "ix_automation_kv_automation_id",
+            "ix_automation_kv_automation_id_key",
             "automation_id",
+            "key",
             unique=True,
         ),
     )
