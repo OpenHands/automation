@@ -26,6 +26,7 @@ independent rows, so their sizes are limited independently.
 
 import uuid
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -296,12 +297,18 @@ class TestGetValue:
         await create_test_state(async_session, TEST_AUTOMATION_ID, {"config": "test"})
         await async_session.commit()
 
+        execute = AsyncMock(wraps=async_session.execute)
+        async_session.execute = execute
+
         response = await kv_client.get("/api/automation/v1/kv/config?meta=true")
 
         assert response.status_code == 200
         data = response.json()
         assert "created_at" in data
         assert "updated_at" in data
+        # The value and version must share one database snapshot. Separate
+        # reads can pair a stale value with a newer optimistic-lock version.
+        execute.assert_awaited_once()
 
 
 class TestSetValue:

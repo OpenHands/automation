@@ -470,20 +470,6 @@ async def _ensure_meta_row(
     return meta
 
 
-async def _get_version(
-    session: AsyncSession,
-    automation_id: uuid.UUID,
-) -> int:
-    """Read the global state version for an automation (no lock), default 0."""
-    result = await session.execute(
-        select(AutomationKVMeta.version).where(
-            AutomationKVMeta.automation_id == automation_id
-        )
-    )
-    version = result.scalar_one_or_none()
-    return 0 if version is None else int(version)
-
-
 async def _lock_key_rows(
     session: AsyncSession,
     automation_id: uuid.UUID,
@@ -497,9 +483,13 @@ async def _lock_key_rows(
     ordered = sorted(set(keys))
     if not ordered:
         return {}
-    query = select(AutomationKV).where(
-        AutomationKV.automation_id == automation_id,
-        AutomationKV.key.in_(ordered),
+    query = (
+        select(AutomationKV)
+        .where(
+            AutomationKV.automation_id == automation_id,
+            AutomationKV.key.in_(ordered),
+        )
+        .order_by(AutomationKV.key)
     )
     if not using_sqlite():
         query = query.with_for_update()
@@ -718,17 +708,23 @@ async def get_value(
     kv_config = get_config().kv
 
     result = await session.execute(
-        select(AutomationKV).where(
+        select(AutomationKV, AutomationKVMeta.version)
+        .outerjoin(
+            AutomationKVMeta,
+            AutomationKVMeta.automation_id == AutomationKV.automation_id,
+        )
+        .where(
             AutomationKV.automation_id == ctx.automation_id,
             AutomationKV.key == key,
         )
     )
-    row = result.scalars().first()
-    if row is None:
+    record = result.first()
+    if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="key_not_found",
         )
+    row, version = record
 
     value = _decrypt_value(kv_config.kv_secret, row)
 
@@ -743,11 +739,10 @@ async def get_value(
         return KVKeyPathResponse(key=key, path=path, value=value)
 
     if meta:
-        version = await _get_version(session, ctx.automation_id)
         return KVKeyMetaResponse(
             key=key,
             value=value,
-            version=version,
+            version=0 if version is None else int(version),
             created_at=row.created_at.isoformat(),
             updated_at=row.updated_at.isoformat(),
         )
