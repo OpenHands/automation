@@ -122,9 +122,9 @@ implementation with the rest of the OpenHands platform — we don't need to
 maintain our own AES code or worry about IV management, padding, or
 authentication tag handling.
 
-**What's stored in the database:**
+**What's stored in the database (one row per key):**
 ```
-state_encrypted: "gAAAAABm...<Fernet token (URL-safe base64)>"
+(automation_id, key) → value_encrypted: "gAAAAABm...<Fernet token (URL-safe base64)>"
 ```
 
 **What the application sees after decryption:**
@@ -549,88 +549,86 @@ Run B: INCR counter → 7  # Correct!
 
 ## Implementation Notes
 
-### Single-Document Storage Design
+### Per-Key Storage Design
 
-Each automation has exactly **ONE row** in the database containing its entire state as an encrypted JSON document. API "keys" (e.g., `/kv/config`, `/kv/counter`) are top-level fields within this single document.
+Each automation has **one row per key** in `automation_kv`, keyed by
+`(automation_id, key)`, plus a small per-automation metadata row in
+`automation_kv_meta` that holds the global `$version` counter. API "keys"
+(e.g., `/kv/config`, `/kv/counter`) map directly to rows.
 
-**Why single-document?**
-- **Eliminates deadlocks**: Only one row per automation to lock. All operations serialize through that single lock. No possibility of lock ordering issues.
-- **Simpler model**: One encryption boundary, one row to manage per automation.
-- **Acceptable trade-off**: Every operation reads/writes the entire state blob, but automation state is small and access is infrequent.
+**Why per-key?**
+- **Scales by key**: the size limit applies to one value, so hundreds of small,
+  individually valid values no longer combine into a 413 (see issue #523).
+- **Cheaper operations**: a write touches only the rows it changes, not the
+  automation's entire state.
+- **Explicit lock ordering**: writers lock the metadata row first, then the
+  affected key rows in sorted-key order, which gives multi-key batches a
+  deterministic order and keeps them deadlock-safe.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Database Row (ONE per automation)                           │
-├─────────────────────────────────────────────────────────────┤
-│ automation_id: uuid-123 (UNIQUE)                            │
-│ state_encrypted: <encrypted JSON blob>                      │
-│                                                             │
-│   Decrypted contents:                                       │
-│   {                                                         │
-│     "config": {"host": "localhost", "port": 5432},          │
-│     "counter": 42,                                          │
-│     "task-queue": [{"task_id": "abc"}]                      │
-│   }                                                         │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ automation_kv_meta (ONE per automation)      │
+├──────────────────────────────────────────────┤
+│ automation_id: uuid-123                      │
+│ version: 3          ← global $version        │
+└──────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────┐
+│ automation_kv (ONE row per key)              │
+├──────────────────────────────────────────────┤
+│ (uuid-123, "config")     → <encrypted value> │
+│ (uuid-123, "counter")    → <encrypted 42>    │
+│ (uuid-123, "task-queue") → <encrypted list>  │
+└──────────────────────────────────────────────┘
 ```
 
 ### Atomic Operations with Encryption
 
-Since values are encrypted at the application level, we **cannot** use native PostgreSQL operations like `value = value + 1`. Instead, atomic operations lock the single state row and perform read-modify-write:
+Since values are encrypted at the application level, we **cannot** use native
+PostgreSQL operations like `value = value + 1`. Instead, atomic operations lock
+the metadata row, then the key row, and perform read-modify-write:
 
 ```python
 async def incr(self, automation_id: UUID, key: str, by: int = 1) -> int:
     async with session.begin():
-        # 1. Lock the automation's state row (ONE row per automation)
-        row = await session.execute(
-            select(AutomationKV)
-            .where(AutomationKV.automation_id == automation_id)
-            .with_for_update()
-        )
-        kv = row.scalar_one_or_none()
-        
-        # 2. Decrypt entire state, modify target key, encrypt
-        if kv is None:
-            state = {key: by}
-            kv = AutomationKV(automation_id=automation_id)
-            session.add(kv)
-        else:
-            state = decrypt_value(kv.state_encrypted)
-            if key not in state:
-                state[key] = by
-            else:
-                value = state[key]
-                if not isinstance(value, int):
-                    raise TypeError("Cannot increment non-integer value")
-                state[key] = value + by
-        
-        # 3. Update with encrypted state
-        kv.state_encrypted = encrypt_value(state)
-        
-        # 4. Commit releases lock
-        return state[key]
+        # 1. Lock the metadata row first (serializes all writers)
+        meta = await lock_meta_row(session, automation_id)
+
+        # 2. Lock just this key's row (sorted with any other touched keys)
+        row = await lock_key_rows(session, automation_id, [key])
+
+        # 3. Decrypt, modify, re-encrypt only this value
+        value = decrypt_value(row.value_encrypted) if row else 0
+        new_value = value + by
+        row = upsert(row, encrypt_value(new_value))
+
+        # 4. Bump the global version once and commit; the commit releases locks
+        meta.version += 1
+        return new_value
 ```
 
 **Concurrency model:**
-- Each automation has ONE row → all operations serialize through one lock
-- No deadlock risk between keys (there's only one lock to acquire)
-- Different automations → completely isolated (different rows)
+- The metadata row is the single serialization point for an automation's writers.
+- Multi-key batches lock affected key rows in sorted order, so overlapping
+  batches cannot deadlock.
+- Different automations → completely isolated (different rows).
 
-This is acceptable for our use case (automations doing 5-10 KV ops per run). The brief lock during decrypt-modify-encrypt is negligible.
+This is acceptable for our use case (automations doing 5-10 KV ops per run). The
+brief lock during decrypt-modify-encrypt is negligible.
 
 ### SETNX (Set If Not Exists)
 
-For conditional set operations, we lock the state row, check if the key exists in the decrypted state, and proceed accordingly:
+For conditional set operations, we lock the metadata row and the key row, check
+whether the key row exists, and proceed accordingly:
 
 ```python
-# Lock state row
-state = decrypt_value(kv.state_encrypted) if kv else {}
+# Lock metadata + key row
+existing = await lock_key_row(session, automation_id, key)
 
-if nx and key in state:
+if nx and existing is not None:
     return 409  # Key already exists
 
-state[key] = value
-kv.state_encrypted = encrypt_value(state)
+upsert_key_row(key=key, value=encrypt_value(value))
 ```
 
 ### Path Syntax
@@ -644,28 +642,34 @@ For keys containing dots, use bracket notation: `config["my.key.with.dots"]`
 ## Data Model
 
 ```python
+class AutomationKVMeta(Base):
+    """Per-automation metadata: the global $version counter."""
+    __tablename__ = "automation_kv_meta"
+
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
 class AutomationKV(Base):
-    """Single-document state store for automation persistence.
-    
-    Each automation has exactly ONE row containing its entire state as an
-    encrypted JSON document. The API presents a key-value interface, but
-    "keys" are top-level fields within this single document.
-    """
+    """Per-key state store: one encrypted row per (automation_id, key)."""
     __tablename__ = "automation_kv"
-    
+
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     automation_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, 
+        Uuid,
         ForeignKey("automations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,  # ONE row per automation
     )
-    
-    # Encrypted JSON document containing all KV pairs, stored as a Fernet
-    # token (URL-safe base64 text) produced by the SDK's Cipher helper.
-    # Decrypted example: {"config": {...}, "counter": 42, "queue": [...]}
-    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
-    
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Encrypted single value, stored as a Fernet token (URL-safe base64 text)
+    # produced by the SDK's Cipher helper.
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+
     # Timestamps (foundation for future TTL support)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -678,11 +682,20 @@ class AutomationKV(Base):
         onupdate=utcnow,
         nullable=False,
     )
-    
+
     __table_args__ = (
-        Index("ix_automation_kv_automation_id", "automation_id", unique=True),
+        Index("ix_automation_kv_automation_id_key", "automation_id", "key", unique=True),
     )
 ```
+
+### Migration From Single-Document State
+
+Migration `028` is a one-shot, transactional conversion: it decrypts each
+legacy aggregate document, writes one row per key plus the metadata row, and
+only then drops the legacy table. There is no lazy-migration or dual-read
+compatibility path. The migration requires `AUTOMATION_KV_SECRET` when legacy
+rows exist (they cannot be decrypted without it) and is a no-op on an empty
+database.
 
 ### Future TTL Support
 
@@ -850,16 +863,19 @@ This gives a clear error if someone tries to use KV outside an automation contex
 
 ---
 
-## Open Questions / Limits
+## Limits
 
-| Topic | Question | Suggested Default |
-|-------|----------|-------------------|
-| **Key length** | Max characters for key names? | 255 characters |
-| **State size** | Max total state size per automation? | 1 MB (encrypted) |
-| **Retention** | What happens when automation is deleted? | Cascade delete all KV data |
-| **TTL** | Support key expiration? | Deferred (timestamps in place for future) |
+| Topic | Value |
+|-------|-------|
+| **Key length** | 255 characters |
+| **Value size** | 64 KB per value (`AUTOMATION_KV_MAX_VALUE_SIZE`); not a total across keys |
+| **Key count** | No per-automation quota; list keys is paginated (`limit`/`offset`) |
+| **Retention** | Cascade delete all KV data when the automation is deleted |
+| **TTL** | Deferred (timestamps in place for future) |
 
-These limits are generous for the intended use case (state persistence between automation runs). They can be adjusted based on usage patterns.
+Oversized individual values return HTTP 413 with a structured `value_too_large`
+error carrying the `key`, `size`, and `limit`. These limits are generous for the
+intended use case (state persistence between automation runs).
 
 ---
 

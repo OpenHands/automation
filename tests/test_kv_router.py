@@ -17,18 +17,16 @@ This module uses two different test client fixtures depending on the test type:
    - Enables true concurrent database operations with separate connections
    - Required for testing FOR UPDATE locking behavior
 
-Single-Document Backend
------------------------
-The KV store uses a single-document backend where each automation has exactly
-ONE row containing all its state as an encrypted JSON document. API "keys"
-are top-level fields in that document.
-
-This design eliminates deadlock risk: all operations serialize through a single
-row lock per automation.
+Per-Key Backend
+---------------
+The KV store keeps one encrypted row per ``(automation_id, key)`` pair, plus a
+per-automation metadata row holding the global ``$version``. API "keys" are
+independent rows, so their sizes are limited independently.
 """
 
 import uuid
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -38,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.app import app
 from openhands.automation.db import get_session
 from openhands.automation.kv_router import get_kv_auth_context
-from openhands.automation.models import Automation, AutomationKV
+from openhands.automation.models import Automation, AutomationKV, AutomationKVMeta
 from openhands.automation.utils.kv import (
     decrypt_value,
     encrypt_value,
@@ -56,7 +54,7 @@ TEST_KV_SECRET = "test-kv-secret-key-for-testing-only"
 
 
 # =============================================================================
-# Test Data Helpers (Single-Document Backend)
+# Test Data Helpers (Per-Key Backend)
 # =============================================================================
 
 
@@ -65,20 +63,25 @@ async def create_test_state(
     automation_id: uuid.UUID,
     state: dict[str, Any],
     secret: str = TEST_KV_SECRET,
-) -> AutomationKV:
-    """Create a state row for an automation with the given state dict.
+) -> None:
+    """Seed per-key rows and a metadata row for an automation.
 
-    In the single-document model, each automation has ONE row containing
-    all keys as top-level fields in the encrypted JSON document.
+    ``state`` maps user keys to values. A ``$version`` entry, if present, is
+    stored on the metadata row rather than as a key row.
     """
-    encrypted = encrypt_value(secret, state)
-    row = AutomationKV(
-        automation_id=automation_id,
-        state_encrypted=encrypted,
-    )
-    session.add(row)
+    version = state.get("$version", 0)
+    session.add(AutomationKVMeta(automation_id=automation_id, version=version))
+    for key, value in state.items():
+        if key.startswith("$"):
+            continue
+        session.add(
+            AutomationKV(
+                automation_id=automation_id,
+                key=key,
+                value_encrypted=encrypt_value(secret, value),
+            )
+        )
     await session.flush()
-    return row
 
 
 async def get_test_state(
@@ -86,17 +89,29 @@ async def get_test_state(
     automation_id: uuid.UUID,
     secret: str = TEST_KV_SECRET,
 ) -> dict[str, Any] | None:
-    """Get the current state dict for an automation.
+    """Reconstruct the state dict (keys + ``$version``) for an automation.
 
-    Returns None if no state row exists.
+    Returns None if the automation has neither key rows nor a metadata row.
     """
     result = await session.execute(
         select(AutomationKV).where(AutomationKV.automation_id == automation_id)
     )
-    row = result.scalars().first()
-    if row is None:
+    rows = result.scalars().all()
+
+    meta_result = await session.execute(
+        select(AutomationKVMeta).where(AutomationKVMeta.automation_id == automation_id)
+    )
+    meta = meta_result.scalars().first()
+
+    if not rows and meta is None:
         return None
-    return decrypt_value(secret, row.state_encrypted)
+
+    state: dict[str, Any] = {
+        row.key: decrypt_value(secret, row.value_encrypted) for row in rows
+    }
+    if meta is not None:
+        state["$version"] = meta.version
+    return state
 
 
 # =============================================================================
@@ -282,12 +297,18 @@ class TestGetValue:
         await create_test_state(async_session, TEST_AUTOMATION_ID, {"config": "test"})
         await async_session.commit()
 
+        execute = AsyncMock(wraps=async_session.execute)
+        async_session.execute = execute
+
         response = await kv_client.get("/api/automation/v1/kv/config?meta=true")
 
         assert response.status_code == 200
         data = response.json()
         assert "created_at" in data
         assert "updated_at" in data
+        # The value and version must share one database snapshot. Separate
+        # reads can pair a stale value with a newer optimistic-lock version.
+        execute.assert_awaited_once()
 
 
 class TestSetValue:
@@ -653,52 +674,48 @@ class TestKeyValidation:
         assert "invalid_key" in response.json()["detail"]
 
 
-class TestSingleDocumentIsolation:
-    """Tests verifying single-document design properties."""
+class TestPerKeyIsolation:
+    """Tests verifying per-key storage properties."""
 
-    async def test_multiple_keys_in_one_doc(self, kv_client, async_session):
-        """Multiple keys are stored in a single document."""
-        # Create first key
+    async def test_each_key_is_its_own_row(self, kv_client, async_session):
+        """Each key is stored in its own row, with one metadata row."""
         await kv_client.put("/api/automation/v1/kv/key1", json="value1")
-        # Create second key
         await kv_client.put("/api/automation/v1/kv/key2", json="value2")
-        # Create third key
         await kv_client.put("/api/automation/v1/kv/key3", json="value3")
 
-        # Verify all keys are in one state document
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
         assert state is not None
-        # Filter out system keys ($version) for comparison
         user_keys = {k: v for k, v in state.items() if not k.startswith("$")}
         assert user_keys == {"key1": "value1", "key2": "value2", "key3": "value3"}
         # $version should be present and incremented (3 writes)
         assert state.get("$version") == 3
 
-        # Verify only ONE row exists in the database
+        # One row per key, plus exactly one metadata row.
         result = await async_session.execute(
             select(AutomationKV).where(AutomationKV.automation_id == TEST_AUTOMATION_ID)
         )
         rows = result.scalars().all()
-        assert len(rows) == 1
+        assert {row.key for row in rows} == {"key1", "key2", "key3"}
 
-    async def test_delete_last_key_removes_row(self, kv_client, async_session):
-        """Deleting the last user key removes the state row entirely."""
-        # Create a key
+        meta_result = await async_session.execute(
+            select(AutomationKVMeta).where(
+                AutomationKVMeta.automation_id == TEST_AUTOMATION_ID
+            )
+        )
+        assert meta_result.scalars().first() is not None
+
+    async def test_delete_last_key_removes_its_row(self, kv_client, async_session):
+        """Deleting the last user key removes its row (state can be empty)."""
         await kv_client.put("/api/automation/v1/kv/onlykey", json="value")
-
-        # Delete it
         await kv_client.delete("/api/automation/v1/kv/onlykey")
 
-        # Verify row is gone (no user keys remain, so row is deleted)
         result = await async_session.execute(
             select(AutomationKV).where(AutomationKV.automation_id == TEST_AUTOMATION_ID)
         )
-        rows = result.scalars().all()
-        assert len(rows) == 0
+        assert result.scalars().all() == []
 
     async def test_operations_preserve_other_keys(self, kv_client, async_session):
         """Operations on one key don't affect other keys."""
-        # Create state with multiple keys
         await create_test_state(
             async_session,
             TEST_AUTOMATION_ID,
@@ -706,15 +723,104 @@ class TestSingleDocumentIsolation:
         )
         await async_session.commit()
 
-        # Increment counter
         await kv_client.post("/api/automation/v1/kv/counter/incr")
 
-        # Verify other keys are unchanged
         state = await get_test_state(async_session, TEST_AUTOMATION_ID)
         assert state is not None
         assert state["counter"] == 11
         assert state["config"] == {"setting": True}
         assert state["queue"] == ["item"]
+
+
+class TestValueSizeLimit:
+    """The per-value limit must not act as an aggregate ceiling."""
+
+    async def test_many_small_keys_do_not_trip_limit(self, kv_client, async_session):
+        """Hundreds of small values can coexist despite the 64 KiB limit.
+
+        This is the regression from issue #523: with the old single-document
+        backend, ~300 keys of 200 bytes each hit the aggregate limit and every
+        subsequent PUT failed with 413.
+        """
+        value = "x" * 200
+        for i in range(400):
+            response = await kv_client.put(
+                f"/api/automation/v1/kv/key-{i:04d}", json=value
+            )
+            assert response.status_code == 201, response.text
+
+        listed = await kv_client.get("/api/automation/v1/kv", params={"limit": 1000})
+        assert listed.status_code == 200
+        assert listed.json()["total"] == 400
+
+    async def test_oversized_single_value_rejected(self, kv_client):
+        """A single value over the limit returns 413 with a structured error."""
+        from openhands.automation.config import get_config
+
+        limit = get_config().kv.kv_max_value_size
+        response = await kv_client.put(
+            "/api/automation/v1/kv/big", json="x" * (limit + 1)
+        )
+
+        assert response.status_code == 413
+        detail = response.json()["detail"]
+        assert detail["error"] == "value_too_large"
+        assert detail["limit"] == limit
+        assert detail["key"] == "big"
+        assert detail["size"] > limit
+
+    async def test_batch_applies_limit_per_value(self, kv_client):
+        """A batch of many small values is accepted (not an aggregate check)."""
+        from openhands.automation.config import get_config
+
+        limit = get_config().kv.kv_max_value_size
+        per_value = "x" * 4000
+        operations = [
+            {"op": "set", "key": f"batch-{i}", "value": per_value}
+            for i in range(30)  # 120 KB total, above the 64 KiB limit
+        ]
+        response = await kv_client.post(
+            "/api/automation/v1/kv/batch", json={"operations": operations}
+        )
+
+        assert response.status_code == 200, response.text
+        assert limit < len(per_value) * len(operations)
+
+
+class TestListKeysPagination:
+    """GET /kv paginates so key count can grow without a quota."""
+
+    async def test_pagination_returns_pages(self, kv_client, async_session):
+        for i in range(25):
+            await kv_client.put(f"/api/automation/v1/kv/k{i:03d}", json=i)
+
+        first = await kv_client.get(
+            "/api/automation/v1/kv", params={"limit": 10, "offset": 0}
+        )
+        assert first.status_code == 200
+        body = first.json()
+        assert body["count"] == 10
+        assert body["total"] == 25
+        assert body["limit"] == 10
+        assert body["offset"] == 0
+
+        second = await kv_client.get(
+            "/api/automation/v1/kv", params={"limit": 10, "offset": 10}
+        )
+        assert second.json()["count"] == 10
+        assert set(first.json()["keys"]).isdisjoint(second.json()["keys"])
+
+        last = await kv_client.get(
+            "/api/automation/v1/kv", params={"limit": 10, "offset": 20}
+        )
+        assert last.json()["count"] == 5
+        assert last.json()["total"] == 25
+
+    async def test_list_keys_sorted_and_default_limit(self, kv_client):
+        response = await kv_client.get("/api/automation/v1/kv")
+        assert response.status_code == 200
+        assert response.json()["total"] == 0
+        assert response.json()["count"] == 0
 
 
 # =============================================================================
