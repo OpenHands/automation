@@ -480,6 +480,11 @@ class CustomWebhook(Base):
     - Stripe: "Stripe-Signature"
     - Slack: "X-Slack-Signature"
     - Generic: "X-Signature-256" (default)
+
+    The event_id_header field names the HTTP header carrying the provider's own
+    delivery id, used to drop redeliveries. It is optional: a source that does
+    not identify its deliveries leaves it NULL, and its events are recorded and
+    routed but never deduplicated.
     """
 
     __tablename__ = "custom_webhooks"
@@ -531,6 +536,13 @@ class CustomWebhook(Base):
         default=DEFAULT_SIGNATURE_SCHEME,
         server_default=DEFAULT_SIGNATURE_SCHEME,
     )
+
+    # HTTP header naming the provider's own delivery id, used to drop
+    # redeliveries (e.g. GitHub's "X-GitHub-Delivery"). NULL means this source
+    # does not identify its deliveries: events are recorded and routed, never
+    # deduplicated. Optional so a webhook can opt in to the existing
+    # `integration_events` dedupe path without the router hard-coding a source.
+    event_id_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Timestamp when the webhook integration was created
     created_at: Mapped[datetime] = mapped_column(
