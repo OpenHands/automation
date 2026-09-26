@@ -131,6 +131,68 @@ async def test_cancel_other_orgs_run_returns_403(async_client, async_session):
     assert resp.status_code == 403
 
 
+async def test_cancel_subject_run_without_sandbox_releases_subject(
+    async_client, async_session
+):
+    """Cancelling a subject run with no sandbox still releases the subject."""
+    _, run = await _create_automation_with_run(
+        async_session, status=AutomationRunStatus.RUNNING
+    )
+    run.subject_key = "team/C123/1755000000.000100"
+    await async_session.commit()
+
+    resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
+    assert resp.status_code == 200
+
+    await async_session.refresh(run)
+    assert run.status == AutomationRunStatus.CANCELLED
+    assert run.subject_released_at is not None
+    assert run.subject_key == "team/C123/1755000000.000100"
+
+
+async def test_cancel_ordinary_run_touches_no_subject(async_client, async_session):
+    """Cancelling a run without a subject leaves subject columns alone."""
+    _, run = await _create_automation_with_run(
+        async_session, status=AutomationRunStatus.RUNNING
+    )
+
+    resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
+    assert resp.status_code == 200
+
+    await async_session.refresh(run)
+    assert run.status == AutomationRunStatus.CANCELLED
+    assert run.subject_key is None
+    assert run.subject_released_at is None
+
+
+async def test_cancelled_subject_no_longer_blocks_resubmission(
+    async_client, async_session
+):
+    """After cancel, a resubmitted event routes to a new run instead of being
+    folded into the cancelled run that still holds the subject."""
+    from openhands.automation.conversations import continue_conversation
+
+    automation, run = await _create_automation_with_run(
+        async_session, status=AutomationRunStatus.PENDING
+    )
+    run.subject_key = "team/C123/1755000000.000100"
+    await async_session.commit()
+
+    resp = await async_client.post(f"/api/automation/v1/runs/{run.id}/cancel")
+    assert resp.status_code == 200
+
+    result = await continue_conversation(
+        async_session,
+        org_id=TEST_ORG_ID,
+        source="slack",
+        subject_key="team/C123/1755000000.000100",
+        automation_id=automation.id,
+        event_key="Ev2",
+        event_payload={},
+    )
+    assert result.needs_run is True
+
+
 async def test_cancel_same_org_other_users_run(async_client, async_session):
     """Cancelling a run owned by another member of the same org should succeed."""
     automation = Automation(

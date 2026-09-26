@@ -18,7 +18,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -992,6 +992,14 @@ async def cancel_run(
             completed_at=now,
             error_detail="Cancelled by user",
             status_detail=None,
+            # A cancelled run is terminal, so it can never open or continue
+            # its conversation afterwards: release its subject atomically in
+            # this same update, whether or not it ever recorded a sandbox.
+            # Runs without a subject keep NULL either way.
+            subject_released_at=case(
+                (AutomationRun.subject_key.is_not(None), now),
+                else_=AutomationRun.subject_released_at,
+            ),
         )
     )
     db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
@@ -1014,15 +1022,11 @@ async def cancel_run(
     )
 
     # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
-    # unlike `complete_run` the sandbox goes even when the run owns a subject
-    # -- but the subject is released with it, or the next event would pick this
-    # run and pay a lookup for a sandbox we just deleted. The key stays on the
-    # row as the record of what this run was about.
+    # unlike `complete_run` the sandbox goes even when the run owned a subject
+    # (already released by the terminal update above, so the next event will
+    # not pick this run). The key stays on the row as the record of what this
+    # run was about.
     if run.sandbox_id:
-        if run.subject_key and run.subject_released_at is None:
-            run.subject_released_at = utcnow()
-            await session.commit()
-
         from openhands.automation.config import get_settings
 
         settings = get_settings()
