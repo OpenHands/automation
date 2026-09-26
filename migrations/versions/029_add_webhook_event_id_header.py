@@ -6,7 +6,7 @@ current behavior (recorded and routed, never deduplicated), and a source opts
 in through the normal create/update API.
 
 Revision ID: 029
-Revises: 027
+Revises: 028
 Create Date: 2026-09-23
 """
 
@@ -17,7 +17,7 @@ from alembic import op
 
 
 revision: str = "029"
-down_revision: str = "027"
+down_revision: str = "028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
