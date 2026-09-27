@@ -98,6 +98,32 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+class TestPresetSessionUrl:
+    """The session URL injected into a run must open the conversation in Agent Canvas.
+
+    The presets build the URL inline in ``main()`` and are excluded from linting,
+    so pin the route here. The legacy ``/conversations/{id}`` SPA route is retired
+    and links to it dead-end for the other members of an organization.
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_session_url_opens_agent_canvas(self, preset_name):
+        # Arrange
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        # Act
+        builds_canvas_url = (
+            'f"{api_url}/canvas/conversations/{conversation.id}"' in source
+        )
+        builds_legacy_url = 'f"{api_url}/conversations/{conversation.id}"' in source
+
+        # Assert
+        assert builds_canvas_url, f"{preset_name} preset must link to Agent Canvas"
+        assert not builds_legacy_url, (
+            f"{preset_name} preset still links to the legacy UI"
+        )
+
+
 class TestPresetFileSyntax:
     """Verify preset files have valid Python/shell syntax.
 
