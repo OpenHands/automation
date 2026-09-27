@@ -13,7 +13,7 @@ writes the per-key rows and the metadata row, and only then drops the legacy
 table. There is no lazy or dual-read compatibility path afterwards.
 
 Revision ID: 030
-Revises: 027
+Revises: 028
 Create Date: 2026-09-25
 """
 
@@ -25,7 +25,7 @@ from alembic import op
 
 
 revision: str = "030"
-down_revision: str = "027"
+down_revision: str = "028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

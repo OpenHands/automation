@@ -1,7 +1,8 @@
-"""Integration tests for the KV single-document -> per-key migration (028).
+"""Integration tests for the KV single-document -> per-key migration (030).
 
-These run Alembic against a temporary SQLite database (no Docker) and exercise
-the one-shot fan-out described in issue #523:
+These build the released main schema through revision 028 in a temporary SQLite
+database, populate its encrypted aggregate KV table, and exercise the one-shot
+fan-out described in issue #523:
 
 - a legacy aggregate document is decrypted into one row per key plus a metadata
   row carrying the original ``$version``;
@@ -14,6 +15,7 @@ to head without the secret.
 """
 
 import os
+import sqlite3
 import subprocess
 import uuid
 
@@ -59,8 +61,14 @@ def sqlite_db_path(tmp_path):
         path.unlink()
 
 
+def _assert_revision(db_path: str, revision: str) -> None:
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert row == (revision,)
+
+
 def _seed_legacy_document(db_path: str) -> str:
-    """Insert one legacy aggregate row via the released 008 schema."""
+    """Insert an aggregate KV row into the current main schema."""
     automation_id = str(uuid.uuid4())
     code = f"""
 import sqlite3, sys
@@ -87,7 +95,8 @@ con.commit()
 
 def test_legacy_document_fans_out(sqlite_db_path):
     db_url = f"sqlite:///{sqlite_db_path}"
-    _alembic(db_url, "upgrade", "027")
+    _alembic(db_url, "upgrade", "028")
+    _assert_revision(sqlite_db_path, "028")
     _seed_legacy_document(sqlite_db_path)
 
     _alembic(db_url, "upgrade", "head")
@@ -118,10 +127,11 @@ print("OK")
 
 def test_downgrade_reassembles_document(sqlite_db_path):
     db_url = f"sqlite:///{sqlite_db_path}"
-    _alembic(db_url, "upgrade", "027")
+    _alembic(db_url, "upgrade", "028")
+    _assert_revision(sqlite_db_path, "028")
     _seed_legacy_document(sqlite_db_path)
     _alembic(db_url, "upgrade", "head")
-    _alembic(db_url, "downgrade", "027")
+    _alembic(db_url, "downgrade", "028")
 
     code = f"""
 import sqlite3, sys
