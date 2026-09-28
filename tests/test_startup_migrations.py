@@ -11,6 +11,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
+from starlette.datastructures import State
 
 from openhands.automation import app as app_module
 from openhands.automation.config import clear_config_cache, get_config
@@ -31,6 +32,9 @@ def reset_config_cache():
 def idle_startup(monkeypatch):
     """Run the lifespan with a fake engine and background loops that exit."""
     monkeypatch.delenv("AUTOMATION_RUN_MIGRATIONS_ON_STARTUP", raising=False)
+    # The lifespan sets process-wide state; keep it from leaking into later tests.
+    monkeypatch.setattr(app_module, "set_sqlite_mode", MagicMock())
+    monkeypatch.setattr(app_module.app, "state", State())
     migrate = AsyncMock()
     monkeypatch.setattr(app_module, "run_migrations", migrate)
     for loop in (
