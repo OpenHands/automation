@@ -551,6 +551,7 @@ async def _validate_and_resolve_fields(
 
     return {
         "name": name,
+        "description": fields.get("description"),
         "model": fields.get("model"),
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
