@@ -108,6 +108,40 @@ class TestAutomationStateEnabledValidation:
             )
 
 
+class TestAutomationDescriptionValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "Description validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_description(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {**base_payload, "description": "Summarizes weekly support trends."}
+        )
+
+        assert request.description == "Summarizes weekly support trends."
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_description_over_2000_characters(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="at most 2000 characters"):
+            request_cls.model_validate({**base_payload, "description": "x" * 2001})
+
+
 class TestRunCompleteRequest:
     def test_accepts_legacy_string_error(self):
         request = RunCompleteRequest(status="FAILED", error="script crashed")

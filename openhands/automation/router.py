@@ -249,6 +249,7 @@ async def create_automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
+        description=body.description,
         model=model,
         agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
