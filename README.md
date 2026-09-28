@@ -71,6 +71,11 @@ uv run alembic revision --autogenerate -m "description"
 uv run alembic upgrade head
 ```
 
+SQLite databases are migrated on startup. PostgreSQL databases are not, unless
+`AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` (or `1`). With it set, each replica runs
+`alembic upgrade head` before it serves requests, and a failed migration stops it from
+starting. Replicas that start at the same time take turns through an advisory lock.
+
 ## Docker
 
 ```bash

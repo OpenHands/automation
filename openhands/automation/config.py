@@ -480,6 +480,9 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
+        AUTOMATION_RUN_MIGRATIONS_ON_STARTUP: Run `alembic upgrade head` on
+            startup for PostgreSQL too (default: false). SQLite always migrates
+            on startup.
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
@@ -555,6 +558,7 @@ class ServiceSettings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
+    run_migrations_on_startup: bool = False
 
     # Database URL (alternative config, supports SQLite for local mode)
     # When set, takes precedence over host/port config.
