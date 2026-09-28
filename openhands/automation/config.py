@@ -483,6 +483,10 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_RUN_MIGRATIONS_ON_STARTUP: Run `alembic upgrade head` on
             startup for PostgreSQL too (default: false). SQLite always migrates
             on startup.
+        AUTOMATION_CREATE_DATABASE_IF_MISSING: Have the migrations create the
+            PostgreSQL database first if it does not exist (default: false).
+            Read by migrations/env.py, so it also applies to
+            `alembic upgrade head`. The database user needs CREATEDB.
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)

@@ -113,6 +113,7 @@ def point_migrations_at(monkeypatch, postgres_server):
             "AUTOMATION_DB_SSL_MODE",
             "DB_SSL_MODE",
             "PGSSLMODE",
+            "AUTOMATION_CREATE_DATABASE_IF_MISSING",
         ):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("AUTOMATION_DB_HOST", postgres_server["host"])
@@ -128,6 +129,18 @@ def point_migrations_at(monkeypatch, postgres_server):
 def empty_database(postgres_server):
     name = f"automation_test_{uuid.uuid4().hex[:12]}"
     _run_admin_sql(postgres_server, f'CREATE DATABASE "{name}"')
+    try:
+        yield name
+    finally:
+        _run_admin_sql(
+            postgres_server, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'
+        )
+
+
+@pytest.fixture
+def missing_database(postgres_server):
+    """A name with no database behind it. The capital and hyphen need quoting."""
+    name = f"automation_test_Missing-{uuid.uuid4().hex[:12]}"
     try:
         yield name
     finally:
@@ -197,3 +210,47 @@ async def test_run_migrations_raises_the_database_error(point_migrations_at):
 
     with pytest.raises(RuntimeError, match="no_such_database"):
         await app_module.run_migrations(get_config().service)
+
+
+@pytest.mark.parametrize("flag", ["true", "1"])
+async def test_run_migrations_creates_a_missing_database(
+    monkeypatch, point_migrations_at, missing_database, postgres_server, flag
+):
+    point_migrations_at(missing_database)
+    monkeypatch.setenv("AUTOMATION_CREATE_DATABASE_IF_MISSING", flag)
+
+    await app_module.run_migrations(get_config().service)
+    # This run finds the database. It would hang if the first run still held
+    # the create lock.
+    await app_module.run_migrations(get_config().service)
+
+    _assert_at_head_and_released(postgres_server, missing_database)
+
+
+async def test_run_migrations_creates_the_database_named_in_the_db_url(
+    monkeypatch, point_migrations_at, missing_database, postgres_server
+):
+    point_migrations_at("unused")
+    url = _url(postgres_server, missing_database)
+    monkeypatch.setenv("AUTOMATION_DB_URL", url.render_as_string(hide_password=False))
+    monkeypatch.setenv("AUTOMATION_CREATE_DATABASE_IF_MISSING", "true")
+
+    await app_module.run_migrations(get_config().service)
+
+    _assert_at_head_and_released(postgres_server, missing_database)
+
+
+async def test_service_and_another_replica_can_create_the_database_at_once(
+    monkeypatch, point_migrations_at, missing_database, postgres_server
+):
+    """The create lock makes one wait for the other, then find the database."""
+    point_migrations_at(missing_database)
+    monkeypatch.setenv("AUTOMATION_CREATE_DATABASE_IF_MISSING", "true")
+    other_replica = await _upgrade_in_another_process()
+
+    _, returncode = await asyncio.gather(
+        app_module.run_migrations(get_config().service), other_replica.wait()
+    )
+
+    assert returncode == 0
+    _assert_at_head_and_released(postgres_server, missing_database)
