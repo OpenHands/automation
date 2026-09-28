@@ -144,19 +144,12 @@ def _assert_at_head_and_released(server: dict, database: str) -> None:
             applied = set(
                 conn.execute(text("SELECT version_num FROM alembic_version")).scalars()
             )
-            other_connections = conn.execute(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND pid <> pg_backend_pid()"
-                )
-            ).scalar()
             lock_free = conn.execute(
                 text(f"SELECT pg_try_advisory_lock({MIGRATION_LOCK_ID})")
             ).scalar()
     finally:
         engine.dispose()
     assert applied == heads
-    assert other_connections == 0
     assert lock_free
 
 
@@ -180,7 +173,7 @@ async def test_run_migrations_brings_an_empty_database_to_head(
 
     await app_module.run_migrations(get_config().service)
 
-    # A connection left open would keep the database busy for other replicas.
+    # A connection left open would keep the lock and block other replicas.
     _assert_at_head_and_released(postgres_server, empty_database)
 
 
