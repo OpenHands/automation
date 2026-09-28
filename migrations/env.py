@@ -21,9 +21,12 @@ URL's own ssl parameter over to pg8000.
 """
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from alembic import context
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.pool import NullPool
 
 from openhands.automation.db import (
     _build_pg8000_connect_args,
@@ -72,50 +75,56 @@ def _configure_sqlite_transaction_control(engine):
         connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
-def get_engine(database_name=DB_NAME):
-    """Create database engine based on configuration.
+@contextmanager
+def migration_engine() -> Iterator[Engine]:
+    """Yield an engine for one migration run, then close everything it opened.
+
+    The service can run migrations inside its own process on startup, so
+    nothing may outlive the run.
 
     Priority:
     1. AUTOMATION_DB_URL (supports SQLite and PostgreSQL URLs)
     2. GCP Cloud SQL connector
     3. Direct PostgreSQL connection
     """
-    # SQLite or explicit PostgreSQL URL
+    connector = None
     if DB_URL:
+        # SQLite or explicit PostgreSQL URL
         url, connect_args = alembic_engine_args(DB_URL)
-        engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
-        if url.startswith("sqlite"):
+        engine = create_engine(url, connect_args=connect_args, poolclass=NullPool)
+        if is_sqlite():
             _configure_sqlite_transaction_control(engine)
-        return engine
-
-    # GCP Cloud SQL
-    if GCP_DB_INSTANCE:
+    elif GCP_DB_INSTANCE:
         from google.cloud.sql.connector import Connector
 
+        connector = Connector()
+        instance_string = f"{GCP_PROJECT}:{GCP_REGION}:{GCP_DB_INSTANCE}"
+
         def get_db_connection():
-            connector = Connector()
-            instance_string = f"{GCP_PROJECT}:{GCP_REGION}:{GCP_DB_INSTANCE}"
             return connector.connect(
                 instance_string,
                 "pg8000",
                 user=DB_USER,
                 password=DB_PASS.strip(),
-                db=database_name,
+                db=DB_NAME,
             )
 
-        return create_engine(
-            "postgresql+pg8000://",
-            creator=get_db_connection,
-            pool_pre_ping=True,
+        engine = create_engine(
+            "postgresql+pg8000://", creator=get_db_connection, poolclass=NullPool
         )
-
-    # Direct PostgreSQL
-    url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{database_name}"
-    return create_engine(
-        url,
-        connect_args=_build_pg8000_connect_args(DB_SSL_MODE),
-        pool_pre_ping=True,
-    )
+    else:
+        url = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        engine = create_engine(
+            url,
+            connect_args=_build_pg8000_connect_args(DB_SSL_MODE),
+            poolclass=NullPool,
+        )
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+        if connector is not None:
+            connector.close()
 
 
 def run_migrations_offline():
@@ -145,10 +154,9 @@ def run_migrations_online():
 
     SQLite: No locking needed (single-process mode assumed).
     """
-    engine = get_engine()
     use_sqlite = is_sqlite()
 
-    with engine.begin() as connection:
+    with migration_engine() as engine, engine.begin() as connection:
         # Acquire advisory lock for PostgreSQL only
         if not use_sqlite:
             connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
