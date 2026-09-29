@@ -1821,7 +1821,34 @@ class TestTarballUploadLifecycle:
             )
 
         await self._push_yaml_edit(
-            origin, "editor-yaml", "enabled: true", "enabled: false"
+            origin,
+            "editor-yaml",
+            "\n".join(
+                [
+                    "enabled: true",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: ACTIVE",
+                ]
+            ),
+            "\n".join(
+                [
+                    "enabled: false",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: INACTIVE",
+                ]
+            ),
         )
         await run_sync_cycle(
             sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
@@ -1834,6 +1861,45 @@ class TestTarballUploadLifecycle:
             assert automation.tarball_path == before
             uploads = (await session.execute(select(TarballUpload))).scalars().all()
             assert len(uploads) == upload_count_before
+
+    @pytest.mark.parametrize("model", [None, "explicit-model"])
+    async def test_profile_import_uses_api_validation(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        model,
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        selected = uuid.uuid4()
+        await self._push_yaml_edit(
+            origin,
+            "editor-profile",
+            "agent_profile_id: null",
+            f"agent_profile_id: {selected}",
+        )
+        if model:
+            await self._push_yaml_edit(
+                origin, "editor-model", "model: null", f"model: {model}"
+            )
+
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.agent_profile_id == (None if model else selected)
+            assert automation.model is None
+            assert (
+                len((await session.execute(select(TarballUpload))).scalars().all()) == 1
+            )
 
     async def test_superseded_upload_is_soft_deleted_when_the_tarball_changes(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin

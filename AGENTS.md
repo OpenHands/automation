@@ -14,6 +14,28 @@ Related repositories have different responsibilities:
 
 If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
 
+## Review-Facing Implementation Checklist
+
+Before opening a PR that changes scheduling, dispatch, run state, or sandbox
+lifecycle:
+
+- Enumerate the affected run-state transitions and competing actors (scheduler,
+  dispatcher, callback, watchdog, retry, and cleanup). Make claims and terminal
+  writes idempotent, release leases on every exit, and make persisted status
+  reflect the real sandbox or process outcome.
+- Compare maximum duration, schedule interval, retry policy, and per-user sandbox
+  capacity. Prevent self-overlap or apply explicit backpressure without pausing
+  or evicting the user's interactive sandbox.
+- Authorize organization, automation, upload, callback, and execution ownership
+  independently. Forward only the secrets required by the sandboxed workload and
+  validate webhook, tarball, entrypoint, and git-sync paths before filesystem use.
+- Keep PostgreSQL and SQLite behavior aligned. A schema change should use one
+  coherent migration with one Alembic head and a complete upgrade path from the
+  released schema.
+- Trace schema, environment, preset, callback, and catalog changes through their
+  real producer and consumer in the SDK, Canvas, or extensions repository. Do
+  not document or test against variables and endpoints production never supplies.
+
 ## Repository Structure
 
 ```
