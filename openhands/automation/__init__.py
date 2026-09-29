@@ -1,3 +1,3 @@
 """OpenHands automation service."""
 
-__version__ = "1.15.1"  # x-release-please-version
+__version__ = "1.15.2"  # x-release-please-version
