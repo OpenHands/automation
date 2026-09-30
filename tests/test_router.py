@@ -3,6 +3,7 @@
 import io
 import tarfile
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1212,38 +1213,51 @@ class TestListAutomations:
         assert len(data["automations"]) == 2
         assert data["total"] == 5
 
-    async def _seed_automation(self, async_session, *, user_id, org_id, name):
-        async_session.add(
-            Automation(
-                user_id=user_id,
-                org_id=org_id,
-                name=name,
-                trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
-                tarball_path="s3://bucket/path/to/code.tar.gz",
-                entrypoint="uv run script.py",
-            )
+    async def _seed_automation(
+        self, async_session, *, user_id, org_id, name, age_minutes=0
+    ) -> Automation:
+        """Persist an automation created ``age_minutes`` ago by ``user_id``."""
+        automation = Automation(
+            user_id=user_id,
+            org_id=org_id,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+            created_at=utcnow() - timedelta(minutes=age_minutes),
         )
+        async_session.add(automation)
         await async_session.commit()
+        return automation
 
     @pytest.mark.parametrize(
         ("created_by", "expected"),
-        [("me", ["Mine"]), ("others", ["Teammate"])],
+        [(None, ["Teammate", "Mine"]), ("me", ["Mine"]), ("others", ["Teammate"])],
     )
     async def test_list_automations_filters_by_creator(
         self, async_client, async_session, created_by, expected
     ):
         """created_by keeps the caller's automations or the rest of the org's."""
         await self._seed_automation(
-            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID, name="Mine"
+            async_session,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Mine",
+            age_minutes=2,
         )
         await self._seed_automation(
-            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="Teammate"
+            async_session,
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate",
+            age_minutes=1,
         )
         await self._seed_automation(
             async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
         )
+        query = f"?created_by={created_by}" if created_by else ""
 
-        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
+        response = await async_client.get(f"/api/automation/v1{query}")
 
         assert response.status_code == 200
         data = response.json()
@@ -1253,13 +1267,14 @@ class TestListAutomations:
     async def test_list_automations_creator_filter_pages_the_filtered_set(
         self, async_client, async_session
     ):
-        """total counts only the filtered automations, so pages cover all of them."""
+        """total counts only the filtered automations; pages keep newest-first."""
         for i in range(3):
             await self._seed_automation(
                 async_session,
                 user_id=TEST_USER_ID,
                 org_id=TEST_ORG_ID,
                 name=f"Mine {i}",
+                age_minutes=i,
             )
         for i in range(2):
             await self._seed_automation(
@@ -1267,6 +1282,7 @@ class TestListAutomations:
                 user_id=OTHER_USER_ID,
                 org_id=TEST_ORG_ID,
                 name=f"Teammate {i}",
+                age_minutes=i,
             )
 
         first = await async_client.get("/api/automation/v1?created_by=me&limit=2")
@@ -1274,11 +1290,11 @@ class TestListAutomations:
             "/api/automation/v1?created_by=me&limit=2&offset=2"
         )
 
-        assert first.json()["total"] == 3
+        assert [page.json()["total"] for page in (first, second)] == [3, 3]
         names = [
             a["name"] for page in (first, second) for a in page.json()["automations"]
         ]
-        assert sorted(names) == ["Mine 0", "Mine 1", "Mine 2"]
+        assert names == ["Mine 0", "Mine 1", "Mine 2"]
 
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
         """An unknown created_by value is a 422, not a silently unfiltered list."""
