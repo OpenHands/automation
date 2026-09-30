@@ -1212,6 +1212,80 @@ class TestListAutomations:
         assert len(data["automations"]) == 2
         assert data["total"] == 5
 
+    async def _seed_automation(self, async_session, *, user_id, org_id, name):
+        async_session.add(
+            Automation(
+                user_id=user_id,
+                org_id=org_id,
+                name=name,
+                trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/path/to/code.tar.gz",
+                entrypoint="uv run script.py",
+            )
+        )
+        await async_session.commit()
+
+    @pytest.mark.parametrize(
+        ("created_by", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"])],
+    )
+    async def test_list_automations_filters_by_creator(
+        self, async_client, async_session, created_by, expected
+    ):
+        """created_by keeps the caller's automations or the rest of the org's."""
+        await self._seed_automation(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID, name="Mine"
+        )
+        await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="Teammate"
+        )
+        await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
+        )
+
+        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == expected
+        assert data["total"] == len(expected)
+
+    async def test_list_automations_creator_filter_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only the filtered automations, so pages cover all of them."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Mine {i}",
+            )
+        for i in range(2):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Teammate {i}",
+            )
+
+        first = await async_client.get("/api/automation/v1?created_by=me&limit=2")
+        second = await async_client.get(
+            "/api/automation/v1?created_by=me&limit=2&offset=2"
+        )
+
+        assert first.json()["total"] == 3
+        names = [
+            a["name"] for page in (first, second) for a in page.json()["automations"]
+        ]
+        assert sorted(names) == ["Mine 0", "Mine 1", "Mine 2"]
+
+    async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
+        """An unknown created_by value is a 422, not a silently unfiltered list."""
+        response = await async_client.get("/api/automation/v1?created_by=team")
+
+        assert response.status_code == 422
+
 
 class TestGetAutomation:
     """Tests for GET /v1/{id} endpoint."""
