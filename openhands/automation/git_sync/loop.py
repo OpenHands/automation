@@ -6,6 +6,7 @@ the source of truth for anything not yet pushed.
 """
 
 import asyncio
+import hashlib
 import logging
 import shutil
 import tarfile
@@ -1276,9 +1277,8 @@ def _retry_backoff_seconds(
     the next capped probe after the token/repo is fixed succeeds and resets the
     streak.
 
-    No random jitter: the cross-replica sync lease (`_acquire_sync_lease`)
-    already guarantees a single writer per org, and each org syncs a different
-    remote, so there is no shared server for a thundering herd to overwhelm.
+    This is the un-jittered ceiling. ``_is_due`` applies equal jitter on top so
+    that orgs knocked out together don't retry in lockstep; see there.
     """
     if consecutive_failures <= 0:
         return float(interval_seconds)
@@ -1288,19 +1288,43 @@ def _retry_backoff_seconds(
     return min(float(interval_seconds * (2**shift)), backoff_cap_seconds)
 
 
+def _jitter_fraction(org_id: uuid.UUID, reference: datetime) -> float:
+    """A deterministic fraction in ``[0, 1)`` keyed on the org and its attempt.
+
+    Deterministic on purpose: ``_is_due`` is re-evaluated every tick across a
+    whole wait window, and fresh randomness each tick would let any low roll
+    fire early, collapsing the wait toward zero. Keying on ``org_id`` spreads
+    different orgs apart; keying on the attempt time re-rolls the offset each
+    round so a herd doesn't stay phase-locked.
+    """
+    seed = f"{org_id}:{reference.timestamp():.0f}".encode()
+    digest = hashlib.blake2b(seed, digest_size=8).digest()
+    return int.from_bytes(digest, "big") / (1 << 64)
+
+
 def _is_due(
     org_config: AutomationGitSyncOrgConfig,
     interval_seconds: int,
     now: datetime,
     backoff_cap_seconds: float,
 ) -> bool:
-    """Whether the org's (backed-off) interval has elapsed since its last cycle.
+    """Whether the org's (backed-off, jittered) wait has elapsed since its last
+    cycle.
 
     A failed cycle counts as an attempt too: a repo that is down waits out the
     interval like a healthy one instead of being retried every tick. After
     repeated failures the wait grows exponentially (see
     ``_retry_backoff_seconds``) so a persistently broken repo is probed ever
     less often, up to ``backoff_cap_seconds``.
+
+    While backing off, the wait carries equal jitter -- a deterministic offset
+    in the lower half of the window (``[0.5, 1.0)`` of the ceiling). Many orgs
+    knocked out by one fault (a GitHub outage, a mass token expiry) would
+    otherwise share a ``last_error_at`` and all hit the cap boundary on the
+    same tick; the jitter smears that retry wave across the window instead so
+    it doesn't land on the database and agent-server as a synchronized herd.
+    Healthy orgs (no failures) are not jittered -- their independent
+    ``last_run_at`` already keeps them apart.
     """
     attempts = [
         ensure_utc(at)
@@ -1309,10 +1333,12 @@ def _is_due(
     ]
     if not attempts:
         return True
-    wait = _retry_backoff_seconds(
-        interval_seconds, org_config.consecutive_failures or 0, backoff_cap_seconds
-    )
-    return now - max(attempts) >= timedelta(seconds=wait)
+    last_attempt = max(attempts)
+    failures = org_config.consecutive_failures or 0
+    wait = _retry_backoff_seconds(interval_seconds, failures, backoff_cap_seconds)
+    if failures > 0:
+        wait *= 0.5 + 0.5 * _jitter_fraction(org_config.org_id, last_attempt)
+    return now - last_attempt >= timedelta(seconds=wait)
 
 
 async def git_sync_loop(

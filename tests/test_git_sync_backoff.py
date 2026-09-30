@@ -5,10 +5,15 @@ no git. The integration side (counter increments/resets across a real cycle)
 lives in ``test_git_sync.py``.
 """
 
+import uuid
 from datetime import timedelta
 from types import SimpleNamespace
 
-from openhands.automation.git_sync.loop import _is_due, _retry_backoff_seconds
+from openhands.automation.git_sync.loop import (
+    _is_due,
+    _jitter_fraction,
+    _retry_backoff_seconds,
+)
 from openhands.automation.utils import utcnow
 
 
@@ -34,8 +39,11 @@ class TestRetryBackoffSeconds:
         assert _retry_backoff_seconds(60, 0, 10.0) == 60.0
 
 
-def _org(consecutive_failures: int, *, last_error_at=None, last_run_at=None):
+def _org(
+    consecutive_failures: int, *, last_error_at=None, last_run_at=None, org_id=None
+):
     return SimpleNamespace(
+        org_id=org_id or uuid.uuid4(),
         consecutive_failures=consecutive_failures,
         last_error_at=last_error_at,
         last_run_at=last_run_at,
@@ -47,28 +55,48 @@ class TestIsDue:
         assert _is_due(_org(0), 60, utcnow(), 3600.0) is True
 
     def test_healthy_org_due_after_one_interval(self):
+        # No failures -> no jitter, exact interval boundary.
         now = utcnow()
         just_before = _org(0, last_run_at=now - timedelta(seconds=59))
         just_after = _org(0, last_run_at=now - timedelta(seconds=61))
         assert _is_due(just_before, 60, now, 3600.0) is False
         assert _is_due(just_after, 60, now, 3600.0) is True
 
-    def test_failing_org_waits_the_backed_off_interval(self):
+    def test_failing_org_waits_at_least_half_the_backed_off_ceiling(self):
+        # One failure -> ceiling doubles to 120s; equal jitter puts the actual
+        # wait in [60, 120). So: never due below the 60s floor, always due at or
+        # past the 120s ceiling, regardless of which org drew which offset.
         now = utcnow()
-        # One failure -> wait doubles to 120s.
-        org = _org(1, last_error_at=now - timedelta(seconds=90))
-        assert _is_due(org, 60, now, 3600.0) is False
-        org_later = _org(1, last_error_at=now - timedelta(seconds=121))
-        assert _is_due(org_later, 60, now, 3600.0) is True
+        for _ in range(50):
+            org = _org(1, last_error_at=now - timedelta(seconds=59))
+            assert _is_due(org, 60, now, 3600.0) is False
+            org = _org(1, last_error_at=now - timedelta(seconds=120))
+            assert _is_due(org, 60, now, 3600.0) is True
 
     def test_backoff_is_capped_so_a_broken_org_still_gets_reprobed(self):
+        # A long streak backs off to the 3600s cap; jitter keeps the wait in
+        # [1800, 3600). Due once the full cap elapses; never due below half.
         now = utcnow()
-        # A long streak would back off past an hour, but the cap holds it at
-        # 3600s: still due once the cap elapses (this is what self-heals).
-        org = _org(20, last_error_at=now - timedelta(seconds=3601))
-        assert _is_due(org, 60, now, 3600.0) is True
-        not_yet = _org(20, last_error_at=now - timedelta(seconds=3599))
-        assert _is_due(not_yet, 60, now, 3600.0) is False
+        for _ in range(50):
+            org = _org(20, last_error_at=now - timedelta(seconds=3600))
+            assert _is_due(org, 60, now, 3600.0) is True
+            not_yet = _org(20, last_error_at=now - timedelta(seconds=1799))
+            assert _is_due(not_yet, 60, now, 3600.0) is False
+
+    def test_jitter_is_stable_within_a_wait_window(self):
+        # Same org + same last attempt must give the same answer every tick --
+        # otherwise repeated ticks would eventually roll a low offset and fire
+        # early, defeating the backoff.
+        now = utcnow()
+        org = _org(
+            5,
+            org_id=uuid.uuid4(),
+            last_error_at=now - timedelta(seconds=1000),
+        )
+        assert all(
+            _is_due(org, 60, now, 3600.0) == _is_due(org, 60, now, 3600.0)
+            for _ in range(20)
+        )
 
     def test_latest_of_run_or_error_is_the_reference_point(self):
         now = utcnow()
@@ -79,3 +107,31 @@ class TestIsDue:
         )
         # The more recent attempt (the error, 10s ago) gates it, so not due.
         assert _is_due(org, 60, now, 3600.0) is False
+
+
+class TestJitterFraction:
+    def test_is_in_the_unit_interval(self):
+        now = utcnow()
+        for _ in range(200):
+            frac = _jitter_fraction(uuid.uuid4(), now)
+            assert 0.0 <= frac < 1.0
+
+    def test_is_deterministic_for_the_same_org_and_reference(self):
+        org_id = uuid.uuid4()
+        now = utcnow()
+        assert _jitter_fraction(org_id, now) == _jitter_fraction(org_id, now)
+
+    def test_spreads_orgs_that_share_a_reference(self):
+        # The whole point: many orgs knocked out at the same instant must not
+        # collapse onto one offset. Over a fleet of orgs the fractions should
+        # cover both halves of the window.
+        now = utcnow()
+        fracs = [_jitter_fraction(uuid.uuid4(), now) for _ in range(200)]
+        assert min(fracs) < 0.25
+        assert max(fracs) > 0.75
+
+    def test_rerolls_across_attempts(self):
+        org_id = uuid.uuid4()
+        now = utcnow()
+        earlier = now - timedelta(seconds=3600)
+        assert _jitter_fraction(org_id, now) != _jitter_fraction(org_id, earlier)
