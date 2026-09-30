@@ -603,6 +603,99 @@ class TestVerifyAndMarkRunStillRunning:
             assert run.timeout_at == stale_timeout_at
 
 
+class TestWatchdogCandidateSelection:
+    """The watchdog polls detached commands before their timeout deadline."""
+
+    @pytest.mark.asyncio
+    async def test_command_id_is_verified_before_timeout(
+        self, async_session_factory, mock_settings
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Detached command",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=600,
+            )
+            session.add(automation)
+            await session.flush()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                bash_command_id="command-123",
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(minutes=10),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        verification = VerificationResult(
+            verified=True,
+            success=True,
+            exit_code=0,
+            stdout="done",
+            stderr="",
+        )
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        mock_backend.verify_run.assert_awaited_once_with(str(run_id))
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_pre_command_run_waits_for_timeout(
+        self, async_session_factory, mock_settings
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Provisioning run",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=600,
+            )
+            session.add(automation)
+            await session.flush()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                bash_command_id=None,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(minutes=10),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(verified=True, success=True, exit_code=0)
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 0
+        mock_backend.verify_run.assert_not_awaited()
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.RUNNING
+
+
 def _make_event(age: timedelta, index: int = 0) -> IntegrationEvent:
     """An accepted event received `age` ago."""
     return IntegrationEvent(
