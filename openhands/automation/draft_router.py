@@ -162,7 +162,9 @@ def _draft_name(name: str | None, draft_body: dict[str, Any]) -> str | None:
 
 
 def _errors_to_json(errors: list[DraftValidationError]) -> list[dict[str, Any]]:
-    return [error.model_dump() for error in errors]
+    # Preflight adds default UI metadata to the shared error model. Keep saved
+    # drafts and their existing API responses limited to explicitly set fields.
+    return [error.model_dump(exclude_unset=True) for error in errors]
 
 
 def _normalize_draft_body_or_422(

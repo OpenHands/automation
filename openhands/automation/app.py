@@ -6,11 +6,16 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from openhands.automation.auth import create_http_client
-from openhands.automation.capabilities_router import router as capabilities_router
+from openhands.automation.capabilities_router import (
+    router as capabilities_router,
+    validate_draft,
+)
 from openhands.automation.config import get_config, get_settings
 from openhands.automation.db import (
     create_engine,
@@ -281,6 +286,27 @@ app.add_middleware(
 )
 
 _base_path = get_settings().base_path
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Keep mistakenly supplied secrets out of preflight's envelope errors."""
+    if request.scope.get("endpoint") is not validate_draft:
+        return await request_validation_exception_handler(request, exc)
+    # FastAPI normally includes the rejected input and validator context. The
+    # preflight contract accepts secret names only, even when rejecting a value.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {key: error[key] for key in ("loc", "msg", "type")}
+                for error in exc.errors()
+            ]
+        },
+    )
+
 
 # Include specific routers BEFORE main router to avoid route conflict.
 # The main router has /v1/{automation_id} which would match any /v1/<path>
