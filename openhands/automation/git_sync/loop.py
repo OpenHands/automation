@@ -1130,13 +1130,16 @@ async def run_sync_cycle(
             org_config = await get_or_create_org_config(session, org_id)
             org_config.last_error = str(e)[:2000]
             org_config.last_error_at = utcnow()
-            # Feeds the exponential backoff in `_is_due` and the quiet logging
-            # in `_cycle`. An auth failure won't clear on the next tick, so it
-            # is recorded separately from a transient one.
-            org_config.consecutive_failures = (org_config.consecutive_failures or 0) + 1
-            org_config.last_error_kind = (
-                "auth" if isinstance(e, GitAuthError) else "transient"
-            )
+            # Only auth failures, which won't clear on the next tick, build the
+            # streak behind `_is_due`'s backoff and `_cycle`'s quiet logging. A
+            # transient one (outage, timeout) resets it, so the org is back on
+            # its plain interval as soon as the provider recovers.
+            if isinstance(e, GitAuthError):
+                org_config.consecutive_auth_failures = (
+                    org_config.consecutive_auth_failures or 0
+                ) + 1
+            else:
+                org_config.consecutive_auth_failures = 0
             await session.commit()
         raise
     finally:
@@ -1257,34 +1260,29 @@ async def _run_sync_cycle_leased(
         # A success clears the backoff: the next cycle runs at the normal
         # interval again, which is what makes recovery automatic once a token
         # or repo is fixed -- no manual re-enable.
-        org_config.consecutive_failures = 0
-        org_config.last_error_kind = None
+        org_config.consecutive_auth_failures = 0
         await session.commit()
 
     return result
 
 
 def _retry_backoff_seconds(
-    interval_seconds: int, consecutive_failures: int, backoff_cap_seconds: float
+    interval_seconds: int, consecutive_auth_failures: int, backoff_cap_seconds: float
 ) -> float:
-    """The wait an org owes before its next cycle, given its failure streak.
+    """The un-jittered wait an org owes before its next cycle.
 
-    Healthy (no failures) it is the plain interval. After a failure the wait
-    grows exponentially -- ``interval * 2**failures`` -- capped at
-    ``backoff_cap_seconds``. A permanently broken repo (revoked token, deleted
-    repo) is therefore re-probed at most that often instead of every interval,
-    which is what stops the log flood; the cap still lets it self-heal, since
-    the next capped probe after the token/repo is fixed succeeds and resets the
-    streak.
-
-    This is the un-jittered ceiling. ``_is_due`` applies equal jitter on top so
-    that orgs knocked out together don't retry in lockstep; see there.
+    Healthy it is the plain interval. After auth failures the wait grows
+    exponentially -- ``interval * 2**failures`` -- capped at
+    ``backoff_cap_seconds``, so a revoked token or deleted repo is re-probed at
+    most that often instead of every interval, and still self-heals on the next
+    capped probe after it is fixed. ``_is_due`` jitters this and floors it at
+    the interval.
     """
-    if consecutive_failures <= 0:
+    if consecutive_auth_failures <= 0:
         return float(interval_seconds)
     # Bound the shift so `2**failures` can't overflow into an enormous float on
     # a long-broken org; the cap makes anything past a handful of failures moot.
-    shift = min(consecutive_failures, 30)
+    shift = min(consecutive_auth_failures, 30)
     return min(float(interval_seconds * (2**shift)), backoff_cap_seconds)
 
 
@@ -1313,18 +1311,17 @@ def _is_due(
 
     A failed cycle counts as an attempt too: a repo that is down waits out the
     interval like a healthy one instead of being retried every tick. After
-    repeated failures the wait grows exponentially (see
+    repeated auth failures the wait grows exponentially (see
     ``_retry_backoff_seconds``) so a persistently broken repo is probed ever
     less often, up to ``backoff_cap_seconds``.
 
     While backing off, the wait carries equal jitter -- a deterministic offset
-    in the lower half of the window (``[0.5, 1.0)`` of the ceiling). Many orgs
-    knocked out by one fault (a GitHub outage, a mass token expiry) would
-    otherwise share a ``last_error_at`` and all hit the cap boundary on the
-    same tick; the jitter smears that retry wave across the window instead so
-    it doesn't land on the database and agent-server as a synchronized herd.
-    Healthy orgs (no failures) are not jittered -- their independent
-    ``last_run_at`` already keeps them apart.
+    in ``[0.5, 1.0)`` of the ceiling -- so orgs knocked out together (a mass
+    token expiry) don't all hit the cap boundary on the same tick and retry as
+    a synchronized herd. The result is floored at the interval: backing off
+    must never retry a failing org sooner than a healthy one, which a cap
+    below the interval (an hourly or daily sync) would otherwise do. Healthy
+    orgs are not jittered -- their independent ``last_run_at`` keeps them apart.
     """
     attempts = [
         ensure_utc(at)
@@ -1334,10 +1331,11 @@ def _is_due(
     if not attempts:
         return True
     last_attempt = max(attempts)
-    failures = org_config.consecutive_failures or 0
+    failures = org_config.consecutive_auth_failures or 0
     wait = _retry_backoff_seconds(interval_seconds, failures, backoff_cap_seconds)
     if failures > 0:
         wait *= 0.5 + 0.5 * _jitter_fraction(org_config.org_id, last_attempt)
+        wait = max(wait, float(interval_seconds))
     return now - last_attempt >= timedelta(seconds=wait)
 
 
@@ -1369,8 +1367,8 @@ async def git_sync_loop(
 
     async def _cycle() -> None:
         now = utcnow()
-        # (org_id, effective settings, failure streak before this cycle). The
-        # streak decides how loud a fresh failure is logged below.
+        # (org_id, effective settings, auth-failure streak before this cycle).
+        # The streak decides how loud a fresh auth failure is logged below.
         due: list[tuple[uuid.UUID, GitSyncSettings, int]] = []
         async with session_factory() as session:
             if service_settings.is_local_mode:
@@ -1407,13 +1405,13 @@ async def git_sync_loop(
                         (
                             org_config.org_id,
                             effective,
-                            org_config.consecutive_failures or 0,
+                            org_config.consecutive_auth_failures or 0,
                         )
                     )
 
         # One org's failure must not stop the others, so each gets its own
         # try: `run_periodic_loop` only guards the tick as a whole.
-        for org_id, effective, prior_failures in due:
+        for org_id, effective, prior_auth_failures in due:
             try:
                 result = await run_sync_cycle(
                     session_factory, org_id, effective, service_settings
@@ -1424,13 +1422,13 @@ async def git_sync_loop(
                 # threshold -- one WARNING per cycle instead, so a permanently
                 # broken repo stops flooding the logs while still being visible.
                 threshold = effective.git_sync_auth_failure_backoff_threshold
-                if threshold > 0 and prior_failures + 1 >= threshold:
+                if threshold > 0 and prior_auth_failures + 1 >= threshold:
                     logger.warning(
                         "Git sync for org %s keeps failing authentication "
                         "(%d consecutive); backing off and suppressing the "
                         "traceback until its token or repo recovers",
                         org_id,
-                        prior_failures + 1,
+                        prior_auth_failures + 1,
                     )
                 else:
                     logger.exception("Git sync cycle failed for org %s (auth)", org_id)

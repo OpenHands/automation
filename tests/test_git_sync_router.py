@@ -577,6 +577,40 @@ class TestOrgScoping:
             await asyncio.wait_for(waiter, timeout=5)
             await second.commit()
 
+    @pytest.mark.parametrize(
+        ("update", "resets"),
+        [
+            ({"token": "fresh-token"}, True),
+            ({"repo_url": "https://example.com/other.git"}, True),
+            ({"branch": "develop"}, True),
+            ({"token": None}, True),
+            ({"token": "old-token"}, False),
+            ({"path": "elsewhere"}, False),
+            ({"interval_seconds": 600}, False),
+        ],
+    )
+    async def test_repo_or_token_change_clears_the_auth_backoff(
+        self, async_client, async_session, update, resets
+    ):
+        """A corrected repo or token resumes its normal interval straight away
+        instead of waiting out a backoff earned by the old config."""
+        await async_client.put(
+            "/api/automation/v1/git-sync/config",
+            json={"repo_url": "https://example.com/repo.git", "token": "old-token"},
+        )
+        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        assert row is not None
+        row.consecutive_auth_failures = 5
+        await async_session.commit()
+
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json=update
+        )
+        assert response.status_code == 200
+
+        await async_session.refresh(row)
+        assert row.consecutive_auth_failures == (0 if resets else 5)
+
     async def test_records_who_configured_the_org(
         self, async_client, async_session, mock_authenticated_user
     ):

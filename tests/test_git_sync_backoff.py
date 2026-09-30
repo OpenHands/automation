@@ -42,7 +42,7 @@ class TestRetryBackoffSeconds:
 
 
 def _org(
-    consecutive_failures: int, *, last_error_at=None, last_run_at=None, org_id=None
+    consecutive_auth_failures: int, *, last_error_at=None, last_run_at=None, org_id=None
 ) -> AutomationGitSyncOrgConfig:
     # A lightweight stand-in for the ORM row: _is_due only reads these four
     # attributes, so a SimpleNamespace is enough. Cast so the pure-function
@@ -51,7 +51,7 @@ def _org(
         AutomationGitSyncOrgConfig,
         SimpleNamespace(
             org_id=org_id or uuid.uuid4(),
-            consecutive_failures=consecutive_failures,
+            consecutive_auth_failures=consecutive_auth_failures,
             last_error_at=last_error_at,
             last_run_at=last_run_at,
         ),
@@ -90,6 +90,31 @@ class TestIsDue:
             assert _is_due(org, 60, now, 3600.0) is True
             not_yet = _org(20, last_error_at=now - timedelta(seconds=1799))
             assert _is_due(not_yet, 60, now, 3600.0) is False
+
+    def test_failing_org_never_retries_sooner_than_its_interval(self):
+        # An interval at or above the cap (hourly, daily) would otherwise have
+        # the cap and jitter pull a failing org's wait down to [1800, 3600) --
+        # probing a broken repo more often than a healthy one syncs.
+        now = utcnow()
+        for interval in (3600, 86400):
+            for failures in (1, 20):
+                for _ in range(50):
+                    early = _org(
+                        failures,
+                        last_error_at=now - timedelta(seconds=interval - 1),
+                    )
+                    assert _is_due(early, interval, now, 3600.0) is False
+                    on_time = _org(
+                        failures, last_error_at=now - timedelta(seconds=interval)
+                    )
+                    assert _is_due(on_time, interval, now, 3600.0) is True
+
+    def test_interval_between_half_cap_and_cap_is_floored_not_just_jittered(self):
+        # 2400s: ceiling is the 3600s cap, jitter alone would allow 1800s.
+        now = utcnow()
+        for _ in range(50):
+            org = _org(1, last_error_at=now - timedelta(seconds=2399))
+            assert _is_due(org, 2400, now, 3600.0) is False
 
     def test_jitter_is_stable_within_a_wait_window(self):
         # Same org + same last attempt must give the same answer every tick --

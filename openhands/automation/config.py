@@ -413,11 +413,11 @@ class GitSyncSettings(BaseSettings):
     # per-cycle traceback is just noise. Mirrors the run-path
     # `failure_disable_threshold` (utils/unhealthy.py). 0 keeps it always loud.
     git_sync_auth_failure_backoff_threshold: int = 3
-    # Ceiling for the exponential backoff between retries after a failure. The
-    # retry wait is `interval * 2**consecutive_failures` capped here, so even a
-    # permanently broken repo is still re-probed at least this often and
-    # self-heals the moment its token/repo is valid again. No hard disable, so
-    # nothing needs a manual re-enable.
+    # Ceiling for the exponential backoff between retries after auth failures.
+    # The retry wait is `interval * 2**consecutive_auth_failures` capped here,
+    # but never shorter than the interval itself, so a permanently broken repo
+    # is still re-probed and self-heals the moment its token/repo is valid
+    # again. No hard disable, so nothing needs a manual re-enable.
     git_sync_failure_backoff_cap_seconds: float = 3600.0
 
     model_config = {"env_prefix": "AUTOMATION_"}

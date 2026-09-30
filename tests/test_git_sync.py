@@ -1502,7 +1502,7 @@ class TestGitSyncLoop:
         async with sqlite_session_factory() as session:
             row = await session.get(AutomationGitSyncOrgConfig, LOCAL_ORG_ID)
             assert row is not None
-            row.consecutive_failures = 2
+            row.consecutive_auth_failures = 2
             row.last_error_at = utcnow() - timedelta(seconds=3600)
             await session.commit()
 
@@ -2238,14 +2238,14 @@ class TestOrgIsolation:
 
 
 class TestFailureBackoffState:
-    """The per-org failure streak that drives backoff and quiet logging.
+    """The per-org auth-failure streak that drives backoff and quiet logging.
 
-    Increment and kind on failure, reset on the next success -- see
-    ``run_sync_cycle`` and ``_is_due``. The pure backoff maths live in
+    Incremented by an auth failure; reset by a success or a transient failure
+    -- see ``run_sync_cycle`` and ``_is_due``. The pure backoff maths live in
     ``test_git_sync_backoff.py``.
     """
 
-    async def test_auth_failure_increments_counter_and_records_kind(
+    async def test_auth_failure_increments_the_streak(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
         import openhands.automation.git_sync.loop as loop_module
@@ -2265,15 +2265,22 @@ class TestFailureBackoffState:
                 )
             row = await _org_config(sqlite_session_factory)
             assert row is not None
-            assert row.consecutive_failures == expected
-            assert row.last_error_kind == "auth"
+            assert row.consecutive_auth_failures == expected
             assert row.last_error is not None
             assert row.last_error_at is not None
 
-    async def test_transient_failure_records_transient_kind(
+    async def test_transient_failure_resets_the_streak(
         self, sqlite_session_factory, git_settings, service_settings, monkeypatch
     ):
+        # A transient failure must neither back off like an auth one nor let an
+        # earlier auth streak send the next auth failure straight to the quiet
+        # path with an inflated count.
         import openhands.automation.git_sync.loop as loop_module
+
+        async with sqlite_session_factory() as session:
+            row = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            row.consecutive_auth_failures = 2
+            await session.commit()
 
         async def boom(*args, **kwargs):
             raise GitSyncError("Could not resolve host")
@@ -2286,8 +2293,8 @@ class TestFailureBackoffState:
             )
         row = await _org_config(sqlite_session_factory)
         assert row is not None
-        assert row.consecutive_failures == 1
-        assert row.last_error_kind == "transient"
+        assert row.consecutive_auth_failures == 0
+        assert row.last_error is not None
 
     async def test_success_resets_the_failure_counter(
         self,
@@ -2317,7 +2324,7 @@ class TestFailureBackoffState:
             )
         row = await _org_config(sqlite_session_factory)
         assert row is not None
-        assert row.consecutive_failures == 1
+        assert row.consecutive_auth_failures == 1
 
         # A real, successful cycle must clear the streak so the normal interval
         # resumes -- this is what makes recovery automatic, no manual re-enable.
@@ -2330,7 +2337,6 @@ class TestFailureBackoffState:
 
         row = await _org_config(sqlite_session_factory)
         assert row is not None
-        assert row.consecutive_failures == 0
-        assert row.last_error_kind is None
+        assert row.consecutive_auth_failures == 0
         assert row.last_error is None
         assert row.last_error_at is None

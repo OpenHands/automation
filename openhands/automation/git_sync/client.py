@@ -47,18 +47,28 @@ _AUTH_FAILURE_MARKERS: Final[tuple[str, ...]] = (
     "terminal prompts disabled",
     "authentication failed",
     "invalid username or password",
-    "permission denied",
+    # Only SSH's: a bare "permission denied" is also a local filesystem error
+    # (read-only workspace, foreign-owned index.lock), which is no token issue.
+    "permission denied (publickey",
+    # GitHub's `remote:`/`ERROR:` line, the only hint on SSH.
     "repository not found",
     "returned error: 403",
     "returned error: 401",
     "access denied",
 )
 
+# git's own line for an HTTP 404 on any host: `fatal: repository '<url>' not found`.
+_REPO_NOT_FOUND_RE: Final[re.Pattern[str]] = re.compile(
+    r"repository '[^']*' not found", re.IGNORECASE
+)
+
 
 def _looks_like_auth_failure(stderr: str) -> bool:
     """Whether git's stderr describes an auth/access failure vs a transient one."""
     haystack = stderr.lower()
-    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS)
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS) or bool(
+        _REPO_NOT_FOUND_RE.search(stderr)
+    )
 
 
 def redact_url_credentials(text: str) -> str:

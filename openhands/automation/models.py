@@ -803,14 +803,12 @@ class AutomationGitSyncOrgConfig(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # Consecutive failed cycles, reset to 0 on the next success. Drives the
-    # exponential retry backoff and the quiet-after-N-auth-failures logging in
-    # `git_sync/loop.py`. `last_error_kind` is "auth" or "transient" (or NULL
-    # when the last cycle succeeded), matching the GitAuthError classification.
-    consecutive_failures: Mapped[int] = mapped_column(
+    # Consecutive GitAuthError cycles; reset by a success, a transient failure,
+    # or a change to the repo URL, branch or token. Drives the retry backoff and
+    # the quiet-after-N-auth-failures logging in `git_sync/loop.py`.
+    consecutive_auth_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
-    last_error_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -39,6 +39,13 @@ _REPO_IDENTITY_FIELDS: Final[tuple[str, ...]] = (
     "git_sync_path",
 )
 
+# The fields whose change can fix what an auth-failure streak was about.
+_AUTH_BACKOFF_RESET_FIELDS: Final[tuple[str, ...]] = (
+    "git_sync_repo_url",
+    "git_sync_branch",
+    "git_sync_token",
+)
+
 
 def base_git_sync_settings() -> GitSyncSettings:
     """The env-level defaults an org's overrides are merged over.
@@ -183,14 +190,21 @@ async def apply_git_sync_config_override(
 
     `configured_by_user_id` records who saved last; automations imported from
     git are created as that user (see loop.py).
+
+    Changing the repo URL, branch or token clears the auth-failure backoff, so
+    a corrected config is retried on its normal interval rather than waiting
+    out a backoff earned by the old one.
     """
     row = await get_or_create_org_config(session, org_id)
     overrides = _decode_overrides(row)
+    before = {key: overrides.get(key) for key in _AUTH_BACKOFF_RESET_FIELDS}
     for key, value in updates.items():
         if value is None:
             overrides.pop(key, None)
         else:
             overrides[key] = value
+    if any(overrides.get(key) != before[key] for key in _AUTH_BACKOFF_RESET_FIELDS):
+        row.consecutive_auth_failures = 0
     row.overrides = json.dumps(encrypt_secret_fields(overrides))
     row.configured_by_user_id = configured_by_user_id
 

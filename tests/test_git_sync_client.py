@@ -453,7 +453,16 @@ class TestErrorClassification:
             "terminal prompts disabled",
             "remote: Support for password authentication was removed.\n"
             "fatal: Authentication failed for 'https://github.com/x/y.git/'",
-            "remote: Repository not found.\nfatal: repository not found",
+            # GitHub over HTTPS: its own remote line plus git's.
+            "remote: Repository not found.\n"
+            "fatal: repository 'https://github.com/x/y.git/' not found",
+            # GitLab: only git's own line names the 404.
+            "remote: The project you were looking for could not be found or "
+            "you don't have permission to view it.\n"
+            "fatal: repository 'https://gitlab.com/x/y.git/' not found",
+            # GitHub over SSH.
+            "ERROR: Repository not found.\n"
+            "fatal: Could not read from remote repository.",
             "fatal: unable to access '...': The requested URL returned error: 403",
             "git@github.com: Permission denied (publickey).",
         ],
@@ -468,6 +477,9 @@ class TestErrorClassification:
             "error: RPC failed; curl 56 recv failure: Connection reset by peer",
             "fatal: not a git repository (or any of the parent directories)",
             "fatal: the remote end hung up unexpectedly",
+            # Local filesystem permissions: no token to fix.
+            "fatal: could not create work tree dir '/workspace/x': Permission denied",
+            "fatal: Unable to create '/workspace/x/.git/index.lock': Permission denied",
         ],
     )
     def test_transient_failures_are_not_misclassified(self, stderr):
