@@ -24,6 +24,7 @@ from openhands.automation.git_sync import (
     run_sync_cycle,
 )
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
     commit_and_push,
     ensure_repo,
@@ -2173,3 +2174,98 @@ class TestOrgIsolation:
             upload = (await session.execute(select(TarballUpload))).scalars().one()
             assert upload.user_id == admin_id
             assert upload.org_id == LOCAL_ORG_ID
+
+
+class TestFailureBackoffState:
+    """The per-org failure streak that drives backoff and quiet logging.
+
+    Increment and kind on failure, reset on the next success -- see
+    ``run_sync_cycle`` and ``_is_due``. The pure backoff maths live in
+    ``test_git_sync_backoff.py``.
+    """
+
+    async def test_auth_failure_increments_counter_and_records_kind(
+        self, sqlite_session_factory, git_settings, service_settings, monkeypatch
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        async def boom(*args, **kwargs):
+            raise GitAuthError("fatal: Authentication failed")
+
+        monkeypatch.setattr(loop_module, "ensure_repo", boom)
+
+        for expected in (1, 2):
+            with pytest.raises(GitAuthError):
+                await run_sync_cycle(
+                    sqlite_session_factory,
+                    LOCAL_ORG_ID,
+                    git_settings,
+                    service_settings,
+                )
+            row = await _org_config(sqlite_session_factory)
+            assert row is not None
+            assert row.consecutive_failures == expected
+            assert row.last_error_kind == "auth"
+            assert row.last_error is not None
+            assert row.last_error_at is not None
+
+    async def test_transient_failure_records_transient_kind(
+        self, sqlite_session_factory, git_settings, service_settings, monkeypatch
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        async def boom(*args, **kwargs):
+            raise GitSyncError("Could not resolve host")
+
+        monkeypatch.setattr(loop_module, "ensure_repo", boom)
+
+        with pytest.raises(GitSyncError):
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
+        row = await _org_config(sqlite_session_factory)
+        assert row.consecutive_failures == 1
+        assert row.last_error_kind == "transient"
+
+    async def test_success_resets_the_failure_counter(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        monkeypatch,
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        real_ensure_repo = loop_module.ensure_repo
+        failing = {"on": True}
+
+        async def maybe_boom(*args, **kwargs):
+            if failing["on"]:
+                raise GitAuthError("fatal: Authentication failed")
+            return await real_ensure_repo(*args, **kwargs)
+
+        # A narrow toggle rather than monkeypatch.undo(), which would also revert
+        # the autouse file-store patch and the git env vars this test relies on.
+        monkeypatch.setattr(loop_module, "ensure_repo", maybe_boom)
+        with pytest.raises(GitAuthError):
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
+        assert (await _org_config(sqlite_session_factory)).consecutive_failures == 1
+
+        # A real, successful cycle must clear the streak so the normal interval
+        # resumes -- this is what makes recovery automatic, no manual re-enable.
+        failing["on"] = False
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert result.pushed_commit is not None
+
+        row = await _org_config(sqlite_session_factory)
+        assert row.consecutive_failures == 0
+        assert row.last_error_kind is None
+        assert row.last_error is None
+        assert row.last_error_at is None

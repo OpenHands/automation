@@ -9,7 +9,9 @@ import subprocess
 import pytest
 
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
+    _looks_like_auth_failure,
     _non_interactive_env,
     check_remote_access,
     commit_and_push,
@@ -422,3 +424,49 @@ class TestCheckRemoteAccess:
         assert len(commands) == 1
         assert commands[0][1] == "ls-remote"
         assert list(tmp_path.iterdir()) == [origin]
+
+
+class TestErrorClassification:
+    def test_git_auth_error_is_a_git_sync_error(self):
+        # Existing `except GitSyncError` handlers must still catch auth failures.
+        assert issubclass(GitAuthError, GitSyncError)
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: could not read Username for 'https://github.com': "
+            "terminal prompts disabled",
+            "remote: Support for password authentication was removed.\n"
+            "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+            "remote: Repository not found.\nfatal: repository not found",
+            "fatal: unable to access '...': The requested URL returned error: 403",
+            "git@github.com: Permission denied (publickey).",
+        ],
+    )
+    def test_auth_failures_are_recognised(self, stderr):
+        assert _looks_like_auth_failure(stderr) is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: unable to access '...': Could not resolve host: github.com",
+            "error: RPC failed; curl 56 recv failure: Connection reset by peer",
+            "fatal: not a git repository (or any of the parent directories)",
+            "fatal: the remote end hung up unexpectedly",
+        ],
+    )
+    def test_transient_failures_are_not_misclassified(self, stderr):
+        assert _looks_like_auth_failure(stderr) is False
+
+    async def test_missing_local_repo_raises_transient_not_auth(
+        self, tmp_path, monkeypatch
+    ):
+        """A clone of a nonexistent local repo is a plain GitSyncError, not a
+        GitAuthError -- there is no credential problem to back off on."""
+        monkeypatch.chdir(tmp_path)
+        workdir = tmp_path / "clone"
+        with pytest.raises(GitSyncError) as exc_info:
+            await ensure_repo(
+                workdir, _repo_url(tmp_path / "nope"), "main", token="", timeout=30
+            )
+        assert not isinstance(exc_info.value, GitAuthError)
