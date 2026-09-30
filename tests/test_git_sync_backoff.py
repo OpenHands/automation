@@ -8,12 +8,14 @@ lives in ``test_git_sync.py``.
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 
 from openhands.automation.git_sync.loop import (
     _is_due,
     _jitter_fraction,
     _retry_backoff_seconds,
 )
+from openhands.automation.models import AutomationGitSyncOrgConfig
 from openhands.automation.utils import utcnow
 
 
@@ -41,12 +43,18 @@ class TestRetryBackoffSeconds:
 
 def _org(
     consecutive_failures: int, *, last_error_at=None, last_run_at=None, org_id=None
-):
-    return SimpleNamespace(
-        org_id=org_id or uuid.uuid4(),
-        consecutive_failures=consecutive_failures,
-        last_error_at=last_error_at,
-        last_run_at=last_run_at,
+) -> AutomationGitSyncOrgConfig:
+    # A lightweight stand-in for the ORM row: _is_due only reads these four
+    # attributes, so a SimpleNamespace is enough. Cast so the pure-function
+    # calls type-check without building a real DB-backed model.
+    return cast(
+        AutomationGitSyncOrgConfig,
+        SimpleNamespace(
+            org_id=org_id or uuid.uuid4(),
+            consecutive_failures=consecutive_failures,
+            last_error_at=last_error_at,
+            last_run_at=last_run_at,
+        ),
     )
 
 

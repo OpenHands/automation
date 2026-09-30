@@ -2224,6 +2224,7 @@ class TestFailureBackoffState:
                 sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
             )
         row = await _org_config(sqlite_session_factory)
+        assert row is not None
         assert row.consecutive_failures == 1
         assert row.last_error_kind == "transient"
 
@@ -2253,7 +2254,9 @@ class TestFailureBackoffState:
             await run_sync_cycle(
                 sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
             )
-        assert (await _org_config(sqlite_session_factory)).consecutive_failures == 1
+        row = await _org_config(sqlite_session_factory)
+        assert row is not None
+        assert row.consecutive_failures == 1
 
         # A real, successful cycle must clear the streak so the normal interval
         # resumes -- this is what makes recovery automatic, no manual re-enable.
@@ -2265,6 +2268,7 @@ class TestFailureBackoffState:
         assert result.pushed_commit is not None
 
         row = await _org_config(sqlite_session_factory)
+        assert row is not None
         assert row.consecutive_failures == 0
         assert row.last_error_kind is None
         assert row.last_error is None
