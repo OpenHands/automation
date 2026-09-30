@@ -116,6 +116,28 @@ class TestIsDue:
         # The more recent attempt (the error, 10s ago) gates it, so not due.
         assert _is_due(org, 60, now, 3600.0) is False
 
+    def test_is_due_jitter_varies_by_org_not_a_constant_fraction(self):
+        # The anti-herd property lives at the _is_due call site, not just in the
+        # _jitter_fraction helper. Pin it here: at a fixed point *inside* the
+        # backed-off window, different orgs must reach different due-decisions.
+        # One failure -> ceiling 120s; equal jitter puts each org's real wait in
+        # [60, 120), so 90s is due for some orgs and not others. A constant
+        # fraction (the mutant that drops the per-org jitter) would make every
+        # org share one wait and one decision -- exactly the lockstep retry the
+        # jitter exists to prevent.
+        now = utcnow()
+        elapsed = timedelta(seconds=90)  # mid the [60, 120) window for failures=1
+        decisions = {
+            _is_due(
+                _org(1, org_id=uuid.uuid4(), last_error_at=now - elapsed),
+                60,
+                now,
+                3600.0,
+            )
+            for _ in range(300)
+        }
+        assert decisions == {True, False}
+
 
 class TestJitterFraction:
     def test_is_in_the_unit_interval(self):
