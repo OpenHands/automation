@@ -35,6 +35,7 @@ from openhands.automation.models import (
     AutomationState as ModelAutomationState,
     TarballUpload,
 )
+from openhands.automation.observability import add_event, automation_attributes, span
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
     AutomationListResponse,
@@ -820,6 +821,22 @@ async def complete_run(
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    callback_attributes = automation_attributes(
+        automation,
+        run,
+        **{
+            "automation.conversation_id": body.conversation_id,
+            "openhands.conversation_id": body.conversation_id,
+            "automation.callback.reconciled_watchdog_timeout": reconciled,
+        },
+    )
+    with span("automation.callback.received", callback_attributes):
+        add_event(
+            "automation.run.completed"
+            if new_status == AutomationRunStatus.COMPLETED
+            else "automation.run.failed",
+            callback_attributes,
+        )
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
