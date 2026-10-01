@@ -11,7 +11,7 @@ import logging
 import uuid
 from zoneinfo import available_timezones
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +47,7 @@ from openhands.automation.schemas import (
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
 from openhands.automation.utils.model_profiles import (
-    validate_agent_profile_selection,
+    validate_agent_profile,
     validate_model_profile_for_user,
 )
 from openhands.automation.utils.webhook import get_webhook_config
@@ -140,6 +140,7 @@ async def get_capabilities(
 @router.post("/validate")
 async def validate_draft(
     body: ValidateDraftRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> ValidateDraftResponse:
@@ -153,8 +154,14 @@ async def validate_draft(
         "Validating draft for %s (automation_id=%s)", body.endpoint, body.automation_id
     )
 
+    # A saved draft has no agent profile, so the draft shape does not know the
+    # field. Creation does, and preflight answers for creation: the profile
+    # skips the shape and is checked by the model creation itself uses.
+    shape = {k: v for k, v in body.draft.items() if k != "agent_profile_id"}
     try:
-        normalized_draft = normalize_draft_body(body.endpoint, body.draft)
+        normalized_draft = normalize_draft_body(body.endpoint, shape)
+        if "agent_profile_id" in body.draft:
+            normalized_draft["agent_profile_id"] = body.draft["agent_profile_id"]
         draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
@@ -175,8 +182,10 @@ async def validate_draft(
 
     if isinstance(draft, CreateAutomationRequest):
         try:
-            validate_agent_profile_selection(draft.agent_profile_id, draft.model)
+            await validate_agent_profile(draft.agent_profile_id, draft.model, request)
         except HTTPException as e:
+            if e.status_code != 422:
+                raise
             errors.append(
                 DraftValidationError(
                     field="agent_profile_id",
