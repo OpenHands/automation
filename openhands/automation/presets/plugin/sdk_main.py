@@ -52,9 +52,12 @@ Env vars (Local mode):
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
+  AUTOMATION_ID              - automation ID for observability correlation (optional)
+  AUTOMATION_NAME            - automation name for observability correlation (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_USER_ID         - owner user ID for observability attribution (optional)
   AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
+  AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
 
@@ -541,6 +544,28 @@ More activity arrived on the same subject while this run was queued:
     if automation_run_id and not default_tags.get("automationrunid"):
         conversation_tags["automationrunid"] = automation_run_id
 
+    trigger_payload = (
+        event_context.get("trigger_payload")
+        if isinstance(event_context.get("trigger_payload"), dict)
+        else {}
+    )
+    observability_metadata = {
+        "automation.id": os.environ.get("AUTOMATION_ID")
+        or event_context.get("automation_id"),
+        "automation.name": os.environ.get("AUTOMATION_NAME")
+        or event_context.get("automation_name"),
+        "automation.run_id": automation_run_id,
+        "automation.org_id": os.environ.get("AUTOMATION_ORG_ID"),
+        "automation.user_id": automation_user_id,
+        "automation.trigger_source": os.environ.get("AUTOMATION_TRIGGER_SOURCE")
+        or event_context.get("trigger"),
+        "automation.event.source": trigger_payload.get("source"),
+        "automation.event.key": trigger_payload.get("event_key"),
+    }
+    observability_metadata = {
+        key: value for key, value in observability_metadata.items() if value
+    }
+
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
@@ -549,6 +574,8 @@ More activity arrived on the same subject while this run was queued:
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags,
+        "observability_metadata": observability_metadata,
+        "observability_span_name": "automation.conversation",
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
