@@ -106,9 +106,10 @@ async def get_capabilities(
     builtin = builtin_sources() if config.service.webhook_secret else []
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
-    # Not static: the id is passed through to the run, whose conversation server
-    # resolves it - the Agent Server locally, the OpenHands app server in cloud,
-    # which has to be a version that serves /api/agent-profiles.
+    # Not a packaged-code feature: the id is passed through to the run, whose
+    # conversation server resolves it - the Agent Server locally, the OpenHands
+    # app server in cloud, which has to be a version that serves
+    # /api/agent-profiles.
     features = [*_STATIC_FEATURES, "agentProfiles"]
     if event_sources:
         features.append("webhookDelivery")
@@ -166,6 +167,19 @@ async def validate_draft(
         draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
+
+    # Asked first, before this request touches the database, and reported last.
+    # A failure to ask must not cost the caller the verdicts below: preflight is
+    # advisory and creation repeats the check, so the profile is left unjudged.
+    profile_error: DraftValidationError | None = None
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+        except HTTPException as e:
+            if e.status_code == 422:
+                profile_error = _agent_profile_error(e)
+            else:
+                logger.warning("Preflight could not check the agent profile: %s", e)
 
     errors: list[DraftValidationError] = []
     sample_event_matched: bool | None = None
@@ -225,17 +239,8 @@ async def validate_draft(
                         trigger, trigger.source, event.event_key, body.sample_event
                     )
 
-    # Last, because it asks the OpenHands API: a failure there must not cost the
-    # caller the verdicts above. Preflight is advisory and creation repeats the
-    # check, so an unreachable app server leaves the profile unjudged.
-    if isinstance(draft, CreateAutomationRequest):
-        try:
-            await ensure_agent_profile_exists(draft.agent_profile_id, request)
-        except HTTPException as e:
-            if e.status_code == 422:
-                errors.append(_agent_profile_error(e))
-            else:
-                logger.warning("Preflight could not check the agent profile: %s", e)
+    if profile_error is not None:
+        errors.append(profile_error)
 
     return ValidateDraftResponse(
         valid=not errors,

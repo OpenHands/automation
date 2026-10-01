@@ -216,9 +216,6 @@ async def create_automation(
     preset, so it may carry the same ``template`` provenance those accept.
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
-    # Before the first query: this asks the OpenHands API, and a transaction
-    # held open across that call would pin a pooled connection for its duration.
-    await ensure_agent_profile_exists(body.agent_profile_id, request)
 
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
@@ -230,6 +227,10 @@ async def create_automation(
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    # After the template lookup, so a repeat enable stays one query and does
+    # not depend on the OpenHands API, and before the rest of the transaction.
+    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
 
     # Validate tarball_path (checks ownership for internal uploads)
     await validate_tarball_path(
@@ -346,15 +347,10 @@ async def update_automation(
     Only the creator may edit the definition. Admins and owners may turn an
     automation off but cannot reactivate it or change what it runs.
     """
-    update_data = body.model_dump(exclude_unset=True)
-    # A newly selected profile is checked before the first query: this asks the
-    # OpenHands API, and a transaction held open across that call would pin a
-    # pooled connection for its duration.
-    await ensure_agent_profile_exists(update_data.get("agent_profile_id"), request)
-
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
+    update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
@@ -434,6 +430,11 @@ async def update_automation(
     if "agent_profile_id" in update_data or "model" in update_data:
         selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
         validate_agent_profile_combination(selected_profile, body.model)
+        if selected_profile != auto.agent_profile_id:
+            # Only a newly selected profile is looked up: an update that sends
+            # the current one back must not start failing because the profile
+            # was deleted since, or the OpenHands API is down.
+            await ensure_agent_profile_exists(selected_profile, request, user)
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:
