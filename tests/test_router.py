@@ -31,6 +31,15 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
+# An automation an agent profile can be selected for: only the raw create
+# endpoint accepts one.
+PROFILE_AUTOMATION = {
+    "name": "Independent reviewer",
+    "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+    "tarball_path": "s3://bucket/reviewer.tar.gz",
+    "entrypoint": "python3 main.py",
+}
+
 
 @pytest.fixture
 def local_mode(monkeypatch):
@@ -923,6 +932,93 @@ class TestCreateAutomation:
         assert response.status_code == 201
         data = response.json()
         assert data["timeout"] == 1800
+
+
+class TestAgentProfileInCloudMode:
+    """A profile selected on a deployment whose profiles live in the OpenHands API."""
+
+    async def test_create_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        # The profile is looked up as the caller, so it is the caller's own.
+        [lookup] = agent_profiles_api.requests
+        assert (
+            lookup.headers["authorization"]
+            == agent_profiles_api.caller_auth["Authorization"]
+        )
+
+    async def test_create_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={**PROFILE_AUTOMATION, "agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+
+    async def test_create_rejects_a_model_alongside_a_profile(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+                "model": "fast",
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+
+    async def test_create_reports_a_failing_openhands_api_as_a_bad_gateway(
+        self, async_client, agent_profiles_api
+    ):
+        agent_profiles_api.status = 500
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 502
+
+    async def test_update_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json=PROFILE_AUTOMATION,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
 
 
 class TestListAutomations:
