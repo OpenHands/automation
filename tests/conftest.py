@@ -171,7 +171,9 @@ class AgentProfilesApi:
 
 
 @pytest.fixture
-async def agent_profiles_api(async_client, monkeypatch) -> AgentProfilesApi:
+async def agent_profiles_api(
+    async_client, monkeypatch
+) -> AsyncGenerator[AgentProfilesApi, None]:
     """Cloud mode, with the OpenHands API serving one agent profile."""
     from openhands.automation.config import clear_config_cache
 
