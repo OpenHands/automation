@@ -3,6 +3,7 @@
 import dataclasses
 import uuid
 
+import httpx
 import pytest
 
 from openhands.automation.app import app
@@ -114,9 +115,12 @@ class TestGetCapabilities:
     """Tests for GET /v1/capabilities endpoint."""
 
     async def test_agent_profiles_are_offered_without_an_agent_server(
-        self, async_client, ready_deployment
+        self, async_client, ready_deployment, monkeypatch
     ):
         """In cloud mode the OpenHands app server resolves the profile."""
+        monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+        clear_config_cache()
+
         response = await async_client.get(CAPABILITIES_URL)
 
         assert "agentProfiles" in response.json()["features"]
@@ -435,6 +439,23 @@ class TestValidateDraft:
 
         assert response.json()["valid"] is True
 
+    async def test_a_profile_already_seen_is_not_looked_up_again(
+        self, async_client, agent_profiles_api
+    ):
+        """A form validates on every edit, so a known selection costs one lookup."""
+        draft = {**BUNDLE_DRAFT, "agent_profile_id": agent_profiles_api.profile_id}
+        body = preflight(draft, endpoint="/v1")
+
+        responses = [
+            await async_client.post(
+                VALIDATE_URL, json=body, headers=agent_profiles_api.caller_auth
+            )
+            for _ in range(3)
+        ]
+
+        assert all(response.json()["valid"] for response in responses)
+        assert len(agent_profiles_api.requests) == 1
+
     async def test_reports_a_profile_the_organization_does_not_have(
         self, async_client, agent_profiles_api
     ):
@@ -453,7 +474,7 @@ class TestValidateDraft:
         self, async_client, agent_profiles_api
     ):
         """An OpenHands API failure leaves the profile unjudged, not the draft."""
-        agent_profiles_api.status = 500
+        agent_profiles_api.response = httpx.Response(500)
         draft = {
             **with_trigger(BUNDLE_DRAFT, schedule="*/10 * * * * *"),
             "agent_profile_id": agent_profiles_api.profile_id,

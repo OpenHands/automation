@@ -162,12 +162,17 @@ class AgentProfilesApi:
         # up with the caller's credential, which mocked authentication does not
         # set.
         self.caller_auth = {"Authorization": "Bearer caller-key"}
-        self.status = 200
+        # What the API answers the lookup with; a test replaces it to misbehave.
+        self.response = httpx.Response(
+            200, json={"profiles": [{"id": self.profile_id}]}
+        )
         self.requests: list[httpx.Request] = []
 
     def respond(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or request.url.path != "/api/agent-profiles":
+            return httpx.Response(404)
         self.requests.append(request)
-        return httpx.Response(self.status, json={"profiles": [{"id": self.profile_id}]})
+        return self.response
 
 
 @pytest.fixture
@@ -176,9 +181,11 @@ async def agent_profiles_api(
 ) -> AsyncGenerator[AgentProfilesApi, None]:
     """Cloud mode, with the OpenHands API serving one agent profile."""
     from openhands.automation.config import clear_config_cache
+    from openhands.automation.utils.model_profiles import clear_agent_profile_cache
 
     monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
     clear_config_cache()
+    clear_agent_profile_cache()
     api = AgentProfilesApi()
     await app.state.http_client.aclose()
     app.state.http_client = httpx.AsyncClient(
@@ -186,6 +193,7 @@ async def agent_profiles_api(
     )
     yield api
     clear_config_cache()
+    clear_agent_profile_cache()
 
 
 @pytest.fixture
