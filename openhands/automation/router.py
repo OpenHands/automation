@@ -296,11 +296,7 @@ async def list_automations(
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the caller's org (excludes soft-deleted).
-
-    ``created_by`` narrows the list to the caller's automations (``me``) or to
-    the rest of the org's (``others``); ``total`` counts the narrowed list.
-    """
+    """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
