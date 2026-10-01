@@ -1318,6 +1318,96 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.status_detail["transient"] is False
 
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_cancel_mid_provisioning_releases_sandbox_without_recording(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A run cancelled while provisioning must not gain a sandbox.
+
+        Simulates cancel landing between sandbox creation and the sandbox-id
+        record: the provisioned sandbox is released instead of being
+        attached to the terminal row, so it cannot leak or fork the subject.
+        """
+        from sqlalchemy import update
+
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        async def _cancel_mid_flight(*args, **kwargs):
+            async with async_session_factory() as session:
+                await session.execute(
+                    update(AutomationRun)
+                    .where(AutomationRun.id == run_id)
+                    .values(
+                        status=AutomationRunStatus.CANCELLED,
+                        completed_at=utcnow(),
+                        subject_released_at=utcnow(),
+                    )
+                )
+                await session.commit()
+            return MagicMock(success=True, bash_command_id="cmd-1", error=None)
+
+        mock_execute.side_effect = _cancel_mid_flight
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_called_once()
+        async with async_session_factory() as session:
+            updated = (
+                (
+                    await session.execute(
+                        select(AutomationRun).where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert updated.status == AutomationRunStatus.CANCELLED
+            assert updated.sandbox_id is None
+
 
 class TestExecuteRunDerivedConversationId:
     """A subject-owning run creates its conversation under the derived id."""

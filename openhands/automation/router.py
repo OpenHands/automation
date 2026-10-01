@@ -995,7 +995,9 @@ async def cancel_run(
             # A cancelled run is terminal, so it can never open or continue
             # its conversation afterwards: release its subject atomically in
             # this same update, whether or not it ever recorded a sandbox.
-            # Runs without a subject keep NULL either way.
+            # Runs without a subject keep NULL either way. A sandbox that
+            # finishes provisioning afterwards is ignored (status-guarded)
+            # and released by the dispatcher, so no orphan can attach here.
             subject_released_at=case(
                 (AutomationRun.subject_key.is_not(None), now),
                 else_=AutomationRun.subject_released_at,
