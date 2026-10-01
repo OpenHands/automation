@@ -300,7 +300,6 @@ async def list_automations(
 
     ``created_by`` narrows the list to the caller's automations (``me``) or to
     the rest of the org's (``others``); ``total`` counts the narrowed list.
-    Automations imported by Git Sync belong to the admin who configured it.
     """
     base_query = select(Automation).where(
         Automation.org_id == user.org_id,

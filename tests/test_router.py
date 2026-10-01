@@ -1230,14 +1230,8 @@ class TestListAutomations:
         await async_session.commit()
         return automation
 
-    @pytest.mark.parametrize(
-        ("created_by", "expected"),
-        [(None, ["Teammate", "Mine"]), ("me", ["Mine"]), ("others", ["Teammate"])],
-    )
-    async def test_list_automations_filters_by_creator(
-        self, async_client, async_session, created_by, expected
-    ):
-        """created_by keeps the caller's automations or the rest of the org's."""
+    async def _seed_mine_teammate_and_other_org(self, async_session):
+        """Persist the caller's automation, an older teammate's, and another org's."""
         await self._seed_automation(
             async_session,
             user_id=TEST_USER_ID,
@@ -1255,9 +1249,31 @@ class TestListAutomations:
         await self._seed_automation(
             async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
         )
-        query = f"?created_by={created_by}" if created_by else ""
 
-        response = await async_client.get(f"/api/automation/v1{query}")
+    async def test_list_automations_lists_every_creator_without_a_filter(
+        self, async_client, async_session
+    ):
+        """Without created_by, the org's automations from every creator are listed."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == ["Teammate", "Mine"]
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        ("created_by", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"])],
+    )
+    async def test_list_automations_filters_by_creator(
+        self, async_client, async_session, created_by, expected
+    ):
+        """created_by keeps the caller's automations or the rest of the org's."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
 
         assert response.status_code == 200
         data = response.json()
@@ -1285,15 +1301,12 @@ class TestListAutomations:
                 age_minutes=i,
             )
 
-        first = await async_client.get("/api/automation/v1?created_by=me&limit=2")
-        second = await async_client.get(
-            "/api/automation/v1?created_by=me&limit=2&offset=2"
-        )
+        url = "/api/automation/v1?created_by=me&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
 
-        assert [page.json()["total"] for page in (first, second)] == [3, 3]
-        names = [
-            a["name"] for page in (first, second) for a in page.json()["automations"]
-        ]
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
         assert names == ["Mine 0", "Mine 1", "Mine 2"]
 
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
