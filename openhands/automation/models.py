@@ -803,6 +803,13 @@ class AutomationGitSyncOrgConfig(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Consecutive GitAuthError cycles; reset by a success, a transient failure,
+    # or a change to the repo URL, branch or token. Drives the retry backoff and
+    # the quiet-after-N-auth-failures logging in `git_sync/loop.py`.
+    consecutive_auth_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
