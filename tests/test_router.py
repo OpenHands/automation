@@ -1231,7 +1231,7 @@ class TestListAutomations:
         return automation
 
     async def _seed_mine_teammate_and_other_org(self, async_session):
-        """Persist the caller's automation, an older teammate's, and another org's."""
+        """Persist the caller's automation, a newer teammate's, and another org's."""
         await self._seed_automation(
             async_session,
             user_id=TEST_USER_ID,
