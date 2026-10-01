@@ -62,6 +62,9 @@ _require_view_automations = require_permission("view_automations")
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    # The id is passed through to the run, whose conversation server resolves
+    # it: the Agent Server locally, the OpenHands app server in cloud.
+    "agentProfiles",
     "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
@@ -106,8 +109,6 @@ async def get_capabilities(
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
     features = [*_STATIC_FEATURES]
-    if config.service.is_local_mode:
-        features.append("agentProfiles")
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:

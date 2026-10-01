@@ -62,7 +62,7 @@ from openhands.automation.utils.conversation_outcome import (
 )
 from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
-    validate_agent_profile_selection,
+    validate_agent_profile,
 )
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -232,7 +232,7 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    validate_agent_profile_selection(body.agent_profile_id, body.model)
+    await validate_agent_profile(body.agent_profile_id, body.model, request)
     model = (
         None
         if body.agent_profile_id
@@ -423,7 +423,7 @@ async def update_automation(
 
     if "agent_profile_id" in update_data or "model" in update_data:
         selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
-        validate_agent_profile_selection(selected_profile, body.model)
+        await validate_agent_profile(selected_profile, body.model, request)
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:

@@ -2,9 +2,14 @@
 
 import uuid
 
-from fastapi import HTTPException, status
+import httpx
+from fastapi import HTTPException, Request, status
 
-from openhands.automation.auth import AuthenticatedUser
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    upstream_auth_headers,
+)
 
 
 def validate_model_profile_for_user(
@@ -53,3 +58,44 @@ def validate_agent_profile_selection(
         raise HTTPException(422, "Agent profiles require a configured Agent Server")
     if model:
         raise HTTPException(422, "An agent profile already specifies the model")
+
+
+async def validate_agent_profile(
+    agent_profile_id: uuid.UUID | None, model: str | None, request: Request
+) -> None:
+    """Validate an agent profile selected through the API.
+
+    A local deployment hands the id to its Agent Server. In cloud mode the
+    profiles belong to the caller's organization in the OpenHands app server,
+    which starts a conversation with default settings rather than fail on an id
+    it does not know, so the id is checked against that organization here.
+    """
+    if agent_profile_id is None:
+        return
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
+    if settings.is_local_mode:
+        validate_agent_profile_selection(agent_profile_id, model)
+        return
+    if model:
+        raise HTTPException(422, "An agent profile already specifies the model")
+
+    try:
+        resp = await get_http_client(request).get(
+            f"{settings.openhands_api_base_url}/api/agent-profiles",
+            headers=upstream_auth_headers(request),
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Failed to reach OpenHands API for agent profiles",
+        ) from exc
+    if resp.status_code != 200:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Unexpected response from OpenHands API for agent profiles",
+        )
+    known = {str(profile.get("id")) for profile in resp.json().get("profiles", [])}
+    if str(agent_profile_id) not in known:
+        raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
