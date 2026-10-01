@@ -61,8 +61,9 @@ from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
 from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
     resolve_model_profile_for_user,
-    validate_agent_profile,
+    validate_agent_profile_combination,
 )
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -214,6 +215,11 @@ async def create_automation(
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
     """
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+    # Before the first query: this asks the OpenHands API, and a transaction
+    # held open across that call would pin a pooled connection for its duration.
+    await ensure_agent_profile_exists(body.agent_profile_id, request)
+
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
     # query and leaves the new upload unreferenced rather than adopting it.
@@ -232,7 +238,6 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    await validate_agent_profile(body.agent_profile_id, body.model, request)
     model = (
         None
         if body.agent_profile_id
@@ -341,10 +346,15 @@ async def update_automation(
     Only the creator may edit the definition. Admins and owners may turn an
     automation off but cannot reactivate it or change what it runs.
     """
+    update_data = body.model_dump(exclude_unset=True)
+    # A newly selected profile is checked before the first query: this asks the
+    # OpenHands API, and a transaction held open across that call would pin a
+    # pooled connection for its duration.
+    await ensure_agent_profile_exists(update_data.get("agent_profile_id"), request)
+
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
-    update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
@@ -423,7 +433,7 @@ async def update_automation(
 
     if "agent_profile_id" in update_data or "model" in update_data:
         selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
-        await validate_agent_profile(selected_profile, body.model, request)
+        validate_agent_profile_combination(selected_profile, body.model)
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:

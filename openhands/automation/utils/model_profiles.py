@@ -46,29 +46,47 @@ def resolve_model_profile_for_user(
     return model_profile
 
 
+def validate_agent_profile_combination(
+    agent_profile_id: uuid.UUID | None, model: str | None
+) -> None:
+    """An agent profile owns its model, so the two cannot be selected together."""
+    if agent_profile_id is not None and model:
+        raise HTTPException(422, "An agent profile already specifies the model")
+
+
 def validate_agent_profile_selection(
     agent_profile_id: uuid.UUID | None, model: str | None
 ) -> None:
-    """An agent profile owns its model and is resolved by the configured server."""
+    """Validate a profile selected where no caller is present, as in git sync.
+
+    Without a caller there is no credential to check the profile against the
+    OpenHands app server with, so in cloud mode the selection is refused. A
+    caller's own selection goes through `ensure_agent_profile_exists` instead.
+    """
     if agent_profile_id is None:
         return
     from openhands.automation.config import get_config
 
     if not get_config().service.is_local_mode:
-        raise HTTPException(422, "Agent profiles require a configured Agent Server")
-    if model:
-        raise HTTPException(422, "An agent profile already specifies the model")
+        raise HTTPException(
+            422,
+            "Agent profiles can only be selected through the API on this deployment",
+        )
+    validate_agent_profile_combination(agent_profile_id, model)
 
 
-async def validate_agent_profile(
-    agent_profile_id: uuid.UUID | None, model: str | None, request: Request
+async def ensure_agent_profile_exists(
+    agent_profile_id: uuid.UUID | None, request: Request
 ) -> None:
-    """Validate an agent profile selected through the API.
+    """Check a profile the caller selected against their organization.
 
-    A local deployment hands the id to its Agent Server. In cloud mode the
-    profiles belong to the caller's organization in the OpenHands app server,
-    which starts a conversation with default settings rather than fail on an id
-    it does not know, so the id is checked against that organization here.
+    A local deployment hands the id to its Agent Server, which resolves it. In
+    cloud mode the profiles belong to the caller's organization in the
+    OpenHands app server, which starts a conversation with default settings
+    rather than fail on an id it does not know, so an unknown id is refused
+    here. A profile deleted after this check still falls back at run time.
+
+    It calls the app server, so call it before opening a database transaction.
     """
     if agent_profile_id is None:
         return
@@ -76,10 +94,7 @@ async def validate_agent_profile(
 
     settings = get_config().service
     if settings.is_local_mode:
-        validate_agent_profile_selection(agent_profile_id, model)
         return
-    if model:
-        raise HTTPException(422, "An agent profile already specifies the model")
 
     try:
         resp = await get_http_client(request).get(
@@ -91,11 +106,20 @@ async def validate_agent_profile(
             status.HTTP_502_BAD_GATEWAY,
             "Failed to reach OpenHands API for agent profiles",
         ) from exc
-    if resp.status_code != 200:
+    if resp.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+        # The credential was accepted from the auth cache but the app server no
+        # longer honours it; say so rather than report a gateway fault.
+        raise HTTPException(
+            resp.status_code, "OpenHands API refused the request for agent profiles"
+        )
+    try:
+        if resp.status_code != status.HTTP_200_OK:
+            raise ValueError(f"status {resp.status_code}")
+        known = {str(profile["id"]) for profile in resp.json()["profiles"]}
+    except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "Unexpected response from OpenHands API for agent profiles",
-        )
-    known = {str(profile.get("id")) for profile in resp.json().get("profiles", [])}
+        ) from exc
     if str(agent_profile_id) not in known:
         raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")

@@ -47,7 +47,8 @@ from openhands.automation.schemas import (
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
 from openhands.automation.utils.model_profiles import (
-    validate_agent_profile,
+    ensure_agent_profile_exists,
+    validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
 from openhands.automation.utils.webhook import get_webhook_config
@@ -62,9 +63,6 @@ _require_view_automations = require_permission("view_automations")
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
-    # The id is passed through to the run, whose conversation server resolves
-    # it: the Agent Server locally, the OpenHands app server in cloud.
-    "agentProfiles",
     "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
@@ -108,7 +106,10 @@ async def get_capabilities(
     builtin = builtin_sources() if config.service.webhook_secret else []
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
-    features = [*_STATIC_FEATURES]
+    # Not static: the id is passed through to the run, whose conversation server
+    # resolves it - the Agent Server locally, the OpenHands app server in cloud,
+    # which has to be a version that serves /api/agent-profiles.
+    features = [*_STATIC_FEATURES, "agentProfiles"]
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -182,17 +183,9 @@ async def validate_draft(
 
     if isinstance(draft, CreateAutomationRequest):
         try:
-            await validate_agent_profile(draft.agent_profile_id, draft.model, request)
+            validate_agent_profile_combination(draft.agent_profile_id, draft.model)
         except HTTPException as e:
-            if e.status_code != 422:
-                raise
-            errors.append(
-                DraftValidationError(
-                    field="agent_profile_id",
-                    code="invalid_agent_profile",
-                    message=str(e.detail),
-                )
-            )
+            errors.append(_agent_profile_error(e))
 
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
@@ -232,10 +225,30 @@ async def validate_draft(
                         trigger, trigger.source, event.event_key, body.sample_event
                     )
 
+    # Last, because it asks the OpenHands API: a failure there must not cost the
+    # caller the verdicts above. Preflight is advisory and creation repeats the
+    # check, so an unreachable app server leaves the profile unjudged.
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            await ensure_agent_profile_exists(draft.agent_profile_id, request)
+        except HTTPException as e:
+            if e.status_code == 422:
+                errors.append(_agent_profile_error(e))
+            else:
+                logger.warning("Preflight could not check the agent profile: %s", e)
+
     return ValidateDraftResponse(
         valid=not errors,
         errors=errors,
         sample_event_matched=sample_event_matched,
+    )
+
+
+def _agent_profile_error(error: HTTPException) -> DraftValidationError:
+    return DraftValidationError(
+        field="agent_profile_id",
+        code="invalid_agent_profile",
+        message=str(error.detail),
     )
 
 
