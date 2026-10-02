@@ -42,6 +42,12 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
+)
 from openhands.automation.preset_router import (
     CreatePluginAutomationRequest,
     CreatePromptAutomationRequest,
@@ -629,15 +635,33 @@ async def dispatch_draft(
     automation = await _materialize_draft(
         draft, parsed, user, request, session, file_store
     )
-    run = await create_pending_run(
-        session,
-        automation,
-        telemetry_distinct_id=get_request_telemetry_context(
-            request
-        ).frontend_distinct_id,
-        trigger_source="manual",
-        event_payload=event_payload,
-    )
+    telemetry_context = get_request_telemetry_context(request)
+    with span(
+        "automation.manual_dispatch.receive",
+        automation_attributes(
+            automation,
+            None,
+            **{
+                "automation.run.trigger_source": "manual",
+                "automation.draft_id": str(draft.id),
+            },
+        ),
+    ):
+        run = await create_pending_run(
+            session,
+            automation,
+            telemetry_distinct_id=telemetry_context.frontend_distinct_id,
+            trigger_source="manual",
+            event_payload=event_payload,
+            observability_parent_span_context=current_span_context(),
+        )
+        run_created_attributes = automation_attributes(
+            automation,
+            run,
+            **{"automation.draft_id": str(draft.id)},
+        )
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
     draft.last_test_run_id = run.id
     await session.flush()
     await session.refresh(run)

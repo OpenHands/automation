@@ -37,7 +37,12 @@ from openhands.automation.models import (
     AutomationState as ModelAutomationState,
     TarballUpload,
 )
-from openhands.automation.observability import add_event, automation_attributes, span
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
+)
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
     AutomationListResponse,
@@ -649,14 +654,25 @@ async def dispatch_automation(
     await _assert_can_manage(auto, user)
     await _assert_normal_api_can_use_draft_artifact(session, auto)
 
-    run = await create_pending_run(
-        session,
-        auto,
-        telemetry_distinct_id=get_request_telemetry_context(
-            request
-        ).frontend_distinct_id,
-        trigger_source="manual",
-    )
+    telemetry_context = get_request_telemetry_context(request)
+    with span(
+        "automation.manual_dispatch.receive",
+        automation_attributes(
+            auto,
+            None,
+            **{"automation.run.trigger_source": "manual"},
+        ),
+    ):
+        run = await create_pending_run(
+            session,
+            auto,
+            telemetry_distinct_id=telemetry_context.frontend_distinct_id,
+            trigger_source="manual",
+            observability_parent_span_context=current_span_context(),
+        )
+        run_created_attributes = automation_attributes(auto, run)
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
     await session.flush()
     await session.refresh(run)
     await capture_automation_event(
