@@ -7,6 +7,7 @@ not configured, every helper is a no-op and service behavior is unchanged.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from collections.abc import Iterator, Mapping, MutableMapping
 from typing import Any
@@ -145,15 +146,17 @@ def automation_attributes(
         if trigger:
             attributes["automation.trigger_source"] = trigger.get("type")
     if run is not None:
+        run_status = getattr(run, "status", None)
+        conversation_id = getattr(run, "conversation_id", None)
         attributes.update(
             {
                 "automation.run_id": str(run.id),
-                "automation.run.status": run.status.value if run.status else None,
-                "automation.run.trigger_source": run.trigger_source,
-                "automation.conversation_id": run.conversation_id,
-                "openhands.conversation_id": run.conversation_id,
-                "automation.sandbox_id": run.sandbox_id,
-                "automation.bash_command_id": run.bash_command_id,
+                "automation.run.status": run_status.value if run_status else None,
+                "automation.run.trigger_source": getattr(run, "trigger_source", None),
+                "automation.conversation_id": conversation_id,
+                "openhands.conversation_id": conversation_id,
+                "automation.sandbox_id": getattr(run, "sandbox_id", None),
+                "automation.bash_command_id": getattr(run, "bash_command_id", None),
             }
         )
         if automation is None:
@@ -162,17 +165,41 @@ def automation_attributes(
     return {key: value for key, value in attributes.items() if value is not None}
 
 
+def automation_observability_tags(
+    automation: Automation, run: AutomationRun
+) -> list[str]:
+    """Return low-cardinality Laminar tags for an automation run."""
+    trigger = automation.trigger if isinstance(automation.trigger, dict) else {}
+    trigger_type = str(trigger.get("type") or "")
+    run_trigger_source = run.trigger_source or trigger_type
+    tags = ["automation"]
+    if trigger_type:
+        tags.append(f"automation.trigger:{trigger_type}")
+    if run_trigger_source:
+        tags.append(f"automation.run_trigger:{run_trigger_source}")
+    return tags
+
+
 def automation_env_metadata(
     automation: Automation, run: AutomationRun
 ) -> dict[str, str]:
     """Environment variables exposing authoritative automation correlation IDs."""
     trigger = automation.trigger if isinstance(automation.trigger, dict) else {}
-    trigger_source = run.trigger_source or str(trigger.get("type") or "")
+    trigger_type = str(trigger.get("type") or "")
+    run_trigger_source = run.trigger_source or trigger_type
+    metadata = automation_attributes(automation, run)
     return {
         "AUTOMATION_ID": str(automation.id),
         "AUTOMATION_NAME": automation.name,
         "AUTOMATION_RUN_ID": str(run.id),
         "AUTOMATION_ORG_ID": str(automation.org_id),
         "AUTOMATION_USER_ID": str(automation.user_id),
-        "AUTOMATION_TRIGGER_SOURCE": trigger_source,
+        "AUTOMATION_TRIGGER_SOURCE": run_trigger_source,
+        "AUTOMATION_TRIGGER_TYPE": trigger_type,
+        "AUTOMATION_RUN_TRIGGER_SOURCE": run_trigger_source,
+        "OPENHANDS_OBSERVABILITY_METADATA": json.dumps(metadata, separators=(",", ":")),
+        "OPENHANDS_OBSERVABILITY_TAGS": ",".join(
+            automation_observability_tags(automation, run)
+        ),
+        "OPENHANDS_OBSERVABILITY_SPAN_NAME": "automation.conversation",
     }

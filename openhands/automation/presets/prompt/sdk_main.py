@@ -223,7 +223,6 @@ def _normalize_mcp_config(raw_mcp_config):
     return raw_mcp_config
 
 
-
 def _build_conversation_title(event_context) -> str | None:
     """Build a descriptive conversation title from the automation event context.
 
@@ -385,9 +384,7 @@ that variable, but your terminal does not inherit it.
     # the service could not deliver them as turns. They open the conversation
     # with this one instead of each starting a run of its own.
     if event_context and event_context.get("follow_up_turns"):
-        follow_ups = "\n\n".join(
-            str(turn) for turn in event_context["follow_up_turns"]
-        )
+        follow_ups = "\n\n".join(str(turn) for turn in event_context["follow_up_turns"])
         context_sections.append(f"""## Follow-up messages
 
 More activity arrived on the same subject while this run was queued:
@@ -511,14 +508,22 @@ More activity arrived on the same subject while this run was queued:
         "automation.run_id": automation_run_id,
         "automation.org_id": os.environ.get("AUTOMATION_ORG_ID"),
         "automation.user_id": automation_user_id,
-        "automation.trigger_source": os.environ.get("AUTOMATION_TRIGGER_SOURCE")
+        "automation.trigger_source": os.environ.get("AUTOMATION_TRIGGER_TYPE")
         or event_context.get("trigger"),
+        "automation.run.trigger_source": os.environ.get(
+            "AUTOMATION_RUN_TRIGGER_SOURCE"
+        ),
         "automation.event.source": trigger_payload.get("source"),
         "automation.event.key": trigger_payload.get("event_key"),
     }
     observability_metadata = {
         key: value for key, value in observability_metadata.items() if value
     }
+    observability_tags = [
+        tag.strip()
+        for tag in os.environ.get("OPENHANDS_OBSERVABILITY_TAGS", "").split(",")
+        if tag.strip()
+    ]
 
     conversation_kwargs = {
         "agent": agent,
@@ -528,7 +533,10 @@ More activity arrived on the same subject while this run was queued:
         "delete_on_close": False,  # Keep conversation history after completion
         "tags": conversation_tags or None,
         "observability_metadata": observability_metadata,
-        "observability_span_name": "automation.conversation",
+        "observability_tags": observability_tags or None,
+        "observability_span_name": os.environ.get(
+            "OPENHANDS_OBSERVABILITY_SPAN_NAME", "automation.conversation"
+        ),
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
