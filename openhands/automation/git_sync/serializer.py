@@ -138,6 +138,7 @@ def _automation_yaml_fields(
         if automation.agent_profile_id
         else None,
         "trigger": automation.trigger,
+        "observability_associations": automation.observability_associations,
         "setup_script_path": automation.setup_script_path,
         "entrypoint": automation.entrypoint,
         "timeout": automation.timeout,

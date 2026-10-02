@@ -90,6 +90,13 @@ class Automation(Base):
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
 
+    # Optional high-cardinality trace associations. Keys are observability
+    # metadata names; values are JMESPath expressions evaluated against the
+    # triggering event payload when an event run is created.
+    observability_associations: Mapped[dict[str, str] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -266,6 +273,12 @@ class AutomationRun(Base):
     # asynchronous dispatcher can continue the same trace when it picks up the run.
     observability_parent_span_context: Mapped[str | None] = mapped_column(
         Text, nullable=True
+    )
+
+    # Evaluated high-cardinality observability associations for this run. These
+    # are attached once to the run-created span for trace searchability.
+    observability_associations: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
     )
 
     # Event payload for event-triggered runs (JSON)

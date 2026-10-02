@@ -211,7 +211,8 @@ def automation_env_metadata(
     trigger = automation.trigger if isinstance(automation.trigger, dict) else {}
     trigger_type = str(trigger.get("type") or "")
     run_trigger_source = run.trigger_source or trigger_type
-    metadata = automation_attributes(automation, run)
+    associations = getattr(run, "observability_associations", None) or {}
+    metadata = {**associations, **automation_attributes(automation, run)}
     return {
         "AUTOMATION_ID": str(automation.id),
         "AUTOMATION_NAME": automation.name,

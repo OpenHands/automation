@@ -265,6 +265,7 @@ async def create_automation(
         agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
+        observability_associations=body.observability_associations,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
