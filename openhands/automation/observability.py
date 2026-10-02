@@ -70,7 +70,11 @@ def observability_enabled() -> bool:
 
 
 @contextlib.contextmanager
-def span(name: str, attributes: Mapping[str, Any] | None = None) -> Iterator[Any]:
+def span(
+    name: str,
+    attributes: Mapping[str, Any] | None = None,
+    parent_span_context: str | None = None,
+) -> Iterator[Any]:
     """Start a Laminar/OTEL span if tracing is configured, else no-op."""
     if not observability_enabled():
         yield None
@@ -78,7 +82,14 @@ def span(name: str, attributes: Mapping[str, Any] | None = None) -> Iterator[Any
     try:
         from lmnr import Laminar
 
-        span_context = Laminar.start_as_current_span(name=name)
+        parent = None
+        if parent_span_context:
+            with contextlib.suppress(Exception):
+                parent = Laminar.deserialize_span_context(parent_span_context)
+        span_context = Laminar.start_as_current_span(
+            name=name,
+            parent_span_context=parent,
+        )
     except Exception:
         logger.debug("Failed to create observability span %s", name, exc_info=True)
         yield None

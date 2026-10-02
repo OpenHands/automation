@@ -868,7 +868,13 @@ async def complete_run(
             "automation.callback.reconciled_watchdog_timeout": reconciled,
         },
     )
-    with span("automation.callback.received", callback_attributes):
+    with span(
+        "automation.callback.received",
+        callback_attributes,
+        parent_span_context=request.headers.get(
+            "X-OpenHands-Observability-Parent-Span-Context"
+        ),
+    ):
         add_event(
             "automation.run.completed"
             if new_status == AutomationRunStatus.COMPLETED
