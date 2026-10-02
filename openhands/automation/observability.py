@@ -116,18 +116,27 @@ def add_event(name: str, attributes: Mapping[str, Any] | None = None) -> None:
         logger.debug("Failed to add observability event %s", name, exc_info=True)
 
 
+def current_span_context() -> str | None:
+    """Return the current serialized Laminar span context, when available."""
+    if not observability_enabled():
+        return None
+    try:
+        from lmnr import Laminar
+
+        return Laminar.serialize_span_context() or None
+    except Exception:
+        logger.debug("Failed to serialize Laminar span context", exc_info=True)
+        return None
+
+
 def inject_trace_context(carrier: MutableMapping[str, str]) -> None:
     """Inject active trace context into a mutable environment carrier."""
     if not observability_enabled():
         return
-    try:
-        from lmnr import Laminar
 
-        span_context = Laminar.serialize_span_context()
-        if span_context:
-            carrier["LMNR_SPAN_CONTEXT"] = span_context
-    except Exception:
-        logger.debug("Failed to inject Laminar span context", exc_info=True)
+    span_context = current_span_context()
+    if span_context:
+        carrier["LMNR_SPAN_CONTEXT"] = span_context
 
     try:
         from opentelemetry.propagate import inject
@@ -159,11 +168,15 @@ def automation_attributes(
     if run is not None:
         run_status = getattr(run, "status", None)
         conversation_id = getattr(run, "conversation_id", None)
+        trigger_event_id = getattr(run, "trigger_event_id", None)
         attributes.update(
             {
                 "automation.run_id": str(run.id),
                 "automation.run.status": run_status.value if run_status else None,
                 "automation.run.trigger_source": getattr(run, "trigger_source", None),
+                "automation.trigger_event_id": str(trigger_event_id)
+                if trigger_event_id
+                else None,
                 "automation.conversation_id": conversation_id,
                 "openhands.conversation_id": conversation_id,
                 "automation.sandbox_id": getattr(run, "sandbox_id", None),
