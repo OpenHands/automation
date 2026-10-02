@@ -105,15 +105,24 @@ def add_event(name: str, attributes: Mapping[str, Any] | None = None) -> None:
 
 
 def inject_trace_context(carrier: MutableMapping[str, str]) -> None:
-    """Inject the active OTEL trace context into a mutable carrier."""
+    """Inject active trace context into a mutable environment carrier."""
     if not observability_enabled():
         return
+    try:
+        from lmnr import Laminar
+
+        span_context = Laminar.serialize_span_context()
+        if span_context:
+            carrier["LMNR_SPAN_CONTEXT"] = span_context
+    except Exception:
+        logger.debug("Failed to inject Laminar span context", exc_info=True)
+
     try:
         from opentelemetry.propagate import inject
 
         inject(carrier)
     except Exception:
-        logger.debug("Failed to inject trace context", exc_info=True)
+        logger.debug("Failed to inject W3C trace context", exc_info=True)
 
 
 def automation_attributes(
