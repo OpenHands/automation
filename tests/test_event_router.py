@@ -11,7 +11,12 @@ from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
-from openhands.automation.models import Automation, AutomationRun, IntegrationEvent
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    CustomWebhook,
+    IntegrationEvent,
+)
 
 
 @pytest.fixture
@@ -699,3 +704,77 @@ async def test_github_event_without_a_delivery_header_is_still_recorded(
     assert len(events) == 2
     assert {event.provider_event_id for event in events} == {None}
     assert {event.matched_count for event in events} == {0}
+
+
+async def _add_custom_webhook(
+    async_session,
+    org_id: uuid.UUID,
+    source: str,
+    *,
+    secret: str = "s3cret-value",
+    event_id_header: str | None = None,
+) -> None:
+    async_session.add(
+        CustomWebhook(
+            org_id=org_id,
+            name=source,
+            source=source,
+            webhook_secret=secret,
+            event_key_expr="type",
+            signature_header="X-Signature-256",
+            event_id_header=event_id_header,
+        )
+    )
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_redelivered_custom_event_creates_runs_once(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+):
+    """A custom source's configured delivery header dedupes through the same path."""
+    await _add_custom_webhook(
+        async_session, org_id, "canvas", event_id_header="X-GitHub-Delivery"
+    )
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="On canvas events",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "canvas", "on": "review_requested"},
+        )
+    )
+    await async_session.commit()
+
+    body = json.dumps({"type": "review_requested"}).encode()
+    digest = hmac.new(b"s3cret-value", body, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Signature-256": f"sha256={digest}",
+        "X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+        "Content-Type": "application/json",
+    }
+    url = f"/api/automation/v1/events/{org_id}/canvas"
+
+    first = await async_client.post(url, content=body, headers=headers)
+    second = await async_client.post(url, content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert first.json()["matched"] == 1
+    assert len(first.json()["runs_created"]) == 1
+
+    # The redelivery is acknowledged but not routed again.
+    assert second.status_code == 200
+    assert second.json()["matched"] == 0
+    assert second.json()["runs_created"] == []
+
+    runs = (await async_session.execute(select(AutomationRun))).scalars().all()
+    assert len(runs) == 1
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].provider_event_id == "72d3162e-cc78-11e3-81ab-4c9367dc0958"

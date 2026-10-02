@@ -71,6 +71,7 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         signature_header=webhook.signature_header,
         # A cleared column verifies as the default.
         signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
+        event_id_header=webhook.event_id_header,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -130,6 +131,7 @@ async def create_webhook(
         event_key_expr=data.event_key_expr,
         signature_header=data.signature_header,
         signature_scheme=data.signature_scheme,
+        event_id_header=data.event_id_header,
         enabled=True,
     )
 
@@ -209,7 +211,7 @@ async def update_webhook(
     Update a webhook's configuration.
 
     Updatable fields: `name`, `event_key_expr`, `signature_header`,
-    `signature_scheme`, `enabled`.
+    `signature_scheme`, `event_id_header`, `enabled`.
     The `source` cannot be changed after creation.
     """
     webhook = await session.get(CustomWebhook, webhook_id)
