@@ -342,6 +342,24 @@ class TestAuthentication:
         assert exc_info.value.status_code == 401
         assert "Invalid or expired API key" in exc_info.value.detail
 
+    async def test_authenticate_forbidden_passes_through_403(
+        self, mock_request, mock_http_client
+    ):
+        """403 from OpenHands (e.g. X-Org-Id not a member) raises 403, not 502."""
+        _set_mock_headers(
+            mock_request,
+            {"Authorization": "Bearer valid-key", "X-Org-Id": str(TEST_ORG_ID)},
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await authenticate_request(mock_request, client=mock_http_client)
+
+        assert exc_info.value.status_code == 403
+
     async def test_authenticate_openhands_unavailable(
         self, mock_request, mock_http_client
     ):
