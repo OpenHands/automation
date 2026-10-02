@@ -656,6 +656,7 @@ async def _execute_run_safe(
         with span(
             "automation.run.dispatch",
             automation_attributes(run.automation, run),
+            parent_span_context=getattr(run, "observability_parent_span_context", None),
         ):
             await _execute_run(run, settings, session_factory, client)
     except Exception as exc:

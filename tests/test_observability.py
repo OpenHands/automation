@@ -17,6 +17,17 @@ def test_span_noop_does_not_swallow_body_exceptions(monkeypatch):
             raise RuntimeError("boom")
 
 
+def test_current_span_context_serializes_laminar_context(monkeypatch):
+    from lmnr import Laminar
+
+    monkeypatch.setattr(observability, "observability_enabled", lambda: True)
+    monkeypatch.setattr(
+        Laminar, "serialize_span_context", classmethod(lambda cls: "serialized-context")
+    )
+
+    assert observability.current_span_context() == "serialized-context"
+
+
 def test_inject_trace_context_sets_laminar_span_context(monkeypatch):
     from lmnr import Laminar
 
@@ -109,11 +120,13 @@ def test_automation_env_metadata_includes_authoritative_ids():
 def test_automation_attributes_filters_none_and_formats_run_status():
     automation_id = uuid4()
     run_id = uuid4()
+    trigger_event_id = uuid4()
     run = SimpleNamespace(
         id=run_id,
         automation_id=automation_id,
         status=AutomationRunStatus.RUNNING,
         trigger_source="manual",
+        trigger_event_id=trigger_event_id,
         conversation_id=None,
         sandbox_id="sandbox-1",
         bash_command_id=None,
@@ -124,5 +137,6 @@ def test_automation_attributes_filters_none_and_formats_run_status():
     assert attrs["automation.id"] == str(automation_id)
     assert attrs["automation.run_id"] == str(run_id)
     assert attrs["automation.run.status"] == "RUNNING"
+    assert attrs["automation.trigger_event_id"] == str(trigger_event_id)
     assert attrs["automation.sandbox_id"] == "sandbox-1"
     assert "automation.bash_command_id" not in attrs

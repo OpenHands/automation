@@ -164,6 +164,7 @@ async def test_accept_event_matching_automation_creates_run(
     async_session,
     slack_payload: dict,
     mock_authenticated_user,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """A matching trigger produces one PENDING run, with no HTTP involved."""
     automation = make_automation(
@@ -172,6 +173,11 @@ async def test_accept_event_matching_automation_creates_run(
         {"type": "event", "source": "slack", "on": "app_mention"},
     )
     async_session.add(automation)
+    monkeypatch.setattr(
+        "openhands.automation.ingest.current_span_context",
+        lambda: "serialized-event-context",
+    )
+
     await async_session.commit()
 
     result = await accept_event(
@@ -193,6 +199,10 @@ async def test_accept_event_matching_automation_creates_run(
     assert str(run.id) == result.run_ids[0]
     assert run.automation_id == automation.id
     assert run.status == AutomationRunStatus.PENDING
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    assert run.trigger_event_id == events[0].id
+    assert run.observability_parent_span_context == "serialized-event-context"
 
 
 @pytest.mark.asyncio

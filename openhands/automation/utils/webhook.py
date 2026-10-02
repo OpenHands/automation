@@ -249,6 +249,8 @@ async def create_automation_run(
     session: AsyncSession,
     event_payload: dict[str, Any] | None = None,
     subject_key: str | None = None,
+    trigger_event_id: uuid.UUID | None = None,
+    observability_parent_span_context: str | None = None,
 ) -> AutomationRun:
     """
     Create a PENDING automation run for an event-triggered automation.
@@ -273,6 +275,8 @@ async def create_automation_run(
         event_payload=event_payload,
         telemetry_distinct_id=automation.telemetry_distinct_id,
         subject_key=subject_key,
+        trigger_event_id=trigger_event_id,
+        observability_parent_span_context=observability_parent_span_context,
     )
     session.add(run)
     return run

@@ -254,6 +254,20 @@ class AutomationRun(Base):
         String(32), nullable=True, index=True
     )
 
+    # Integration event row that created this run, for event-triggered runs.
+    trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("integration_events.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Serialized Laminar span context captured from the triggering event, so the
+    # asynchronous dispatcher can continue the same trace when it picks up the run.
+    observability_parent_span_context: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+
     # Event payload for event-triggered runs (JSON)
     # Contains the webhook payload that triggered this run.
     # For GitHub events: model_dump() of the parsed Pydantic event

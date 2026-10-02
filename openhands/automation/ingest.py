@@ -23,7 +23,12 @@ from openhands.automation.conversations import (
     resolve_turn_text,
 )
 from openhands.automation.models import Automation, IntegrationEvent
-from openhands.automation.observability import add_event, automation_attributes, span
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
+)
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
@@ -203,6 +208,8 @@ async def accept_event(
         },
     )
 
+    event_parent_span_context = current_span_context()
+
     # Typed events (GitHub) keep their model shape; others store the payload.
     event_payload = (
         event.parsed_event.model_dump(mode="json")
@@ -270,20 +277,22 @@ async def accept_event(
             session,
             event_payload=event_payload,
             subject_key=subject_key,
+            trigger_event_id=record.id,
+            observability_parent_span_context=event_parent_span_context,
         )
         run_ids.append(str(run.id))
-        add_event(
-            "automation.route.run_created",
-            automation_attributes(
-                automation,
-                run,
-                **{
-                    "automation.event.source": source,
-                    "automation.event.key": event.event_key,
-                    "automation.subject.key": subject_key,
-                },
-            ),
+        run_created_attributes = automation_attributes(
+            automation,
+            run,
+            **{
+                "automation.event.source": source,
+                "automation.event.key": event.event_key,
+                "automation.event.provider_event_id": event.provider_event_id,
+                "automation.subject.key": subject_key,
+            },
         )
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
         run_properties = {
             "trigger_source": "event",
             "event_source": source,
