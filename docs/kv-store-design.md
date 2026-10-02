@@ -690,7 +690,7 @@ class AutomationKV(Base):
 
 ### Migration From Single-Document State
 
-Migration `028` is a one-shot, transactional conversion: it decrypts each
+Migration `030` is a one-shot, transactional conversion: it decrypts each
 legacy aggregate document, writes one row per key plus the metadata row, and
 only then drops the legacy table. There is no lazy-migration or dual-read
 compatibility path. The migration requires `AUTOMATION_KV_SECRET` when legacy
