@@ -1,10 +1,10 @@
 """Staleness watchdog for stuck RUNNING automation runs.
 
-Periodically scans for runs stuck in RUNNING state past their pre-computed
-``timeout_at`` deadline. Before marking as FAILED, attempts to verify the
-actual run status by querying the execution environment. A verification
-result that means "the bash command may still be executing" defers the
-deadline (bounded by a hard cap) instead of terminalizing the run.
+Periodically verifies RUNNING runs as soon as they have a recorded Bash command
+ID. Runs still in provisioning, without a command ID, are considered only after
+their pre-computed ``timeout_at`` deadline. A verification result that means
+"the bash command may still be executing" defers the deadline (bounded by a
+hard cap) instead of terminalizing the run.
 
 The ``timeout_at`` column is set to a provisioning-phase deadline when the
 dispatcher transitions a run to RUNNING (see ``mark_run_status``), then
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Final
 from uuid import UUID
 
-from sqlalchemy import delete, inspect, select, update
+from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -543,11 +543,11 @@ async def mark_stale_runs(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> int:
-    """Find and process stale RUNNING runs.
+    """Find and process verifiable or stale RUNNING runs.
 
-    A run is stale if ``timeout_at < now()``. Before marking as FAILED,
-    attempts to verify the actual status by querying the sandbox. Uses
-    optimistic locking so concurrent callbacks win.
+    A run is verifiable on every scan once ``bash_command_id`` is recorded.
+    Before then it is selected only when ``timeout_at < now()``. Uses optimistic
+    locking so concurrent callbacks win.
 
     Each run is processed in its own session so that row locks are released
     immediately after commit rather than held for the duration of the batch.
@@ -559,18 +559,23 @@ async def mark_stale_runs(
     marked = 0
 
     async with session_factory() as session:
-        # Fetch stale run IDs only — close this session before doing any
+        # Fetch candidate run IDs only — close this session before doing any
         # per-run work so we don't hold locks across slow verify calls.
         result = await session.execute(
             select(AutomationRun.id).where(
                 AutomationRun.status == AutomationRunStatus.RUNNING,
-                AutomationRun.timeout_at.isnot(None),
-                AutomationRun.timeout_at < now,
+                or_(
+                    AutomationRun.bash_command_id.isnot(None),
+                    (
+                        AutomationRun.timeout_at.isnot(None)
+                        & (AutomationRun.timeout_at < now)
+                    ),
+                ),
             )
         )
-        stale_run_ids = list(result.scalars().all())
+        candidate_run_ids = list(result.scalars().all())
 
-    for run_id in stale_run_ids:
+    for run_id in candidate_run_ids:
         async with session_factory() as session:
             # Re-fetch with automation relationship inside a fresh session.
             result = await session.execute(
@@ -585,7 +590,11 @@ async def mark_stale_runs(
             extra = log_extra(run_id=str(run_id), sandbox_id=run.sandbox_id)
 
             logger.info(
-                "Processing stale run (timeout_at=%s, now=%s)",
+                (
+                    "Processing watchdog candidate "
+                    "(bash_command_id=%s, timeout_at=%s, now=%s)"
+                ),
+                run.bash_command_id,
                 run.timeout_at,
                 now,
                 extra=extra,
