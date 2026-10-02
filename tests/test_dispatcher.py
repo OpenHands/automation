@@ -4,9 +4,12 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
 import asyncio
+import contextlib
+import json
 import logging
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +22,7 @@ from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
+    _execute_run_safe,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -49,6 +53,46 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def mock_client():
     """Mock httpx.AsyncClient for tests."""
     return MagicMock()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_safe_resumes_triggering_event_trace():
+    automation_id = uuid.uuid4()
+    parent_context = "serialized-event-context"
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        automation_id=automation_id,
+        status=AutomationRunStatus.RUNNING,
+        trigger_source="event",
+        trigger_event_id=uuid.uuid4(),
+        observability_parent_span_context=parent_context,
+        conversation_id=None,
+        sandbox_id=None,
+        bash_command_id=None,
+        automation=SimpleNamespace(
+            id=automation_id,
+            name="Event Automation",
+            org_id=TEST_ORG_ID,
+            user_id=TEST_USER_ID,
+            trigger={"type": "event", "source": "local-test", "on": "ping.created"},
+        ),
+    )
+
+    with (
+        patch("openhands.automation.dispatcher.span") as mock_span,
+        patch("openhands.automation.dispatcher._execute_run", new_callable=AsyncMock),
+    ):
+        mock_span.return_value = contextlib.nullcontext(None)
+        await _execute_run_safe(
+            run,  # type: ignore[arg-type]
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+
+    mock_span.assert_called_once()
+    assert mock_span.call_args.args[0] == "automation.run.dispatch"
+    assert mock_span.call_args.kwargs["parent_span_context"] == parent_context
 
 
 class TestIsHttpUrl:
@@ -1428,6 +1472,35 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert "AUTOMATION_CONVERSATION_ID" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_dispatch_propagates_generic_observability_context(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        def inject_parent_context(env_vars: dict[str, str]) -> None:
+            env_vars["LMNR_SPAN_CONTEXT"] = "serialized-parent-context"
+
+        with patch(
+            "openhands.automation.dispatcher.inject_trace_context",
+            side_effect=inject_parent_context,
+        ):
+            env_vars, _, _ = await self._dispatch(
+                mock_execute,
+                async_session_factory,
+                mock_settings,
+                mock_client,
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                subject_key=None,
+            )
+
+        assert (
+            env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"]
+            == "serialized-parent-context"
+        )
+        metadata = json.loads(env_vars["OPENHANDS_OBSERVABILITY_METADATA"])
+        assert metadata["automation.run_id"] == env_vars["AUTOMATION_RUN_ID"]
+        assert metadata["automation.id"] == env_vars["AUTOMATION_ID"]
+        assert "automation" in env_vars["OPENHANDS_OBSERVABILITY_TAGS"].split(",")
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_selected_agent_profile_is_available_to_the_command(

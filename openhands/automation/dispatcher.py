@@ -43,6 +43,13 @@ from openhands.automation.models import (
     AutomationState,
     TarballUpload,
 )
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    automation_env_metadata,
+    inject_trace_context,
+    span,
+)
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
@@ -333,13 +340,15 @@ async def _execute_run(
     # 3. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
+    env_vars.update(automation_env_metadata(automation, run))
+    inject_trace_context(env_vars)
+    if lmnr_span_context := env_vars.get("LMNR_SPAN_CONTEXT"):
+        env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"] = lmnr_span_context
+
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     env_vars["AUTOMATION_PHASE_URL"] = (
         f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
     )
-    env_vars["AUTOMATION_RUN_ID"] = run_id
-    env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
-    env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
     env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
@@ -495,6 +504,17 @@ async def _execute_run(
 
     # 6. Handle result
     if result.success:
+        add_event(
+            "automation.entrypoint.start",
+            automation_attributes(
+                automation,
+                run,
+                **{
+                    "automation.sandbox_id": ctx.sandbox_id,
+                    "automation.bash_command_id": result.bash_command_id,
+                },
+            ),
+        )
         await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
@@ -633,7 +653,12 @@ async def _execute_run_safe(
     automation_id = str(run.automation_id) if run.automation_id else None
     extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
-        await _execute_run(run, settings, session_factory, client)
+        with span(
+            "automation.run.dispatch",
+            automation_attributes(run.automation, run),
+            parent_span_context=getattr(run, "observability_parent_span_context", None),
+        ):
+            await _execute_run(run, settings, session_factory, client)
     except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
         await mark_run_terminal(

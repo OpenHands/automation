@@ -65,6 +65,9 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.observability_associations import (
+    validate_observability_associations,
+)
 from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.utils import utcnow
@@ -506,6 +509,9 @@ async def _validate_and_resolve_fields(
         raise ValueError("automation.yaml missing required 'name' or 'entrypoint'")
 
     trigger = _TRIGGER_ADAPTER.validate_python(fields.get("trigger") or {})
+    observability_associations = validate_observability_associations(
+        fields.get("observability_associations")
+    )
     entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
@@ -548,6 +554,7 @@ async def _validate_and_resolve_fields(
         "model": fields.get("model"),
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
+        "observability_associations": observability_associations,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,

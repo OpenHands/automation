@@ -178,6 +178,7 @@ async def create_pending_run(
     telemetry_distinct_id: str | None = None,
     trigger_source: str | None = None,
     event_payload: dict[str, Any] | None = None,
+    observability_parent_span_context: str | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -205,6 +206,7 @@ async def create_pending_run(
         telemetry_distinct_id=(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),
+        observability_parent_span_context=observability_parent_span_context,
     )
     session.add(run)
 

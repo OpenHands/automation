@@ -5,6 +5,7 @@ FastAPI app — which is the point of the seam.
 """
 
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,6 +77,7 @@ def make_automation(
     user_id: uuid.UUID,
     trigger: dict,
     name: str = "Test Automation",
+    observability_associations: dict[str, str] | None = None,
 ) -> Automation:
     """Build an event-triggered automation."""
     return Automation(
@@ -86,6 +88,7 @@ def make_automation(
         tarball_path="oh-internal://uploads/test.tar.gz",
         entrypoint="python main.py",
         trigger=trigger,
+        observability_associations=observability_associations,
     )
 
 
@@ -164,6 +167,7 @@ async def test_accept_event_matching_automation_creates_run(
     async_session,
     slack_payload: dict,
     mock_authenticated_user,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """A matching trigger produces one PENDING run, with no HTTP involved."""
     automation = make_automation(
@@ -172,6 +176,11 @@ async def test_accept_event_matching_automation_creates_run(
         {"type": "event", "source": "slack", "on": "app_mention"},
     )
     async_session.add(automation)
+    monkeypatch.setattr(
+        "openhands.automation.ingest.current_span_context",
+        lambda: "serialized-event-context",
+    )
+
     await async_session.commit()
 
     result = await accept_event(
@@ -193,6 +202,88 @@ async def test_accept_event_matching_automation_creates_run(
     assert str(run.id) == result.run_ids[0]
     assert run.automation_id == automation.id
     assert run.status == AutomationRunStatus.PENDING
+    events = await fetch_events(async_session)
+    assert len(events) == 1
+    assert run.trigger_event_id == events[0].id
+    assert run.observability_parent_span_context == "serialized-event-context"
+
+
+@pytest.mark.asyncio
+async def test_accept_event_stores_and_traces_observability_associations(
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Configured JMESPath associations are attached once to run-created spans."""
+    payload = {
+        "repository": {"full_name": "OpenHands/automation"},
+        "pull_request": {
+            "number": 544,
+            "html_url": "https://github.com/OpenHands/automation/pull/544",
+        },
+    }
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        {"type": "event", "source": "github", "on": "pull_request.review_requested"},
+        observability_associations={
+            "scm.repository.full_name": "repository.full_name",
+            "scm.pull_request.number": "pull_request.number",
+            "scm.pull_request.url": "pull_request.html_url",
+            "automation.subject.id": (
+                "join('', [repository.full_name, '#', to_string(pull_request.number)])"
+            ),
+            "ignored.object": "repository",
+            "ignored.missing": "does_not_exist",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    span_attrs: list[dict[str, Any]] = []
+    events: list[tuple[str, dict[str, Any] | None]] = []
+
+    @contextmanager
+    def capture_span(name: str, attributes: dict[str, Any] | None = None, **kwargs):
+        if name == "automation.route.run_created":
+            span_attrs.append(attributes or {})
+        yield None
+
+    monkeypatch.setattr("openhands.automation.ingest.span", capture_span)
+    monkeypatch.setattr(
+        "openhands.automation.ingest.add_event",
+        lambda name, attributes=None: events.append((name, attributes)),
+    )
+
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="github",
+            event_key="pull_request.review_requested",
+            payload=payload,
+        ),
+        async_session,
+    )
+
+    assert result.matched == 1
+    runs = await fetch_runs(async_session)
+    assert runs[0].observability_associations == {
+        "scm.repository.full_name": "OpenHands/automation",
+        "scm.pull_request.number": 544,
+        "scm.pull_request.url": "https://github.com/OpenHands/automation/pull/544",
+        "automation.subject.id": "OpenHands/automation#544",
+    }
+    assert span_attrs[0]["automation.run_id"] == result.run_ids[0]
+    assert span_attrs[0]["scm.repository.full_name"] == "OpenHands/automation"
+    assert span_attrs[0]["scm.pull_request.number"] == 544
+    assert span_attrs[0]["automation.subject.id"] == "OpenHands/automation#544"
+    run_created_events = [
+        attributes
+        for name, attributes in events
+        if name == "automation.route.run_created"
+    ]
+    assert run_created_events == [span_attrs[0]]
 
 
 @pytest.mark.asyncio
