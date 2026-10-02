@@ -562,8 +562,9 @@ Each automation has **one row per key** in `automation_kv`, keyed by
 - **Cheaper operations**: a write touches only the rows it changes, not the
   automation's entire state.
 - **Explicit lock ordering**: writers lock the metadata row first, then the
-  affected key rows in sorted-key order, which gives multi-key batches a
-  deterministic order and keeps them deadlock-safe.
+  affected key rows. The metadata row is the single serialization point that
+  makes multi-key batches deadlock-safe; the key rows are locked in sorted-key
+  order for a deterministic, reproducible statement order.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -609,8 +610,8 @@ async def incr(self, automation_id: UUID, key: str, by: int = 1) -> int:
 
 **Concurrency model:**
 - The metadata row is the single serialization point for an automation's writers.
-- Multi-key batches lock affected key rows in sorted order, so overlapping
-  batches cannot deadlock.
+- Multi-key batches lock affected key rows in sorted order as a deterministic
+  secondary ordering; the metadata lock taken first is what prevents deadlock.
 - Different automations → completely isolated (different rows).
 
 This is acceptable for our use case (automations doing 5-10 KV ops per run). The

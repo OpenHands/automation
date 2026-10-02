@@ -477,8 +477,10 @@ async def _lock_key_rows(
 ) -> dict[str, AutomationKV]:
     """Lock the given key rows in sorted-key order and return them by key.
 
-    Sorted order makes multi-key acquisition deterministic across concurrent
-    transactions, so two batches touching overlapping keys cannot deadlock.
+    The metadata row is locked first and is what actually serializes writers for
+    an automation; the sorted order here is a secondary, deterministic ordering
+    so the emitted statements are reproducible, not the deadlock-prevention
+    mechanism.
     """
     ordered = sorted(set(keys))
     if not ordered:
@@ -615,8 +617,9 @@ async def _lock_write(
     """Lock the metadata row and the given key rows for a write.
 
     The metadata row is locked first so all writers for an automation serialize
-    on one lock; key rows are then locked in sorted order by ``_lock_key_rows``.
-    Lock/statement timeouts are surfaced as HTTP 409 by the caller.
+    on one lock; key rows are then locked in sorted order by ``_lock_key_rows``
+    for a deterministic statement order. Lock/statement timeouts are surfaced as
+    HTTP 409 by the caller.
     """
     try:
         meta = await _ensure_meta_row(session, automation_id, lock_timeout_ms)
@@ -642,6 +645,29 @@ async def _lock_existing_key(
     """Lock metadata + one key row for a read-modify-write on a single key."""
     meta, rows = await _lock_write(session, automation_id, [key], lock_timeout_ms)
     return meta, rows.get(key)
+
+
+async def _lock_write_existing_meta(
+    session: AsyncSession,
+    automation_id: uuid.UUID,
+    keys: Iterable[str],
+    lock_timeout_ms: int,
+) -> tuple[AutomationKVMeta | None, dict[str, AutomationKV]]:
+    """Like ``_lock_write`` but never creates the metadata row.
+
+    For paths that tolerate a no-op (deleting a key that was never written), so
+    a failed operation does not materialize a metadata row and a version 0 for
+    an automation nothing has been written to. Lock order is unchanged: the
+    metadata row is taken first, then the key rows.
+    """
+    try:
+        meta = await _lock_meta_row(session, automation_id, lock_timeout_ms)
+        rows = await _lock_key_rows(session, automation_id, keys)
+    except Exception as e:
+        if _is_lock_timeout_error(e):
+            _raise_lock_conflict()
+        raise
+    return meta, rows
 
 
 # --- Endpoints ---
@@ -902,12 +928,16 @@ async def delete_key(
     """
     kv_config = get_config().kv
 
-    meta, existing = await _lock_existing_key(
-        session, ctx.automation_id, key, kv_config.kv_lock_timeout_ms
+    meta, rows = await _lock_write_existing_meta(
+        session, ctx.automation_id, [key], kv_config.kv_lock_timeout_ms
     )
+    existing = rows.get(key)
 
-    if if_version is not None and int(meta.version) != if_version:
-        _raise_version_conflict(if_version, int(meta.version))
+    # No metadata row means nothing was ever written for this automation, so the
+    # version reads as 0 — the same value a lazily created row would report.
+    current_version = 0 if meta is None else int(meta.version)
+    if if_version is not None and current_version != if_version:
+        _raise_version_conflict(if_version, current_version)
 
     if existing is None:
         return KVDeleteResponse(key=key, deleted=False)
@@ -915,7 +945,8 @@ async def delete_key(
     await _upsert_key_rows(
         session, ctx.automation_id, {}, kv_config.kv_secret, {key: existing}
     )
-    await _bump_version(session, meta)
+    if meta is not None:
+        await _bump_version(session, meta)
 
     return KVDeleteResponse(key=key, deleted=True)
 

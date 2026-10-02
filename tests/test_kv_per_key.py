@@ -214,3 +214,72 @@ class TestAtomicityAndVersion:
             },
         )
         assert resp.status_code == 409
+
+
+class TestDeleteDoesNotCreateMetaRow:
+    """A delete that changes nothing must not materialize a metadata row."""
+
+    async def test_delete_of_missing_key_creates_no_meta_row(self, kv_sqlite_client):
+        """Deleting a never-written key leaves the automation without meta."""
+        client, factory = kv_sqlite_client
+        assert await _count_rows(factory, AutomationKVMeta) == 0
+
+        response = await client.delete(f"{_KV}/never-written")
+
+        assert response.status_code == 200
+        assert response.json()["deleted"] is False
+        # The automation was never written to, so it still has no metadata row
+        # and no version to report.
+        assert await _count_rows(factory, AutomationKVMeta) == 0
+        assert await _count_rows(factory, AutomationKV) == 0
+
+    async def test_delete_of_missing_key_with_if_version_zero_succeeds(
+        self, kv_sqlite_client
+    ):
+        """With no meta row the version reads as 0, matching a lazy row."""
+        client, factory = kv_sqlite_client
+
+        response = await client.delete(f"{_KV}/never-written?if_version=0")
+
+        assert response.status_code == 200
+        assert response.json()["deleted"] is False
+        assert await _count_rows(factory, AutomationKVMeta) == 0
+
+    async def test_delete_of_missing_key_with_if_version_nonzero_conflicts(
+        self, kv_sqlite_client
+    ):
+        """A nonzero if_version against a never-written automation is a 409."""
+        client, factory = kv_sqlite_client
+
+        response = await client.delete(f"{_KV}/never-written?if_version=3")
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["actual_version"] == 0
+        assert await _count_rows(factory, AutomationKVMeta) == 0
+
+    async def test_delete_of_existing_key_still_bumps_version(self, kv_sqlite_client):
+        """A real delete still increments the shared version exactly once."""
+        client, factory = kv_sqlite_client
+        assert (await client.put(f"{_KV}/real", json="v")).status_code == 201
+
+        response = await client.delete(f"{_KV}/real")
+
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+        assert await _count_rows(factory, AutomationKV) == 0
+        assert await _count_rows(factory, AutomationKVMeta) == 1
+
+    async def test_failed_deletes_do_not_leave_a_version(self, kv_sqlite_client):
+        """Repeated failed deletes must not make the automation look written."""
+        client, factory = kv_sqlite_client
+        for i in range(5):
+            response = await client.delete(f"{_KV}/missing-{i}")
+            assert response.status_code == 200
+            assert response.json()["deleted"] is False
+
+        assert await _count_rows(factory, AutomationKVMeta) == 0
+
+        # A subsequent real write starts the version at 1, not 6.
+        assert (await client.put(f"{_KV}/first", json=1)).status_code == 201
+        resp = await client.get(f"{_KV}/first", params={"meta": "true"})
+        assert resp.json()["version"] == 1

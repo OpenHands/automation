@@ -53,6 +53,22 @@ def _python(code: str) -> None:
     assert result.returncode == 0, f"helper failed: {result.stderr}"
 
 
+def _alembic_expect_failure(db_url: str, *args: str) -> str:
+    """Run alembic expecting a non-zero exit; return combined output."""
+    env = os.environ.copy()
+    env["AUTOMATION_DB_URL"] = db_url
+    env.pop("AUTOMATION_KV_SECRET", None)
+    result = subprocess.run(
+        ["uv", "run", "alembic", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+    )
+    assert result.returncode != 0, f"alembic {args} unexpectedly succeeded"
+    return result.stdout + result.stderr
+
+
 @pytest.fixture
 def sqlite_db_path(tmp_path):
     path = tmp_path / "kv-migration.db"
@@ -145,6 +161,39 @@ rows = con.execute("SELECT state_encrypted FROM automation_kv").fetchall()
 assert len(rows) == 1, rows
 state = decrypt_value({SECRET!r}, rows[0][0])
 assert state == {{"config": {{"host": "localhost"}}, "counter": 7, "$version": 3}}
+print("OK")
+"""
+    _python(code)
+
+
+def test_legacy_rows_without_secret_fails_and_rolls_back(sqlite_db_path):
+    """A populated legacy table without AUTOMATION_KV_SECRET aborts cleanly.
+
+    This is the rollout hazard the migration documents: the legacy documents
+    cannot be decrypted without the deployment secret, so the upgrade must fail
+    loudly rather than silently dropping state, and must leave the database on
+    the pre-migration revision with no half-built tables behind.
+    """
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", "028")
+    _assert_revision(sqlite_db_path, "028")
+    _seed_legacy_document(sqlite_db_path)
+
+    output = _alembic_expect_failure(db_url, "upgrade", "head")
+    assert "AUTOMATION_KV_SECRET is required" in output, output
+
+    # Still on 028, and the rename/create work was rolled back with it.
+    _assert_revision(sqlite_db_path, "028")
+    code = f"""
+import sqlite3
+con = sqlite3.connect({sqlite_db_path!r})
+tables = {{r[0] for r in con.execute(
+    "SELECT name FROM sqlite_master WHERE type='table'")}}
+assert "automation_kv_legacy" not in tables, tables
+assert "automation_kv_meta" not in tables, tables
+assert "automation_kv" in tables, tables
+rows = con.execute("SELECT state_encrypted FROM automation_kv").fetchall()
+assert len(rows) == 1, rows
 print("OK")
 """
     _python(code)

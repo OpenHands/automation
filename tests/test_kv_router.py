@@ -3,19 +3,15 @@
 Testing Strategy
 ================
 
-This module uses two different test client fixtures depending on the test type:
-
-1. `kv_client` - For most tests (single-request tests)
+This module uses the `kv_client` fixture:
    - Overrides `get_session` to use a SHARED async_session
    - All requests go through the same database session/connection
    - Simpler setup, good for testing individual endpoint behavior
    - ⚠️ NOT suitable for concurrent request tests (causes deadlocks)
 
-2. `concurrent_kv_client` - For concurrency tests ONLY
-   - Does NOT override `get_session`
-   - Each request gets its own session from the session factory
-   - Enables true concurrent database operations with separate connections
-   - Required for testing FOR UPDATE locking behavior
+True concurrency (separate connections, `FOR UPDATE` contention) is covered by
+`tests/test_kv_postgres_concurrency.py`, which does not override `get_session`
+so each request gets its own connection.
 
 Per-Key Backend
 ---------------
