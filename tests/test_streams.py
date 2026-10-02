@@ -108,6 +108,19 @@ class FakeWebClient:
         return dict(self.identity)
 
 
+class FakeThreadWebClient:
+    def __init__(self, messages=None, error=None):
+        self.messages = messages or []
+        self.error = error
+        self.calls = []
+
+    async def conversations_replies(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return {"messages": self.messages}
+
+
 def request(payload: dict, request_type: str = "events_api"):
     from slack_sdk.socket_mode.request import SocketModeRequest
 
@@ -269,6 +282,80 @@ def test_the_run_payload_matches_the_webhook_path_exactly(provider):
     dumped = event.parsed_event.model_dump(mode="json")
     assert dumped["payload"]["event"]["type"] == "app_mention"
     assert dumped["event_key"] == "app_mention"
+
+
+@pytest.mark.asyncio
+async def test_threaded_mention_gets_prior_thread_context(provider):
+    accepted = provider.accepted_event(
+        envelope(thread_ts="1754999999.000001", ts="1755000000.000100")
+    )
+    assert accepted is not None
+    web = FakeThreadWebClient(
+        [
+            {"user": "U1", "ts": "1754999999.000001", "text": "root"},
+            {
+                "user": "U2",
+                "ts": "1755000000.000050",
+                "text": "transcript",
+                "files": [{"name": "screen.png"}],
+            },
+            {"user": "U3", "ts": "1755000001.000000", "text": "after trigger"},
+        ]
+    )
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    thread = enriched.context["slack_thread"]
+    assert [message["text"] for message in thread["messages"]] == [
+        "root",
+        "transcript",
+    ]
+    assert thread["messages"][1]["files"] == ["screen.png"]
+    assert accepted.payload == enriched.payload
+
+
+@pytest.mark.asyncio
+async def test_bare_mention_does_not_fetch_thread(provider):
+    accepted = provider.accepted_event(envelope())
+    assert accepted is not None
+    web = FakeThreadWebClient()
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    assert enriched is accepted
+    assert web.calls == []
+
+
+@pytest.mark.asyncio
+async def test_thread_context_drops_oldest_messages_and_marks_truncation(provider):
+    provider.thread_context_max_messages = 2
+    accepted = provider.accepted_event(envelope(thread_ts="1", ts="4"))
+    assert accepted is not None
+    web = FakeThreadWebClient(
+        [{"user": f"U{i}", "ts": str(i), "text": f"message {i}"} for i in range(1, 4)]
+    )
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    thread = enriched.context["slack_thread"]
+    assert [message["text"] for message in thread["messages"]] == [
+        "message 2",
+        "message 3",
+    ]
+    assert thread["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_thread_fetch_failure_keeps_mention_only(provider, caplog):
+    accepted = provider.accepted_event(envelope(thread_ts="1"))
+    assert accepted is not None
+
+    enriched = await provider.with_thread_context(
+        accepted, FakeThreadWebClient(error=RuntimeError("rate limited"))
+    )
+
+    assert enriched is accepted
+    assert "Could not fetch Slack thread context" in caplog.text
 
 
 @pytest.mark.parametrize(
