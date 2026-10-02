@@ -482,26 +482,13 @@ More activity arrived on the same subject while this run was queued:
                 if redacted:
                     _live_phase["pending"] = redacted[:200]
 
-    trigger_payload = (
-        event_context.get("trigger_payload")
-        if isinstance(event_context.get("trigger_payload"), dict)
-        else {}
-    )
-    extra_observability_metadata = {
-        "automation.event.source": trigger_payload.get("source"),
-        "automation.event.key": trigger_payload.get("event_key"),
-    }
-    extra_observability_metadata = {
-        key: value for key, value in extra_observability_metadata.items() if value
-    }
-
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "callbacks": [event_callback],
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
-        **automation_conversation_kwargs(metadata=extra_observability_metadata),
+        **automation_conversation_kwargs(),
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
