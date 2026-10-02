@@ -308,7 +308,7 @@ async def update_sandbox_id(
     """
     try:
         async with session_factory() as session:
-            result = await session.execute(
+            result: CursorResult = await session.execute(  # type: ignore[assignment]
                 update(AutomationRun)
                 .where(
                     AutomationRun.id == run_id,
