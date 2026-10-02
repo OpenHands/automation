@@ -231,7 +231,7 @@ Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
 | Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
 | Driver | asyncpg | aiosqlite |
 | Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
-| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+| Migrations | `alembic upgrade head`, or on startup with `AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` | Auto-run on startup |
 
 ### Writing Migrations
 
