@@ -15,6 +15,20 @@ def test_span_noop_does_not_swallow_body_exceptions(monkeypatch):
             raise RuntimeError("boom")
 
 
+def test_inject_trace_context_sets_laminar_span_context(monkeypatch):
+    from lmnr import Laminar
+
+    monkeypatch.setattr(observability, "observability_enabled", lambda: True)
+    monkeypatch.setattr(
+        Laminar, "serialize_span_context", classmethod(lambda cls: "serialized-context")
+    )
+    carrier: dict[str, str] = {}
+
+    observability.inject_trace_context(carrier)
+
+    assert carrier["LMNR_SPAN_CONTEXT"] == "serialized-context"
+
+
 def test_automation_env_metadata_includes_authoritative_ids():
     automation_id = uuid4()
     org_id = uuid4()
