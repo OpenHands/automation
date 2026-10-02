@@ -8,6 +8,7 @@ which is the failure an out-of-process bridge cannot avoid.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ class SlackStreamProvider:
     bot_token: str
     team_id: str
     bot_user_id: str
+    thread_context_max_messages: int = 50
+    thread_context_max_chars: int = 12_000
     source: str = "slack"
 
     @property
@@ -118,7 +121,80 @@ class SlackStreamProvider:
 
         event = self.accepted_event(request.payload)
         if event is not None:
+            event = await self.with_thread_context(
+                event, getattr(client, "web_client", None)
+            )
             await emit(event)
+
+    async def with_thread_context(
+        self, event: AcceptedEvent, web_client: AsyncWebClient | None
+    ) -> AcceptedEvent:
+        """Attach bounded Slack thread context without changing the raw envelope."""
+        slack_event = event.payload.get("event") or {}
+        thread_ts = slack_event.get("thread_ts")
+        channel = slack_event.get("channel")
+        trigger_ts = slack_event.get("ts")
+        if not thread_ts or not channel:
+            return event
+        if web_client is None:
+            logger.warning(
+                "Slack client has no Web API client; omitting thread context"
+            )
+            return event
+        try:
+            response = await web_client.conversations_replies(
+                channel=channel, ts=thread_ts, limit=200
+            )
+        except Exception as exc:  # noqa: BLE001 - context is best effort
+            logger.warning(
+                "Could not fetch Slack thread context for channel=%s ts=%s: %s",
+                channel,
+                thread_ts,
+                exc,
+            )
+            return event
+
+        messages = []
+        for message in response.get("messages", []):
+            if trigger_ts and message.get("ts", "") > trigger_ts:
+                break
+            files = [
+                item.get("name") or item.get("title")
+                for item in message.get("files", [])
+                if item.get("name") or item.get("title")
+            ]
+            attachments = [
+                item.get("title") or item.get("fallback")
+                for item in message.get("attachments", [])
+                if item.get("title") or item.get("fallback")
+            ]
+            messages.append(
+                {
+                    "author": message.get("user") or message.get("bot_id") or "unknown",
+                    "timestamp": message.get("ts", ""),
+                    "text": message.get("text", ""),
+                    "files": files + attachments,
+                }
+            )
+
+        truncated = len(messages) > self.thread_context_max_messages
+        messages = messages[-self.thread_context_max_messages :]
+        while (
+            messages
+            and len(json.dumps(messages, ensure_ascii=False))
+            > self.thread_context_max_chars
+        ):
+            messages.pop(0)
+            truncated = True
+        return AcceptedEvent(
+            source=event.source,
+            event_key=event.event_key,
+            payload=event.payload,
+            provider_event_id=event.provider_event_id,
+            occurred_at=event.occurred_at,
+            parsed_event=event.parsed_event,
+            context={"slack_thread": {"messages": messages, "truncated": truncated}},
+        )
 
     def accepted_event(self, envelope: dict[str, Any]) -> AcceptedEvent | None:
         """Interpret a Slack event envelope, or None if it is not for us.
@@ -181,4 +257,6 @@ def _provider(app: SlackAppSettings) -> SlackStreamProvider:
         bot_token=app.bot_token,
         team_id=app.team_id,
         bot_user_id=app.bot_user_id,
+        thread_context_max_messages=app.thread_context_max_messages,
+        thread_context_max_chars=app.thread_context_max_chars,
     )
