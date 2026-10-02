@@ -1214,9 +1214,10 @@ class TestListAutomations:
         assert data["total"] == 5
 
     async def _seed_automation(
-        self, async_session, *, user_id, org_id, name, age_minutes=0
+        self, async_session, *, user_id, org_id, name, age_minutes=0, created_at=None
     ) -> Automation:
-        """Persist an automation created ``age_minutes`` ago by ``user_id``."""
+        """Persist an automation by ``user_id``, created ``age_minutes`` ago or at
+        ``created_at``."""
         automation = Automation(
             user_id=user_id,
             org_id=org_id,
@@ -1224,7 +1225,7 @@ class TestListAutomations:
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             tarball_path="s3://bucket/path/to/code.tar.gz",
             entrypoint="uv run script.py",
-            created_at=utcnow() - timedelta(minutes=age_minutes),
+            created_at=created_at or utcnow() - timedelta(minutes=age_minutes),
         )
         async_session.add(automation)
         await async_session.commit()
@@ -1308,6 +1309,31 @@ class TestListAutomations:
         assert first["total"] == second["total"] == 3
         names = [a["name"] for a in first["automations"] + second["automations"]]
         assert names == ["Mine 0", "Mine 1", "Mine 2"]
+
+    async def test_list_automations_pages_tied_created_at_by_id(
+        self, async_client, async_session
+    ):
+        """Automations with one created_at (e.g. one Git Sync import) page by id, so
+        each one is listed once across offsets."""
+        created_at = utcnow()
+        seeded = [
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Imported {i}",
+                created_at=created_at,
+            )
+            for i in range(5)
+        ]
+
+        pages = [
+            (await async_client.get(f"/api/automation/v1?limit=2&offset={o}")).json()
+            for o in (0, 2, 4)
+        ]
+
+        ids = [a["id"] for page in pages for a in page["automations"]]
+        assert ids == sorted((str(a.id) for a in seeded), reverse=True)
 
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
         """An unknown created_by value is a 422, not a silently unfiltered list."""

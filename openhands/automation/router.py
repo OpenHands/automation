@@ -311,8 +311,12 @@ async def list_automations(
     )
     total = count_result.scalar() or 0
 
+    # id breaks created_at ties (e.g. one Git Sync import), so offset pages
+    # keep one order across requests.
     result = await session.execute(
-        base_query.order_by(Automation.created_at.desc()).offset(offset).limit(limit)
+        base_query.order_by(Automation.created_at.desc(), Automation.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     automations = result.scalars().all()
 
