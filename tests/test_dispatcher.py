@@ -4,6 +4,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import timedelta
@@ -1428,6 +1429,35 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert "AUTOMATION_CONVERSATION_ID" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_dispatch_propagates_generic_observability_context(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        def inject_parent_context(env_vars: dict[str, str]) -> None:
+            env_vars["LMNR_SPAN_CONTEXT"] = "serialized-parent-context"
+
+        with patch(
+            "openhands.automation.dispatcher.inject_trace_context",
+            side_effect=inject_parent_context,
+        ):
+            env_vars, _, _ = await self._dispatch(
+                mock_execute,
+                async_session_factory,
+                mock_settings,
+                mock_client,
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                subject_key=None,
+            )
+
+        assert (
+            env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"]
+            == "serialized-parent-context"
+        )
+        metadata = json.loads(env_vars["OPENHANDS_OBSERVABILITY_METADATA"])
+        assert metadata["automation.run_id"] == env_vars["AUTOMATION_RUN_ID"]
+        assert metadata["automation.id"] == env_vars["AUTOMATION_ID"]
+        assert "automation" in env_vars["OPENHANDS_OBSERVABILITY_TAGS"].split(",")
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_selected_agent_profile_is_available_to_the_command(

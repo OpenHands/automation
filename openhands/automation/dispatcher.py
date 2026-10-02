@@ -342,6 +342,9 @@ async def _execute_run(
     env_vars = backend.build_env_vars()
     env_vars.update(automation_env_metadata(automation, run))
     inject_trace_context(env_vars)
+    if lmnr_span_context := env_vars.get("LMNR_SPAN_CONTEXT"):
+        env_vars["OPENHANDS_OBSERVABILITY_PARENT_SPAN_CONTEXT"] = lmnr_span_context
+
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
     env_vars["AUTOMATION_PHASE_URL"] = (
         f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"

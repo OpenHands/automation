@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -45,14 +46,22 @@ def test_automation_env_metadata_includes_authoritative_ids():
 
     metadata = observability.automation_env_metadata(automation, run)  # type: ignore[arg-type]
 
-    assert metadata == {
-        "AUTOMATION_ID": str(automation_id),
-        "AUTOMATION_NAME": "Trace me",
-        "AUTOMATION_RUN_ID": str(run_id),
-        "AUTOMATION_ORG_ID": str(org_id),
-        "AUTOMATION_USER_ID": str(user_id),
-        "AUTOMATION_TRIGGER_SOURCE": "event",
-    }
+    assert metadata["AUTOMATION_ID"] == str(automation_id)
+    assert metadata["AUTOMATION_NAME"] == "Trace me"
+    assert metadata["AUTOMATION_RUN_ID"] == str(run_id)
+    assert metadata["AUTOMATION_ORG_ID"] == str(org_id)
+    assert metadata["AUTOMATION_USER_ID"] == str(user_id)
+    assert metadata["AUTOMATION_TRIGGER_SOURCE"] == "event"
+    assert metadata["AUTOMATION_TRIGGER_TYPE"] == "event"
+    assert metadata["AUTOMATION_RUN_TRIGGER_SOURCE"] == "event"
+    assert metadata["OPENHANDS_OBSERVABILITY_SPAN_NAME"] == "automation.conversation"
+    assert metadata["OPENHANDS_OBSERVABILITY_TAGS"] == (
+        "automation,automation.trigger:event,automation.run_trigger:event"
+    )
+    observability_metadata = json.loads(metadata["OPENHANDS_OBSERVABILITY_METADATA"])
+    assert observability_metadata["automation.id"] == str(automation_id)
+    assert observability_metadata["automation.trigger_source"] == "event"
+    assert observability_metadata["automation.run.trigger_source"] == "event"
 
 
 def test_automation_attributes_filters_none_and_formats_run_status():
