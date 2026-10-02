@@ -12,7 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.dml import Update
 
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
@@ -38,6 +41,7 @@ from openhands.automation.utils.run import (
     update_run_timeout_at,
 )
 from openhands.automation.utils.tarball_validation import is_http_url
+from openhands.automation.utils.time import ensure_utc
 
 
 # Test UUIDs
@@ -1407,6 +1411,81 @@ class TestExecuteRunConcurrencyLimit:
             )
             assert updated.status == AutomationRunStatus.CANCELLED
             assert updated.sandbox_id is None
+
+    @pytest.mark.parametrize("failure_at", ["execute", "commit"])
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_sandbox_record_error_keeps_running_execution(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        caplog,
+        failure_at,
+    ):
+        """A failed sandbox write must not cancel a successful dispatch."""
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        run.automation.tarball_path = "https://example.com/code.tar.gz"
+        run.automation.timeout = 600
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            return_value=MagicMock(
+                agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            )
+        )
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.release_context = AsyncMock()
+
+        original_execute = AsyncSession.execute
+        original_commit = AsyncSession.commit
+        sandbox_session: AsyncSession | None = None
+        write_error = OperationalError(
+            "UPDATE automation_runs", {}, RuntimeError("temporary database failure")
+        )
+
+        async def fail_sandbox_execute(session, statement, *args, **kwargs):
+            nonlocal sandbox_session
+            if isinstance(statement, Update) and "sandbox_id" in (
+                statement.compile().params or {}
+            ):
+                sandbox_session = session
+                if failure_at == "execute":
+                    raise write_error
+            return await original_execute(session, statement, *args, **kwargs)
+
+        async def fail_sandbox_commit(session):
+            if failure_at == "commit" and session is sandbox_session:
+                raise write_error
+            await original_commit(session)
+
+        dispatched_at = utcnow()
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch.object(AsyncSession, "execute", new=fail_sandbox_execute),
+            patch.object(AsyncSession, "commit", new=fail_sandbox_commit),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert sandbox_session is not None
+        assert "Failed to update sandbox_id" in caplog.text
+        backend.release_context.assert_not_awaited()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated is not None
+            assert updated.status == AutomationRunStatus.RUNNING
+            assert updated.completed_at is None
+            assert updated.sandbox_id is None
+            assert updated.bash_command_id == "cmd-1"
+            assert updated.timeout_at is not None
+            assert ensure_utc(updated.timeout_at) >= dispatched_at + timedelta(
+                seconds=600 + get_config().sandbox.run_timeout_margin
+            )
 
 
 class TestExecuteRunDerivedConversationId:

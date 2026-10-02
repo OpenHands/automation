@@ -293,13 +293,14 @@ async def update_sandbox_id(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: uuid.UUID,
     sandbox_id: str,
-) -> bool:
+) -> bool | None:
     """Store the sandbox ID on the automation run for later verification.
 
     Only applies while the run is still RUNNING. A run cancelled (or
     otherwise finished) mid-provisioning must not gain a sandbox
     afterwards: nobody would clean it up, and it would sit on a terminal
-    row. Returns True when the sandbox was recorded.
+    row. Returns True when recorded, False when the run is no longer
+    RUNNING, and None on a write error so execution can continue.
 
     Args:
         session_factory: Async session factory
@@ -320,7 +321,7 @@ async def update_sandbox_id(
             return (result.rowcount or 0) > 0
     except Exception:
         logger.exception("Failed to update sandbox_id for run %s", run_id)
-        return False
+        return None
 
 
 async def update_bash_command_id(

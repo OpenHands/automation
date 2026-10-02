@@ -498,7 +498,7 @@ async def _execute_run(
         await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             recorded = await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
-            if not recorded:
+            if recorded is False:
                 # The run left RUNNING while provisioning (cancelled or
                 # failed concurrently): drop the sandbox instead of
                 # attaching it to a terminal row nobody will clean up.
