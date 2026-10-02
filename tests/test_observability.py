@@ -1,3 +1,4 @@
+import contextlib
 import json
 from types import SimpleNamespace
 from uuid import uuid4
@@ -28,6 +29,47 @@ def test_inject_trace_context_sets_laminar_span_context(monkeypatch):
     observability.inject_trace_context(carrier)
 
     assert carrier["LMNR_SPAN_CONTEXT"] == "serialized-context"
+
+
+def test_span_uses_laminar_parent_span_context(monkeypatch):
+    from lmnr import Laminar
+
+    calls: dict[str, object] = {}
+    attributes: dict[str, object] = {}
+
+    class DummySpan:
+        def set_attribute(self, key, value):
+            attributes[key] = value
+
+    @contextlib.contextmanager
+    def fake_start_as_current_span(**kwargs):
+        calls["start_kwargs"] = kwargs
+        yield DummySpan()
+
+    monkeypatch.setattr(observability, "observability_enabled", lambda: True)
+    monkeypatch.setattr(
+        Laminar,
+        "deserialize_span_context",
+        classmethod(lambda cls, value: {"deserialized": value}),
+    )
+    monkeypatch.setattr(
+        Laminar,
+        "start_as_current_span",
+        classmethod(lambda cls, **kwargs: fake_start_as_current_span(**kwargs)),
+    )
+
+    with observability.span(
+        "automation.callback.received",
+        {"automation.run_id": "run-1"},
+        parent_span_context="parent-context",
+    ):
+        pass
+
+    assert calls["start_kwargs"] == {
+        "name": "automation.callback.received",
+        "parent_span_context": {"deserialized": "parent-context"},
+    }
+    assert attributes == {"automation.run_id": "run-1"}
 
 
 def test_automation_env_metadata_includes_authoritative_ids():
