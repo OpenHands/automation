@@ -5,11 +5,14 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
+from openhands.automation.capabilities_router import validate_draft
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import CustomWebhook
+from openhands.automation.schemas import ValidateDraftRequest
 
 
 # Test UUID matching mock_authenticated_user fixture
@@ -237,6 +240,17 @@ class TestGetCapabilities:
 
         assert response.json()["triggers"]["cron"]["minIntervalSeconds"] == 300
 
+    async def test_advertises_a_higher_configured_cron_floor(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """Clients see the same deployment floor enforced by trigger validation."""
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", "900")
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        assert response.json()["triggers"]["cron"]["minIntervalSeconds"] == 900
+
 
 class TestValidateDraft:
     """Tests for POST /v1/validate endpoint."""
@@ -299,6 +313,43 @@ class TestValidateDraft:
         body = response.json()
         assert body["valid"] is False
         assert addressed_errors(body) == [("trigger.schedule", "interval_too_short")]
+
+    @pytest.mark.parametrize(
+        ("endpoint", "draft"),
+        [("/v1/preset/prompt", CRON_DRAFT), ("/v1", BUNDLE_DRAFT)],
+    )
+    @pytest.mark.parametrize(
+        ("floor", "schedule", "expected_errors"),
+        [
+            (0, "*/2 * * * *", []),
+            (300, "*/2 * * * *", [("trigger.schedule", "interval_too_short")]),
+            (300, "*/5 * * * *", []),
+        ],
+    )
+    async def test_configured_cron_floor_preserves_preflight_error_codes(
+        self,
+        mock_authenticated_user,
+        monkeypatch,
+        endpoint,
+        draft,
+        floor,
+        schedule,
+        expected_errors,
+    ):
+        monkeypatch.setenv("AUTOMATION_MIN_CRON_INTERVAL_SECONDS", str(floor))
+        clear_config_cache()
+
+        request = ValidateDraftRequest.model_validate(
+            preflight(with_trigger(draft, schedule=schedule), endpoint=endpoint)
+        )
+        async with AsyncSession() as session:
+            response = await validate_draft(
+                request, user=mock_authenticated_user, session=session
+            )
+
+        body = response.model_dump()
+        assert body["valid"] == (expected_errors == [])
+        assert addressed_errors(body) == expected_errors
 
     @pytest.mark.parametrize(
         ("event_pattern", "expected_errors"),

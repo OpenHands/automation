@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.alias_generators import to_camel
+from pydantic_core import PydanticCustomError
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.models import AutomationState
@@ -28,6 +29,7 @@ from openhands.automation.providers import (
     verifier_schemes,
 )
 from openhands.automation.utils.cron import (
+    min_interval_seconds,
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
 )
@@ -68,7 +70,19 @@ class CronTrigger(BaseModel):
     @field_validator("schedule")
     @classmethod
     def validate_cron_schedule(cls, v: str) -> str:
-        return validate_cron_schedule_value(v)
+        schedule = validate_cron_schedule_value(v)
+
+        # Import lazily to keep the schema/config dependency one-way at import time.
+        from openhands.automation.config import get_config
+
+        floor = get_config().service.min_cron_interval_seconds
+        if floor > 0 and min_interval_seconds(schedule) < floor:
+            raise PydanticCustomError(
+                "interval_too_short",
+                "Cron expression must have at least {floor} seconds between fires",
+                {"floor": floor},
+            )
+        return schedule
 
     @field_validator("timezone")
     @classmethod
