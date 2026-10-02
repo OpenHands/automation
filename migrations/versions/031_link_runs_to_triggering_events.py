@@ -22,10 +22,18 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    with op.batch_alter_table("automations") as batch:
+        batch.add_column(
+            sa.Column("observability_associations", sa.JSON(), nullable=True)
+        )
+
     with op.batch_alter_table("automation_runs") as batch:
         batch.add_column(sa.Column("trigger_event_id", sa.Uuid(), nullable=True))
         batch.add_column(
             sa.Column("observability_parent_span_context", sa.Text(), nullable=True)
+        )
+        batch.add_column(
+            sa.Column("observability_associations", sa.JSON(), nullable=True)
         )
         batch.create_index(
             "ix_automation_runs_trigger_event_id",
@@ -43,6 +51,11 @@ def upgrade() -> None:
         return
 
     op.execute(
+        "COMMENT ON COLUMN automations.observability_associations "
+        "IS 'High-cardinality observability metadata keys mapped to JMESPath "
+        "expressions evaluated against incoming event payloads.'"
+    )
+    op.execute(
         "COMMENT ON COLUMN automation_runs.trigger_event_id "
         "IS 'Integration event row that created this run, for event-triggered runs.'"
     )
@@ -50,6 +63,10 @@ def upgrade() -> None:
         "COMMENT ON COLUMN automation_runs.observability_parent_span_context "
         "IS 'Serialized Laminar span context from the triggering event, used by "
         "the dispatcher to continue the same trace.'"
+    )
+    op.execute(
+        "COMMENT ON COLUMN automation_runs.observability_associations "
+        "IS 'Evaluated high-cardinality observability metadata for this run.'"
     )
 
 
@@ -60,5 +77,9 @@ def downgrade() -> None:
             type_="foreignkey",
         )
         batch.drop_index("ix_automation_runs_trigger_event_id")
+        batch.drop_column("observability_associations")
         batch.drop_column("observability_parent_span_context")
         batch.drop_column("trigger_event_id")
+
+    with op.batch_alter_table("automations") as batch:
+        batch.drop_column("observability_associations")

@@ -95,7 +95,14 @@ def test_automation_env_metadata_includes_authoritative_ids():
         user_id=user_id,
         trigger={"type": "event"},
     )
-    run = SimpleNamespace(id=run_id, trigger_source="event")
+    run = SimpleNamespace(
+        id=run_id,
+        trigger_source="event",
+        observability_associations={
+            "scm.repository.full_name": "OpenHands/automation",
+            "scm.pull_request.number": 544,
+        },
+    )
 
     metadata = observability.automation_env_metadata(automation, run)  # type: ignore[arg-type]
 
@@ -115,6 +122,8 @@ def test_automation_env_metadata_includes_authoritative_ids():
     assert observability_metadata["automation.id"] == str(automation_id)
     assert observability_metadata["automation.trigger_source"] == "event"
     assert observability_metadata["automation.run.trigger_source"] == "event"
+    assert observability_metadata["scm.repository.full_name"] == "OpenHands/automation"
+    assert observability_metadata["scm.pull_request.number"] == 544
 
 
 def test_automation_attributes_filters_none_and_formats_run_status():
