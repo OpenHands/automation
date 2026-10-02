@@ -189,6 +189,7 @@ def _phase_poster() -> None:
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
+from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -527,49 +528,18 @@ More activity arrived on the same subject while this run was queued:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
-    # Cloud workspaces supply richer automation tags (for example, whether the
-    # trigger was cron or webhook). Only add fallback tags in local mode.
-    default_tags = workspace.default_conversation_tags or {}
-    conversation_tags = dict(experiment_tags)
-    if not any(
-        default_tags.get(key)
-        for key in ("automationtrigger", "automationid", "automationrunid")
-    ):
-        conversation_tags["automationtrigger"] = "automation"
-
-    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
-    if automation_run_id and not default_tags.get("automationrunid"):
-        conversation_tags["automationrunid"] = automation_run_id
-
     trigger_payload = (
         event_context.get("trigger_payload")
         if isinstance(event_context.get("trigger_payload"), dict)
         else {}
     )
-    observability_metadata = {
-        "automation.id": os.environ.get("AUTOMATION_ID")
-        or event_context.get("automation_id"),
-        "automation.name": os.environ.get("AUTOMATION_NAME")
-        or event_context.get("automation_name"),
-        "automation.run_id": automation_run_id,
-        "automation.org_id": os.environ.get("AUTOMATION_ORG_ID"),
-        "automation.user_id": automation_user_id,
-        "automation.trigger_source": os.environ.get("AUTOMATION_TRIGGER_TYPE")
-        or event_context.get("trigger"),
-        "automation.run.trigger_source": os.environ.get(
-            "AUTOMATION_RUN_TRIGGER_SOURCE"
-        ),
+    extra_observability_metadata = {
         "automation.event.source": trigger_payload.get("source"),
         "automation.event.key": trigger_payload.get("event_key"),
     }
-    observability_metadata = {
-        key: value for key, value in observability_metadata.items() if value
+    extra_observability_metadata = {
+        key: value for key, value in extra_observability_metadata.items() if value
     }
-    observability_tags = [
-        tag.strip()
-        for tag in os.environ.get("OPENHANDS_OBSERVABILITY_TAGS", "").split(",")
-        if tag.strip()
-    ]
 
     conversation_kwargs = {
         "agent": agent,
@@ -578,11 +548,9 @@ More activity arrived on the same subject while this run was queued:
         "callbacks": [event_callback],
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": conversation_tags,
-        "observability_metadata": observability_metadata,
-        "observability_tags": observability_tags or None,
-        "observability_span_name": os.environ.get(
-            "OPENHANDS_OBSERVABILITY_SPAN_NAME", "automation.conversation"
+        **automation_conversation_kwargs(
+            metadata=extra_observability_metadata,
+            conversation_tags=experiment_tags,
         ),
     }
     if automation_user_id and _conversation_supports_user_id():

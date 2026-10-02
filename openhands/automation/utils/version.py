@@ -11,7 +11,7 @@ SDK_TOOLS_PACKAGE_NAME: Final[str] = "openhands-tools"
 SDK_WORKSPACE_PACKAGE_NAME: Final[str] = "openhands-workspace"
 SDK_REPOSITORY_URL: Final[str] = "https://github.com/OpenHands/software-agent-sdk.git"
 # Temporary cross-repo pin for OpenHands/software-agent-sdk#5462 until released.
-SDK_OBSERVABILITY_REF: Final[str] = "d4d662b9004aca78efb452f1b35a5da50d248f97"
+SDK_OBSERVABILITY_REF: Final[str] = "ab79e382bf5946e9ca8543cfc1e0a502508d68f1"
 SDK_PACKAGE_SUBDIRECTORIES: Final[dict[str, str]] = {
     SDK_PACKAGE_NAME: "openhands-sdk",
     SDK_TOOLS_PACKAGE_NAME: "openhands-tools",
