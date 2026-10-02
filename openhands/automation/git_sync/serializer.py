@@ -151,6 +151,10 @@ def _automation_yaml_fields(
             "url": None if tarball_is_internal else automation.tarball_path,
         },
     }
+    # Omit null descriptions so enabling this field does not rewrite every
+    # existing automation on the first sync cycle.
+    if automation.description is not None:
+        fields["description"] = automation.description
     # Omitted when nothing is executable, so upgrading doesn't rewrite every
     # already-synced automation.yaml just to add an empty list.
     if tarball_executables:
