@@ -476,7 +476,14 @@ async def _verify_and_mark_run(
     # Clean up resources via backend only when the automation owns explicit
     # cleanup. Otherwise, leave cleanup to the runtime TTL reaper.
     keep_alive = await _get_automation_keep_alive(session, run)
-    if _should_cleanup_after_terminal(run, keep_alive, backend):
+    # The still-running command may be using it; the retention purge reclaims it later.
+    skip_local_cleanup = (
+        backend.is_local_mode
+        and verification.outcome == VerificationOutcome.STILL_RUNNING
+    )
+    if not skip_local_cleanup and _should_cleanup_after_terminal(
+        run, keep_alive, backend
+    ):
         if settings.sandbox_cleanup_delay_seconds > 0 and run.sandbox_id:
             await _defer_sandbox_cleanup(session, run, backend, settings, now)
         else:

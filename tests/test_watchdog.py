@@ -923,6 +923,67 @@ class TestLocalRunsReachTerminalCleanup:
             is False
         )
 
+    @staticmethod
+    async def _run_local(async_session_factory, run_id, settings, verification):
+        backend = _create_mock_backend(verification)
+        backend.is_local_mode = True
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.sandbox_id = None
+            run.started_at = utcnow() - timedelta(hours=2)
+            await session.commit()
+        with patch("openhands.automation.watchdog.get_backend", return_value=backend):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                await _verify_and_mark_run(session, run, settings)
+                await session.commit()
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_still_running_local_workspace_is_left_alone(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        run_id = automation_with_run["run_id"]
+        backend = await self._run_local(
+            async_session_factory,
+            run_id,
+            mock_settings,
+            VerificationResult(verified=False, error="Command still running"),
+        )
+
+        backend.cleanup_after_verification.assert_not_called()
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_local_run_is_still_cleaned_up(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        backend = await self._run_local(
+            async_session_factory,
+            automation_with_run["run_id"],
+            mock_settings,
+            VerificationResult(verified=False, error="Sandbox not found"),
+        )
+
+        backend.cleanup_after_verification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_delay_does_not_strand_a_local_workspace(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        backend = await self._run_local(
+            async_session_factory,
+            automation_with_run["run_id"],
+            mock_settings.model_copy(update={"sandbox_cleanup_delay_seconds": 600}),
+            VerificationResult(
+                verified=True, success=True, exit_code=0, stdout="ok", stderr=""
+            ),
+        )
+
+        backend.cleanup_after_verification.assert_called_once()
+
     def test_a_cloud_run_without_a_sandbox_is_unchanged(self):
         assert (
             _should_cleanup_after_terminal(
