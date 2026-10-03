@@ -111,7 +111,8 @@ async def lifespan(app: FastAPI):
         alembic_cfg.set_main_option("script_location", str(migrations_path))
         # Set the database URL for Alembic to use (sync version)
         db_url = normalize_url_for_alembic(settings.db_url)
-        alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+        # Alembic config values go through configparser interpolation.
+        alembic_cfg.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
         # Run migrations synchronously (Alembic doesn't support async)
         try:

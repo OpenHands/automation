@@ -77,6 +77,20 @@ class TestStartupMigrationGate:
             "postgresql+pg8000://user:pass@db.example.com/automations"
         )
 
+    async def test_postgres_percent_encoded_password_reaches_alembic(self, monkeypatch):
+        upgrade = await _run_lifespan(
+            monkeypatch,
+            db_url="postgresql+asyncpg://user:p%40ss%25@db.example.com/automations",
+            is_sqlite=False,
+            auto_migrate=True,
+        )
+
+        upgrade.assert_called_once()
+        config = upgrade.call_args.args[0]
+        assert config.get_main_option("sqlalchemy.url") == (
+            "postgresql+pg8000://user:p%40ss%25@db.example.com/automations"
+        )
+
     async def test_postgres_does_not_migrate_when_opted_out(self, monkeypatch):
         upgrade = await _run_lifespan(
             monkeypatch, db_url=POSTGRES_URL, is_sqlite=False, auto_migrate=False
