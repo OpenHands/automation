@@ -3,12 +3,13 @@
 import asyncio
 import os
 import sqlite3
+import ssl
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from openhands.automation import db as db_module
 from openhands.automation.config import ServiceSettings
@@ -16,6 +17,7 @@ from openhands.automation.db import (
     _build_asyncpg_connect_args,
     _build_pg8000_connect_args,
     _create_sqlite_engine,
+    alembic_engine_args,
     is_sqlite_url,
     normalize_url_for_alembic,
     set_sqlite_mode,
@@ -186,9 +188,25 @@ class TestPostgresSslMode:
         assert _build_pg8000_connect_args("require") == {"ssl_context": True}
         assert _build_pg8000_connect_args("disable") == {"ssl_context": False}
 
+    def test_build_connect_args_accept_libpq_verify_and_allow_modes(self):
+        for mode in ("allow", "verify-ca", "verify-full"):
+            assert _build_asyncpg_connect_args(mode) == {"ssl": mode}
+        assert _build_pg8000_connect_args("allow") == {}
+
+    @pytest.mark.parametrize(
+        ("mode", "checks_hostname"), [("verify-ca", False), ("verify-full", True)]
+    )
+    def test_build_pg8000_connect_args_verify_modes_verify_the_certificate(
+        self, mode, checks_hostname
+    ):
+        context = _build_pg8000_connect_args(mode)["ssl_context"]
+        assert isinstance(context, ssl.SSLContext)
+        assert context.verify_mode is ssl.CERT_REQUIRED
+        assert context.check_hostname is checks_hostname
+
     def test_build_connect_args_rejects_unsupported_ssl_mode(self):
         with pytest.raises(ValueError, match="Unsupported AUTOMATION_DB_SSL_MODE"):
-            _build_asyncpg_connect_args("verify-full")
+            _build_asyncpg_connect_args("sometimes")
 
     @pytest.mark.asyncio
     async def test_create_engine_passes_asyncpg_ssl_connect_args(self, monkeypatch):
@@ -274,6 +292,55 @@ class TestNormalizeUrlForAlembic:
     def test_preserves_empty_url(self):
         """Empty URL is unchanged."""
         assert normalize_url_for_alembic("") == ""
+
+
+class TestAlembicEngineArgs:
+    """Tests for alembic_engine_args, the sync URL + pg8000 TLS args for migrations."""
+
+    def test_plain_asyncpg_url_gets_no_tls_args(self):
+        url, connect_args = alembic_engine_args("postgresql+asyncpg://u:p@h/db")
+        assert url == "postgresql+pg8000://u:p@h/db"
+        assert connect_args == {}
+
+    @pytest.mark.parametrize("param", ["ssl", "sslmode"])
+    def test_tls_query_param_moves_into_pg8000_connect_args(self, param):
+        url, connect_args = alembic_engine_args(
+            f"postgresql+asyncpg://u:p@h/db?{param}=require&application_name=mig"
+        )
+        assert url == "postgresql+pg8000://u:p@h/db?application_name=mig"
+        assert connect_args == {"ssl_context": True}
+
+    def test_verify_full_query_param_builds_a_verifying_context(self):
+        url, connect_args = alembic_engine_args(
+            "postgresql+asyncpg://u:p@h/db?ssl=verify-full"
+        )
+        assert url == "postgresql+pg8000://u:p@h/db"
+        assert connect_args["ssl_context"].check_hostname is True
+
+    def test_percent_encoded_password_survives(self):
+        url, _ = alembic_engine_args(
+            "postgresql+asyncpg://u:p%40ss%25w@h/db?sslmode=disable"
+        )
+        assert url == "postgresql+pg8000://u:p%40ss%25w@h/db"
+
+    def test_ignores_pgsslmode_like_the_application_engine(self, monkeypatch):
+        monkeypatch.setenv("PGSSLMODE", "verify-full")
+        monkeypatch.setenv("AUTOMATION_DB_SSL_MODE", "require")
+        assert alembic_engine_args("postgresql+asyncpg://u:p@h/db")[1] == {}
+
+    def test_sqlite_url_is_only_normalized(self):
+        assert alembic_engine_args("sqlite+aiosqlite:///x.db?ssl=require") == (
+            "sqlite:///x.db?ssl=require",
+            {},
+        )
+
+    def test_pg8000_accepts_the_result(self):
+        url, connect_args = alembic_engine_args(
+            "postgresql+asyncpg://u:p@h/db?ssl=require"
+        )
+        engine = create_engine(url, connect_args=connect_args)
+        _, cparams = engine.dialect.create_connect_args(engine.url)
+        assert "ssl" not in cparams and "sslmode" not in cparams
 
 
 class TestSqliteMigrations:

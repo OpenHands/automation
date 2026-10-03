@@ -10,13 +10,14 @@ The backend is selected based on the AUTOMATION_DB_URL setting:
 """
 
 import logging
+import ssl
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
 from sqlalchemy import event
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -28,7 +29,14 @@ from openhands.automation.config import ServiceSettings, get_config
 
 
 logger = logging.getLogger("automation.db")
-SUPPORTED_DB_SSL_MODES = {"prefer", "require", "disable"}
+SUPPORTED_DB_SSL_MODES = {
+    "allow",
+    "prefer",
+    "require",
+    "verify-ca",
+    "verify-full",
+    "disable",
+}
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
 
 
@@ -60,6 +68,10 @@ def _build_pg8000_connect_args(db_ssl_mode: str | None) -> dict:
         return {"ssl_context": True}
     if mode == "disable":
         return {"ssl_context": False}
+    if mode in ("verify-ca", "verify-full"):
+        context = ssl.create_default_context()
+        context.check_hostname = mode == "verify-full"
+        return {"ssl_context": context}
     return {}
 
 
@@ -85,6 +97,26 @@ def normalize_url_for_alembic(url: str) -> str:
         if url.startswith(async_driver):
             return url.replace(async_driver, sync_driver, 1)
     return url
+
+
+def alembic_engine_args(url: str) -> tuple[str, dict]:
+    """Return the sync URL and connect args Alembic uses for AUTOMATION_DB_URL.
+
+    As for the application engine, TLS for a URL comes from its own ``ssl`` or
+    ``sslmode`` query parameter. pg8000 rejects those as connect() keywords, so
+    they are removed from the URL and translated into an ``ssl_context``.
+    """
+    sync_url = normalize_url_for_alembic(url)
+    if not sync_url.startswith("postgresql+pg8000"):
+        return sync_url, {}
+    parsed = make_url(sync_url)
+    mode = parsed.query.get("sslmode") or parsed.query.get("ssl")
+    if isinstance(mode, tuple):
+        mode = mode[-1]
+    stripped = parsed.difference_update_query(["ssl", "sslmode"])
+    return stripped.render_as_string(hide_password=False), _build_pg8000_connect_args(
+        mode
+    )
 
 
 @dataclass
