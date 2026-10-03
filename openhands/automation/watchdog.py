@@ -229,6 +229,7 @@ async def _verify_and_mark_run(
     sandbox_id = run.sandbox_id
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
+    deadline_reached = run.timeout_at is not None and run.timeout_at <= now
 
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
@@ -239,6 +240,24 @@ async def _verify_and_mark_run(
         verification = await backend.verify_run(run_id)
     except Exception as e:
         logger.warning("Failed to verify run: %s", e, extra=extra)
+        if not deadline_reached:
+            await session.execute(
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run.id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status_detail=run_status_detail_from_exception(
+                        e,
+                        phase=RunStatusPhase.VERIFICATION,
+                        source="automation_service",
+                        operation="verify_run",
+                        previous=run.status_detail,
+                    )
+                )
+            )
+            return False
         stmt = (
             update(AutomationRun)
             .where(
@@ -456,6 +475,43 @@ async def _verify_and_mark_run(
             "Still-running grace exhausted, proceeding to terminal timeout",
             extra=extra,
         )
+
+    # Command-backed runs are checked before their deadline so the watchdog can
+    # notice a detached command that completed without a callback. A missing
+    # environment or other non-terminal verification failure during that early
+    # check is not evidence that the live run failed; retry it on a later scan.
+    if not deadline_reached:
+        await session.execute(
+            update(AutomationRun)
+            .where(
+                AutomationRun.id == run.id,
+                AutomationRun.status == AutomationRunStatus.RUNNING,
+            )
+            .values(
+                status_detail=make_run_status_detail(
+                    phase=RunStatusPhase.VERIFICATION,
+                    kind=(
+                        RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE
+                        if verification.outcome
+                        == VerificationOutcome.ENVIRONMENT_UNAVAILABLE
+                        else RunStatusDetailKind.UNKNOWN
+                    ),
+                    detail=verification.detail or "Verification unavailable",
+                    transient=True,
+                    source="automation_service",
+                    operation="verify_run",
+                    previous=run.status_detail,
+                    extra={
+                        "verification_outcome": (
+                            verification.outcome.value
+                            if verification.outcome is not None
+                            else "unknown"
+                        )
+                    },
+                )
+            )
+        )
+        return False
 
     # This likely means the sandbox crashed, was cleaned up, or verification
     # failed in a way that is not known to be transient.

@@ -20,7 +20,10 @@ from openhands.automation.models import (
     IntegrationEvent,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.utils.agent_server import (
+    VerificationOutcome,
+    VerificationResult,
+)
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_sandbox_after_terminal,
@@ -468,6 +471,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         run = MagicMock()
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
         run.status_detail = None
         session = MagicMock()
         session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
@@ -485,6 +489,62 @@ class TestVerifyAndMarkRunVerificationFailed:
         assert params["status_detail"]["phase"] == "verification"
         assert params["status_detail"]["transient"] is True
         assert params["status_detail"]["detail"] == verification.detail
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_verification_exception_leaves_run_running(self, mock_settings):
+        """A verifier exception before the deadline is retried, not terminal."""
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(outcome=VerificationOutcome.TRANSIENT_ERROR)
+        )
+        mock_backend.verify_run.side_effect = RuntimeError("temporary lookup failure")
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        stmt = session.execute.await_args.args[0]
+        params = stmt.compile().params
+        assert params["status_detail"]["phase"] == "verification"
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_environment_unavailable_leaves_run_running(
+        self, mock_settings
+    ):
+        """A missing environment is terminal only once the deadline passes."""
+        verification = VerificationResult(
+            outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+            detail="sandbox lookup returned no environment",
+        )
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        stmt = session.execute.await_args.args[0]
+        params = stmt.compile().params
+        assert params["status_detail"]["kind"] == "environment_unavailable"
+        assert params["status_detail"]["transient"] is True
         mock_backend.cleanup_after_verification.assert_not_called()
 
 
