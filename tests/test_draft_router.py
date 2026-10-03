@@ -186,6 +186,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
             "endpoint": "/v1/preset/prompt",
             "draft": {
                 "name": "Runnable draft",
+                "description": "Summarizes weekly support trends.",
                 "prompt": "Write a short greeting.",
                 "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             },
@@ -213,6 +214,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     assert automation is not None
     assert automation.enabled is False
     assert automation.state == AutomationState.DRAFT
+    assert automation.description == "Summarizes weekly support trends."
     assert automation.prompt == "Write a short greeting."
     assert automation.tarball_path.startswith("oh-internal://uploads/")
 
