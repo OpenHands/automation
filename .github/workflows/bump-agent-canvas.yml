@@ -1,0 +1,414 @@
+---
+# Opens a PR in OpenHands/agent-canvas after openhands-automation is available
+# on PyPI. Canvas pins the Automation and Agent Server versions together.
+name: Bump Agent Canvas dependencies
+
+on:
+    workflow_dispatch:
+        inputs:
+            automation_version:
+                description: Published openhands-automation version
+                required: true
+                type: string
+
+concurrency:
+    group: bump-agent-canvas
+    cancel-in-progress: false
+
+jobs:
+    prepare-agent-canvas-update:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        permissions:
+            contents: read
+        outputs:
+            automation_version: ${{ steps.versions.outputs.automation }}
+            branch: ${{ steps.prepare.outputs.branch }}
+            expected_sha: ${{ steps.prepare.outputs.expected_sha }}
+            sdk_version: ${{ steps.versions.outputs.sdk }}
+            skip: ${{ steps.prepare.outputs.skip }}
+            title: ${{ steps.prepare.outputs.title }}
+        steps:
+            - name: Install uv
+              uses: astral-sh/setup-uv@v7
+              with:
+                  version: latest
+                  python-version: '3.12'
+                  enable-cache: false
+
+            - name: Resolve published dependency versions
+              id: versions
+              env:
+                  AUTOMATION_VERSION: ${{ inputs.automation_version }}
+              run: |
+                  set -euo pipefail
+
+                  if ! [[ "$AUTOMATION_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "Invalid Automation version: $AUTOMATION_VERSION" >&2
+                    exit 1
+                  fi
+
+                  max_attempts=60
+                  sleep_seconds=20
+                  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+                    if uv pip compile \
+                      --no-config \
+                      --no-cache \
+                      --python-version 3.12 \
+                      - <<< "openhands-automation==$AUTOMATION_VERSION" \
+                      >/dev/null 2>&1; then
+                      break
+                    fi
+
+                    if [ "$attempt" -eq "$max_attempts" ]; then
+                      echo "Timed out waiting for openhands-automation==$AUTOMATION_VERSION on PyPI" >&2
+                      exit 1
+                    fi
+
+                    echo "Attempt $attempt/$max_attempts: package not resolvable; waiting ${sleep_seconds}s"
+                    sleep "$sleep_seconds"
+                  done
+
+                  metadata=$(curl --fail --silent --show-error \
+                    "https://pypi.org/pypi/openhands-automation/$AUTOMATION_VERSION/json")
+                  sdk_version=$(printf '%s' "$metadata" \
+                    | jq -r '.info.requires_dist[]?' \
+                    | sed -nE 's/^openhands-sdk[[:space:]]*==[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+                    | head -n 1)
+                  workspace_version=$(printf '%s' "$metadata" \
+                    | jq -r '.info.requires_dist[]?' \
+                    | sed -nE 's/^openhands-workspace[[:space:]]*==[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+                    | head -n 1)
+
+                  if [ -z "$sdk_version" ] || [ "$sdk_version" != "$workspace_version" ]; then
+                    echo "Published Automation package has inconsistent SDK pins" >&2
+                    exit 1
+                  fi
+
+                  echo "automation=$AUTOMATION_VERSION" >> "$GITHUB_OUTPUT"
+                  echo "sdk=$sdk_version" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare Agent Canvas update
+              id: prepare
+              env:
+                  AUTOMATION_VERSION: ${{ steps.versions.outputs.automation }}
+                  SDK_VERSION: ${{ steps.versions.outputs.sdk }}
+              run: |
+                  set -euo pipefail
+
+                  repo="OpenHands/agent-canvas"
+                  git clone "https://github.com/${repo}.git" agent-canvas
+                  cd agent-canvas
+
+                  echo "skip=false" >> "$GITHUB_OUTPUT"
+                  base_automation_version=$(jq -r '.versions.automation' config/defaults.json)
+                  latest_automation_version=$(printf '%s\n%s\n' \
+                    "$base_automation_version" "$AUTOMATION_VERSION" \
+                    | sort -V \
+                    | tail -n 1)
+                  if [ "$latest_automation_version" != "$AUTOMATION_VERSION" ]; then
+                    echo "Skipping stale Automation $AUTOMATION_VERSION; main has $base_automation_version"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  base_sdk_version=$(jq -r '.versions.agentServer' config/defaults.json)
+                  latest_sdk_version=$(printf '%s\n%s\n' \
+                    "$base_sdk_version" "$SDK_VERSION" \
+                    | sort -V \
+                    | tail -n 1)
+                  if [ "$latest_sdk_version" != "$SDK_VERSION" ]; then
+                    echo "Skipping stale SDK $SDK_VERSION; main has $base_sdk_version"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  if [ "$base_sdk_version" = "$SDK_VERSION" ]; then
+                    branch="bump-automation-$AUTOMATION_VERSION"
+                    title="chore: bump automation to $AUTOMATION_VERSION"
+                  else
+                    branch="bump-sdk-$SDK_VERSION"
+                    title="chore: bump agent-server SDK to $SDK_VERSION and automation to $AUTOMATION_VERSION"
+                  fi
+                  echo "branch=$branch" >> "$GITHUB_OUTPUT"
+                  echo "title=$title" >> "$GITHUB_OUTPUT"
+
+                  expected_sha=$(git ls-remote --heads origin "$branch" | awk '{print $1}')
+                  echo "expected_sha=$expected_sha" >> "$GITHUB_OUTPUT"
+                  if [ -n "$expected_sha" ]; then
+                    git fetch origin "$branch"
+                    git checkout -B "$branch" "origin/$branch"
+                  else
+                    git checkout -b "$branch"
+                  fi
+
+                  current_automation_version=$(jq -r '.versions.automation' config/defaults.json)
+                  latest_automation_version=$(printf '%s\n%s\n' \
+                    "$current_automation_version" "$AUTOMATION_VERSION" \
+                    | sort -V \
+                    | tail -n 1)
+                  if [ "$latest_automation_version" != "$AUTOMATION_VERSION" ]; then
+                    echo "Skipping stale Automation $AUTOMATION_VERSION; branch has $current_automation_version"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  old_sdk_version=$(jq -r '.versions.agentServer' config/defaults.json)
+                  latest_sdk_version=$(printf '%s\n%s\n' \
+                    "$old_sdk_version" "$SDK_VERSION" \
+                    | sort -V \
+                    | tail -n 1)
+                  if [ "$latest_sdk_version" != "$SDK_VERSION" ]; then
+                    echo "Skipping stale SDK $SDK_VERSION; branch has $old_sdk_version"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+
+                  python - "$AUTOMATION_VERSION" "$SDK_VERSION" "$old_sdk_version" <<'PY'
+                  import json
+                  import sys
+                  from pathlib import Path
+
+                  automation_version, sdk_version, old_sdk_version = sys.argv[1:]
+                  config_path = Path("config/defaults.json")
+                  config = json.loads(config_path.read_text())
+                  config["versions"]["automation"] = automation_version
+                  config["versions"]["agentServer"] = sdk_version
+                  if old_sdk_version != sdk_version:
+                      old_reference = f"openhands-sdk {old_sdk_version} requires"
+                      new_reference = f"openhands-sdk {sdk_version} requires"
+                      constraint_comment = config["constraints"]["_comment"]
+                      if old_reference not in constraint_comment:
+                          raise ValueError(
+                              "Expected SDK version reference is missing from constraint comment"
+                          )
+                      config["constraints"]["_comment"] = constraint_comment.replace(
+                          old_reference, new_reference
+                      )
+                  config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+                  if old_sdk_version != sdk_version:
+                      sdk_version_files = (
+                          Path(".github/workflows/mock-llm-e2e.yml"),
+                          Path("AGENTS.md"),
+                          Path("__tests__/scripts/dev-safe.test.ts"),
+                          Path("scripts/check-sdk-version-sync.mjs"),
+                          Path("scripts/dev-safe.mjs"),
+                      )
+                      for path in sdk_version_files:
+                          content = path.read_text()
+                          path.write_text(content.replace(old_sdk_version, sdk_version))
+                  PY
+
+                  if [ "$old_sdk_version" != "$SDK_VERSION" ]; then
+                    remaining=$(git grep -n -F "$old_sdk_version" -- ':!package-lock.json' || true)
+                    if [ -n "$remaining" ]; then
+                      echo "Old SDK version remains in tracked files:" >&2
+                      printf '%s\n' "$remaining" >&2
+                      exit 1
+                    fi
+                  fi
+
+                  unexpected=$(git diff --name-only \
+                    | grep -Ev '^(\.github/workflows/mock-llm-e2e\.yml|AGENTS\.md|__tests__/scripts/dev-safe\.test\.ts|config/defaults\.json|scripts/check-sdk-version-sync\.mjs|scripts/dev-safe\.mjs)$' \
+                    || true)
+                  if [ -n "$unexpected" ]; then
+                    echo "Unexpected files changed:" >&2
+                    printf '%s\n' "$unexpected" >&2
+                    exit 1
+                  fi
+
+                  git diff --check
+                  jq -e . config/defaults.json >/dev/null
+
+                  if git diff --quiet; then
+                    if [ "$base_automation_version" = "$AUTOMATION_VERSION" ] \
+                      && [ "$base_sdk_version" = "$SDK_VERSION" ]; then
+                      echo "Agent Canvas main already contains the requested versions"
+                      echo "skip=true" >> "$GITHUB_OUTPUT"
+                    else
+                      echo "Branch already uses Automation $AUTOMATION_VERSION and SDK $SDK_VERSION"
+                    fi
+                  fi
+
+                  git diff --binary > /tmp/agent-canvas.patch
+
+            - name: Upload Agent Canvas update
+              if: steps.prepare.outputs.skip != 'true'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: agent-canvas-update
+                  path: /tmp/agent-canvas.patch
+                  retention-days: 1
+
+    publish-agent-canvas-update:
+        needs: prepare-agent-canvas-update
+        if: needs.prepare-agent-canvas-update.outputs.skip != 'true'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 10
+        permissions:
+            contents: read
+        steps:
+            - name: Download Agent Canvas update
+              uses: actions/download-artifact@v8
+              with:
+                  name: agent-canvas-update
+                  path: /tmp
+
+            - name: Push Agent Canvas update and open PR
+              env:
+                  AUTOMATION_VERSION: ${{ needs.prepare-agent-canvas-update.outputs.automation_version }}
+                  BRANCH: ${{ needs.prepare-agent-canvas-update.outputs.branch }}
+                  EXPECTED_SHA: ${{ needs.prepare-agent-canvas-update.outputs.expected_sha }}
+                  GH_TOKEN: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PUBLIC }}
+                  SDK_VERSION: ${{ needs.prepare-agent-canvas-update.outputs.sdk_version }}
+                  TITLE: ${{ needs.prepare-agent-canvas-update.outputs.title }}
+              run: |
+                  set -euo pipefail
+
+                  repo="OpenHands/agent-canvas"
+                  git clone "https://github.com/${repo}.git" agent-canvas
+                  cd agent-canvas
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+
+                  current_sha=$(git ls-remote --heads origin "$BRANCH" | awk '{print $1}')
+                  if [ "$current_sha" != "$EXPECTED_SHA" ]; then
+                    echo "Agent Canvas branch changed while the update was prepared" >&2
+                    exit 1
+                  fi
+                  if [ -n "$EXPECTED_SHA" ]; then
+                    git fetch origin "$BRANCH"
+                    git checkout -B "$BRANCH" "origin/$BRANCH"
+                  else
+                    git checkout -b "$BRANCH"
+                  fi
+
+                  if [ -s /tmp/agent-canvas.patch ]; then
+                    git apply --check /tmp/agent-canvas.patch
+                    git apply --index /tmp/agent-canvas.patch
+                    git commit -m "$TITLE" \
+                      -m "Bump Agent Canvas to openhands-automation $AUTOMATION_VERSION and SDK $SDK_VERSION." \
+                      -m "Automated after the Automation package was published to PyPI." \
+                      -m "Co-authored-by: openhands <openhands@all-hands.dev>"
+                  fi
+
+                  if [ -n "$EXPECTED_SHA" ]; then
+                    git push \
+                      --force-with-lease="refs/heads/$BRANCH:$EXPECTED_SHA" \
+                      "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" \
+                      "HEAD:refs/heads/$BRANCH"
+                  else
+                    git push \
+                      "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" \
+                      "HEAD:refs/heads/$BRANCH"
+                  fi
+
+                  cat > /tmp/agent-canvas-pr-body.md <<EOF
+                  HUMAN:
+
+                  <!-- Human contributors: add a short note about your testing before checking the box. -->
+
+                  - [ ] A human has tested these changes.
+
+                  AGENT:
+
+                  ---
+
+                  ## Why
+
+                  Keep Agent Canvas aligned with the published Automation and Agent Server packages.
+
+                  ## Summary
+
+                  - Bump openhands-automation to $AUTOMATION_VERSION.
+                  - Bump the Agent Server SDK packages to $SDK_VERSION.
+
+                  ## Issue Number
+
+                  N/A — automated dependency update.
+
+                  ## How to Test
+
+                  Review the version changes and wait for Agent Canvas CI to complete.
+
+                  ## Video/Screenshots
+
+                  Not applicable — dependency update only.
+
+                  ## Type
+
+                  - [ ] Bug fix
+                  - [ ] Feature
+                  - [ ] Refactor
+                  - [ ] Breaking change
+                  - [x] Docs / chore
+
+                  ## Notes
+
+                  Triggered by the publication of openhands-automation $AUTOMATION_VERSION.
+
+                  _This PR description was generated by an AI-maintained GitHub Actions workflow (OpenHands)._
+                  EOF
+
+                  existing_pr=$(gh pr list \
+                    --repo "$repo" \
+                    --head "$BRANCH" \
+                    --state open \
+                    --json baseRefName,headRepositoryOwner,isCrossRepository,number \
+                    --jq '[.[] | select(
+                      .baseRefName == "main" and
+                      .headRepositoryOwner.login == "OpenHands" and
+                      .isCrossRepository == false
+                    )] | .[0].number')
+                  if [ -n "$existing_pr" ]; then
+                    gh pr view "$existing_pr" \
+                      --repo "$repo" \
+                      --json body \
+                      --jq .body > /tmp/existing-agent-canvas-pr-body.md
+                    python - <<'PY'
+                  import re
+                  from pathlib import Path
+
+                  existing_path = Path("/tmp/existing-agent-canvas-pr-body.md")
+                  generated_path = Path("/tmp/agent-canvas-pr-body.md")
+                  existing = existing_path.read_text()
+                  generated = generated_path.read_text()
+
+                  def section_bounds(body: str) -> tuple[int, int] | None:
+                      human = list(re.finditer(r"(?m)^HUMAN:\s*$", body))
+                      agent = list(re.finditer(r"(?m)^AGENT:\s*$", body))
+                      if len(human) != 1 or len(agent) != 1:
+                          return None
+                      if agent[0].start() <= human[0].start():
+                          return None
+                      return human[0].start(), agent[0].start()
+
+                  existing_bounds = section_bounds(existing)
+                  generated_bounds = section_bounds(generated)
+                  if existing_bounds is None or generated_bounds is None:
+                      generated_path.write_text(existing)
+                  else:
+                      existing_human, existing_agent = existing_bounds
+                      generated_human, generated_agent = generated_bounds
+                      generated_path.write_text(
+                          generated[:generated_human]
+                          + existing[existing_human:existing_agent]
+                          + generated[generated_agent:]
+                      )
+                  PY
+                    gh pr edit "$existing_pr" \
+                      --repo "$repo" \
+                      --title "$TITLE" \
+                      --body-file /tmp/agent-canvas-pr-body.md
+                    echo "Updated PR #$existing_pr for $repo"
+                    exit 0
+                  fi
+
+                  gh pr create \
+                    --repo "$repo" \
+                    --draft \
+                    --title "$TITLE" \
+                    --body-file /tmp/agent-canvas-pr-body.md \
+                    --base main \
+                    --head "$BRANCH"
