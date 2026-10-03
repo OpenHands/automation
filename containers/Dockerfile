@@ -4,6 +4,9 @@ ARG DEBIAN_SNAPSHOT=20260913T000000Z
 
 WORKDIR /app
 ENV PYTHONPATH='/app'
+# The service image runs behind an ingress. Direct deployments can override
+# this with their trusted proxy IPs or CIDRs.
+ENV FORWARDED_ALLOW_IPS='*'
 
 # Datadog labels
 LABEL com.datadoghq.tags.service="automation"
