@@ -471,6 +471,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         run = MagicMock()
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
+        run.bash_command_id = None
         run.timeout_at = utcnow() + timedelta(minutes=10)
         run.status_detail = None
         session = MagicMock()
@@ -497,6 +498,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         run = MagicMock()
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
+        run.bash_command_id = "command-123"
         run.timeout_at = utcnow() + timedelta(minutes=10)
         run.status_detail = None
         session = MagicMock()
@@ -506,8 +508,14 @@ class TestVerifyAndMarkRunVerificationFailed:
             VerificationResult(outcome=VerificationOutcome.TRANSIENT_ERROR)
         )
         mock_backend.verify_run.side_effect = RuntimeError("temporary lookup failure")
-        with patch(
-            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch(
+                "openhands.automation.watchdog._run_hard_deadline",
+                new=AsyncMock(return_value=utcnow() + timedelta(minutes=10)),
+            ),
         ):
             result = await _verify_and_mark_run(session, run, mock_settings)
 
@@ -521,7 +529,7 @@ class TestVerifyAndMarkRunVerificationFailed:
     async def test_early_environment_unavailable_leaves_run_running(
         self, mock_settings
     ):
-        """A missing environment is terminal only once the deadline passes."""
+        """A deferred scan marker does not replace the command's hard deadline."""
         verification = VerificationResult(
             outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
             detail="sandbox lookup returned no environment",
@@ -529,14 +537,23 @@ class TestVerifyAndMarkRunVerificationFailed:
         run = MagicMock()
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
-        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.bash_command_id = "command-123"
+        # A previous STILL_RUNNING scan may have moved this marker to one
+        # watchdog interval ago while the real command budget remains open.
+        run.timeout_at = utcnow() - timedelta(seconds=1)
         run.status_detail = None
         session = MagicMock()
         session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
         mock_backend = _create_mock_backend(verification)
-        with patch(
-            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch(
+                "openhands.automation.watchdog._run_hard_deadline",
+                new=AsyncMock(return_value=utcnow() + timedelta(minutes=10)),
+            ),
         ):
             result = await _verify_and_mark_run(session, run, mock_settings)
 
