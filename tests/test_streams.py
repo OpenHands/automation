@@ -1,6 +1,7 @@
 """Tests for the supervised stream transport and its Slack provider."""
 
 import asyncio
+import json
 import uuid
 from dataclasses import FrozenInstanceError
 from typing import Any
@@ -109,15 +110,18 @@ class FakeWebClient:
 
 
 class FakeThreadWebClient:
-    def __init__(self, messages=None, error=None):
+    def __init__(self, messages=None, error=None, pages=None):
         self.messages = messages or []
         self.error = error
+        self.pages = pages
         self.calls = []
 
     async def conversations_replies(self, **kwargs):
         self.calls.append(kwargs)
         if self.error:
             raise self.error
+        if self.pages is not None:
+            return self.pages[len(self.calls) - 1]
         return {"messages": self.messages}
 
 
@@ -343,6 +347,57 @@ async def test_thread_context_drops_oldest_messages_and_marks_truncation(provide
         "message 3",
     ]
     assert thread["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_thread_context_truncates_single_long_message_text(provider):
+    provider.thread_context_max_chars = 140
+    accepted = provider.accepted_event(envelope(thread_ts="1", ts="1"))
+    assert accepted is not None
+    web = FakeThreadWebClient([{"user": "U1", "ts": "1", "text": "x" * 1000}])
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    thread = enriched.context["slack_thread"]
+    assert len(thread["messages"]) == 1
+    assert thread["messages"][0]["text"].endswith("…")
+    assert len(json.dumps(thread["messages"], ensure_ascii=False)) <= 140
+    assert thread["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_thread_context_follows_pagination_until_trigger(provider):
+    accepted = provider.accepted_event(envelope(thread_ts="1", ts="3"))
+    assert accepted is not None
+    web = FakeThreadWebClient(
+        pages=[
+            {
+                "messages": [{"user": "U1", "ts": "1", "text": "root"}],
+                "has_more": True,
+                "response_metadata": {"next_cursor": "page-2"},
+            },
+            {
+                "messages": [
+                    {"user": "U2", "ts": "2", "text": "middle"},
+                    {"user": "U3", "ts": "3", "text": "trigger"},
+                ],
+                "has_more": True,
+                "response_metadata": {"next_cursor": "page-3"},
+            },
+        ]
+    )
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    assert [
+        message["text"] for message in enriched.context["slack_thread"]["messages"]
+    ] == [
+        "root",
+        "middle",
+        "trigger",
+    ]
+    assert enriched.context["slack_thread"]["truncated"] is False
+    assert [call["cursor"] for call in web.calls] == [None, "page-2"]
 
 
 @pytest.mark.asyncio

@@ -141,21 +141,42 @@ class SlackStreamProvider:
                 "Slack client has no Web API client; omitting thread context"
             )
             return event
-        try:
-            response = await web_client.conversations_replies(
-                channel=channel, ts=thread_ts, limit=200
-            )
-        except Exception as exc:  # noqa: BLE001 - context is best effort
-            logger.warning(
-                "Could not fetch Slack thread context for channel=%s ts=%s: %s",
-                channel,
-                thread_ts,
-                exc,
-            )
-            return event
+        raw_messages: list[dict[str, Any]] = []
+        cursor: str | None = None
+        truncated = False
+        while True:
+            try:
+                response = await web_client.conversations_replies(
+                    channel=channel, ts=thread_ts, limit=200, cursor=cursor
+                )
+            except Exception as exc:  # noqa: BLE001 - context is best effort
+                logger.warning(
+                    "Could not fetch Slack thread context for channel=%s ts=%s: %s",
+                    channel,
+                    thread_ts,
+                    exc,
+                )
+                if not raw_messages:
+                    return event
+                truncated = True
+                break
+
+            page = response.get("messages", [])
+            raw_messages.extend(page)
+            if trigger_ts and any(
+                message.get("ts", "") >= trigger_ts for message in page
+            ):
+                break
+            if not response.get("has_more"):
+                break
+            next_cursor = (response.get("response_metadata") or {}).get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                truncated = True
+                break
+            cursor = next_cursor
 
         messages = []
-        for message in response.get("messages", []):
+        for message in raw_messages:
             if trigger_ts and message.get("ts", "") > trigger_ts:
                 break
             files = [
@@ -177,14 +198,46 @@ class SlackStreamProvider:
                 }
             )
 
-        truncated = len(messages) > self.thread_context_max_messages
+        truncated = truncated or len(messages) > self.thread_context_max_messages
         messages = messages[-self.thread_context_max_messages :]
         while (
-            messages
+            len(messages) > 1
             and len(json.dumps(messages, ensure_ascii=False))
             > self.thread_context_max_chars
         ):
             messages.pop(0)
+            truncated = True
+        if (
+            messages
+            and len(json.dumps(messages, ensure_ascii=False))
+            > self.thread_context_max_chars
+        ):
+            message = dict(messages[0])
+            files = list(message["files"])
+            while (
+                files
+                and len(json.dumps([message], ensure_ascii=False))
+                > self.thread_context_max_chars
+            ):
+                files.pop()
+                message["files"] = files
+
+            original_text = message["text"]
+            low, high = 0, len(original_text)
+            while low < high:
+                midpoint = (low + high + 1) // 2
+                message["text"] = original_text[:midpoint] + "…"
+                if (
+                    len(json.dumps([message], ensure_ascii=False))
+                    <= self.thread_context_max_chars
+                ):
+                    low = midpoint
+                else:
+                    high = midpoint - 1
+            message["text"] = original_text[:low] + (
+                "…" if low < len(original_text) else ""
+            )
+            messages = [message]
             truncated = True
         return AcceptedEvent(
             source=event.source,
