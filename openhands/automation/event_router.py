@@ -53,7 +53,6 @@ from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.providers import (
     WebhookVerifier,
     get_header,
-    get_provider,
     get_verifier,
 )
 from openhands.automation.schemas import (
@@ -271,12 +270,13 @@ async def receive_event(
     #
     # The delivery id is where HTTP has to do the looking: `accept_event()`
     # deduplicates on whatever the transport hands it, and for a webhook that
-    # is a header. A provider that names no header, and every custom webhook,
+    # is a header. The header name comes from the resolved config, so a
+    # built-in provider uses its descriptor and a custom webhook uses whatever
+    # it configured; neither is hard-coded here. A source that names no header
     # yields None -- recorded, routed, not deduplicated.
-    provider = get_provider(source)
     provider_event_id = (
-        get_header(request.headers, provider.event_id_header)
-        if provider is not None and provider.event_id_header
+        get_header(request.headers, config.event_id_header)
+        if config.event_id_header
         else None
     )
     result = await accept_event(
