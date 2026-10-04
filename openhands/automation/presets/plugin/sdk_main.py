@@ -391,7 +391,9 @@ with workspace_ctx as workspace:
         context_sections.append(f"""## Event Payload
 
 This automation was triggered by a webhook event. The full event payload is
-included below.
+included below; use it directly. Do not read it from a shell environment
+variable such as `$AUTOMATION_EVENT_PAYLOAD`: the automation process receives
+that variable, but your terminal does not inherit it.
 
 ```json
 {event_json}
