@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -40,6 +40,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     TarballUpload,
 )
 from openhands.automation.subjects import conversation_id_for
@@ -137,8 +138,14 @@ async def _poll_pending_runs(
         .options(selectinload(AutomationRun.automation))
         .where(
             AutomationRun.status == AutomationRunStatus.PENDING,
-            Automation.enabled.is_(True),
             Automation.deleted_at.is_(None),
+            or_(
+                AutomationRun.trigger_source == "manual",
+                and_(
+                    Automation.enabled.is_(True),
+                    Automation.state == AutomationState.ACTIVE,
+                ),
+            ),
         )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
@@ -337,6 +344,8 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    if automation.agent_profile_id:
+        env_vars["AUTOMATION_AGENT_PROFILE_ID"] = str(automation.agent_profile_id)
     # A subject-owning run must create its conversation under the id
     # `continue_conversation` addresses later, or every follow-up 404s and
     # silently starts a fresh thread.
@@ -435,7 +444,6 @@ async def _execute_run(
     work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
@@ -601,13 +609,6 @@ async def dispatch_pending_runs(
         await session.commit()
 
         for run in dispatched_runs:
-            await capture_automation_event(
-                "automation_run_dispatched",
-                automation=run.automation,
-                run=run,
-                properties={"trigger_source": "dispatcher"},
-                session_factory=session_factory,
-            )
             asyncio.create_task(
                 _execute_run_safe(run, settings, session_factory, client),
                 name=f"execute-run-{run.id}",

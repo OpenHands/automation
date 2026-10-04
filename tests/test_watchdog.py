@@ -25,6 +25,7 @@ from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_sandbox_after_terminal,
     _verify_and_mark_run,
+    cleanup_due_sandboxes,
     mark_stale_runs,
     prune_integration_events,
     watchdog_loop,
@@ -670,6 +671,151 @@ class TestPruneIntegrationEvents:
         assert 0 < PRUNE_BATCH_SIZE <= 10_000
 
 
+class TestDeferredSandboxCleanup:
+    """With a cleanup delay the watchdog pauses now and deletes later."""
+
+    @pytest.mark.asyncio
+    async def test_verified_exit_pauses_and_books_deletion_instead_of_deleting(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """A verified terminal exit stamps the due time and pauses the sandbox."""
+        run_id = automation_with_run["run_id"]
+        settings = mock_settings.model_copy(
+            update={"sandbox_cleanup_delay_seconds": 600}
+        )
+        verification = VerificationResult(
+            verified=True, success=True, exit_code=0, stdout="ok", stderr=""
+        )
+
+        mock_backend = _create_mock_backend(verification)
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch(
+                "openhands.automation.watchdog.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, settings)
+                await session.commit()
+
+        assert result is True
+        mock_backend.cleanup_after_verification.assert_not_called()
+        mock_pause.assert_awaited_once_with(
+            api_url=settings.openhands_api_base_url,
+            api_key="test-api-key",
+            sandbox_id="test-sandbox-123",
+            run_id=str(run_id),
+        )
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+            assert run.completed_at is not None
+            assert run.sandbox_cleanup_due_at is not None
+            delay = run.sandbox_cleanup_due_at - run.completed_at
+            assert abs(delay - timedelta(seconds=600)) < timedelta(seconds=5)
+
+    @pytest.mark.asyncio
+    async def test_failed_verification_pauses_and_books_deletion_instead_of_deleting(
+        self, async_session_factory, automation_with_run, mock_settings
+    ):
+        """A timed-out run is booked for deletion too, not deleted on the spot."""
+        run_id = automation_with_run["run_id"]
+        settings = mock_settings.model_copy(
+            update={"sandbox_cleanup_delay_seconds": 600}
+        )
+        verification = VerificationResult(verified=False, error="Sandbox not available")
+
+        mock_backend = _create_mock_backend(verification)
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch(
+                "openhands.automation.watchdog.pause_sandbox", new_callable=AsyncMock
+            ) as mock_pause,
+        ):
+            async with async_session_factory() as session:
+                run = await session.get(AutomationRun, run_id)
+                result = await _verify_and_mark_run(session, run, settings)
+                await session.commit()
+
+        assert result is True
+        mock_backend.cleanup_after_verification.assert_not_called()
+        mock_pause.assert_awaited_once()
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.FAILED
+            assert run.sandbox_cleanup_due_at is not None
+
+    @pytest.mark.asyncio
+    async def test_sweep_deletes_only_due_sandboxes_and_clears_their_stamp(
+        self, async_session_factory, automation_with_run
+    ):
+        """A due row is deleted and released; a future row waits for its turn."""
+        automation = automation_with_run["automation"]
+        due_id = automation_with_run["run_id"]
+        now = utcnow()
+        async with async_session_factory() as session:
+            due = await session.get(AutomationRun, due_id)
+            due.status = AutomationRunStatus.COMPLETED
+            due.sandbox_cleanup_due_at = now - timedelta(seconds=1)
+            later = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.COMPLETED,
+                sandbox_id="sandbox-later",
+                sandbox_cleanup_due_at=now + timedelta(hours=1),
+            )
+            session.add(later)
+            await session.commit()
+            later_id = later.id
+
+        mock_backend = MagicMock()
+        mock_backend.cleanup_after_verification = AsyncMock()
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ) as mock_get_backend:
+            assert await cleanup_due_sandboxes(async_session_factory) == 1
+
+        assert mock_get_backend.call_args_list[0].args[0].id == due_id
+        mock_backend.cleanup_after_verification.assert_awaited_once_with(str(due_id))
+
+        async with async_session_factory() as session:
+            due = await session.get(AutomationRun, due_id)
+            later = await session.get(AutomationRun, later_id)
+            assert due.sandbox_cleanup_due_at is None
+            assert later.sandbox_cleanup_due_at is not None
+
+    @pytest.mark.asyncio
+    async def test_sweep_clears_the_stamp_even_when_deletion_fails(
+        self, async_session_factory, automation_with_run
+    ):
+        """Best-effort like the immediate path: one attempt, then the TTL reaper."""
+        run_id = automation_with_run["run_id"]
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            run.status = AutomationRunStatus.COMPLETED
+            run.sandbox_cleanup_due_at = utcnow() - timedelta(seconds=1)
+            await session.commit()
+
+        mock_backend = MagicMock()
+        mock_backend.cleanup_after_verification = AsyncMock(
+            side_effect=RuntimeError("could not mint API key")
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            assert await cleanup_due_sandboxes(async_session_factory) == 1
+
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.sandbox_cleanup_due_at is None
+
+
 class TestSubjectOwningRunsKeepTheirSandbox:
     """A `continue_conversation` run's sandbox holds the live conversation.
 
@@ -860,6 +1006,39 @@ async def test_watchdog_runs_local_workspace_purge_in_same_cycle(monkeypatch):
     await watchdog_loop(AsyncMock(), settings, shutdown_event)
 
     assert calls == ["stale", "events", "workspaces"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_sweeps_deferred_sandboxes_in_cloud_mode(monkeypatch):
+    """Cloud mode adds the sandbox sweep to the same janitor cycle."""
+    shutdown_event = asyncio.Event()
+    calls = []
+
+    async def mark_stale(*_args):
+        calls.append("stale")
+        return 0
+
+    async def prune_events(*_args):
+        calls.append("events")
+        return 0
+
+    async def cleanup_sandboxes(*_args):
+        calls.append("sandboxes")
+        shutdown_event.set()
+        return 0
+
+    monkeypatch.setattr("openhands.automation.watchdog.mark_stale_runs", mark_stale)
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.prune_integration_events", prune_events
+    )
+    monkeypatch.setattr(
+        "openhands.automation.watchdog.cleanup_due_sandboxes", cleanup_sandboxes
+    )
+
+    settings = Settings(agent_server_url="", watchdog_interval_seconds=60)
+    await watchdog_loop(AsyncMock(), settings, shutdown_event)
+
+    assert calls == ["stale", "events", "sandboxes"]
 
 
 @pytest.mark.asyncio

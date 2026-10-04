@@ -11,7 +11,7 @@ import logging
 import uuid
 from zoneinfo import available_timezones
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
+from openhands.automation.draft_schemas import (
+    FINAL_DRAFT_MODELS,
+    normalize_draft_body,
+)
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.github import (
     get_supported_event_patterns,
@@ -26,10 +30,6 @@ from openhands.automation.event_schemas.github import (
 )
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.models import CustomWebhook
-from openhands.automation.preset_router import (
-    CreatePluginAutomationRequest,
-    CreatePromptAutomationRequest,
-)
 from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
@@ -46,7 +46,11 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
-from openhands.automation.utils.model_profiles import validate_model_profile_for_user
+from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
+    validate_agent_profile_combination,
+    validate_model_profile_for_user,
+)
 from openhands.automation.utils.webhook import get_webhook_config
 
 
@@ -56,26 +60,10 @@ router = APIRouter(prefix="/v1", tags=["Capabilities"])
 
 _require_view_automations = require_permission("view_automations")
 
-DraftModel = (
-    CreateAutomationRequest
-    | CreatePromptAutomationRequest
-    | CreatePluginAutomationRequest
-)
-
-# Draft models keyed by the endpoint they would be posted to. Validating with
-# the model creation itself uses is what keeps preflight from drifting.
-# "/v1" is the raw create path, used by an entry shipping its own tarball. Its
-# tarball_path is checked for scheme here and for ownership only at creation:
-# preflight validates the body, not the upload behind it.
-_DRAFT_MODELS: dict[str, type[DraftModel]] = {
-    "/v1": CreateAutomationRequest,
-    "/v1/preset/prompt": CreatePromptAutomationRequest,
-    "/v1/preset/plugin": CreatePluginAutomationRequest,
-}
-
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
     "customTarball",
@@ -118,7 +106,11 @@ async def get_capabilities(
     builtin = builtin_sources() if config.service.webhook_secret else []
     event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
 
-    features = [*_STATIC_FEATURES]
+    # Not a packaged-code feature: the id is passed through to the run, whose
+    # conversation server resolves it - the Agent Server locally, the OpenHands
+    # app server in cloud, which has to be a version that serves
+    # /api/agent-profiles.
+    features = [*_STATIC_FEATURES, "agentProfiles"]
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
@@ -150,6 +142,7 @@ async def get_capabilities(
 @router.post("/validate")
 async def validate_draft(
     body: ValidateDraftRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> ValidateDraftResponse:
@@ -163,10 +156,30 @@ async def validate_draft(
         "Validating draft for %s (automation_id=%s)", body.endpoint, body.automation_id
     )
 
+    # A saved draft has no agent profile, so the draft shape does not know the
+    # field. Creation does, and preflight answers for creation: the profile
+    # skips the shape and is checked by the model creation itself uses.
+    shape = {k: v for k, v in body.draft.items() if k != "agent_profile_id"}
     try:
-        draft = _DRAFT_MODELS[body.endpoint].model_validate(body.draft)
+        normalized_draft = normalize_draft_body(body.endpoint, shape)
+        if "agent_profile_id" in body.draft:
+            normalized_draft["agent_profile_id"] = body.draft["agent_profile_id"]
+        draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))
+
+    # Asked first, before this request touches the database, and reported last.
+    # A failure to ask must not cost the caller the verdicts below: preflight is
+    # advisory and creation repeats the check, so the profile is left unjudged.
+    profile_error: DraftValidationError | None = None
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            await ensure_agent_profile_exists(draft.agent_profile_id, request, user)
+        except HTTPException as e:
+            if e.status_code == 422:
+                profile_error = _agent_profile_error(e)
+            else:
+                logger.warning("Preflight could not check the agent profile: %s", e)
 
     errors: list[DraftValidationError] = []
     sample_event_matched: bool | None = None
@@ -181,6 +194,12 @@ async def validate_draft(
                 message=str(e.detail),
             )
         )
+
+    if isinstance(draft, CreateAutomationRequest):
+        try:
+            validate_agent_profile_combination(draft.agent_profile_id, draft.model)
+        except HTTPException as e:
+            errors.append(_agent_profile_error(e))
 
     trigger = draft.trigger
     if isinstance(trigger, CronTrigger):
@@ -220,10 +239,21 @@ async def validate_draft(
                         trigger, trigger.source, event.event_key, body.sample_event
                     )
 
+    if profile_error is not None:
+        errors.append(profile_error)
+
     return ValidateDraftResponse(
         valid=not errors,
         errors=errors,
         sample_event_matched=sample_event_matched,
+    )
+
+
+def _agent_profile_error(error: HTTPException) -> DraftValidationError:
+    return DraftValidationError(
+        field="agent_profile_id",
+        code="invalid_agent_profile",
+        message=str(error.detail),
     )
 
 

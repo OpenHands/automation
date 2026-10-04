@@ -62,7 +62,6 @@ from openhands.automation.schemas import (
     RequestedEventTypesResponse,
     WebhookConfig,
 )
-from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils.webhook import (
     get_requested_event_types,
     get_webhook_config,
@@ -256,15 +255,6 @@ async def receive_event(
             org_id,
             e,
         )
-        await capture_automation_event(
-            "automation_event_ignored",
-            request=request,
-            properties={
-                "event_source": source,
-                "org_id": str(org_id),
-                "ignore_reason": "unrecognized_event",
-            },
-        )
         return EventResponse(received=True, matched=0, runs_created=[])
     except Exception as e:
         logger.warning("Failed to parse event: %s", e)
@@ -275,16 +265,6 @@ async def receive_event(
         source,
         event.event_key,
         org_id,
-    )
-    await capture_automation_event(
-        "automation_event_received",
-        request=request,
-        properties={
-            "event_source": source,
-            "event_key": event.event_key,
-            "org_id": str(org_id),
-            "webhook_builtin": config.is_builtin,
-        },
     )
 
     # 6. Record, match triggers and create runs (transport-neutral)

@@ -543,7 +543,6 @@ async def test_accept_event_emits_telemetry_without_a_request(
     assert result.matched == 1
     assert captured_telemetry == [
         "automation_event_matched",
-        "automation_run_scheduled",
         "automation_run_created",
     ]
 

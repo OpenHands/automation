@@ -1,7 +1,7 @@
 """Shared helpers for the `automation_service_metadata` key/value table.
 
 For singleton values too small to warrant their own column: PostHog's distinct
-ID and consent state (telemetry.py), git sync's bookkeeping (git_sync/loop.py).
+ID and consent state (telemetry.py).
 """
 
 from sqlalchemy import select, text

@@ -3,8 +3,10 @@
 import ast
 import io
 import json
+import os
 import re
 import socket
+import subprocess
 import tarfile
 import uuid
 from collections.abc import Callable
@@ -94,6 +96,32 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
         namespace,
     )
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
+
+
+class TestPresetSessionUrl:
+    """The session URL injected into a run must open the conversation in Agent Canvas.
+
+    The presets build the URL inline in ``main()`` and are excluded from linting,
+    so pin the route here. The legacy ``/conversations/{id}`` SPA route is retired
+    and links to it dead-end for the other members of an organization.
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_session_url_opens_agent_canvas(self, preset_name):
+        # Arrange
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        # Act
+        builds_canvas_url = (
+            'f"{api_url}/canvas/conversations/{conversation.id}"' in source
+        )
+        builds_legacy_url = 'f"{api_url}/conversations/{conversation.id}"' in source
+
+        # Assert
+        assert builds_canvas_url, f"{preset_name} preset must link to Agent Canvas"
+        assert not builds_legacy_url, (
+            f"{preset_name} preset still links to the legacy UI"
+        )
 
 
 class TestPresetFileSyntax:
@@ -251,6 +279,70 @@ class TestPresetEntrypoint:
         assert "command -v python3" in content
         assert "command -v python" in content
         assert "command -v py" in content
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize(
+        "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
+    )
+    def test_setup_targets_run_venv_despite_ambient_uv_python(
+        self, tmp_path, preset_name, venv_python
+    ):
+        """An inherited UV_PYTHON cannot redirect the preset installation."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        uv_log = tmp_path / "uv.log"
+        ambient_mutated = tmp_path / "ambient-mutated"
+        venv_verified = tmp_path / "venv-verified"
+
+        fake_curl = bin_dir / "curl"
+        fake_curl.write_text('#!/bin/sh\nprintf \'{"version": "1.46.0"}\\n\'\n')
+        fake_curl.chmod(0o755)
+
+        fake_uv = bin_dir / "uv"
+        fake_uv.write_text(
+            """#!/bin/sh
+printf '%s\\n' "$*" >> "$UV_CALL_LOG"
+if [ "$1" = "venv" ]; then
+    mkdir -p "$(dirname "$FAKE_VENV_PYTHON")"
+    printf '#!/bin/sh\\ntouch "$VENV_VERIFIED"\\n' > "$FAKE_VENV_PYTHON"
+    chmod +x "$FAKE_VENV_PYTHON"
+elif [ "$1" = "pip" ]; then
+    case " $* " in
+        *" --python $FAKE_VENV_PYTHON "*) ;;
+        *) touch "$AMBIENT_MUTATED" ;;
+    esac
+fi
+"""
+        )
+        fake_uv.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "UV_PYTHON": "/ambient/agent-server/python",
+            "UV_CALL_LOG": str(uv_log),
+            "FAKE_VENV_PYTHON": venv_python,
+            "AMBIENT_MUTATED": str(ambient_mutated),
+            "VENV_VERIFIED": str(venv_verified),
+            "AUTOMATION_API_URL": "https://automation.invalid",
+        }
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+
+        result = subprocess.run(
+            ["bash", str(setup_sh_path)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        calls = uv_log.read_text().splitlines()
+        assert calls[0] == "venv .venv --python cpython>=3.12,<3.14 --quiet"
+        assert calls[1].startswith(f"pip install --python {venv_python} --quiet ")
+        assert not ambient_mutated.exists()
+        assert venv_verified.exists()
 
 
 @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
@@ -741,6 +833,37 @@ class TestCreateAutomationFromPrompt:
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_rejects_draft_state(self, async_client):
+        """Prompt preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Prompt Automation",
+            "prompt": "Write a short greeting.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_prompt_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from a prompt."""
+        payload = {
+            "name": "Member Prompt Automation",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_prompt_stores_preset_metadata(self, async_client):
         """Prompt preset records preset metadata without repos when none given."""
@@ -1871,6 +1994,39 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_rejects_draft_state(self, async_client):
+        """Plugin preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review the code.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_plugin_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from plugins."""
+        payload = {
+            "name": "Member Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_plugin_stores_preset_metadata(self, async_client):
         """Plugin preset records plugins and repos in preset metadata."""
