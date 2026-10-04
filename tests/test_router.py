@@ -3821,8 +3821,24 @@ class TestDownloadTarball:
             ("Café", "Café", "Cafe"),
             ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'", "Cafe ;%'"),
             ('"\\/\x00\n\r\t\x1f\x7f', "automation", "automation"),
+            (
+                "\uff02;filename*=UTF-8''spoofed",
+                "\uff02;filename*=UTF-8''spoofed",
+                ";filename*=UTF-8''spoofed",
+            ),
+            ("a\uff3cb\ufe68c\u2100d", "a\uff3cb\ufe68c\u2100d", "abcacd"),
         ],
-        ids=["ascii", "em-dash", "emoji", "cjk", "latin-1", "mixed", "empty"],
+        ids=[
+            "ascii",
+            "em-dash",
+            "emoji",
+            "cjk",
+            "latin-1",
+            "mixed",
+            "empty",
+            "nfkd-quote",
+            "nfkd-solidus",
+        ],
     )
     async def test_internal_url_encodes_download_filename(
         self, name, sanitized_name, fallback_name, mock_authenticated_user

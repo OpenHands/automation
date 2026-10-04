@@ -590,16 +590,19 @@ async def download_automation_tarball(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve tarball from storage",
             )
-        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        unsafe_chars = r'[\x00-\x1f\x7f"\\\/]'
+        safe_name = re.sub(unsafe_chars, "", auto.name) or "automation"
         if safe_name.isascii():
             disposition = f'attachment; filename="{safe_name}.tar"'
         else:
-            # NFKD keeps accented letters' base form ("Café" -> "Cafe"); other
-            # non-ASCII characters drop out, so re-join the remaining words.
-            ascii_name = unicodedata.normalize("NFKD", safe_name).encode(
-                "ascii", errors="ignore"
+            # NFKD keeps accented letters' base form ("Café" -> "Cafe"), but it
+            # also maps compatibility characters onto removed ones (U+FF02 ->
+            # '"'), so sanitize again before dropping what is still non-ASCII.
+            normalized = re.sub(
+                unsafe_chars, "", unicodedata.normalize("NFKD", safe_name)
             )
-            fallback = " ".join(ascii_name.decode().split()) or "automation"
+            ascii_name = normalized.encode("ascii", errors="ignore").decode()
+            fallback = " ".join(ascii_name.split()) or "automation"
             disposition = (
                 f'attachment; filename="{fallback}.tar"; '
                 f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"
