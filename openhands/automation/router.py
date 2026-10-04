@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import timedelta
 from typing import Any, Literal
@@ -593,8 +594,12 @@ async def download_automation_tarball(
         if safe_name.isascii():
             disposition = f'attachment; filename="{safe_name}.tar"'
         else:
-            fallback = safe_name.encode("ascii", errors="ignore").decode().strip()
-            fallback = fallback or "automation"
+            # NFKD keeps accented letters' base form ("Café" -> "Cafe"); other
+            # non-ASCII characters drop out, so re-join the remaining words.
+            ascii_name = unicodedata.normalize("NFKD", safe_name).encode(
+                "ascii", errors="ignore"
+            )
+            fallback = " ".join(ascii_name.decode().split()) or "automation"
             disposition = (
                 f'attachment; filename="{fallback}.tar"; '
                 f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"

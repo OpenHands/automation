@@ -3812,20 +3812,20 @@ class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
 
     @pytest.mark.parametrize(
-        ("name", "sanitized_name"),
+        ("name", "sanitized_name", "fallback_name"),
         [
-            ("My Automation", "My Automation"),
-            ("Monday — review", "Monday — review"),
-            ("Robot 🤖", "Robot 🤖"),
-            ("自动化", "自动化"),
-            ("Café", "Café"),
-            ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'"),
-            ('"\\/\x00\n\r\t\x1f\x7f', "automation"),
+            ("My Automation", "My Automation", "My Automation"),
+            ("Monday — review", "Monday — review", "Monday review"),
+            ("Robot 🤖", "Robot 🤖", "Robot"),
+            ("自动化", "自动化", "automation"),
+            ("Café", "Café", "Cafe"),
+            ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'", "Cafe ;%'"),
+            ('"\\/\x00\n\r\t\x1f\x7f', "automation", "automation"),
         ],
         ids=["ascii", "em-dash", "emoji", "cjk", "latin-1", "mixed", "empty"],
     )
     async def test_internal_url_encodes_download_filename(
-        self, name, sanitized_name, mock_authenticated_user
+        self, name, sanitized_name, fallback_name, mock_authenticated_user
     ):
         """Download names round-trip safely without changing the stored archive."""
         from openhands.automation.router import download_automation_tarball
@@ -3883,10 +3883,8 @@ class TestDownloadTarball:
         fallback = re.fullmatch(r'attachment; filename="([^"\\/]+)"', fallback_part)
         assert fallback is not None
         assert all(32 <= ord(char) < 127 for char in fallback.group(1))
-        assert fallback.group(1).endswith(".tar")
-        assert fallback.group(1) != ".tar"
+        assert fallback.group(1) == f"{fallback_name}.tar"
         if sanitized_name.isascii():
-            assert fallback.group(1) == f"{sanitized_name}.tar"
             assert separator == ""
         else:
             assert separator
@@ -3894,8 +3892,6 @@ class TestDownloadTarball:
             assert charset.lower() == "utf-8"
             assert language == ""
             assert unquote_to_bytes(encoded).decode("utf-8") == f"{sanitized_name}.tar"
-            if not any(char.isascii() for char in sanitized_name):
-                assert fallback.group(1) == "automation.tar"
 
     async def test_internal_url_returns_tarball_bytes(
         self, async_client, async_session
