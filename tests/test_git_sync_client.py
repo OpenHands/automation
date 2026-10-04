@@ -9,8 +9,11 @@ import subprocess
 import pytest
 
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
+    _looks_like_auth_failure,
     _non_interactive_env,
+    _run_git,
     check_remote_access,
     commit_and_push,
     current_head,
@@ -32,6 +35,20 @@ def origin(tmp_path):
 
 def _repo_url(path) -> str:
     return f"file://{path}"
+
+
+def _ext_helper(tmp_path, name: str, stderr_line: str) -> list[str]:
+    """Args that make `git` fail offline with a controlled stderr line.
+
+    git's `ext::` transport runs an arbitrary command as the remote helper. A
+    tiny script that prints to stderr and exits non-zero gives a real, non-mocked
+    git failure with fully deterministic output -- no network, no fixture repo --
+    so `_run_git`'s own failure path (not a monkeypatched stand-in) is exercised.
+    """
+    script = tmp_path / name
+    script.write_text(f'#!/bin/sh\necho "{stderr_line}" >&2\nexit 128\n')
+    script.chmod(0o755)
+    return ["-c", "protocol.ext.allow=always", "ls-remote", f"ext::{script}"]
 
 
 class TestEnsureRepo:
@@ -422,3 +439,89 @@ class TestCheckRemoteAccess:
         assert len(commands) == 1
         assert commands[0][1] == "ls-remote"
         assert list(tmp_path.iterdir()) == [origin]
+
+
+class TestErrorClassification:
+    def test_git_auth_error_is_a_git_sync_error(self):
+        # Existing `except GitSyncError` handlers must still catch auth failures.
+        assert issubclass(GitAuthError, GitSyncError)
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: could not read Username for 'https://github.com': "
+            "terminal prompts disabled",
+            "remote: Support for password authentication was removed.\n"
+            "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+            # GitHub over HTTPS: its own remote line plus git's.
+            "remote: Repository not found.\n"
+            "fatal: repository 'https://github.com/x/y.git/' not found",
+            # GitLab: only git's own line names the 404.
+            "remote: The project you were looking for could not be found or "
+            "you don't have permission to view it.\n"
+            "fatal: repository 'https://gitlab.com/x/y.git/' not found",
+            # GitHub over SSH.
+            "ERROR: Repository not found.\n"
+            "fatal: Could not read from remote repository.",
+            "fatal: unable to access '...': The requested URL returned error: 403",
+            "git@github.com: Permission denied (publickey).",
+        ],
+    )
+    def test_auth_failures_are_recognised(self, stderr):
+        assert _looks_like_auth_failure(stderr) is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: unable to access '...': Could not resolve host: github.com",
+            "error: RPC failed; curl 56 recv failure: Connection reset by peer",
+            "fatal: not a git repository (or any of the parent directories)",
+            "fatal: the remote end hung up unexpectedly",
+            # Local filesystem permissions: no token to fix.
+            "fatal: could not create work tree dir '/workspace/x': Permission denied",
+            "fatal: Unable to create '/workspace/x/.git/index.lock': Permission denied",
+        ],
+    )
+    def test_transient_failures_are_not_misclassified(self, stderr):
+        assert _looks_like_auth_failure(stderr) is False
+
+    async def test_missing_local_repo_raises_transient_not_auth(
+        self, tmp_path, monkeypatch
+    ):
+        """A clone of a nonexistent local repo is a plain GitSyncError, not a
+        GitAuthError -- there is no credential problem to back off on."""
+        monkeypatch.chdir(tmp_path)
+        workdir = tmp_path / "clone"
+        with pytest.raises(GitSyncError) as exc_info:
+            await ensure_repo(
+                workdir, _repo_url(tmp_path / "nope"), "main", token="", timeout=30
+            )
+        assert not isinstance(exc_info.value, GitAuthError)
+
+    async def test_run_git_maps_auth_stderr_to_gitautherror(self, tmp_path):
+        """The wiring seam itself: a real git failure whose stderr looks like an
+        auth/access problem must come out of `_run_git` as `GitAuthError`, not a
+        plain `GitSyncError`. The classifier is unit-tested above, but only this
+        exercises the branch in `_run_git` that raises the distinct type -- the
+        line the whole backoff feature hangs off. Uses git's `ext::` transport to
+        drive a deterministic, offline non-zero exit with controlled stderr."""
+        args = _ext_helper(
+            tmp_path,
+            "auth.sh",
+            "fatal: Authentication failed for 'https://example.com/x.git'",
+        )
+        with pytest.raises(GitAuthError):
+            await _run_git(args, cwd=None, timeout=30)
+
+    async def test_run_git_keeps_transient_stderr_as_gitsyncerror(self, tmp_path):
+        """The other side of the same seam: a genuine git failure with transient
+        stderr must stay a plain `GitSyncError` and not be misrouted to the auth
+        backoff path."""
+        args = _ext_helper(
+            tmp_path,
+            "trans.sh",
+            "fatal: unable to access: Could not resolve host",
+        )
+        with pytest.raises(GitSyncError) as exc_info:
+            await _run_git(args, cwd=None, timeout=30)
+        assert not isinstance(exc_info.value, GitAuthError)
