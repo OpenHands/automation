@@ -389,6 +389,25 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     )
 
 
+def _upstream_headers(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> dict[str, str]:
+    headers = (
+        {"Authorization": f"Bearer {credential}"}
+        if auth_method == AuthMethod.API_KEY
+        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
+    )
+    if x_org_id:
+        headers[X_ORG_ID_HEADER] = x_org_id
+    return headers
+
+
+def upstream_auth_headers(request: Request) -> dict[str, str]:
+    """Headers that carry the caller's own credential to the OpenHands API."""
+    credential, auth_method = _extract_credential(request)
+    return _upstream_headers(credential, auth_method, _extract_x_org_id(request))
+
+
 def _parse_users_me(
     data: dict[str, Any], auth_method: AuthMethod, credential: str
 ) -> AuthenticatedUser:
@@ -477,13 +496,7 @@ async def authenticate_request(
 
     # --- Validate against OpenHands API ---
     logger.debug("Auth cache miss, validating with OpenHands API")
-    outbound_headers = (
-        {"Authorization": f"Bearer {credential}"}
-        if auth_method == AuthMethod.API_KEY
-        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
-    )
-    if x_org_id:
-        outbound_headers[X_ORG_ID_HEADER] = x_org_id
+    outbound_headers = _upstream_headers(credential, auth_method, x_org_id)
 
     try:
         resp = await _make_auth_request_with_retry(

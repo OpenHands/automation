@@ -5,6 +5,7 @@ Uses an in-memory SQLite engine and a real bare repo under tmp_path, not mocks.
 
 import asyncio
 import io
+import logging
 import subprocess
 import tarfile
 import uuid
@@ -24,6 +25,7 @@ from openhands.automation.git_sync import (
     run_sync_cycle,
 )
 from openhands.automation.git_sync.client import (
+    GitAuthError,
     GitSyncError,
     commit_and_push,
     ensure_repo,
@@ -1464,6 +1466,66 @@ class TestGitSyncLoop:
             # the cycle instead of exporting.
             assert states[0].dirty is True
 
+    async def test_cycle_goes_quiet_after_auth_failure_threshold(
+        self,
+        sqlite_session_factory,
+        git_settings,
+        service_settings,
+        monkeypatch,
+        caplog,
+    ):
+        """Once an org has failed auth past the threshold, the loop must stop
+        emitting a per-cycle traceback and log a single WARNING instead.
+
+        This drives the whole point of the feature -- the quiet-after-N branch in
+        `_cycle` -- which none of the state tests reach: they assert the counter,
+        not the log volume. Plant a streak at the threshold boundary, run one loop
+        tick down the auth path, and assert the log went quiet (WARNING, no
+        traceback).
+        """
+        import openhands.automation.git_sync.loop as loop_module
+
+        # Tick fast so a couple of cycles happen within the sleep below.
+        monkeypatch.setattr(loop_module, "_IDLE_POLL_SECONDS", 0.05)
+
+        async def boom(*args, **kwargs):
+            raise GitAuthError("fatal: Authentication failed")
+
+        monkeypatch.setattr(loop_module, "run_sync_cycle", boom)
+
+        async with sqlite_session_factory() as session:
+            await _apply_override(session, {"git_sync_interval_seconds": 1})
+            await session.commit()
+        # Plant the streak at threshold-1 (default threshold is 3), so the tick
+        # below is the 3rd consecutive auth failure -- the first quiet one. The
+        # old last_error_at keeps the backed-off org due immediately.
+        async with sqlite_session_factory() as session:
+            row = await session.get(AutomationGitSyncOrgConfig, LOCAL_ORG_ID)
+            assert row is not None
+            row.consecutive_auth_failures = 2
+            row.last_error_at = utcnow() - timedelta(seconds=3600)
+            await session.commit()
+
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(
+            git_sync_loop(sqlite_session_factory, shutdown_event=shutdown_event)
+        )
+        with caplog.at_level(logging.WARNING, logger="automation.git_sync"):
+            await asyncio.sleep(0.4)
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=5)
+
+        quiet = [
+            r for r in caplog.records if "keeps failing authentication" in r.message
+        ]
+        tracebacks = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.ERROR and r.name == "automation.git_sync"
+        ]
+        assert quiet, "past the threshold the loop must log the quiet warning"
+        assert not tracebacks, "past the threshold the per-cycle traceback must stop"
+
 
 class TestBackfillsPreExistingAutomations:
     """Regression: nothing created state rows for automations predating git
@@ -1821,7 +1883,34 @@ class TestTarballUploadLifecycle:
             )
 
         await self._push_yaml_edit(
-            origin, "editor-yaml", "enabled: true", "enabled: false"
+            origin,
+            "editor-yaml",
+            "\n".join(
+                [
+                    "enabled: true",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: ACTIVE",
+                ]
+            ),
+            "\n".join(
+                [
+                    "enabled: false",
+                    "entrypoint: python main.py",
+                    "keep_alive: null",
+                    "model: null",
+                    "name: My First Automation",
+                    "preset_metadata: null",
+                    "prompt: null",
+                    "setup_script_path: null",
+                    "state: INACTIVE",
+                ]
+            ),
         )
         await run_sync_cycle(
             sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
@@ -1834,6 +1923,45 @@ class TestTarballUploadLifecycle:
             assert automation.tarball_path == before
             uploads = (await session.execute(select(TarballUpload))).scalars().all()
             assert len(uploads) == upload_count_before
+
+    @pytest.mark.parametrize("model", [None, "explicit-model"])
+    async def test_profile_import_uses_api_validation(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        model,
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        selected = uuid.uuid4()
+        await self._push_yaml_edit(
+            origin,
+            "editor-profile",
+            "agent_profile_id: null",
+            f"agent_profile_id: {selected}",
+        )
+        if model:
+            await self._push_yaml_edit(
+                origin, "editor-model", "model: null", f"model: {model}"
+            )
+
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.agent_profile_id == (None if model else selected)
+            assert automation.model is None
+            assert (
+                len((await session.execute(select(TarballUpload))).scalars().all()) == 1
+            )
 
     async def test_superseded_upload_is_soft_deleted_when_the_tarball_changes(
         self, sqlite_session_factory, file_store, git_settings, service_settings, origin
@@ -2107,3 +2235,108 @@ class TestOrgIsolation:
             upload = (await session.execute(select(TarballUpload))).scalars().one()
             assert upload.user_id == admin_id
             assert upload.org_id == LOCAL_ORG_ID
+
+
+class TestFailureBackoffState:
+    """The per-org auth-failure streak that drives backoff and quiet logging.
+
+    Incremented by an auth failure; reset by a success or a transient failure
+    -- see ``run_sync_cycle`` and ``_is_due``. The pure backoff maths live in
+    ``test_git_sync_backoff.py``.
+    """
+
+    async def test_auth_failure_increments_the_streak(
+        self, sqlite_session_factory, git_settings, service_settings, monkeypatch
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        async def boom(*args, **kwargs):
+            raise GitAuthError("fatal: Authentication failed")
+
+        monkeypatch.setattr(loop_module, "ensure_repo", boom)
+
+        for expected in (1, 2):
+            with pytest.raises(GitAuthError):
+                await run_sync_cycle(
+                    sqlite_session_factory,
+                    LOCAL_ORG_ID,
+                    git_settings,
+                    service_settings,
+                )
+            row = await _org_config(sqlite_session_factory)
+            assert row is not None
+            assert row.consecutive_auth_failures == expected
+            assert row.last_error is not None
+            assert row.last_error_at is not None
+
+    async def test_transient_failure_resets_the_streak(
+        self, sqlite_session_factory, git_settings, service_settings, monkeypatch
+    ):
+        # A transient failure must neither back off like an auth one nor let an
+        # earlier auth streak send the next auth failure straight to the quiet
+        # path with an inflated count.
+        import openhands.automation.git_sync.loop as loop_module
+
+        async with sqlite_session_factory() as session:
+            row = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            row.consecutive_auth_failures = 2
+            await session.commit()
+
+        async def boom(*args, **kwargs):
+            raise GitSyncError("Could not resolve host")
+
+        monkeypatch.setattr(loop_module, "ensure_repo", boom)
+
+        with pytest.raises(GitSyncError):
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
+        row = await _org_config(sqlite_session_factory)
+        assert row is not None
+        assert row.consecutive_auth_failures == 0
+        assert row.last_error is not None
+
+    async def test_success_resets_the_failure_counter(
+        self,
+        sqlite_session_factory,
+        file_store,
+        git_settings,
+        service_settings,
+        origin,
+        monkeypatch,
+    ):
+        import openhands.automation.git_sync.loop as loop_module
+
+        real_ensure_repo = loop_module.ensure_repo
+        failing = {"on": True}
+
+        async def maybe_boom(*args, **kwargs):
+            if failing["on"]:
+                raise GitAuthError("fatal: Authentication failed")
+            return await real_ensure_repo(*args, **kwargs)
+
+        # A narrow toggle rather than monkeypatch.undo(), which would also revert
+        # the autouse file-store patch and the git env vars this test relies on.
+        monkeypatch.setattr(loop_module, "ensure_repo", maybe_boom)
+        with pytest.raises(GitAuthError):
+            await run_sync_cycle(
+                sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+            )
+        row = await _org_config(sqlite_session_factory)
+        assert row is not None
+        assert row.consecutive_auth_failures == 1
+
+        # A real, successful cycle must clear the streak so the normal interval
+        # resumes -- this is what makes recovery automatic, no manual re-enable.
+        failing["on"] = False
+        await _create_internal_automation(sqlite_session_factory, file_store)
+        result = await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        assert result.pushed_commit is not None
+
+        row = await _org_config(sqlite_session_factory)
+        assert row is not None
+        assert row.consecutive_auth_failures == 0
+        assert row.last_error is None
+        assert row.last_error_at is None

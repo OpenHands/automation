@@ -117,7 +117,7 @@ async def create_upload(
     request: Request,
     name: str = Query(..., min_length=1, max_length=255),
     description: str | None = Query(default=None, max_length=2000),
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> UploadResponse:

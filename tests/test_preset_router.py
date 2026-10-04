@@ -98,6 +98,32 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+class TestPresetSessionUrl:
+    """The session URL injected into a run must open the conversation in Agent Canvas.
+
+    The presets build the URL inline in ``main()`` and are excluded from linting,
+    so pin the route here. The legacy ``/conversations/{id}`` SPA route is retired
+    and links to it dead-end for the other members of an organization.
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_session_url_opens_agent_canvas(self, preset_name):
+        # Arrange
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        # Act
+        builds_canvas_url = (
+            'f"{api_url}/canvas/conversations/{conversation.id}"' in source
+        )
+        builds_legacy_url = 'f"{api_url}/conversations/{conversation.id}"' in source
+
+        # Assert
+        assert builds_canvas_url, f"{preset_name} preset must link to Agent Canvas"
+        assert not builds_legacy_url, (
+            f"{preset_name} preset still links to the legacy UI"
+        )
+
+
 class TestPresetFileSyntax:
     """Verify preset files have valid Python/shell syntax.
 
@@ -807,6 +833,37 @@ class TestCreateAutomationFromPrompt:
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_rejects_draft_state(self, async_client):
+        """Prompt preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Prompt Automation",
+            "prompt": "Write a short greeting.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_prompt_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from a prompt."""
+        payload = {
+            "name": "Member Prompt Automation",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_prompt_stores_preset_metadata(self, async_client):
         """Prompt preset records preset metadata without repos when none given."""
@@ -1937,6 +1994,39 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_rejects_draft_state(self, async_client):
+        """Plugin preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review the code.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_plugin_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from plugins."""
+        payload = {
+            "name": "Member Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_create_from_plugin_stores_preset_metadata(self, async_client):
         """Plugin preset records plugins and repos in preset metadata."""
