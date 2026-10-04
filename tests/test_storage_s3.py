@@ -13,7 +13,7 @@ import botocore.exceptions
 import pytest
 
 from openhands.automation.config import StorageSettings
-from openhands.automation.storage import S3FileStore
+from openhands.automation.storage import ObjectNotFoundError, S3FileStore
 from openhands.automation.storage.google_cloud import (
     BUCKET_PREFIX,
     FileSizeLimitExceeded,
@@ -113,7 +113,7 @@ class TestS3FileStore:
             )
 
     def test_read_not_found(self):
-        """Read raises FileNotFoundError when key doesn't exist."""
+        """Read raises ObjectNotFoundError when key doesn't exist."""
         settings = make_s3_settings()
         with patch("openhands.automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
@@ -124,8 +124,29 @@ class TestS3FileStore:
             mock_boto3.client.return_value = mock_client
 
             store = S3FileStore(settings)
-            with pytest.raises(FileNotFoundError, match="File not found"):
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
                 store.read("test/nonexistent.txt")
+
+    def test_read_transient_error_is_not_object_not_found(self):
+        """A transient S3 error must not be reported as a confirmed absence.
+
+        Callers treat ObjectNotFoundError as permanent (e.g. the dispatcher
+        disables the automation), so a 5xx from a flapping backend must stay a
+        plain FileNotFoundError.
+        """
+        settings = make_s3_settings()
+        with patch("openhands.automation.storage.s3.boto3") as mock_boto3:
+            mock_client = MagicMock()
+            error_response = {"Error": {"Code": "ServiceUnavailable"}}
+            mock_client.get_object.side_effect = botocore.exceptions.ClientError(
+                error_response, "GetObject"
+            )
+            mock_boto3.client.return_value = mock_client
+
+            store = S3FileStore(settings)
+            with pytest.raises(FileNotFoundError) as exc_info:
+                store.read("test/path.txt")
+            assert not isinstance(exc_info.value, ObjectNotFoundError)
 
     def test_list(self):
         """List files under a prefix, with automation prefix added and stripped."""
@@ -179,7 +200,7 @@ class TestS3FileStore:
             )
 
     def test_delete_not_found(self):
-        """Delete raises FileNotFoundError when key doesn't exist."""
+        """Delete raises ObjectNotFoundError when key doesn't exist."""
         settings = make_s3_settings()
         with patch("openhands.automation.storage.s3.boto3") as mock_boto3:
             mock_client = MagicMock()
@@ -190,7 +211,7 @@ class TestS3FileStore:
             mock_boto3.client.return_value = mock_client
 
             store = S3FileStore(settings)
-            with pytest.raises(FileNotFoundError, match="File not found"):
+            with pytest.raises(ObjectNotFoundError, match="File not found"):
                 store.delete("test/nonexistent.txt")
 
     def test_endpoint_creates_bucket_when_auto_create_enabled(self):

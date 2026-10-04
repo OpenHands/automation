@@ -1,0 +1,30 @@
+---
+name: release
+
+# Caller workflow: consumes the centralized, reusable release-please workflow
+# from OpenHands/release-actions. That repo owns the logic (release-please +
+# back-labeling shipped PRs); this file owns the trigger.
+#
+# The release-please tag (e.g. 1.0.0) is created with a GitHub App token, so its
+# tag-push DOES trigger our publish workflows (pypi-release.yml, tag-image.yml) —
+# unlike the default GITHUB_TOKEN, whose events GitHub's recursion guard
+# suppresses.
+on:
+    push:
+        # release/** are maintenance/freeze branches; the reusable workflow
+        # scopes each release to whichever branch triggered this run.
+        branches:
+            - main
+            - release/**
+
+jobs:
+    release-please:
+        # The caller must grant the permissions the reusable workflow needs —
+        # the effective token is the intersection of the two.
+        permissions:
+            contents: write
+            pull-requests: write
+        # secrets: inherit passes the org secrets RELEASE_APP_ID /
+        # RELEASE_APP_PRIVATE_KEY through so it can mint the GitHub App token.
+        secrets: inherit
+        uses: OpenHands/release-actions/.github/workflows/release-please.yml@main

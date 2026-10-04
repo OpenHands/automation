@@ -204,11 +204,14 @@ class CloudSandboxBackend(ExecutionBackend):
         """Verify run status via sandbox discovery."""
         sandbox_id = self._run.sandbox_id
         if not sandbox_id:
-            from openhands.automation.utils.agent_server import VerificationResult
+            from openhands.automation.utils.agent_server import (
+                VerificationOutcome,
+                VerificationResult,
+            )
 
             return VerificationResult(
-                verified=False,
-                error="No sandbox_id available for verification",
+                outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+                detail="No sandbox_id available for verification",
             )
 
         async def _do_verify() -> VerificationResult:
@@ -216,7 +219,6 @@ class CloudSandboxBackend(ExecutionBackend):
                 api_url=self.api_url,
                 api_key=await self._ensure_api_key(),
                 sandbox_id=sandbox_id,
-                keep_alive=self._run.keep_alive,
                 run_id=run_id,
                 bash_command_id=self._run.bash_command_id,
             )
@@ -226,7 +228,7 @@ class CloudSandboxBackend(ExecutionBackend):
     async def cleanup_after_verification(self, run_id: str) -> None:
         """Clean up sandbox after verification failure."""
         sandbox_id = self._run.sandbox_id
-        if not self._run.keep_alive and sandbox_id:
+        if sandbox_id:
 
             async def _do_cleanup() -> None:
                 await cleanup_sandbox(

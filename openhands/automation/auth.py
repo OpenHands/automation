@@ -15,10 +15,12 @@ import logging
 import secrets
 import uuid
 from enum import StrEnum
+from typing import Any
 
 import httpx
 from cachetools import TTLCache
 from fastapi import Depends, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic.dataclasses import dataclass
 from tenacity import (
     RetryCallState,
@@ -37,6 +39,7 @@ logger = logging.getLogger("automation.auth")
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
 SESSION_COOKIE_NAME = "keycloak_auth"
+X_ORG_ID_HEADER = "X-Org-Id"
 # Keep parity with OpenHands' cookie chunking helper: 8 * 3000 bytes is
 # comfortably above expected session token sizes while staying bounded.
 MAX_SESSION_COOKIE_CHUNKS = 8
@@ -105,34 +108,77 @@ class AuthenticatedUser:
     active_model_profile_name: str | None = None
 
 
-def _extract_model_profile_names(data: dict) -> frozenset[str] | None:  # type: ignore[type-arg]
-    """Extract model profile names from a users/me response when present."""
-    profiles_payload = data.get("llm_profiles")
-    if not isinstance(profiles_payload, dict):
-        return None
-
-    profiles = profiles_payload.get("profiles")
-    if isinstance(profiles, dict):
-        return frozenset(str(name) for name in profiles)
-    if isinstance(profiles, list):
-        names = {
-            str(profile["name"])
-            for profile in profiles
-            if isinstance(profile, dict) and isinstance(profile.get("name"), str)
-        }
-        return frozenset(names) if names else None
-
-    return None
+def _store_authenticated_user(
+    request: Request, user: AuthenticatedUser
+) -> AuthenticatedUser:
+    request.state.authenticated_user = user
+    return user
 
 
-def _extract_active_model_profile_name(data: dict) -> str | None:  # type: ignore[type-arg]
-    """Extract the active model profile name from a users/me response when present."""
-    profiles_payload = data.get("llm_profiles")
-    if not isinstance(profiles_payload, dict):
-        return None
+class _LLMProfiles(BaseModel):
+    """Consuming subset of the upstream ``LLMProfiles`` model.
 
-    active_profile = profiles_payload.get("active_profile")
-    return active_profile if isinstance(active_profile, str) else None
+    Mirrors ``openhands/app_server/settings/llm_profiles.py``: the
+    ``/api/v1/users/me`` response embeds ``llm_profiles`` as
+    ``{"profiles": {name: {...}}, "active": str | None}``. We only read the
+    profile names and the active name, so the profile values are typed ``Any``.
+
+    Tolerant by design, matching upstream's "degrade rather than fail" stance
+    (its own validators drop invalid profiles and reconcile a stale ``active``):
+    this is optional secondary metadata, so an unexpected shape becomes "no
+    profiles" instead of failing authentication.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    profiles: dict[str, Any] = Field(default_factory=dict)
+    active: str | None = None
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _ignore_non_object_profiles(cls, v: Any) -> Any:
+        return v if isinstance(v, dict) else {}
+
+    @field_validator("active", mode="before")
+    @classmethod
+    def _ignore_non_string_active(cls, v: Any) -> Any:
+        return v if isinstance(v, str) else None
+
+    def profile_names(self) -> frozenset[str]:
+        """Return the set of saved profile names (empty when there are none)."""
+        return frozenset(self.profiles)
+
+
+class _UsersMe(BaseModel):
+    """Consuming subset of the OpenHands ``/api/v1/users/me`` response.
+
+    Field types mirror the upstream ``SaasUserInfo`` model (which extends
+    ``UserInfo`` → ``Settings``): ``id``/``org_id``/``email``/``role`` are
+    ``str | None`` and ``permissions`` is ``list[str] | None`` — all nullable,
+    as the SaaS endpoint serializes them (e.g. as ``null`` without org context).
+
+    Modelling the response with pydantic means an incompatible upstream change
+    to a field we rely on fails fast (surfaced as a 502) instead of silently
+    mis-parsing — the failure mode that previously hid an ``active`` profile
+    field-name bug. ``extra="ignore"`` keeps us forward-compatible with new
+    response fields we do not read (such as ``org_name``).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = None
+    org_id: str | None = None
+    email: str | None = None
+    role: str | None = None
+    permissions: list[str] | None = None
+    llm_profiles: _LLMProfiles | None = None
+
+    @field_validator("llm_profiles", mode="before")
+    @classmethod
+    def _ignore_non_object_profiles(cls, v: Any) -> Any:
+        # Secondary metadata: anything that is not a JSON object is treated as
+        # absent so a shape change here can never break authentication.
+        return v if isinstance(v, dict) else None
 
 
 def clear_auth_cache() -> None:
@@ -140,9 +186,27 @@ def clear_auth_cache() -> None:
     _get_auth_cache().clear()
 
 
-def _credential_cache_key(credential: str) -> str:
-    """Hash a credential for use as a cache key (never store raw credential)."""
-    return hashlib.sha256(credential.encode()).hexdigest()
+def _credential_cache_key(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> str:
+    """Hash auth scope for use as a cache key (never store raw credentials)."""
+    cache_material = "\0".join((auth_method.value, x_org_id or "", credential))
+    return hashlib.sha256(cache_material.encode()).hexdigest()
+
+
+def _extract_x_org_id(request: Request) -> str | None:
+    """Extract and normalize the optional organization scope header."""
+    header_value = request.headers.get(X_ORG_ID_HEADER, "").strip()
+    if not header_value:
+        return None
+
+    try:
+        return str(uuid.UUID(header_value))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Org-Id header (must be a UUID)",
+        ) from exc
 
 
 def _is_rate_limited(response: httpx.Response) -> bool:
@@ -231,7 +295,7 @@ def _get_local_user() -> AuthenticatedUser:
         org_id=local_org_id,
         email="local@localhost",
         role="admin",
-        permissions=["manage_automations"],
+        permissions=["view_automations", "manage_automations"],
         auth_method=AuthMethod.LOCAL_API_KEY,
         api_key=None,
     )
@@ -325,37 +389,71 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     )
 
 
+def _upstream_headers(
+    credential: str, auth_method: AuthMethod, x_org_id: str | None
+) -> dict[str, str]:
+    headers = (
+        {"Authorization": f"Bearer {credential}"}
+        if auth_method == AuthMethod.API_KEY
+        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
+    )
+    if x_org_id:
+        headers[X_ORG_ID_HEADER] = x_org_id
+    return headers
+
+
+def upstream_auth_headers(request: Request) -> dict[str, str]:
+    """Headers that carry the caller's own credential to the OpenHands API."""
+    credential, auth_method = _extract_credential(request)
+    return _upstream_headers(credential, auth_method, _extract_x_org_id(request))
+
+
 def _parse_users_me(
-    data: dict, auth_method: AuthMethod, credential: str
-) -> AuthenticatedUser:  # type: ignore[type-arg]
-    """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response."""
-    user_id_raw = data.get("id")
-    org_id_raw = data.get("org_id")
-    if not user_id_raw or not org_id_raw:
+    data: dict[str, Any], auth_method: AuthMethod, credential: str
+) -> AuthenticatedUser:
+    """Build an AuthenticatedUser from the OpenHands /api/v1/users/me response.
+
+    The response is validated through :class:`_UsersMe`, so an incompatible
+    upstream change to a field we rely on fails fast as a 502 rather than being
+    silently mis-parsed. The optional ``llm_profiles`` block stays tolerant.
+    """
+    try:
+        parsed = _UsersMe.model_validate(data)
+    except ValidationError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unexpected response shape from OpenHands API",
+        )
+
+    if not parsed.id or not parsed.org_id:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not determine user/org identity from OpenHands API",
         )
 
     try:
-        user_uuid = uuid.UUID(str(user_id_raw))
-        org_uuid = uuid.UUID(str(org_id_raw))
+        user_uuid = uuid.UUID(parsed.id)
+        org_uuid = uuid.UUID(parsed.org_id)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Invalid user_id or org_id format from OpenHands API",
         )
 
+    # Upstream types email/role/permissions as nullable; AuthenticatedUser
+    # requires non-null, so coalesce here (an authenticated automation user
+    # always has org context, which populates these).
+    profiles = parsed.llm_profiles
     return AuthenticatedUser(
         user_id=user_uuid,
         org_id=org_uuid,
-        email=data.get("email", ""),
-        role=data.get("role", ""),
-        permissions=data.get("permissions", []),
+        email=parsed.email or "",
+        role=parsed.role or "",
+        permissions=parsed.permissions or [],
         auth_method=auth_method,
         api_key=credential if auth_method == AuthMethod.API_KEY else None,
-        model_profile_names=_extract_model_profile_names(data),
-        active_model_profile_name=_extract_active_model_profile_name(data),
+        model_profile_names=profiles.profile_names() if profiles else None,
+        active_model_profile_name=profiles.active if profiles else None,
     )
 
 
@@ -378,7 +476,7 @@ async def authenticate_request(
     if api_key and settings.is_local_mode and settings.local_api_key:
         if secrets.compare_digest(api_key, settings.local_api_key):
             logger.debug("Authenticated via local API key")
-            return _get_local_user()
+            return _store_authenticated_user(request, _get_local_user())
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -386,22 +484,19 @@ async def authenticate_request(
 
     # --- Resolve credential (API key or cookie) ---
     credential, auth_method = _extract_credential(request)
+    x_org_id = _extract_x_org_id(request)
 
     # --- Cache lookup ---
-    cache_key = _credential_cache_key(credential)
+    cache_key = _credential_cache_key(credential, auth_method, x_org_id)
     auth_cache = _get_auth_cache()
     cached_user = auth_cache.get(cache_key)
     if cached_user is not None:
         logger.debug("Auth cache hit for user %s", cached_user.user_id)
-        return cached_user
+        return _store_authenticated_user(request, cached_user)
 
     # --- Validate against OpenHands API ---
     logger.debug("Auth cache miss, validating with OpenHands API")
-    outbound_headers = (
-        {"Authorization": f"Bearer {credential}"}
-        if auth_method == AuthMethod.API_KEY
-        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
-    )
+    outbound_headers = _upstream_headers(credential, auth_method, x_org_id)
 
     try:
         resp = await _make_auth_request_with_retry(
@@ -441,4 +536,4 @@ async def authenticate_request(
     # --- Build user and cache ---
     user = _parse_users_me(resp.json(), auth_method, credential)
     auth_cache[cache_key] = user
-    return user
+    return _store_authenticated_user(request, user)

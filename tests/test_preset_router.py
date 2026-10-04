@@ -1,11 +1,18 @@
 """Tests for preset-based automation creation endpoint."""
 
+import ast
 import io
 import json
+import os
+import re
 import socket
+import subprocess
 import tarfile
 import uuid
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +25,7 @@ from openhands.automation.preset_router import (
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -45,6 +53,75 @@ requires_docker = pytest.mark.skipif(
     not _docker_available(),
     reason="Docker not available for testcontainers",
 )
+
+
+def _load_preset_mcp_normalizer(
+    preset_name: str, *, with_coercer: bool = True
+) -> Callable[[Any], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_normalize_mcp_config"
+    )
+    namespace: dict[str, Any] = {
+        "_coerce_mcp_config": coerce_mcp_config if with_coercer else None
+    }
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any], Any], namespace["_normalize_mcp_config"])
+
+
+def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_build_conversation_title"
+    )
+    namespace: dict[str, Any] = {"datetime": datetime, "timezone": timezone}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
+
+
+class TestPresetSessionUrl:
+    """The session URL injected into a run must open the conversation in Agent Canvas.
+
+    The presets build the URL inline in ``main()`` and are excluded from linting,
+    so pin the route here. The legacy ``/conversations/{id}`` SPA route is retired
+    and links to it dead-end for the other members of an organization.
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_session_url_opens_agent_canvas(self, preset_name):
+        # Arrange
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        # Act
+        builds_canvas_url = (
+            'f"{api_url}/canvas/conversations/{conversation.id}"' in source
+        )
+        builds_legacy_url = 'f"{api_url}/conversations/{conversation.id}"' in source
+
+        # Assert
+        assert builds_canvas_url, f"{preset_name} preset must link to Agent Canvas"
+        assert not builds_legacy_url, (
+            f"{preset_name} preset still links to the legacy UI"
+        )
 
 
 class TestPresetFileSyntax:
@@ -95,6 +172,34 @@ class TestPresetFileSyntax:
             "setup.sh doesn't look like a valid shell script"
         )
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_creates_its_conversation_under_the_derived_id(self, preset_name):
+        """The other half of the `continue_conversation` contract.
+
+        The dispatcher exports AUTOMATION_CONVERSATION_ID for a subject-owning
+        run, but that only matters if the script actually creates its
+        conversation with it. Exporting it and never reading it looks exactly
+        like the feature working, right up until the first follow-up event
+        404s and the thread silently restarts.
+        """
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert "AUTOMATION_CONVERSATION_ID" in source, (
+            f"{preset_name} preset ignores AUTOMATION_CONVERSATION_ID, so a "
+            "continued thread would get a fresh conversation every event"
+        )
+        assert '"conversation_id"' in source, (
+            f"{preset_name} preset must pass conversation_id to Conversation()"
+        )
+
+    def test_shared_finish_tool_hook_syntax(self):
+        """Verify shared finish-tool hook helper has valid Python syntax."""
+        helper_path = PRESETS_DIR / "finish_tool_hook.py"
+        assert helper_path.exists(), f"Preset file not found: {helper_path}"
+
+        source = helper_path.read_text()
+        compile(source, str(helper_path), "exec")
+
     def test_prompt_setup_sh_fetches_sdk_version_from_api(self):
         """Prompt setup.sh fetches SDK version from the automation service API."""
         setup_sh_path = PRESETS_DIR / "prompt" / "setup.sh"
@@ -112,6 +217,44 @@ class TestPresetFileSyntax:
             "setup.sh must call ${AUTOMATION_API_URL}/sdk-version "
             "— do not hardcode the version"
         )
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_finish_tool_uses_task_outcome_schema(self, preset_name):
+        """Preset agents attach TaskOutcome structured output to FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        assert "from openhands.sdk import Conversation, RemoteConversation" in content
+        assert "from openhands.tools.preset import TaskOutcome" in content
+        assert "class TaskOutcome" not in content
+        assert "finish_tool_response_schema=TaskOutcome" in content
+        assert 'Tool(name="FinishTool"' not in content
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_preset_requires_finish_tool_via_stop_hook(self, preset_name):
+        """Preset conversations nudge text-only endings to call FinishTool."""
+        sdk_main_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        content = sdk_main_path.read_text()
+
+        helper_content = (PRESETS_DIR / "finish_tool_hook.py").read_text()
+
+        assert (
+            "from finish_tool_hook import finish_tool_required_hook_config" in content
+        )
+        assert "def _finish_tool_marker_path(script_dir: str) -> str:" not in content
+        assert (
+            "def finish_tool_required_hook_config(script_dir: str) -> HookConfig:"
+            in helper_content
+        )
+        assert '".openhands_automation_runtime"' in helper_content
+        assert "session_start=[" in helper_content
+        assert "post_tool_use=[" in helper_content
+        assert 'matcher="/(?:finish|FinishTool)/"' in helper_content
+        assert "stop=[" in helper_content
+        assert "session_end=[" in helper_content
+        assert "shutil.rmtree" in helper_content
+        assert '"hook_config": finish_tool_required_hook_config(SCRIPT_DIR),' in content
+        assert "Please call the finish tool now" in helper_content
 
 
 class TestPresetEntrypoint:
@@ -137,6 +280,209 @@ class TestPresetEntrypoint:
         assert "command -v python" in content
         assert "command -v py" in content
 
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize(
+        "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
+    )
+    def test_setup_targets_run_venv_despite_ambient_uv_python(
+        self, tmp_path, preset_name, venv_python
+    ):
+        """An inherited UV_PYTHON cannot redirect the preset installation."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        uv_log = tmp_path / "uv.log"
+        ambient_mutated = tmp_path / "ambient-mutated"
+        venv_verified = tmp_path / "venv-verified"
+
+        fake_curl = bin_dir / "curl"
+        fake_curl.write_text('#!/bin/sh\nprintf \'{"version": "1.46.0"}\\n\'\n')
+        fake_curl.chmod(0o755)
+
+        fake_uv = bin_dir / "uv"
+        fake_uv.write_text(
+            """#!/bin/sh
+printf '%s\\n' "$*" >> "$UV_CALL_LOG"
+if [ "$1" = "venv" ]; then
+    mkdir -p "$(dirname "$FAKE_VENV_PYTHON")"
+    printf '#!/bin/sh\\ntouch "$VENV_VERIFIED"\\n' > "$FAKE_VENV_PYTHON"
+    chmod +x "$FAKE_VENV_PYTHON"
+elif [ "$1" = "pip" ]; then
+    case " $* " in
+        *" --python $FAKE_VENV_PYTHON "*) ;;
+        *) touch "$AMBIENT_MUTATED" ;;
+    esac
+fi
+"""
+        )
+        fake_uv.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "UV_PYTHON": "/ambient/agent-server/python",
+            "UV_CALL_LOG": str(uv_log),
+            "FAKE_VENV_PYTHON": venv_python,
+            "AMBIENT_MUTATED": str(ambient_mutated),
+            "VENV_VERIFIED": str(venv_verified),
+            "AUTOMATION_API_URL": "https://automation.invalid",
+        }
+        setup_sh_path = PRESETS_DIR / preset_name / "setup.sh"
+
+        result = subprocess.run(
+            ["bash", str(setup_sh_path)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        calls = uv_log.read_text().splitlines()
+        assert calls[0] == "venv .venv --python cpython>=3.12,<3.14 --quiet"
+        assert calls[1].startswith(f"pip install --python {venv_python} --quiet ")
+        assert not ambient_mutated.exists()
+        assert venv_verified.exists()
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize(
+    ("raw_mcp_config", "expected_keys"),
+    [
+        ({"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}, ["fetch"]),
+        (
+            {"mcpServers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}},
+            ["fetch"],
+        ),
+        ({}, []),
+        (None, []),
+    ],
+)
+def test_preset_mcp_normalizer_accepts_native_wrapped_and_empty_shapes(
+    preset_name, raw_mcp_config, expected_keys
+):
+    normalize = _load_preset_mcp_normalizer(preset_name)
+
+    normalized = normalize(raw_mcp_config)
+
+    assert list(normalized) == expected_keys
+    if expected_keys:
+        assert dump_mcp_config(normalized)["fetch"] == {
+            "command": "uvx",
+            "args": ["mcp-server-fetch"],
+        }
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
+    normalize = _load_preset_mcp_normalizer(preset_name, with_coercer=False)
+    wrapped_config = {"mcpServers": {"fetch": {"command": "uvx"}}}
+    native_config = {"fetch": {"command": "uvx"}}
+
+    assert normalize(wrapped_config) == native_config
+    assert normalize(native_config) == native_config
+    assert normalize(None) == {}
+
+
+_UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize(
+    ("event", "expected_context"),
+    [
+        (
+            {
+                "repository": {"full_name": "OpenHands/software-agent-sdk"},
+                "number": 1234,
+                "pull_request": {"number": 1234, "title": "Fix bug"},
+            },
+            "software-agent-sdk#1234",
+        ),
+        (
+            {
+                "repository": {"full_name": "OpenHands/automation"},
+                "issue": {"number": 274},
+            },
+            "automation#274",
+        ),
+        ({"repository": {"full_name": "org/repo"}, "number": 7}, "repo#7"),
+    ],
+)
+def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
+    preset_name, event, expected_context
+):
+    build_title = _load_preset_title_builder(preset_name)
+    event_context = {"automation_name": "PR review", "event": event}
+
+    title = build_title(event_context)
+
+    assert title == f"PR review — {expected_context}"
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize(
+    "event_context",
+    [
+        {"automation_name": "Issue triage", "trigger": "cron"},
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "repository": {"full_name": "org/repo"},
+                "ref": "refs/heads/main",
+            },
+        },
+        {"automation_name": "Issue triage", "event": {"issue": {"number": 7}}},
+        {
+            "automation_name": "Issue triage",
+            "event": {"number": True, "repository": "junk", "pull_request": [1]},
+        },
+    ],
+)
+def test_preset_title_builder_falls_back_to_utc_timestamp(preset_name, event_context):
+    build_title = _load_preset_title_builder(preset_name)
+
+    title = build_title(event_context)
+
+    assert title is not None
+    name, separator, context = title.partition(" — ")
+    assert (name, separator) == ("Issue triage", " — ")
+    assert _UTC_TIMESTAMP_RE.fullmatch(context)
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize(
+    "event_context",
+    [None, "not a dict", {}, {"automation_name": "   "}, {"automation_name": 42}],
+)
+def test_preset_title_builder_skips_runs_without_an_automation_name(
+    preset_name, event_context
+):
+    build_title = _load_preset_title_builder(preset_name)
+
+    assert build_title(event_context) is None
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_title_builder_collapses_automation_name_whitespace(preset_name):
+    build_title = _load_preset_title_builder(preset_name)
+
+    title = build_title({"automation_name": "  Nightly\n\ntriage  "})
+
+    assert title is not None
+    assert title.startswith("Nightly triage — ")
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_title_builder_caps_titles_at_the_conversation_api_limit(preset_name):
+    # The agent-server's UpdateConversationRequest enforces title max_length=200
+    build_title = _load_preset_title_builder(preset_name)
+
+    title = build_title({"automation_name": "x" * 500})
+
+    assert title is not None
+    assert len(title) == 200
+
 
 class TestGenerateTarball:
     """Tests for the tarball generation function."""
@@ -150,6 +496,7 @@ class TestGenerateTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -180,6 +527,7 @@ class TestGenerateTarball:
             assert "from openhands.sdk import" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
@@ -242,7 +590,7 @@ class TestReplacePromptInTarball:
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
-        # Arrange — a plugin preset tarball carries main.py, setup.sh, prompt.txt,
+        # Arrange — a plugin preset tarball carries generated code, prompt,
         # plugins_config.json and repos_config.json; all but the prompt must survive.
         original = _generate_plugin_tarball(
             [PluginSource(source="github:owner/repo")],
@@ -271,7 +619,13 @@ class TestReplacePromptInTarball:
         new_files, new_setup_mode = _read(updated)
 
         assert new_files["prompt.txt"].decode() == "New prompt"
-        for name in ("main.py", "setup.sh", "plugins_config.json", "repos_config.json"):
+        for name in (
+            "main.py",
+            "finish_tool_hook.py",
+            "setup.sh",
+            "plugins_config.json",
+            "repos_config.json",
+        ):
             assert new_files[name] == old_files[name]
         assert new_setup_mode & 0o100  # setup.sh stays executable
 
@@ -470,6 +824,7 @@ class TestCreateAutomationFromPrompt:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
             assert "automation_model.py" not in tar.getnames()
@@ -478,6 +833,192 @@ class TestCreateAutomationFromPrompt:
             prompt_file = tar.extractfile("prompt.txt")
             assert prompt_file is not None
             assert prompt_file.read().decode() == test_prompt
+
+    async def test_create_from_prompt_rejects_draft_state(self, async_client):
+        """Prompt preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Prompt Automation",
+            "prompt": "Write a short greeting.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_prompt_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from a prompt."""
+        payload = {
+            "name": "Member Prompt Automation",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
+    async def test_create_from_prompt_stores_preset_metadata(self, async_client):
+        """Prompt preset records preset metadata without repos when none given."""
+        test_prompt = "Summarize open PRs"
+        payload = {
+            "name": "Metadata Test",
+            "prompt": test_prompt,
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": test_prompt,
+        }
+
+    async def test_create_from_prompt_stores_repos_in_preset_metadata(
+        self, async_client
+    ):
+        """Prompt preset records requested repos in preset metadata."""
+        payload = {
+            "name": "Metadata Repos Test",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [
+                {"url": "owner/repo1", "ref": "main", "provider": "github"},
+                {"url": "owner/repo2", "provider": "github"},
+            ],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Summarize open PRs",
+            "repos": [
+                {"url": "owner/repo1", "ref": "main", "provider": "github"},
+                {"url": "owner/repo2", "provider": "github"},
+            ],
+        }
+
+    async def test_create_from_prompt_stores_template_provenance(self, async_client):
+        """Template provenance is stored verbatim and returned to the client."""
+        payload = {
+            "name": "Provenance Test",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {
+                "id": "github-pr-reviewer",
+                "version": "1.0.0",
+                "config": {"reviewTone": "thorough"},
+            },
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"]["template"] == {
+            "id": "github-pr-reviewer",
+            "version": "1.0.0",
+            "config": {"reviewTone": "thorough"},
+        }
+
+    async def test_create_from_prompt_honors_explicit_enabled_state(self, async_client):
+        """An automation can be created disabled instead of PATCHed afterwards."""
+        payload = {
+            "name": "Starts Disabled",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "enabled": False,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["enabled"] is False
+
+    async def test_create_from_prompt_with_known_template_returns_existing(
+        self, async_client
+    ):
+        """Enabling an already-enabled template returns the first automation, 200."""
+        payload = {
+            "name": "Resolver",
+            "prompt": "Respond to mentions",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "openhands-resolver", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+        assert first.status_code == 201
+
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
+        listing = await async_client.get("/api/automation/v1")
+        assert listing.json()["total"] == 1
+
+    async def test_create_from_prompt_rejects_oversized_template_config(
+        self, async_client
+    ):
+        """A template config over the serialized-size cap is a validation error."""
+        payload = {
+            "name": "Oversized Config",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {
+                "id": "big-template",
+                "version": "1.0.0",
+                "config": {"blob": "x" * 20_000},
+            },
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+
+    async def test_deleted_template_automation_does_not_block_reenabling(
+        self, async_client
+    ):
+        """After deleting a template automation, the template can be enabled again."""
+        payload = {
+            "name": "Recreate Me",
+            "prompt": "Summarize open PRs",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "pr-reviewer", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+        deleted = await async_client.delete(f"/api/automation/v1/{first.json()['id']}")
+        assert deleted.status_code == 204
+
+        second = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
 
     async def test_create_from_prompt_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
@@ -640,6 +1181,20 @@ class TestCreateAutomationFromPrompt:
 
         assert response.status_code == 422
 
+    async def test_create_from_prompt_impossible_cron(self, async_client):
+        """Cron schedules that can never fire return 422."""
+        payload = {
+            "name": "Test",
+            "prompt": "Do something",
+            "trigger": {"type": "cron", "schedule": "0 0 31 2 *"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
+
     async def test_create_from_prompt_missing_trigger(self, async_client):
         """Missing trigger returns 422."""
         payload = {
@@ -671,6 +1226,38 @@ class TestCreateAutomationFromPrompt:
         assert response.status_code == 201
         data = response.json()
         assert data["timeout"] == 120
+
+    async def test_create_from_prompt_without_timeout_defaults(
+        self, async_client, mock_file_store
+    ):
+        """Prompt preset stores the configured default timeout when omitted."""
+        payload = {
+            "name": "Default Timeout Test",
+            "prompt": "Short task",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["timeout"] == 600
+
+    async def test_create_from_prompt_timeout_exceeds_max_rejected(self, async_client):
+        """Prompt preset rejects timeouts over 30 minutes."""
+        payload = {
+            "name": "Timeout Test",
+            "prompt": "Long running task",
+            "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+            "timeout": 1801,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=payload
+        )
+
+        assert response.status_code == 422
 
     async def test_create_from_prompt_name_max_length(self, async_client):
         """Name exceeding max length returns 422."""
@@ -803,6 +1390,7 @@ class TestGeneratePluginTarball:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -855,10 +1443,12 @@ class TestGeneratePluginTarball:
             assert "from openhands.sdk.plugin import PluginSource" in main_content
             assert "Conversation" in main_content
             assert "OpenHandsCloudWorkspace" in main_content
+            assert "keep_alive=True" in main_content
             assert "RemoteWorkspace" in main_content
             assert "workspace.get_llm(profile_name=model_profile)" in main_content
             assert "falling back to active/default profile" in main_content
             assert "workspace.get_secrets()" in main_content
+            assert "workspace.get_mcp_config()" in main_content
             assert "workspace.clone_repos" in main_content
             assert "workspace.load_skills_from_agent_server" in main_content
             assert "plugins_config.json" in main_content
@@ -1252,6 +1842,7 @@ class TestExperimentTarball:
             assert "experiment_config.json" in names
             assert "plugins_config.json" not in names
             assert "main.py" in names
+            assert "finish_tool_hook.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 
@@ -1390,6 +1981,7 @@ class TestCreateAutomationFromPlugin:
         assert tarball_bytes is not None
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
             assert "main.py" in tar.getnames()
+            assert "finish_tool_hook.py" in tar.getnames()
             assert "plugins_config.json" in tar.getnames()
             assert "prompt.txt" in tar.getnames()
             assert "setup.sh" in tar.getnames()
@@ -1402,6 +1994,117 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/code-review-plugin"
             assert config[0]["ref"] == "v1.0.0"
             assert config[1]["source"] == "github:owner/security-plugin"
+
+    async def test_create_from_plugin_rejects_draft_state(self, async_client):
+        """Plugin preset creation cannot create draft test artifacts directly."""
+        payload = {
+            "name": "Draft Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review the code.",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "state": "DRAFT",
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
+        assert "/v1/drafts" in str(response.json()["detail"])
+
+    async def test_create_from_plugin_as_member_succeeds(self, readonly_client):
+        """A member can create their own automation from plugins."""
+        payload = {
+            "name": "Member Plugin Automation",
+            "plugins": [{"source": "github:owner/code-review-plugin"}],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        }
+
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+
+    async def test_create_from_plugin_stores_preset_metadata(self, async_client):
+        """Plugin preset records plugins and repos in preset metadata."""
+        payload = {
+            "name": "Metadata Test",
+            "plugins": [
+                {"source": "github:owner/code-review-plugin", "ref": "v1.0.0"},
+                {"source": "github:owner/security-plugin"},
+            ],
+            "prompt": "Review all Python files for security issues",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "repos": [{"url": "owner/repo", "ref": "main", "provider": "github"}],
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"] == {
+            "preset_type": "plugin",
+            "prompt": "Review all Python files for security issues",
+            "plugins": [
+                {"source": "github:owner/code-review-plugin", "ref": "v1.0.0"},
+                {"source": "github:owner/security-plugin"},
+            ],
+            "repos": [{"url": "owner/repo", "ref": "main", "provider": "github"}],
+        }
+
+    async def test_create_from_plugin_stores_template_provenance(self, async_client):
+        """Plugin presets honor template provenance and explicit enabled state."""
+        payload = {
+            "name": "Plugin Provenance",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run the plugin",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "enabled": False,
+            "template": {"id": "plugin-template", "version": "2.0.0"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["preset_metadata"]["template"] == {
+            "id": "plugin-template",
+            "version": "2.0.0",
+        }
+        assert data["enabled"] is False
+
+    async def test_create_from_plugin_dedupes_across_preset_kinds(self, async_client):
+        """A template automation is returned unchanged from either endpoint."""
+        prompt_payload = {
+            "name": "Shared Template",
+            "prompt": "Respond to mentions",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "shared-template", "version": "1.0.0"},
+        }
+        first = await async_client.post(
+            "/api/automation/v1/preset/prompt", json=prompt_payload
+        )
+        assert first.status_code == 201
+
+        plugin_payload = {
+            "name": "Shared Template Again",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run the plugin",
+            "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+            "template": {"id": "shared-template", "version": "1.0.0"},
+        }
+        second = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=plugin_payload
+        )
+
+        assert second.status_code == 200
+        assert second.json()["id"] == first.json()["id"]
 
     async def test_create_from_plugin_defaults_to_active_model_profile(
         self, async_client, mock_authenticated_user
@@ -1494,6 +2197,40 @@ class TestCreateAutomationFromPlugin:
         assert automation.timeout == 300
         assert automation.user_id == TEST_USER_ID
         assert automation.org_id == TEST_ORG_ID
+
+    async def test_create_from_plugin_without_timeout_defaults(
+        self, async_client, mock_file_store
+    ):
+        """Plugin preset stores the configured default timeout when omitted."""
+        payload = {
+            "name": "Default Plugin Timeout Test",
+            "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            "prompt": "Run plugin tasks",
+            "trigger": {"type": "cron", "schedule": "30 10 * * 5"},
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 201
+        assert response.json()["timeout"] == 600
+
+    async def test_create_from_plugin_timeout_exceeds_max_rejected(self, async_client):
+        """Plugin preset rejects timeouts over 30 minutes."""
+        payload = {
+            "name": "Plugin Timeout Test",
+            "plugins": [{"source": "github:owner/plugin"}],
+            "prompt": "Run plugin tasks",
+            "trigger": {"type": "cron", "schedule": "30 10 * * 5"},
+            "timeout": 1801,
+        }
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin", json=payload
+        )
+
+        assert response.status_code == 422
 
     async def test_create_from_plugin_missing_plugins(self, async_client):
         """Missing plugins returns 422."""

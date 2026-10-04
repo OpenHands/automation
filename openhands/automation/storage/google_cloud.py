@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 from google.cloud import storage
 from google.cloud.exceptions import NotFound
 
-from openhands.automation.storage.file_store import BUCKET_PREFIX, FileStore
+from openhands.automation.storage.file_store import (
+    BUCKET_PREFIX,
+    FileStore,
+    ObjectNotFoundError,
+)
 
 
 if TYPE_CHECKING:
@@ -92,14 +96,14 @@ class GoogleCloudFileStore(FileStore):
             The file contents as bytes.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            ObjectNotFoundError: If the file does not exist.
         """
         full_path = self._prefixed_path(path)
         blob = self.bucket.blob(full_path)
         try:
             return blob.download_as_bytes()
         except NotFound:
-            raise FileNotFoundError(f"File not found: {full_path}")
+            raise ObjectNotFoundError(f"File not found: {full_path}")
 
     def list(self, path: str) -> list[str]:
         """
@@ -127,14 +131,14 @@ class GoogleCloudFileStore(FileStore):
                   with "automation/").
 
         Raises:
-            FileNotFoundError: If the file doesn't exist.
+            ObjectNotFoundError: If the file doesn't exist.
         """
         full_path = self._prefixed_path(path)
         blob = self.bucket.blob(full_path)
         try:
             blob.delete()
         except NotFound:
-            raise FileNotFoundError(f"File not found: {full_path}")
+            raise ObjectNotFoundError(f"File not found: {full_path}")
 
     async def write_stream(
         self,

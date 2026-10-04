@@ -5,11 +5,13 @@ For true integration testing with GCS, see test_storage.py module docstring.
 """
 
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openhands.automation.app import app
 from openhands.automation.models import TarballUpload, UploadStatus
+from openhands.automation.storage import get_file_store
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 from openhands.automation.uploads import (
     MAX_UPLOAD_SIZE,
@@ -190,3 +192,26 @@ class TestMaxUploadSize:
     def test_max_upload_size_is_1mb(self):
         """Maximum upload size is 1MB."""
         assert MAX_UPLOAD_SIZE == 1 * 1024 * 1024
+
+
+class TestCreateUpload:
+    """Tests for POST /v1/uploads endpoint."""
+
+    async def test_create_upload_as_member_succeeds(self, readonly_client):
+        """A member can upload a tarball for their own automation."""
+        # Arrange
+        file_store = MagicMock()
+        file_store.write_stream = AsyncMock(return_value=4)
+        app.dependency_overrides[get_file_store] = lambda: file_store
+
+        # Act
+        response = await readonly_client.post(
+            "/api/automation/v1/uploads",
+            params={"name": "member-upload"},
+            content=b"data",
+            headers={"Content-Type": "application/gzip"},
+        )
+
+        # Assert
+        assert response.status_code == 201
+        assert response.json()["status"] == "COMPLETED"

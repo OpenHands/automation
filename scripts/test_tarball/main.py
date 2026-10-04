@@ -57,6 +57,7 @@ with OpenHandsCloudWorkspace(
     local_agent_server_mode=True,
     cloud_api_url=api_url,
     cloud_api_key=api_key,
+    keep_alive=True,
 ) as workspace:
     # get_llm() — fetches LLM config from the user's SaaS account
     print("\n=== GET_LLM ===")

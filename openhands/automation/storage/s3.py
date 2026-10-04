@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any
 import boto3
 import botocore.exceptions
 
-from openhands.automation.storage.file_store import BUCKET_PREFIX, FileStore
+from openhands.automation.storage.file_store import (
+    BUCKET_PREFIX,
+    FileStore,
+    ObjectNotFoundError,
+)
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
@@ -168,6 +172,19 @@ class S3FileStore(FileStore):
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "write", full_path)
 
+        logger.info(
+            "S3 write ok: bucket=%s, path=%s, size_bytes=%d",
+            self.bucket_name,
+            full_path,
+            len(as_bytes),
+            extra={
+                "s3_operation": "write",
+                "bucket": self.bucket_name,
+                "path": full_path,
+                "size_bytes": len(as_bytes),
+            },
+        )
+
     def read(self, path: str) -> bytes:
         """
         Read file contents from S3.
@@ -179,7 +196,8 @@ class S3FileStore(FileStore):
             The file contents as bytes.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            ObjectNotFoundError: If the file does not exist.
+            FileNotFoundError: For other S3 errors.
         """
         full_path = self._prefixed_path(path)
         try:
@@ -223,7 +241,8 @@ class S3FileStore(FileStore):
                   with "automation/").
 
         Raises:
-            FileNotFoundError: If the file doesn't exist or access is denied.
+            ObjectNotFoundError: If the file doesn't exist.
+            FileNotFoundError: For other S3 errors, including access denied.
         """
         full_path = self._prefixed_path(path)
         try:
@@ -232,6 +251,17 @@ class S3FileStore(FileStore):
             self.client.delete_object(Bucket=self.bucket_name, Key=full_path)
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "delete", full_path)
+
+        logger.info(
+            "S3 delete ok: bucket=%s, path=%s",
+            self.bucket_name,
+            full_path,
+            extra={
+                "s3_operation": "delete",
+                "bucket": self.bucket_name,
+                "path": full_path,
+            },
+        )
 
     def _handle_client_error(
         self, e: botocore.exceptions.ClientError, operation: str, path: str
@@ -247,7 +277,8 @@ class S3FileStore(FileStore):
             path: The S3 key/path involved.
 
         Raises:
-            FileNotFoundError: For not-found and access errors (to match FileStore API).
+            ObjectNotFoundError: If the key genuinely does not exist (404/NoSuchKey).
+            FileNotFoundError: For all other errors (to match FileStore API).
         """
         error_code = e.response.get("Error", {}).get("Code")
         error_msg = e.response.get("Error", {}).get("Message", "")
@@ -265,7 +296,7 @@ class S3FileStore(FileStore):
                 f"Bucket '{self.bucket_name}' does not exist"
             ) from e
         elif error_code in ("404", "NoSuchKey"):
-            raise FileNotFoundError(f"File not found: {path}") from e
+            raise ObjectNotFoundError(f"File not found: {path}") from e
         elif error_code == "AccessDenied":
             raise FileNotFoundError(
                 f"Access denied to '{self.bucket_name}/{path}'"
@@ -336,5 +367,18 @@ class S3FileStore(FileStore):
             )
         except botocore.exceptions.ClientError as e:
             self._handle_client_error(e, "write_stream", full_path)
+
+        logger.info(
+            "S3 write_stream ok: bucket=%s, path=%s, size_bytes=%d",
+            self.bucket_name,
+            full_path,
+            total_size,
+            extra={
+                "s3_operation": "write_stream",
+                "bucket": self.bucket_name,
+                "path": full_path,
+                "size_bytes": total_size,
+            },
+        )
 
         return total_size

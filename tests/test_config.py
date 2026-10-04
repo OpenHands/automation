@@ -8,6 +8,7 @@ from openhands.automation.config import (
     HttpSettings,
     LogSettings,
     SandboxSettings,
+    ServiceSettings,
     Settings,
     clear_config_cache,
     get_config,
@@ -46,60 +47,29 @@ class TestLogSettings:
         assert settings.effective_automation_log_level == "DEBUG"
 
 
-class TestDeprecatedConstants:
-    """Tests for backward-compatible deprecated constants in constants.py."""
+class TestAutomationTimeouts:
+    """Tests for automation timeout policy helpers."""
 
-    def test_deprecated_constant_emits_warning(self):
-        """Accessing deprecated constants emits DeprecationWarning."""
-        # Reset the warned set to ensure we get a warning
-        from openhands.automation import constants
+    def test_resolve_caps_stored_timeout_to_configured_max(self):
+        """Stored timeouts above the current max are capped at runtime."""
+        from openhands.automation.utils.timeout import (
+            resolve_automation_timeout_seconds,
+        )
 
-        constants._warned_constants.clear()
+        max_duration = get_config().sandbox.max_run_duration
+        assert resolve_automation_timeout_seconds(max_duration + 600) == max_duration
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = constants.MAX_RUN_DURATION_SECONDS  # noqa: F841
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert "deprecated" in str(w[0].message).lower()
 
-    def test_deprecated_constant_warns_once(self):
-        """Repeated access to same constant only warns once."""
-        from openhands.automation import constants
+class TestServiceSettings:
+    """Tests for service-level configuration."""
 
-        constants._warned_constants.clear()
+    def test_failure_disable_threshold_uses_documented_env_var(self, monkeypatch):
+        monkeypatch.setenv("AUTOMATION_FAILURE_DISABLE_THRESHOLD", "0")
+        monkeypatch.setenv("AUTOMATION_AUTOMATION_FAILURE_DISABLE_THRESHOLD", "7")
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = constants.SANDBOX_POLL_INTERVAL
-            _ = constants.SANDBOX_POLL_INTERVAL
-            _ = constants.SANDBOX_POLL_INTERVAL
-            # Should only have 1 warning despite 3 accesses
-            deprecation_warnings = [
-                x for x in w if issubclass(x.category, DeprecationWarning)
-            ]
-            assert len(deprecation_warnings) == 1
+        settings = ServiceSettings()
 
-    def test_deprecated_constant_returns_config_value(self):
-        """Deprecated constants return values from config."""
-        from openhands.automation import constants
-        from openhands.automation.config import get_config
-
-        constants._warned_constants.clear()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            assert (
-                constants.MAX_RUN_DURATION_SECONDS
-                == get_config().sandbox.max_run_duration
-            )
-
-    def test_nonexistent_constant_raises_attribute_error(self):
-        """Accessing nonexistent constant raises AttributeError."""
-        from openhands.automation import constants
-
-        with pytest.raises(AttributeError, match="has no attribute"):
-            _ = constants.DOES_NOT_EXIST
+        assert settings.failure_disable_threshold == 0
 
 
 class TestBasePath:
@@ -182,7 +152,8 @@ class TestSandboxSettings:
     def test_default_values(self):
         """Default values are reasonable."""
         settings = SandboxSettings()
-        assert settings.max_run_duration == 600
+        assert settings.default_run_duration == 600
+        assert settings.max_run_duration == 1800
         assert settings.sandbox_poll_interval == 5
         assert settings.sandbox_ready_timeout == 300
         assert settings.rate_limit_min_wait == 10
@@ -192,10 +163,12 @@ class TestSandboxSettings:
     def test_custom_values(self):
         """Custom values are accepted."""
         settings = SandboxSettings(
-            max_run_duration=1200,
+            default_run_duration=1200,
+            max_run_duration=2400,
             sandbox_poll_interval=10,
         )
-        assert settings.max_run_duration == 1200
+        assert settings.default_run_duration == 1200
+        assert settings.max_run_duration == 2400
         assert settings.sandbox_poll_interval == 10
 
 
@@ -217,8 +190,8 @@ class TestAppConfig:
 
     def test_config_sections_accessible(self, monkeypatch):
         """All config sections are accessible."""
-        # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
-        monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
+        # Storage requires LOCAL_STORAGE_PATH when FILE_STORE=local (default)
+        monkeypatch.setenv("LOCAL_STORAGE_PATH", "/tmp/test-storage")
         clear_config_cache()
 
         config = get_config()
@@ -348,6 +321,26 @@ class TestLocalModeSettings:
         assert settings.workspace_base == "/my/workspace"
         assert settings.db_url == "sqlite+aiosqlite:////data/automations.db"
 
+    def test_workspace_retention_default(self):
+        settings = Settings()
+
+        assert settings.workspace_retention_seconds == 7 * 24 * 60 * 60
+
+    def test_zero_workspace_retention_is_disabled_value(self):
+        settings = Settings(workspace_retention_seconds=0)
+
+        assert settings.workspace_retention_seconds == 0
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("workspace_retention_seconds", -1),
+        ],
+    )
+    def test_workspace_retention_rejects_invalid_limits(self, field, value):
+        with pytest.raises(ValueError):
+            Settings(**{field: value})
+
     def test_local_mode_from_env(self, monkeypatch):
         """Local mode settings are loaded from environment variables."""
         monkeypatch.setenv("AUTOMATION_AGENT_SERVER_URL", "http://localhost:3000")
@@ -388,8 +381,8 @@ class TestDeprecatedFunctionWarnings:
         """get_storage_settings() emits DeprecationWarning."""
         from openhands.automation import config
 
-        # Storage requires GCS_BUCKET_NAME when FILE_STORE=gcs (default)
-        monkeypatch.setenv("GCS_BUCKET_NAME", "test-bucket")
+        # Storage requires LOCAL_STORAGE_PATH when FILE_STORE=local (default)
+        monkeypatch.setenv("LOCAL_STORAGE_PATH", "/tmp/test-storage")
         clear_config_cache()
         config._warned_functions.clear()
 

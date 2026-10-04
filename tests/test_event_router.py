@@ -7,10 +7,11 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
-from openhands.automation.models import Automation
+from openhands.automation.models import Automation, AutomationRun, IntegrationEvent
 
 
 @pytest.fixture
@@ -136,6 +137,62 @@ def sign_payload(payload: dict, secret: str) -> tuple[str, bytes]:
     body = json.dumps(payload).encode()
     sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return f"sha256={sig}", body
+
+
+def sign_text(text: str, secret: str) -> str:
+    """Generate HMAC signature for a UTF-8 text payload."""
+    sig = hmac.new(secret.encode(), text.encode(), hashlib.sha256).hexdigest()
+    return f"sha256={sig}"
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_returns_supported_event_families(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": sign_text("github", "test-secret")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == "github"
+    assert data["event_types"] == [
+        "pull_request",
+        "pull_request_review",
+        "issues",
+        "issue_comment",
+        "push",
+        "release",
+    ]
+    assert data["event_detection_rules"][0] == {
+        "event_type": "pull_request_review",
+        "jmespath": "contains(keys(@), 'pull_request') && contains(keys(@), 'review')",
+    }
+    assert {rule["event_type"] for rule in data["event_detection_rules"]} >= {
+        "pull_request",
+        "issue_comment",
+        "push",
+    }
+
+
+@pytest.mark.asyncio
+async def test_requested_github_event_types_rejects_invalid_signature(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    response = await async_client.get(
+        "/api/automation/v1/events/github/requested-types",
+        headers={"X-Hub-Signature-256": "sha256=invalid"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid signature"
 
 
 @pytest.mark.asyncio
@@ -358,12 +415,16 @@ async def test_receive_github_event_missing_signature(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_undetectable_payload(
+async def test_receive_github_event_undetectable_payload_returns_200(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that undetectable payload structure returns 400."""
+    """Payload whose structure doesn't match any known GitHub event is treated
+    as an unrecognized event type. We acknowledge the webhook with matched=0
+    rather than failing with 400, since the payload is structurally valid - the
+    service just doesn't have a detection rule for it. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     # Payload with payload that doesn't match any known GitHub event structure
@@ -379,8 +440,11 @@ async def test_receive_github_event_undetectable_payload(
         },
     )
 
-    assert response.status_code == 400
-    assert "Cannot detect github event type" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
@@ -410,18 +474,22 @@ async def test_receive_github_event_missing_payload(
 
 
 @pytest.mark.asyncio
-async def test_receive_github_event_malformed_payload(
+async def test_receive_github_event_unrecognised_payload_shape_returns_200(
     async_client: AsyncClient,
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that malformed payload returns 400."""
+    """A claim of a known event_type with a payload that doesn't match the
+    service's detection rules is treated as an unrecognized event type and
+    acknowledged with matched=0 rather than failing with 400. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
-    # Payload with event_type but invalid payload for that type
+    # event_type says "push" but the inner payload doesn't have ref/commits,
+    # so the service can't recognise the event type
     payload = {
         "event_type": "push",
-        "payload": {"invalid": "data"},  # Missing required fields
+        "payload": {"invalid": "data"},
     }
     signature, body = sign_payload(payload, "test-secret")
 
@@ -434,8 +502,11 @@ async def test_receive_github_event_malformed_payload(
         },
     )
 
-    assert response.status_code == 400
-    assert "Failed to parse event" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
@@ -444,12 +515,21 @@ async def test_receive_github_event_unknown_event_type(
     org_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Test that unknown GitHub event type returns 400."""
+    """Unknown GitHub event types are acknowledged with matched=0. The webhook
+    is well-formed and authenticated; the service simply doesn't have a
+    detection rule for the event type. See APP-2668.
+    """
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
 
     payload = {
-        "event_type": "unknown_github_event",
-        "payload": {"data": "test"},
+        "event_type": "workflow_job",
+        "payload": {
+            "action": "in_progress",
+            "workflow_job": {"id": 1},
+            "repository": {"id": 1, "name": "r", "full_name": "o/r", "private": False},
+            "sender": {"id": 1, "login": "u"},
+            "installation": {"id": 1},
+        },
     }
     signature, body = sign_payload(payload, "test-secret")
 
@@ -462,8 +542,11 @@ async def test_receive_github_event_unknown_event_type(
         },
     )
 
-    assert response.status_code == 400
-    assert "Failed to parse event" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["received"] is True
+    assert body["matched"] == 0
+    assert body["runs_created"] == []
 
 
 @pytest.mark.asyncio
@@ -536,3 +619,83 @@ async def test_receive_unknown_source(
 
     assert response.status_code == 404
     assert "Unknown webhook source" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_redelivered_github_event_creates_runs_once(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    github_push_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """A repeated X-GitHub-Delivery is acknowledged 2XX but not routed again."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="Test Push Automation",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "github", "on": "push"},
+        )
+    )
+    await async_session.commit()
+
+    signature, body = sign_payload(github_push_payload, "test-secret")
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+        "Content-Type": "application/json",
+    }
+    url = f"/api/automation/v1/events/{org_id}/github"
+
+    first = await async_client.post(url, content=body, headers=headers)
+    second = await async_client.post(url, content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert first.json()["matched"] == 1
+    assert len(first.json()["runs_created"]) == 1
+
+    assert second.status_code == 200
+    assert second.json()["matched"] == 0
+    assert second.json()["runs_created"] == []
+
+    runs = (await async_session.execute(select(AutomationRun))).scalars().all()
+    assert len(runs) == 1
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].provider_event_id == "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+
+
+@pytest.mark.asyncio
+async def test_github_event_without_a_delivery_header_is_still_recorded(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    github_push_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """No delivery id: recorded with a NULL key, and never deduplicated."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    signature, body = sign_payload(github_push_payload, "test-secret")
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "Content-Type": "application/json",
+    }
+    url = f"/api/automation/v1/events/{org_id}/github"
+
+    first = await async_client.post(url, content=body, headers=headers)
+    second = await async_client.post(url, content=body, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert len(events) == 2
+    assert {event.provider_event_id for event in events} == {None}
+    assert {event.matched_count for event in events} == {0}

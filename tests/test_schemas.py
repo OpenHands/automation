@@ -9,14 +9,23 @@ underlying ensure_utc helper) fix this at the serialisation layer.
 
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, ClassVar
+
+import pytest
+from pydantic import ValidationError
 
 from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunResponse,
+    AutomationState,
+    CreateAutomationRequest,
+    CronTrigger,
+    RunCompleteRequest,
     RunStatus,
+    UpdateAutomationRequest,
 )
 from openhands.automation.utils.time import ensure_utc
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
 
 _NAIVE = datetime(2026, 3, 23, 9, 0, 0)  # no tzinfo — simulates SQLite output
@@ -44,6 +53,102 @@ class TestEnsureUtc:
         assert result is _OTHER_TZ
 
 
+class TestCronTriggerValidation:
+    def test_accepts_valid_cron_and_timezone(self):
+        trigger = CronTrigger(schedule="0 9 * * *", timezone="America/New_York")
+
+        assert trigger.schedule == "0 9 * * *"
+        assert trigger.timezone == "America/New_York"
+
+    def test_rejects_impossible_cron_schedule(self):
+        with pytest.raises(
+            ValidationError, match="cannot produce any future fire times"
+        ):
+            CronTrigger(schedule="0 0 31 2 *")
+
+    def test_rejects_invalid_timezone(self):
+        with pytest.raises(ValidationError, match="Invalid timezone"):
+            CronTrigger(schedule="0 9 * * *", timezone="Not/A_Timezone")
+
+
+class TestAutomationStateEnabledValidation:
+    _CREATE_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "name": "State validation",
+        "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
+        "tarball_path": "https://example.com/automation.tar.gz",
+        "entrypoint": "python main.py",
+    }
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_accepts_string_false_for_inactive_state(self, request_cls, base_payload):
+        request = request_cls.model_validate(
+            {**base_payload, "state": "INACTIVE", "enabled": "false"}
+        )
+
+        assert request.state == AutomationState.INACTIVE
+        assert request.enabled is False
+
+    @pytest.mark.parametrize(
+        ("request_cls", "base_payload"),
+        [
+            pytest.param(CreateAutomationRequest, _CREATE_PAYLOAD, id="create"),
+            pytest.param(UpdateAutomationRequest, {}, id="update"),
+        ],
+    )
+    def test_rejects_string_false_for_active_state(self, request_cls, base_payload):
+        with pytest.raises(ValidationError, match="enabled must be true"):
+            request_cls.model_validate(
+                {**base_payload, "state": "ACTIVE", "enabled": "false"}
+            )
+
+
+class TestRunCompleteRequest:
+    def test_accepts_legacy_string_error(self):
+        request = RunCompleteRequest(status="FAILED", error="script crashed")
+
+        assert request.error == "script crashed"
+
+    def test_parses_structured_sdk_error(self):
+        error = {
+            "source": "environment",
+            "code": "RuntimeError",
+            "detail": "script crashed",
+            "classification": {"kind": "unknown", "retryable": False},
+        }
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+        assert isinstance(request.error, ConversationErrorEvent)
+
+        assert request.error.code == "RuntimeError"
+        assert request.error.detail == "script crashed"
+        assert request.error.classification is not None
+
+        assert request.error.classification.kind.value == "unknown"
+
+    def test_preserves_legacy_structured_error(self):
+        error = {"detail": "bad config"}
+
+        request = RunCompleteRequest(status="FAILED", error=error)
+
+        assert request.error == error
+
+    def test_accepts_blocking_factor_metadata(self):
+        blocking_factor = {"kind": "config", "reason": "Missing MCP token"}
+
+        request = RunCompleteRequest(
+            status="COMPLETED",
+            blocking_factor=blocking_factor,
+        )
+
+        assert request.blocking_factor == blocking_factor
+
+
 class TestAutomationRunResponseUtcSerialisation:
     """AutomationRunResponse must include a UTC offset in all datetime fields."""
 
@@ -55,9 +160,9 @@ class TestAutomationRunResponseUtcSerialisation:
             error_detail=None,
             conversation_id=None,
             timeout_at=None,
-            keep_alive=False,
             sandbox_id=None,
             bash_command_id=None,
+            run_metadata=None,
             created_at=_NAIVE,
             started_at=_NAIVE,
             completed_at=_NAIVE,
@@ -74,6 +179,22 @@ class TestAutomationRunResponseUtcSerialisation:
         run = self._make_run()
         data = run.model_dump(mode="json")
         assert data["started_at"].endswith("+00:00") or data["started_at"].endswith("Z")
+
+    def test_status_detail_serialises_as_json_object(self):
+        run = self._make_run(
+            status_detail={
+                "phase": "verification",
+                "kind": "rate_limited",
+                "transient": True,
+            }
+        )
+        data = run.model_dump(mode="json")
+
+        assert data["status_detail"] == {
+            "phase": "verification",
+            "kind": "rate_limited",
+            "transient": True,
+        }
 
     def test_naive_completed_at_serialises_with_utc_offset(self):
         run = self._make_run()
@@ -111,6 +232,7 @@ class TestAutomationResponseUtcSerialisation:
             setup_script_path=None,
             entrypoint="python main.py",
             timeout=None,
+            keep_alive=True,
             enabled=True,
             last_triggered_at=_NAIVE,
             created_at=_NAIVE,
@@ -123,6 +245,22 @@ class TestAutomationResponseUtcSerialisation:
         automation = self._make_automation()
         data = automation.model_dump(mode="json")
         assert data["created_at"].endswith("+00:00") or data["created_at"].endswith("Z")
+
+    def test_disabled_metadata_serialises_for_api_consumers(self):
+        automation = self._make_automation(
+            enabled=False,
+            disabled_reason="auth: Invalid API key",
+            disabled_detail={"kind": "auth", "threshold": 3},
+            disabled_at=_NAIVE,
+        )
+        data = automation.model_dump(mode="json")
+
+        assert data["enabled"] is False
+        assert data["disabled_reason"] == "auth: Invalid API key"
+        assert data["disabled_detail"] == {"kind": "auth", "threshold": 3}
+        assert data["disabled_at"].endswith("+00:00") or data["disabled_at"].endswith(
+            "Z"
+        )
 
     def test_naive_last_triggered_at_serialises_with_utc_offset(self):
         automation = self._make_automation()

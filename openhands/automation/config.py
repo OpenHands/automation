@@ -43,12 +43,14 @@ different values, use monkeypatching or reload the affected modules.
 """
 
 import os
+import uuid
 import warnings
 from functools import cached_property, lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -100,12 +102,12 @@ class StorageSettings(BaseSettings):
     """File storage backend configuration.
 
     The automation service supports three storage backends:
-    - GCS (Google Cloud Storage) - default
+    - Local (local filesystem) - default, for self-hosted deployments
+    - GCS (Google Cloud Storage)
     - S3 (AWS S3 or S3-compatible like MinIO)
-    - Local (local filesystem for self-hosted deployments)
 
     Environment variables (no prefix, follows SDK conventions):
-        FILE_STORE: Backend type, "gcs", "s3", or "local" (default: "gcs")
+        FILE_STORE: Backend type, "local", "gcs", or "s3" (default: "local")
 
         # GCS settings
         GCS_BUCKET_NAME: GCS bucket name (required if FILE_STORE=gcs)
@@ -118,7 +120,7 @@ class StorageSettings(BaseSettings):
         AWS_S3_AUTO_CREATE_BUCKET: Auto-create bucket if missing (default: "false")
 
         # Local settings
-        LOCAL_STORAGE_PATH: Base directory for local storage (required if local)
+        LOCAL_STORAGE_PATH: Base directory for local storage
 
         # Size limits
         MAX_UPLOAD_SIZE: Max tarball upload size in bytes (default: 1MB)
@@ -129,7 +131,7 @@ class StorageSettings(BaseSettings):
         AWS_SECRET_ACCESS_KEY: AWS secret key
     """
 
-    file_store: Literal["gcs", "s3", "local"] = "gcs"
+    file_store: Literal["local", "gcs", "s3"] = "local"
 
     # GCS settings
     gcs_bucket_name: str | None = None
@@ -142,7 +144,7 @@ class StorageSettings(BaseSettings):
     aws_s3_auto_create_bucket: bool = False
 
     # Local settings
-    local_storage_path: str | None = None
+    local_storage_path: Path = Path("~/.openhands/automation/storage")
 
     # Size limits
     max_upload_size: int = 1 * 1024 * 1024  # 1 MB
@@ -154,12 +156,10 @@ class StorageSettings(BaseSettings):
     def validate_bucket_for_backend(self) -> "StorageSettings":
         """Ensure the appropriate bucket/path is configured for the selected backend."""
         if self.file_store == "gcs" and not self.gcs_bucket_name:
-            raise ValueError(
-                "GCS_BUCKET_NAME is required when FILE_STORE=gcs (or not set)"
-            )
+            raise ValueError("GCS_BUCKET_NAME is required when FILE_STORE=gcs")
         if self.file_store == "s3" and not self.aws_s3_bucket:
             raise ValueError("AWS_S3_BUCKET is required when FILE_STORE=s3")
-        if self.file_store == "local" and not self.local_storage_path:
+        if self.file_store == "local" and not str(self.local_storage_path):
             raise ValueError("LOCAL_STORAGE_PATH is required when FILE_STORE=local")
         return self
 
@@ -202,7 +202,13 @@ class SandboxSettings(BaseSettings):
     """Sandbox execution configuration.
 
     Environment variables (AUTOMATION_ prefix):
-        AUTOMATION_MAX_RUN_DURATION: Max run time in seconds (default: 600)
+        AUTOMATION_DEFAULT_RUN_DURATION: Default run time in seconds (default: 600)
+        AUTOMATION_MAX_RUN_DURATION: Max user-configurable run time in seconds
+            (default: 1800)
+        AUTOMATION_RUN_TIMEOUT_MARGIN: Slack added to watchdog deadlines in
+            seconds (default: 120)
+        AUTOMATION_RUN_TIMEOUT_HARD_GRACE: Extra grace before a still-running
+            verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
@@ -212,7 +218,16 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
     """
 
-    max_run_duration: int = 600  # 10 minutes
+    default_run_duration: int = 10 * 60  # 10 minutes
+    max_run_duration: int = 30 * 60  # 30 minutes
+    # Watchdog-deadline slack: covers the in-sandbox post-conversation tail
+    # (event settle + stats + close + callback POST) plus one watchdog scan
+    # of skew, so the bash service's own timeout always fires first.
+    run_timeout_margin: int = 120
+    # Bound on deferring "command still running" verification results past
+    # the theoretical worst case; only matters if the agent-server's own
+    # bash-timeout enforcement is broken.
+    run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
     external_download_timeout: int = 120
@@ -254,7 +269,10 @@ class KVSettings(BaseSettings):
     # with Retry-After so clients can back off and retry.
     kv_lock_timeout_ms: int = 5000
 
-    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    # Maximum size in bytes for a single KV value (plaintext JSON, before
+    # encryption). This is a per-value limit, not a total across the keys an
+    # automation owns: each key is stored in its own row, so many small values
+    # never add up to a failure.
     #
     # Performance guidance - PostgreSQL TOAST behavior:
     #
@@ -280,6 +298,187 @@ class KVSettings(BaseSettings):
     def enabled(self) -> bool:
         """Check if KV store is enabled (kv_secret is set)."""
         return bool(self.kv_secret)
+
+
+# ---------------------------------------------------------------------------
+# GitSyncSettings - Git sync configuration
+# ---------------------------------------------------------------------------
+
+
+def normalize_git_sync_path(path: str) -> str:
+    """Normalize a repo-relative sync path, rejecting anything that escapes it.
+
+    The path is joined onto the checkout directory, then `shutil.rmtree`'d per
+    automation on export and passed to `git add -- <path>` on push, so it must
+    stay inside the repo:
+
+    - `..` is rejected: the path is settable at runtime, so a traversing value
+      would point `sync_root` at an arbitrary host directory and delete any
+      subdirectory there matching an automation slug.
+    - Leading slashes are stripped, not rejected, so a mistyped "/automations"
+      stays repo-relative (`Path("/repo") / "/etc"` is `/etc` -- pathlib drops
+      the left side when the right is absolute).
+    - Trailing slashes are stripped because `_changed_slugs_since` matches an
+      `f"{sync_path}/"` prefix; "automations/" would match nothing and
+      silently mute every import.
+    - An empty result is rejected: `git add -A -- ""` is not a valid pathspec
+      and would wedge every cycle.
+    """
+    # Backslashes aren't separators on the platforms this runs on, but a
+    # Windows-style value pasted into the UI shouldn't smuggle a traversal
+    # segment past the "/"-based split below.
+    segments = [
+        segment
+        for segment in path.strip().replace("\\", "/").split("/")
+        if segment and segment != "."
+    ]
+    if any(segment == ".." for segment in segments):
+        raise ValueError(
+            f"git sync path {path!r} must stay inside the repository (no '..' segments)"
+        )
+    if not segments:
+        raise ValueError("git sync path must not be empty")
+    return "/".join(segments)
+
+
+class GitSyncSettings(BaseSettings):
+    """Git sync configuration for backing up/versioning automations in git.
+
+    When enabled, automations are serialized to files and pushed to a git repo,
+    and changes pushed there (e.g. via a PR) are pulled back. Sync is scoped
+    to an organization: each org syncs its own automations to its own repo,
+    configured from the Git Sync page and stored per org (see
+    `git_sync/config_override.py`). These env vars are the defaults that
+    per-org config is merged over. In local mode they configure the one local
+    org outright; in cloud mode the repo URL, token and encryption key are
+    ignored (a shared deployment must not sync every org into one repo) and
+    only the neutral defaults apply.
+
+    Configuring a repo is what turns sync on: there is no separate enable
+    flag, so nothing syncs until a repo URL is set here or from the UI.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_GIT_SYNC_REPO_URL: Git repo URL to sync to, e.g.
+            https://github.com/org/repo.git. Setting it enables sync; empty
+            (the default) leaves it off. Local mode only.
+        AUTOMATION_GIT_SYNC_BRANCH: Branch to sync (default: "main").
+        AUTOMATION_GIT_SYNC_PATH: Directory within the repo automations are
+            stored under, no leading/trailing slash (default: "automations").
+        AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
+            authentication against the repo. Passed per git-invocation via
+            `-c http.extraHeader`, never written to disk or the remote URL.
+        AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
+            (via the SDK's Fernet-based Cipher, same primitive as the KV
+            store) before they're written to the synced repo. Empty disables
+            encryption; existing plaintext files remain readable either way.
+        AUTOMATION_GIT_SYNC_AUTHOR_NAME: Commit author name (default:
+            "OpenHands Automation").
+        AUTOMATION_GIT_SYNC_AUTHOR_EMAIL: Commit author email (default:
+            "automation@openhands.dev").
+        AUTOMATION_GIT_SYNC_LOCAL_WORKDIR: Local working directory for the
+            clone. Defaults to "{workspace_base}/git-sync" when empty.
+        AUTOMATION_GIT_SYNC_GIT_TIMEOUT_SECONDS: Timeout for individual git
+            subprocess invocations (default: 60).
+        AUTOMATION_GIT_SYNC_SECRET: Key that wraps the per-org git token and
+            encryption key at rest (see `git_sync/secret_store.py`). Falls
+            back to AUTOMATION_KV_SECRET, then (local mode only) to a key
+            file under the workspace. Required in cloud mode, where replicas
+            share a database but not a disk.
+        AUTOMATION_GIT_SYNC_AUTH_FAILURE_BACKOFF_THRESHOLD: Consecutive auth
+            failures before the loop goes quiet (one WARNING instead of a
+            per-cycle traceback) for that org (default: 3; 0 keeps it loud).
+        AUTOMATION_GIT_SYNC_FAILURE_BACKOFF_CAP_SECONDS: Ceiling for the
+            exponential retry backoff after failures (default: 3600).
+    """
+
+    # The sync interval is deliberately not here: it is runtime-only, set from
+    # the UI and stored with the other overrides. See config_override.py.
+    #
+    # `git_sync_enabled` is the pause switch, not a feature flag: it defaults
+    # to on and only ever goes false through a runtime override, so a
+    # deployment enables sync by configuring a repo rather than by setting a
+    # second thing that has to agree with the first.
+    git_sync_enabled: bool = True
+    git_sync_repo_url: str = ""
+    git_sync_branch: str = "main"
+    git_sync_path: str = "automations"
+    git_sync_token: str = ""
+    git_sync_encryption_key: str = ""
+    git_sync_author_name: str = "OpenHands Automation"
+    git_sync_author_email: str = "automation@openhands.dev"
+    git_sync_local_workdir: str = ""
+    git_sync_git_timeout_seconds: float = 60.0
+    git_sync_secret: str = ""
+
+    # After this many consecutive auth failures, the loop stops logging a full
+    # traceback every cycle and logs one WARNING instead: a bad/expired token
+    # or a repo gone private/deleted won't fix itself on the next tick, so the
+    # per-cycle traceback is just noise. Mirrors the run-path
+    # `failure_disable_threshold` (utils/unhealthy.py). 0 keeps it always loud.
+    git_sync_auth_failure_backoff_threshold: int = 3
+    # Ceiling for the exponential backoff between retries after auth failures.
+    # The retry wait is `interval * 2**consecutive_auth_failures` capped here,
+    # but never shorter than the interval itself, so a permanently broken repo
+    # is still re-probed and self-heals the moment its token/repo is valid
+    # again. No hard disable, so nothing needs a manual re-enable.
+    git_sync_failure_backoff_cap_seconds: float = 3600.0
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether git sync is on: a repo is configured and it isn't paused.
+
+        Doesn't raise when misconfigured -- this section is constructed
+        eagerly regardless of deployment mode, so raising would crash every
+        deployment on a bad env var. app.py warns once it knows the mode.
+        """
+        return bool(self.git_sync_repo_url and self.git_sync_enabled)
+
+
+class SlackAppSettings(BaseModel):
+    """One Slack app this deployment holds a Socket Mode connection for.
+
+    `team_id` and `bot_user_id` are asserted against `auth.test` before the
+    socket opens, so a mis-pasted token fails loudly instead of silently
+    bridging the wrong workspace into this organization.
+    """
+
+    org_id: uuid.UUID
+    # App-level token (xapp-), which opens the socket.
+    app_token: str
+    # Bot token (xoxb-), used only to assert identity at startup.
+    bot_token: str
+    team_id: str
+    bot_user_id: str
+
+
+class StreamSettings(BaseSettings):
+    """Stream sources: long-lived inbound connections, supervised in-process.
+
+    Configuring an app is what turns this on: `enabled` needs a source too, so
+    a deployment that sets no `AUTOMATION_SLACK_APPS` starts nothing either
+    way. Still self-hosted only, for two independent reasons: Slack does not
+    allow Socket Mode apps in the public Marketplace, and connection-scoped
+    state does not fit a stateless autoscaled tier. Webhooks remain the cloud
+    path.
+
+    Environment variables (AUTOMATION_ prefix):
+        AUTOMATION_STREAMS_ENABLED: Kill switch (default: true). Set it false
+            to keep the supervisor down while the apps stay configured.
+        AUTOMATION_SLACK_APPS: JSON list of Slack apps to connect, each
+            {"org_id", "app_token", "bot_token", "team_id", "bot_user_id"}.
+    """
+
+    streams_enabled: bool = True
+    slack_apps: list[SlackAppSettings] = Field(default_factory=list)
+
+    model_config = {"env_prefix": "AUTOMATION_"}
+
+    @property
+    def enabled(self) -> bool:
+        """Whether to start the supervisor: a source is configured, not killed."""
+        return bool(self.streams_enabled and self.slack_apps)
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +528,23 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
+            auto-disabling an automation (default: 3, <=0 disables auto-disable)
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD: Consecutive failures
+            before auto-disabling. Unset (the default) turns the rule off;
+            setting a number turns it on and uses that number.
+        AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_WINDOW_HOURS: The rule only fires
+            if nothing has succeeded in this many hours, which is what makes it
+            ignore provider outages shorter than the window (default: 24)
+
+        # Workspace retention (local mode only)
+        AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
+            for terminal runs older than this (default: 604800 — 7 days).
+
+        # Sandbox cleanup (cloud mode only)
+        AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
+            its sandbox is deleted; it is paused meanwhile so the conversation
+            can be resumed (default: 0 — delete immediately).
 
         # API pagination
         AUTOMATION_API_DEFAULT_PAGE_SIZE: Default page size (default: 50)
@@ -339,12 +555,15 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_SERVER_PORT: Server port (default: 8000)
         AUTOMATION_BASE_URL: Public base URL (optional)
         AUTOMATION_CORS_ORIGINS: Comma-separated CORS origins (optional)
-        AUTOMATION_FRONTEND_DIR: Frontend static files directory (optional)
 
         # Auth
         AUTOMATION_SERVICE_KEY: Service key for SaaS API (required in cloud mode)
         AUTOMATION_WEBHOOK_SECRET: Webhook signature secret (optional)
         AUTOMATION_OPENHANDS_API_BASE_URL: OpenHands API URL (default: https://app.all-hands.dev)
+
+        # Product telemetry (optional)
+        AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
+        AUTOMATION_POSTHOG_HOST: PostHog capture host (default: https://us.i.posthog.com)
     """
 
     # Database (PostgreSQL - Cloud mode)
@@ -410,6 +629,35 @@ class ServiceSettings(BaseSettings):
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
 
+    # Auto-disable rules. `failure_disable_threshold` is the fast path for
+    # unambiguous config faults (bad key, revoked token) and needs no time
+    # guard. The two rules below catch automations that merely fail forever;
+    # their span/window guards are what keep a provider outage from pausing
+    # healthy automations en masse, so both must exceed any tolerable outage.
+    failure_disable_threshold: int = 3
+
+    # Setting a threshold at all is what turns the consecutive rule on; it is
+    # off by default. The window only applies once the rule is on, and must
+    # exceed any outage you would rather ride out than pause for.
+    consecutive_failure_disable_threshold: int | None = None
+    consecutive_failure_disable_window_hours: float = 24.0
+
+    # Workspace retention for local mode
+    # Set to 0 to disable workspace purging.
+    workspace_retention_seconds: int = Field(default=604800, ge=0)  # 7 days
+
+    # Cloud mode: how long after a run ends before its sandbox is deleted.
+    # 0 (the default) deletes at once. Above 0 the sandbox is paused instead
+    # and the watchdog deletes it once the delay has passed, so the run's
+    # conversation stays resumable in the UI meanwhile.
+    sandbox_cleanup_delay_seconds: int = Field(default=0, ge=0)
+
+    # How long an accepted event stays in `integration_events`. It bounds two
+    # things: the dedupe window (a redelivery older than this is indistinguishable
+    # from a new event) and the table, which otherwise grows with every delivery.
+    # Well past any provider's own retry horizon -- GitHub gives up after ~3 days.
+    integration_event_retention_days: int = 14
+
     # API pagination
     api_default_page_size: int = 50
     api_max_page_size: int = 100
@@ -435,13 +683,14 @@ class ServiceSettings(BaseSettings):
     # CORS origins (comma-separated list, defaults to openhands_api_base_url)
     cors_origins: str = ""
 
-    # Frontend static files directory.  When set, the app serves the built
-    # frontend SPA at the frontend_path.  Leave empty to disable.
-    frontend_dir: str = ""
-
     # Event-based triggers: Shared secret for verifying webhook signatures
     # Used by the OpenHands server when forwarding GitHub events
     webhook_secret: str = ""
+
+    # Optional PostHog product telemetry. Capture remains disabled unless a
+    # project key is configured by the deployment.
+    posthog_api_key: str = ""
+    posthog_host: str = "https://us.i.posthog.com"
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
@@ -479,21 +728,6 @@ class ServiceSettings(BaseSettings):
         return f"{prefix}/api/automation"
 
     @property
-    def frontend_path(self) -> str:
-        """Route prefix for the frontend SPA, derived from base_url.
-
-        Examples:
-            base_url=""                          -> /automations
-            base_url="https://domain"            -> /automations
-            base_url="https://domain/acmecorp"   -> /acmecorp/automations
-        """
-        if self.base_url:
-            prefix = urlparse(self.base_url).path.rstrip("/")
-        else:
-            prefix = ""
-        return f"{prefix}/automations"
-
-    @property
     def resolved_base_url(self) -> str:
         """Public base URL with /api/automation appended."""
         base = self.base_url or f"http://localhost:{self.server_port}"
@@ -524,13 +758,15 @@ class AppConfig:
         http: HTTP client settings (timeouts, caching)
         sandbox: Sandbox execution settings (limits, retries)
         kv: Key-value store settings (secrets, limits)
+        git_sync: Git sync settings (repo, branch, credentials)
+        streams: Stream source settings (Slack Socket Mode)
 
     Example:
         config = get_config()
         print(config.service.db_host)
         print(config.storage.file_store)
         print(config.log.log_level)
-        print(config.sandbox.max_run_duration)
+        print(config.sandbox.default_run_duration)
         print(config.kv.enabled)
     """
 
@@ -563,6 +799,16 @@ class AppConfig:
     def kv(self) -> KVSettings:
         """Key-value store configuration (AUTOMATION_ prefix)."""
         return KVSettings()
+
+    @cached_property
+    def git_sync(self) -> GitSyncSettings:
+        """Git sync configuration (AUTOMATION_ prefix)."""
+        return GitSyncSettings()
+
+    @cached_property
+    def streams(self) -> StreamSettings:
+        """Stream source configuration (AUTOMATION_ prefix)."""
+        return StreamSettings()
 
 
 @lru_cache

@@ -8,9 +8,9 @@ def get_file_store() -> FileStore:
 
     Configuration is read from StorageSettings (see automation/config.py).
     The FILE_STORE environment variable determines which backend to use:
-    - "gcs" (default): Google Cloud Storage (GoogleCloudFileStore)
+    - "local" (default): Local filesystem (LocalFileStore) - for self-hosted deployments
+    - "gcs": Google Cloud Storage (GoogleCloudFileStore)
     - "s3": S3-compatible storage (S3FileStore) - works with AWS S3, MinIO, etc.
-    - "local": Local filesystem (LocalFileStore) - for self-hosted deployments
 
     Returns:
         A FileStore instance configured for the selected backend.
@@ -28,9 +28,8 @@ def get_file_store() -> FileStore:
     elif storage.file_store == "local":
         from openhands.automation.storage.local import LocalFileStore
 
-        # local_storage_path is validated to be non-None by StorageSettings
-        assert storage.local_storage_path is not None
-        return LocalFileStore(storage.local_storage_path)
+        # local_storage_path is a Path, validated to be non-empty by StorageSettings
+        return LocalFileStore(storage.local_storage_path.expanduser())
     else:
         # Unreachable due to Pydantic Literal validation, but explicit for safety
         raise ValueError(f"Unsupported file_store: {storage.file_store}")

@@ -22,12 +22,13 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
@@ -39,8 +40,11 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     TarballUpload,
 )
+from openhands.automation.subjects import conversation_id_for
+from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.kv import create_kv_token
@@ -49,11 +53,24 @@ from openhands.automation.utils.run import (
     mark_run_status,
     mark_run_terminal,
     update_bash_command_id,
+    update_run_current_phase,
+    update_run_timeout_at,
     update_sandbox_id,
+)
+from openhands.automation.utils.run_status_detail import (
+    RunStatusDetailKind,
+    RunStatusPhase,
+    make_run_status_detail,
+    run_status_detail_from_exception,
 )
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
+)
+from openhands.automation.utils.time import utcnow
+from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
+from openhands.automation.utils.unhealthy import (
+    maybe_disable_unhealthy_automation_after_run,
 )
 
 
@@ -67,8 +84,9 @@ async def _download_internal_tarball(
     """Download a tarball from storage using the TarballUpload record.
 
     Raises:
-        TarballNotFoundError: If the tarball upload record doesn't exist.
-            This is a permanent error that should disable the automation.
+        TarballNotFoundError: If the tarball upload record doesn't exist, or if
+            the record exists but its storage object is missing. Both are
+            permanent errors that should disable the automation.
         ValueError: If no database session is provided.
     """
     if session is None:
@@ -84,10 +102,19 @@ async def _download_internal_tarball(
             "The tarball may have been deleted."
         )
 
-    from openhands.automation.storage import get_file_store
+    from openhands.automation.storage import ObjectNotFoundError, get_file_store
 
     store = get_file_store()
-    return store.read(upload.storage_path)
+    try:
+        return store.read(upload.storage_path)
+    except ObjectNotFoundError as e:
+        # Only confirmed absence is permanent; transient storage errors raise
+        # plain FileNotFoundError and keep retrying on the next schedule tick.
+        raise TarballNotFoundError(
+            f"Internal tarball object missing from storage at "
+            f"{upload.storage_path!r} for upload {upload_id}. "
+            "Recreate the automation to restore it."
+        ) from e
 
 
 async def _poll_pending_runs(
@@ -107,8 +134,19 @@ async def _poll_pending_runs(
     """
     select_query = (
         select(AutomationRun)
+        .join(AutomationRun.automation)
         .options(selectinload(AutomationRun.automation))
-        .where(AutomationRun.status == AutomationRunStatus.PENDING)
+        .where(
+            AutomationRun.status == AutomationRunStatus.PENDING,
+            Automation.deleted_at.is_(None),
+            or_(
+                AutomationRun.trigger_source == "manual",
+                and_(
+                    Automation.enabled.is_(True),
+                    Automation.state == AutomationState.ACTIVE,
+                ),
+            ),
+        )
         .order_by(AutomationRun.created_at.asc())
         .limit(batch_size)
     )
@@ -147,8 +185,15 @@ def _build_event_payload(
         "automation_id": str(automation.id),
         "automation_name": automation.name,
     }
-    if run.event_payload:
-        payload["event"] = run.event_payload
+    # Events that arrived on this subject while the run was still queued are
+    # parked on the payload. Lift them into a field of our own, so the script
+    # still reads the provider's payload exactly as it arrived.
+    event = dict(run.event_payload or {})
+    follow_up_turns = event.pop(COALESCED_TURNS_KEY, None)
+    if event:
+        payload["event"] = event
+    if follow_up_turns:
+        payload["follow_up_turns"] = follow_up_turns
     if automation.model:
         payload["model"] = automation.model
     return payload
@@ -183,19 +228,52 @@ async def _execute_run(
             run_id=run_id, automation_id=automation_id, sandbox_id=sandbox_id
         )
 
-    async def _fail(error: str, disable: bool = False) -> None:
+    async def _fail(
+        error: str,
+        disable: bool = False,
+        status_detail: dict | None = None,
+    ) -> None:
         """Mark run as failed and optionally disable the automation."""
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.FAILED, error)
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            error,
+            status_detail=status_detail,
+        )
+        automation_disabled = disable
         if disable:
-            await disable_automation(session_factory, automation.id, error)
+            automation_disabled = await disable_automation(
+                session_factory,
+                automation.id,
+                error,
+                disabled_detail={"status_detail": status_detail}
+                if status_detail is not None
+                else None,
+                run_id=run.id,
+            )
+        else:
+            # Evaluate whether the automation has failed consecutively and may never
+            # succeed
+            automation_disabled = await maybe_disable_unhealthy_automation_after_run(
+                session_factory,
+                automation.id,
+            )
+        await capture_automation_event(
+            "automation_run_failed",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+                "automation_disabled": automation_disabled,
+            },
+        )
 
-    # 1. Calculate effective timeout (doesn't depend on ctx)
-    max_run_duration = get_config().sandbox.max_run_duration
-    effective_timeout = (
-        min(automation.timeout, max_run_duration)
-        if automation.timeout
-        else max_run_duration
-    )
+    # 1. Calculate effective timeout (doesn't depend on ctx). This same value
+    # drives both the bash command timeout and the watchdog cleanup deadline.
+    effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
 
     # 2. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
@@ -207,11 +285,43 @@ async def _execute_run(
             exc,
             extra=_log_ctx(),
         )
-        await mark_run_terminal(session_factory, run, AutomationRunStatus.SKIPPED)
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.CONCURRENCY_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "concurrency_limit",
+            },
+        )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
-        await _fail("Failed to get execution context")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Failed to get execution context",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source=source,
+                operation="get_execution_context",
+            ),
+        )
         return
 
     logger.info(
@@ -224,6 +334,9 @@ async def _execute_run(
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars["AUTOMATION_CALLBACK_URL"] = callback_url
+    env_vars["AUTOMATION_PHASE_URL"] = (
+        f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
+    )
     env_vars["AUTOMATION_RUN_ID"] = run_id
     env_vars["AUTOMATION_USER_ID"] = str(automation.user_id)
     env_vars["AUTOMATION_ORG_ID"] = str(automation.org_id)
@@ -231,6 +344,20 @@ async def _execute_run(
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )
+    if automation.agent_profile_id:
+        env_vars["AUTOMATION_AGENT_PROFILE_ID"] = str(automation.agent_profile_id)
+    # A subject-owning run must create its conversation under the id
+    # `continue_conversation` addresses later, or every follow-up 404s and
+    # silently starts a fresh thread.
+    if run.subject_key:
+        trigger_source = (automation.trigger or {}).get("source")
+        if trigger_source:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = conversation_id_for(
+                automation.org_id,
+                automation.id,
+                trigger_source,
+                run.subject_key,
+            )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
     if ctx.sandbox_id:
@@ -277,7 +404,19 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
         return
     except (APIKeyError, ValueError) as exc:
         logger.error(
@@ -287,14 +426,24 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc))
+        await _fail(
+            str(exc),
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="prepare_tarball",
+                code=type(exc).__name__,
+            ),
+        )
         return
 
     # 5. Execute in context
     work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
-            client=client,
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
             entrypoint=automation.entrypoint,
@@ -313,18 +462,40 @@ async def _execute_run(
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         await backend.release_context(client, ctx)
-        await _fail(str(exc), disable=True)
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.EXECUTION,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="execute_in_context",
+                code=type(exc).__name__,
+            ),
+        )
         return
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Background execution failed", extra=_log_ctx(sandbox_id=ctx.sandbox_id)
         )
         await backend.release_context(client, ctx)
-        await _fail("Internal error")
+        source = "agent_server" if backend.is_local_mode else "sandbox_api"
+        await _fail(
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.EXECUTION,
+                source=source,
+                operation="execute_in_context",
+            ),
+        )
         return
 
     # 6. Handle result
     if result.success:
+        await update_run_current_phase(session_factory, run.id, "Starting automation")
         if ctx.sandbox_id:
             await update_sandbox_id(session_factory, run.id, ctx.sandbox_id)
         if result.bash_command_id:
@@ -334,17 +505,41 @@ async def _execute_run(
             await update_bash_command_id(
                 session_factory, run.id, result.bash_command_id
             )
+        # Phase-2 deadline: the bash command has started, so its own timeout
+        # (enforced by the agent-server from bash start) now governs the run.
+        # Align the watchdog deadline with it, plus margin so the bash
+        # service's kill always fires first and verification finds a
+        # concrete exit code instead of a still-running command.
+        await update_run_timeout_at(
+            session_factory,
+            run.id,
+            utcnow()
+            + timedelta(
+                seconds=effective_timeout + get_config().sandbox.run_timeout_margin
+            ),
+        )
         logger.info(
             "Automation dispatched successfully, waiting for callback",
             extra=_log_ctx(sandbox_id=ctx.sandbox_id),
         )
         return
 
+    error = result.error or "Execution failed"
     logger.warning(
         "Execution failed: %s", result.error, extra=_log_ctx(sandbox_id=ctx.sandbox_id)
     )
     await backend.release_context(client, ctx)
-    await _fail(result.error or "Execution failed")
+    await _fail(
+        error,
+        status_detail=make_run_status_detail(
+            phase=RunStatusPhase.EXECUTION,
+            kind=RunStatusDetailKind.EXECUTION_ERROR,
+            detail=error,
+            transient=False,
+            source="agent_server" if backend.is_local_mode else "sandbox_api",
+            operation="execute_in_context",
+        ),
+    )
 
 
 async def dispatch_pending_runs(
@@ -352,7 +547,6 @@ async def dispatch_pending_runs(
     settings: ServiceSettings,
     client: httpx.AsyncClient,
     batch_size: int | None = None,
-    max_run_duration: timedelta | None = None,
 ) -> list[AutomationRun]:
     """Poll for pending runs, mark RUNNING, and launch sandboxes.
 
@@ -364,15 +558,11 @@ async def dispatch_pending_runs(
         settings: Service settings for API access
         client: HTTP client for API calls (shared across runs)
         batch_size: Number of pending runs to fetch per poll (from config if None)
-        max_run_duration: Default max duration for runs without custom timeout
     """
     # Use config defaults if not provided
-    if batch_size is None or max_run_duration is None:
+    if batch_size is None:
         config = get_config()
-        if batch_size is None:
-            batch_size = config.service.dispatcher_batch_size
-        if max_run_duration is None:
-            max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
+        batch_size = config.service.dispatcher_batch_size
 
     async with session_factory() as session:
         pending_runs = await _poll_pending_runs(session, batch_size)
@@ -384,21 +574,37 @@ async def dispatch_pending_runs(
             extra = log_extra(run_id=run_id, automation_id=automation_id)
             try:
                 logger.info("Dispatching automation run", extra=extra)
-                # Use automation's custom timeout if set, otherwise use default
-                run_max_duration = (
-                    timedelta(seconds=run.automation.timeout)
-                    if run.automation and run.automation.timeout
-                    else max_run_duration
+                run_timeout_seconds = resolve_automation_timeout_seconds(
+                    run.automation.timeout if run.automation else None
+                )
+                # Phase-1 provisioning deadline: pads the run budget with the
+                # sandbox-ready budget and margin so the watchdog only reaps
+                # runs that die during provisioning. Once the bash command
+                # actually starts, _execute_run resets timeout_at to
+                # bash-start + run budget + margin (phase 2).
+                sandbox_cfg = get_config().sandbox
+                provisioning_deadline = (
+                    sandbox_cfg.sandbox_ready_timeout
+                    + run_timeout_seconds
+                    + sandbox_cfg.run_timeout_margin
                 )
                 await mark_run_status(
                     session,
                     run,
                     AutomationRunStatus.RUNNING,
-                    max_duration=run_max_duration,
+                    max_duration=timedelta(seconds=provisioning_deadline),
+                    current_phase="Preparing environment",
                 )
                 dispatched_runs.append(run)
             except Exception:
                 logger.exception("Failed to dispatch run", extra=extra)
+                await capture_automation_event(
+                    "automation_run_dispatch_failed",
+                    automation=run.automation,
+                    run=run,
+                    properties={"trigger_source": "dispatcher"},
+                    session=session,
+                )
 
         await session.commit()
 
@@ -428,10 +634,19 @@ async def _execute_run_safe(
     extra = log_extra(run_id=run_id, automation_id=automation_id)
     try:
         await _execute_run(run, settings, session_factory, client)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background execution failed", extra=extra)
         await mark_run_terminal(
-            session_factory, run, AutomationRunStatus.FAILED, "Internal error"
+            session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "Internal error",
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="automation_service",
+                operation="execute_run_task",
+            ),
         )
 
 
@@ -453,7 +668,6 @@ async def dispatcher_loop(
         interval_seconds = config.service.dispatcher_interval_seconds
     if batch_size is None:
         batch_size = config.service.dispatcher_batch_size
-    max_run_duration = timedelta(seconds=config.sandbox.max_run_duration)
     http_timeout = config.http.http_long_timeout
 
     logger.info(
@@ -474,7 +688,6 @@ async def dispatcher_loop(
                     settings=settings,
                     client=client,
                     batch_size=batch_size,
-                    max_run_duration=max_run_duration,
                 )
                 if dispatched:
                     logger.info("Dispatched %d run(s)", len(dispatched))

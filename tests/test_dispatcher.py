@@ -4,6 +4,7 @@ The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
 import asyncio
+import logging
 import uuid
 from datetime import timedelta
 from typing import Any, cast
@@ -13,6 +14,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.config import get_config
+from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
@@ -20,9 +23,20 @@ from openhands.automation.dispatcher import (
     dispatcher_loop,
 )
 from openhands.automation.exceptions import ConcurrencyLimitReachedError
-from openhands.automation.models import Automation, AutomationRun, AutomationRunStatus
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
+    AutomationState,
+)
+from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.run import mark_run_status
+from openhands.automation.utils.run import (
+    mark_run_status,
+    mark_run_terminal,
+    update_run_current_phase,
+    update_run_timeout_at,
+)
 from openhands.automation.utils.tarball_validation import is_http_url
 
 
@@ -210,6 +224,124 @@ class TestMarkRunStatus:
             assert before <= updated.completed_at <= after
 
 
+class TestUpdateRunTimeoutAt:
+    """Tests for the RUNNING-guarded watchdog-deadline reset."""
+
+    async def test_does_not_resurrect_terminal_run_deadline(
+        self, async_session_factory
+    ):
+        """A run that reached a terminal state keeps its original deadline."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            original_timeout_at = utcnow() + timedelta(minutes=5)
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.COMPLETED,
+                started_at=utcnow(),
+                completed_at=utcnow(),
+                timeout_at=original_timeout_at,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        await update_run_timeout_at(
+            async_session_factory, run_id, utcnow() + timedelta(hours=1)
+        )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.timeout_at == original_timeout_at
+
+
+class TestUpdateRunCurrentPhase:
+    """Tests for the best-effort live phase write."""
+
+    async def test_database_failure_is_logged_not_raised(self, caplog):
+        """A failing session is logged and swallowed — phases are cosmetic."""
+        session_factory = MagicMock(side_effect=RuntimeError("db down"))
+
+        with caplog.at_level(logging.ERROR, logger="openhands.automation.utils.run"):
+            await update_run_current_phase(session_factory, uuid.uuid4(), "Cloning")
+
+        assert any(
+            "Failed to update current_phase" in record.message
+            for record in caplog.records
+        )
+
+
+class TestMarkRunTerminalFirstRunOutcome:
+    """First-run outcome recording when the dispatcher terminates a run."""
+
+    async def _seed_template_run(self, async_session_factory):
+        """A RUNNING run on an automation created from an extension template."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Template Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                preset_metadata={
+                    "preset_type": "prompt",
+                    "prompt": "p",
+                    "template": {"id": "tpl", "version": "1.0.0"},
+                },
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(run)
+            await session.commit()
+            return automation.id, run
+
+    async def test_dispatch_failure_records_dispatch_stage(self, async_session_factory):
+        """A run failed at dispatch records the dispatch failure stage."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            first_run = automation.preset_metadata["first_run"]
+            assert first_run["status"] == "failure"
+            assert first_run["failure_stage"] == "dispatch"
+
+    async def test_skipped_run_does_not_consume_the_first_run_slot(
+        self, async_session_factory
+    ):
+        """A skipped run records nothing, so a later real run still can."""
+        automation_id, run = await self._seed_template_run(async_session_factory)
+
+        await mark_run_terminal(async_session_factory, run, AutomationRunStatus.SKIPPED)
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert "first_run" not in automation.preset_metadata
+
+
 class TestDispatchPendingRuns:
     """Tests for dispatch_pending_runs function."""
 
@@ -253,6 +385,78 @@ class TestDispatchPendingRuns:
             )
             updated = result.scalars().first()
             assert updated.status == AutomationRunStatus.RUNNING
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatch_sets_initial_phase(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The RUNNING transition records the initial live progress phase."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.current_phase == "Preparing environment"
+
+    @patch(
+        "openhands.automation.dispatcher.capture_automation_event",
+        new_callable=AsyncMock,
+    )
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatch_emits_no_telemetry_events(
+        self,
+        mock_execute,
+        mock_capture_event,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        """Dispatch no longer emits its own telemetry event; lifecycle events
+        come from execution and the watchdog."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+
+        await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
+
+        emitted_events = [call.args[0] for call in mock_capture_event.await_args_list]
+        assert emitted_events == []
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_ignores_running_runs(
@@ -318,6 +522,74 @@ class TestDispatchPendingRuns:
         )
 
         assert len(dispatched) == 0
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_ignores_pending_runs_for_disabled_automations(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Pending runs are not dispatched once their automation is disabled."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=False,
+                disabled_reason="auth: Invalid API key",
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+            )
+            session.add(run)
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+
+        assert dispatched == []
+        mock_execute.assert_not_awaited()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_dispatches_manual_run_for_disabled_automation(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Manual pending runs are dispatched even when automation is inactive."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=False,
+                state=AutomationState.INACTIVE,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.PENDING,
+                trigger_source="manual",
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+
+        assert [run.id for run in dispatched] == [run_id]
+        mock_execute.assert_awaited_once()
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_respects_batch_size(
@@ -488,7 +760,7 @@ class TestEffectiveTimeout:
     async def test_uses_automation_timeout_when_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Dispatcher uses automation's timeout when set."""
+        """Dispatcher uses automation's timeout when set, even above default."""
 
         async with async_session_factory() as session:
             automation = Automation(
@@ -499,7 +771,7 @@ class TestEffectiveTimeout:
                 tarball_path="s3://bucket/code.tar.gz",
                 entrypoint="uv run main.py",
                 enabled=True,
-                timeout=120,  # Custom timeout
+                timeout=1200,
             )
             session.add(automation)
             await session.commit()
@@ -510,21 +782,38 @@ class TestEffectiveTimeout:
             )
             session.add(run)
             await session.commit()
+            run_id = run.id
 
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
         # Verify _execute_run_safe was called
         mock_execute.assert_called_once()
-        # The automation passed should have timeout=120
+        # The automation passed should have timeout=1200
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
-        assert run_arg.automation.timeout == 120
+        assert run_arg.automation.timeout == 1200
+
+        async with async_session_factory() as session:
+            updated_run = await session.get(AutomationRun, run_id)
+            assert updated_run is not None
+            assert updated_run.timeout_at is not None
+            assert updated_run.started_at is not None
+            # Phase-1 provisioning deadline: run budget padded with the
+            # sandbox-ready budget and margin (reset at bash start).
+            sandbox_cfg = get_config().sandbox
+            assert (
+                updated_run.timeout_at - updated_run.started_at
+            ).total_seconds() == (
+                1200
+                + sandbox_cfg.sandbox_ready_timeout
+                + sandbox_cfg.run_timeout_margin
+            )
 
     @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
     async def test_uses_default_timeout_when_not_set(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Dispatcher uses MAX_RUN_DURATION_SECONDS when automation timeout is None."""
+        """Dispatcher uses default_run_duration when automation timeout is None."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
@@ -545,6 +834,7 @@ class TestEffectiveTimeout:
             )
             session.add(run)
             await session.commit()
+            run_id = run.id
 
         await dispatch_pending_runs(async_session_factory, mock_settings, mock_client)
 
@@ -554,6 +844,178 @@ class TestEffectiveTimeout:
         call_args = mock_execute.call_args
         run_arg = call_args[0][0]
         assert run_arg.automation.timeout is None
+
+        async with async_session_factory() as session:
+            updated_run = await session.get(AutomationRun, run_id)
+            assert updated_run is not None
+            assert updated_run.timeout_at is not None
+            assert updated_run.started_at is not None
+            # Phase-1 provisioning deadline: default run budget padded with
+            # the sandbox-ready budget and margin (reset at bash start).
+            sandbox_cfg = get_config().sandbox
+            assert (
+                updated_run.timeout_at - updated_run.started_at
+            ).total_seconds() == (
+                sandbox_cfg.default_run_duration
+                + sandbox_cfg.sandbox_ready_timeout
+                + sandbox_cfg.run_timeout_margin
+            )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_successful_dispatch_resets_timeout_to_bash_start(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Once the bash command starts, timeout_at is re-anchored to bash
+        start + run budget + margin, dropping the provisioning padding."""
+        sandbox_cfg = get_config().sandbox
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Reset Timeout",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=None,
+            )
+            session.add(automation)
+            await session.commit()
+
+            now = utcnow()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=now,
+                timeout_at=now
+                + timedelta(
+                    seconds=sandbox_cfg.default_run_duration
+                    + sandbox_cfg.sandbox_ready_timeout
+                    + sandbox_cfg.run_timeout_margin
+                ),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.RUNNING
+            # Re-anchored to bash start: provisioning padding dropped.
+            remaining = (updated.timeout_at - utcnow()).total_seconds()
+            expected = sandbox_cfg.default_run_duration + sandbox_cfg.run_timeout_margin
+            assert expected - 30 < remaining <= expected
+
+
+class TestExecuteRunPhaseReporting:
+    """Phase-reporting wiring in _execute_run."""
+
+    async def _run_successful_execution(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Drive _execute_run through a successful dispatch; returns run_id."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Phase Wiring",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        return run_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_exposes_phase_url_to_sandbox(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The sandbox env carries the per-run phase reporting endpoint."""
+        run_id = await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_marks_starting_automation_phase_after_bash_dispatch(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A successful bash dispatch advances the phase past provisioning."""
+        run_id = await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.current_phase == "Starting automation"
 
 
 class TestBuildEventPayload:
@@ -582,6 +1044,37 @@ class TestBuildEventPayload:
             status=AutomationRunStatus.PENDING,
             **kw,
         )
+
+    def test_turns_parked_on_a_queued_run_are_lifted_out_of_the_event(self):
+        """The script reads the provider's payload exactly as it arrived.
+
+        Events that landed while the run was queued are stored on the same
+        JSON column, so they have to come back out -- otherwise a webhook
+        payload reaches the automation with a key the provider never sent.
+        """
+        automation = self._make_automation({"type": "event", "source": "slack"})
+        run = self._make_run(
+            automation,
+            event_payload={
+                "action": "opened",
+                COALESCED_TURNS_KEY: ["@bob commented on org/repo#1"],
+            },
+        )
+
+        payload = _build_event_payload(automation, run)
+
+        assert payload["event"] == {"action": "opened"}
+        assert payload["follow_up_turns"] == ["@bob commented on org/repo#1"]
+
+    def test_a_run_carrying_only_parked_turns_has_no_event(self):
+        """Lifting the key must not leave an empty dict behind as the event."""
+        automation = self._make_automation({"type": "event", "source": "slack"})
+        run = self._make_run(automation, event_payload={COALESCED_TURNS_KEY: ["ping"]})
+
+        payload = _build_event_payload(automation, run)
+
+        assert "event" not in payload
+        assert payload["follow_up_turns"] == ["ping"]
 
     def test_cron_trigger_uses_type_string(self):
         """Cron trigger → payload['trigger'] == 'cron' (not the full dict)."""
@@ -748,6 +1241,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
             side_effect=ConcurrencyLimitReachedError(
                 "You have reached your limit of 3 concurrent conversations."
@@ -770,6 +1264,10 @@ class TestExecuteRunConcurrencyLimit:
             )
             assert updated.status == AutomationRunStatus.SKIPPED
             assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["transient"] is True
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
@@ -794,6 +1292,7 @@ class TestExecuteRunConcurrencyLimit:
         run, run_id, _ = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
+        backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(side_effect=RuntimeError("boom"))
         backend.release_context = AsyncMock()
 
@@ -811,3 +1310,138 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert updated.status == AutomationRunStatus.FAILED
+            assert updated.error_detail == "Failed to get execution context"
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["transient"] is False
+
+
+class TestExecuteRunDerivedConversationId:
+    """A subject-owning run creates its conversation under the derived id."""
+
+    async def _dispatch(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        *,
+        trigger: dict,
+        subject_key: str | None,
+        agent_profile_id: uuid.UUID | None = None,
+    ):
+        """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Mention Responder",
+                agent_profile_id=agent_profile_id,
+                trigger=trigger,
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+            org_id = automation.org_id
+
+            run = AutomationRun(
+                automation_id=automation_id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                subject_key=subject_key,
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+        backend = MagicMock()
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        return mock_execute.await_args.kwargs["env_vars"], org_id, automation_id
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_subject_run_gets_the_id_continue_will_address(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The env id is exactly what `continue_conversation` derives later.
+
+        These two drifting apart is the whole failure: the script mints a
+        random conversation, the follow-up turn POSTs to an id that does not
+        exist, and `send_conversation_turn` swallows the 404 as an ordinary
+        reaped sandbox -- so the thread silently restarts on every mention.
+        """
+        env_vars, org_id, automation_id = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "event", "source": "github-events", "on": "*"},
+            subject_key="OpenHands/OpenHands/16997",
+        )
+
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997"
+        )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_without_a_subject_gets_no_id(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Cron runs keep a server-generated id; nothing continues them."""
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+        )
+
+        assert "AUTOMATION_CONVERSATION_ID" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_selected_agent_profile_is_available_to_the_command(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        selected = uuid.uuid4()
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+            agent_profile_id=selected,
+        )
+
+        assert env_vars["AUTOMATION_AGENT_PROFILE_ID"] == str(selected)

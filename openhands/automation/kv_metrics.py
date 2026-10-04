@@ -61,11 +61,11 @@ kv_conflict_total = Counter(
     ["reason"],  # "lock_timeout" or "version_mismatch"
 )
 
-# State document size histogram
+# Stored value size histogram
 # Buckets aligned with PostgreSQL TOAST thresholds (see config.py)
 kv_state_size_bytes = Histogram(
     "kv_state_size_bytes",
-    "Size of encrypted state documents in bytes",
+    "Size of encrypted KV values in bytes",
     buckets=[100, 500, 1000, 2000, 8000, 16000, 32000, 64000, 128000, 256000],
 )
 
@@ -110,5 +110,5 @@ def record_conflict(reason: str = "lock_timeout") -> None:
 
 
 def record_state_size(size_bytes: int) -> None:
-    """Record the size of an encrypted state document."""
+    """Record the size of an encrypted KV value."""
     kv_state_size_bytes.observe(size_bytes)

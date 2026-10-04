@@ -22,10 +22,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    require_permission,
+)
 from openhands.automation.config import get_settings
 from openhands.automation.db import get_session
 from openhands.automation.models import CustomWebhook
+from openhands.automation.providers import DEFAULT_VERIFIER
 from openhands.automation.schemas import (
     CustomWebhookCreate,
     CustomWebhookCreateResponse,
@@ -37,6 +41,9 @@ from openhands.automation.schemas import (
 
 
 router = APIRouter(prefix="/v1/webhooks", tags=["Webhooks"])
+
+_require_view_automations = require_permission("view_automations")
+_require_manage_automations = require_permission("manage_automations")
 
 
 def _generate_webhook_secret() -> str:
@@ -62,6 +69,8 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         webhook_url=_build_webhook_url(webhook.org_id, webhook.source),
         event_key_expr=webhook.event_key_expr,
         signature_header=webhook.signature_header,
+        # A cleared column verifies as the default.
+        signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -89,7 +98,7 @@ def _webhook_to_create_response(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_webhook(
     data: CustomWebhookCreate,
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CustomWebhookCreateResponse:
     """
@@ -120,6 +129,7 @@ async def create_webhook(
         webhook_secret=secret,
         event_key_expr=data.event_key_expr,
         signature_header=data.signature_header,
+        signature_scheme=data.signature_scheme,
         enabled=True,
     )
 
@@ -141,7 +151,7 @@ async def create_webhook(
 
 @router.get("")
 async def list_webhooks(
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -173,7 +183,7 @@ async def list_webhooks(
 @router.get("/{webhook_id}")
 async def get_webhook(
     webhook_id: uuid.UUID,
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CustomWebhookResponse:
     """Get details of a specific webhook."""
@@ -192,13 +202,14 @@ async def get_webhook(
 async def update_webhook(
     webhook_id: uuid.UUID,
     data: CustomWebhookUpdate,
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CustomWebhookResponse:
     """
     Update a webhook's configuration.
 
-    Updatable fields: `name`, `event_key_expr`, `signature_header`, `enabled`.
+    Updatable fields: `name`, `event_key_expr`, `signature_header`,
+    `signature_scheme`, `enabled`.
     The `source` cannot be changed after creation.
     """
     webhook = await session.get(CustomWebhook, webhook_id)
@@ -223,7 +234,7 @@ async def update_webhook(
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_webhook(
     webhook_id: uuid.UUID,
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """
@@ -247,7 +258,7 @@ async def delete_webhook(
 @router.post("/{webhook_id}/rotate-secret")
 async def rotate_webhook_secret(
     webhook_id: uuid.UUID,
-    auth: AuthenticatedUser = Depends(authenticate_request),
+    auth: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session),
 ) -> CustomWebhookSecretResponse:
     """

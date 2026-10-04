@@ -43,6 +43,15 @@ def build_internal_url(upload_id: UUID) -> str:
     return f"{INTERNAL_URL_PREFIX}{upload_id}"
 
 
+def build_upload_storage_path(org_id: UUID, user_id: UUID, upload_id: UUID) -> str:
+    """Build the FileStore path for an internal tarball upload.
+
+    Path format: uploads/{org_id}/{user_id}/{upload_id}.tar
+    Note: The 'automation/' prefix is added by the FileStore implementation.
+    """
+    return f"uploads/{org_id}/{user_id}/{upload_id}.tar"
+
+
 def parse_internal_upload_id(tarball_path: str) -> UUID | None:
     """
     Extract upload_id from internal URL.

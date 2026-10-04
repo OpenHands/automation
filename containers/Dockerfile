@@ -1,13 +1,6 @@
-# ---- Stage 1: Build frontend ----
-FROM node:24-slim AS frontend-build
-WORKDIR /frontend
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend/ .
-RUN npm run build
+FROM python:3.12-slim-trixie
 
-# ---- Stage 2: Python application ----
-FROM python:3.12-slim-bookworm
+ARG DEBIAN_SNAPSHOT=20260913T000000Z
 
 WORKDIR /app
 ENV PYTHONPATH='/app'
@@ -15,9 +8,25 @@ ENV PYTHONPATH='/app'
 # Datadog labels
 LABEL com.datadoghq.tags.service="automation"
 
-# Install system deps for asyncpg + uv + git (for SDK git dependencies)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libpq-dev git && \
+# Install uv + git (for SDK git dependencies)
+RUN printf '%s\n' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" \
+        'Suites: trixie' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        '' \
+        'Types: deb' \
+        "URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/" \
+        'Suites: trixie-security' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        > /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir uv ddtrace
 
@@ -30,15 +39,9 @@ COPY alembic.ini .
 
 RUN uv pip install --system .
 
-# Copy built frontend assets from stage 1
-COPY --from=frontend-build /frontend/build /app/frontend-dist
-
 # Security: run as non-root (UID 42420 chosen arbitrarily)
 RUN groupadd -r automation && useradd -r -g automation -u 42420 automation
 USER automation
-
-# Enable frontend hosting — set to "" to serve API only
-ENV AUTOMATION_FRONTEND_DIR=/app/frontend-dist
 
 EXPOSE 8000
 

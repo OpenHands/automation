@@ -1,5 +1,5 @@
 from openhands.automation.storage.factory import get_file_store
-from openhands.automation.storage.file_store import FileStore
+from openhands.automation.storage.file_store import FileStore, ObjectNotFoundError
 from openhands.automation.storage.google_cloud import (
     FileSizeLimitExceeded,
     GoogleCloudFileStore,
@@ -13,6 +13,7 @@ __all__ = [
     "FileSizeLimitExceeded",
     "GoogleCloudFileStore",
     "LocalFileStore",
+    "ObjectNotFoundError",
     "S3FileStore",
     "get_file_store",
 ]
