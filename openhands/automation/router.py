@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import timedelta
 from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -588,11 +590,27 @@ async def download_automation_tarball(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve tarball from storage",
             )
-        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        unsafe_chars = r'[\x00-\x1f\x7f"\\\/]'
+        safe_name = re.sub(unsafe_chars, "", auto.name) or "automation"
+        if safe_name.isascii():
+            disposition = f'attachment; filename="{safe_name}.tar"'
+        else:
+            # NFKD keeps accented letters' base form ("Café" -> "Cafe"), but it
+            # also maps compatibility characters onto removed ones (U+FF02 ->
+            # '"'), so sanitize again before dropping what is still non-ASCII.
+            normalized = re.sub(
+                unsafe_chars, "", unicodedata.normalize("NFKD", safe_name)
+            )
+            ascii_name = normalized.encode("ascii", errors="ignore").decode()
+            fallback = " ".join(ascii_name.split()) or "automation"
+            disposition = (
+                f'attachment; filename="{fallback}.tar"; '
+                f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"
+            )
         return Response(
             content=data,
             media_type="application/x-tar",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.tar"'},
+            headers={"Content-Disposition": disposition},
         )
 
     if is_http_url(auto.tarball_path):
