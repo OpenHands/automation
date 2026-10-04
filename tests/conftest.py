@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
@@ -150,6 +151,49 @@ async def async_client(
 
     await app.state.http_client.aclose()
     app.dependency_overrides.clear()
+
+
+class AgentProfilesApi:
+    """The OpenHands API's agent profile list, as a cloud-mode test sees it."""
+
+    def __init__(self) -> None:
+        self.profile_id = "0a1b2c3d-0000-4000-8000-000000000001"
+        # A request has to carry a credential of its own: the profile is looked
+        # up with the caller's credential, which mocked authentication does not
+        # set.
+        self.caller_auth = {"Authorization": "Bearer caller-key"}
+        # What the API answers the lookup with; a test replaces it to misbehave.
+        self.response = httpx.Response(
+            200, json={"profiles": [{"id": self.profile_id}]}
+        )
+        self.requests: list[httpx.Request] = []
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or request.url.path != "/api/agent-profiles":
+            return httpx.Response(404)
+        self.requests.append(request)
+        return self.response
+
+
+@pytest.fixture
+async def agent_profiles_api(
+    async_client, monkeypatch
+) -> AsyncGenerator[AgentProfilesApi, None]:
+    """Cloud mode, with the OpenHands API serving one agent profile."""
+    from openhands.automation.config import clear_config_cache
+    from openhands.automation.utils.model_profiles import clear_agent_profile_cache
+
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    clear_config_cache()
+    clear_agent_profile_cache()
+    api = AgentProfilesApi()
+    await app.state.http_client.aclose()
+    app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(api.respond)
+    )
+    yield api
+    clear_config_cache()
+    clear_agent_profile_cache()
 
 
 @pytest.fixture

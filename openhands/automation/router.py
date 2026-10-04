@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -61,8 +61,9 @@ from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
 from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
     resolve_model_profile_for_user,
-    validate_agent_profile_selection,
+    validate_agent_profile_combination,
 )
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -214,6 +215,8 @@ async def create_automation(
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
     """
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
     # query and leaves the new upload unreferenced rather than adopting it.
@@ -225,6 +228,10 @@ async def create_automation(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    # After the template lookup, so a repeat enable stays one query and does
+    # not depend on the OpenHands API, and before the rest of the transaction.
+    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+
     # Validate tarball_path (checks ownership for internal uploads)
     await validate_tarball_path(
         tarball_path=body.tarball_path,
@@ -232,7 +239,6 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    validate_agent_profile_selection(body.agent_profile_id, body.model)
     model = (
         None
         if body.agent_profile_id
@@ -286,6 +292,7 @@ async def create_automation(
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    created_by: Literal["me", "others"] | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
@@ -294,14 +301,22 @@ async def list_automations(
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
+    if created_by == "me":
+        base_query = base_query.where(Automation.user_id == user.user_id)
+    elif created_by == "others":
+        base_query = base_query.where(Automation.user_id != user.user_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
     )
     total = count_result.scalar() or 0
 
+    # id breaks created_at ties (e.g. one Git Sync import), so offset pages
+    # keep one order across requests.
     result = await session.execute(
-        base_query.order_by(Automation.created_at.desc()).offset(offset).limit(limit)
+        base_query.order_by(Automation.created_at.desc(), Automation.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     automations = result.scalars().all()
 
@@ -423,7 +438,12 @@ async def update_automation(
 
     if "agent_profile_id" in update_data or "model" in update_data:
         selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
-        validate_agent_profile_selection(selected_profile, body.model)
+        validate_agent_profile_combination(selected_profile, body.model)
+        if selected_profile != auto.agent_profile_id:
+            # Only a newly selected profile is looked up: an update that sends
+            # the current one back must not start failing because the profile
+            # was deleted since, or the OpenHands API is down.
+            await ensure_agent_profile_exists(selected_profile, request, user)
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:

@@ -3,8 +3,10 @@
 import io
 import tarfile
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -30,6 +32,15 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+# An automation an agent profile can be selected for: only the raw create
+# endpoint accepts one.
+PROFILE_AUTOMATION = {
+    "name": "Independent reviewer",
+    "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+    "tarball_path": "s3://bucket/reviewer.tar.gz",
+    "entrypoint": "python3 main.py",
+}
 
 
 @pytest.fixture
@@ -925,6 +936,161 @@ class TestCreateAutomation:
         assert data["timeout"] == 1800
 
 
+class TestAgentProfileInCloudMode:
+    """A profile selected on a deployment whose profiles live in the OpenHands API."""
+
+    async def test_create_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        # The profile is looked up as the caller, in the organization the
+        # automation is stored under.
+        [lookup] = agent_profiles_api.requests
+        assert (
+            lookup.headers["authorization"]
+            == agent_profiles_api.caller_auth["Authorization"]
+        )
+        assert lookup.headers["x-org-id"] == str(TEST_ORG_ID)
+
+    async def test_create_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={**PROFILE_AUTOMATION, "agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+
+    async def test_create_rejects_a_model_alongside_a_profile(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+                "model": "fast",
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param(httpx.Response(500), id="server-error"),
+            pytest.param(httpx.Response(200, text="<html>"), id="not-json"),
+            pytest.param(httpx.Response(200, json=[]), id="unexpected-shape"),
+        ],
+    )
+    async def test_create_reports_a_failing_openhands_api_as_a_bad_gateway(
+        self, async_client, agent_profiles_api, response
+    ):
+        agent_profiles_api.response = response
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 502
+
+    async def test_create_passes_on_a_credential_the_openhands_api_refuses(
+        self, async_client, agent_profiles_api
+    ):
+        agent_profiles_api.response = httpx.Response(401)
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 401
+
+    async def test_update_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json=PROFILE_AUTOMATION,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"agent_profile_id": agent_profiles_api.profile_id},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+
+    async def test_update_that_keeps_the_profile_does_not_look_it_up_again(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+        # The profile is deleted, and the OpenHands API goes down.
+        agent_profiles_api.response = httpx.Response(500)
+        agent_profiles_api.requests.clear()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"name": "Renamed", "agent_profile_id": agent_profiles_api.profile_id},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 200
+        assert agent_profiles_api.requests == []
+
+    async def test_update_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json=PROFILE_AUTOMATION,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+
+
 class TestListAutomations:
     """Tests for GET /v1 endpoint."""
 
@@ -1046,6 +1212,134 @@ class TestListAutomations:
         data = response.json()
         assert len(data["automations"]) == 2
         assert data["total"] == 5
+
+    async def _seed_automation(
+        self, async_session, *, user_id, org_id, name, age_minutes=0, created_at=None
+    ) -> Automation:
+        """Persist an automation by ``user_id``, created ``age_minutes`` ago or at
+        ``created_at``."""
+        automation = Automation(
+            user_id=user_id,
+            org_id=org_id,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+            created_at=created_at or utcnow() - timedelta(minutes=age_minutes),
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def _seed_mine_teammate_and_other_org(self, async_session):
+        """Persist the caller's automation, a newer teammate's, and another org's."""
+        await self._seed_automation(
+            async_session,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Mine",
+            age_minutes=2,
+        )
+        await self._seed_automation(
+            async_session,
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate",
+            age_minutes=1,
+        )
+        await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
+        )
+
+    async def test_list_automations_lists_every_creator_without_a_filter(
+        self, async_client, async_session
+    ):
+        """Without created_by, the org's automations from every creator are listed."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == ["Teammate", "Mine"]
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        ("created_by", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"])],
+    )
+    async def test_list_automations_filters_by_creator(
+        self, async_client, async_session, created_by, expected
+    ):
+        """created_by keeps the caller's automations or the rest of the org's."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == expected
+        assert data["total"] == len(expected)
+
+    async def test_list_automations_creator_filter_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only the filtered automations; pages keep newest-first."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Mine {i}",
+                age_minutes=i,
+            )
+        for i in range(2):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Teammate {i}",
+                age_minutes=i,
+            )
+
+        url = "/api/automation/v1?created_by=me&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
+
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
+        assert names == ["Mine 0", "Mine 1", "Mine 2"]
+
+    async def test_list_automations_pages_tied_created_at_by_id(
+        self, async_client, async_session
+    ):
+        """Automations with one created_at (e.g. one Git Sync import) page by id, so
+        each one is listed once across offsets."""
+        created_at = utcnow()
+        seeded = [
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Imported {i}",
+                created_at=created_at,
+            )
+            for i in range(5)
+        ]
+
+        pages = [
+            (await async_client.get(f"/api/automation/v1?limit=2&offset={o}")).json()
+            for o in (0, 2, 4)
+        ]
+
+        ids = [a["id"] for page in pages for a in page["automations"]]
+        assert ids == sorted((str(a.id) for a in seeded), reverse=True)
+
+    async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
+        """An unknown created_by value is a 422, not a silently unfiltered list."""
+        response = await async_client.get("/api/automation/v1?created_by=team")
+
+        assert response.status_code == 422
 
 
 class TestGetAutomation:
