@@ -44,6 +44,9 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
+from openhands.automation.observability_associations import (
+    validate_observability_associations as validate_observability_association_exprs,
+)
 from openhands.automation.schemas import (
     AutomationResponse,
     PublicAutomationState,
@@ -180,6 +183,14 @@ class CreatePromptAutomationRequest(BaseModel):
             "or an event trigger (type: 'event') for webhook-based automation."
         ),
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -220,6 +231,13 @@ class CreatePromptAutomationRequest(BaseModel):
             "drafts are managed through /v1/drafts."
         ),
     )
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
@@ -571,6 +589,7 @@ async def create_automation_from_prompt(
             preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
+            observability_associations=body.observability_associations,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),
@@ -699,6 +718,14 @@ class CreatePluginAutomationRequest(BaseModel):
             "or an event trigger (type: 'event') for webhook-based automation."
         ),
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     timeout: int | None = Field(
         default=None,
         description=build_automation_timeout_description(include_default=True),
@@ -739,6 +766,13 @@ class CreatePluginAutomationRequest(BaseModel):
             "drafts are managed through /v1/drafts."
         ),
     )
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
@@ -1019,6 +1053,7 @@ async def create_automation_from_plugin(
             preset_metadata=preset_metadata,
             model=model,
             trigger=body.trigger.model_dump(),
+            observability_associations=body.observability_associations,
             tarball_path=tarball_path,
             setup_script_path="setup.sh",
             entrypoint=_get_preset_entrypoint(),

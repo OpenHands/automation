@@ -1,5 +1,6 @@
 """Tests for API router endpoints."""
 
+import contextlib
 import io
 import re
 import tarfile
@@ -2728,6 +2729,45 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_uses_propagated_parent_span_context(
+        self, async_client, async_session
+    ):
+        """Complete endpoint attaches callback span to propagated trace context."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch("openhands.automation.router.span") as mock_span:
+            mock_span.return_value = contextlib.nullcontext(None)
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                headers={
+                    "X-OpenHands-Observability-Parent-Span-Context": "parent-context"
+                },
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+        mock_span.assert_called_once()
+        assert mock_span.call_args.args[0] == "automation.callback.received"
+        assert mock_span.call_args.kwargs["parent_span_context"] == "parent-context"
 
     async def test_complete_run_ignores_task_result_metadata_for_status_detail(
         self, async_client, async_session

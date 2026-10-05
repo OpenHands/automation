@@ -21,6 +21,9 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.models import AutomationState
+from openhands.automation.observability_associations import (
+    validate_observability_associations as validate_observability_association_exprs,
+)
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
     is_builtin_source,
@@ -497,6 +500,14 @@ class CreateAutomationRequest(BaseModel):
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -574,6 +585,13 @@ class CreateAutomationRequest(BaseModel):
         assert result is not None  # satisfy type checker
         return result
 
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -628,6 +646,14 @@ class UpdateAutomationRequest(BaseModel):
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -673,6 +699,13 @@ class UpdateAutomationRequest(BaseModel):
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
         return validate_command_string(v, "entrypoint")
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
@@ -1010,6 +1043,7 @@ class AutomationResponse(BaseModel):
     prompt: str | None
     preset_metadata: dict | None = None
     trigger: dict
+    observability_associations: dict[str, str] | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1155,6 +1189,7 @@ class AutomationRunResponse(BaseModel):
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None

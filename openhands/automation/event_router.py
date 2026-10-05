@@ -50,6 +50,7 @@ from openhands.automation.event_schemas.github import (
     get_supported_event_types,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
+from openhands.automation.observability import span
 from openhands.automation.providers import (
     WebhookVerifier,
     get_header,
@@ -279,18 +280,27 @@ async def receive_event(
         if config.event_id_header
         else None
     )
-    result = await accept_event(
-        org_id,
-        AcceptedEvent(
-            source=source,
-            event_key=event.event_key,
-            payload=webhook_payload,
-            provider_event_id=provider_event_id,
-            parsed_event=event if isinstance(event, BaseModel) else None,
-        ),
-        session,
-        request=request,
-    )
+    with span(
+        "automation.webhook.receive",
+        {
+            "automation.org_id": str(org_id),
+            "automation.event.source": source,
+            "automation.event.key": event.event_key,
+            "automation.event.provider_event_id": provider_event_id,
+        },
+    ):
+        result = await accept_event(
+            org_id,
+            AcceptedEvent(
+                source=source,
+                event_key=event.event_key,
+                payload=webhook_payload,
+                provider_event_id=provider_event_id,
+                parsed_event=event if isinstance(event, BaseModel) else None,
+            ),
+            session,
+            request=request,
+        )
 
     return EventResponse(
         received=True,

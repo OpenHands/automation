@@ -37,6 +37,12 @@ from openhands.automation.models import (
     AutomationState as ModelAutomationState,
     TarballUpload,
 )
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
+)
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
     AutomationListResponse,
@@ -261,6 +267,7 @@ async def create_automation(
         agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
+        observability_associations=body.observability_associations,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -648,14 +655,25 @@ async def dispatch_automation(
     await _assert_can_manage(auto, user)
     await _assert_normal_api_can_use_draft_artifact(session, auto)
 
-    run = await create_pending_run(
-        session,
-        auto,
-        telemetry_distinct_id=get_request_telemetry_context(
-            request
-        ).frontend_distinct_id,
-        trigger_source="manual",
-    )
+    telemetry_context = get_request_telemetry_context(request)
+    with span(
+        "automation.manual_dispatch.receive",
+        automation_attributes(
+            auto,
+            None,
+            **{"automation.run.trigger_source": "manual"},
+        ),
+    ):
+        run = await create_pending_run(
+            session,
+            auto,
+            telemetry_distinct_id=telemetry_context.frontend_distinct_id,
+            trigger_source="manual",
+            observability_parent_span_context=current_span_context(),
+        )
+        run_created_attributes = automation_attributes(auto, run)
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
     await session.flush()
     await session.refresh(run)
     await capture_automation_event(
@@ -858,6 +876,28 @@ async def complete_run(
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    callback_attributes = automation_attributes(
+        automation,
+        run,
+        **{
+            "automation.conversation_id": body.conversation_id,
+            "openhands.conversation_id": body.conversation_id,
+            "automation.callback.reconciled_watchdog_timeout": reconciled,
+        },
+    )
+    with span(
+        "automation.callback.received",
+        callback_attributes,
+        parent_span_context=request.headers.get(
+            "X-OpenHands-Observability-Parent-Span-Context"
+        ),
+    ):
+        add_event(
+            "automation.run.completed"
+            if new_status == AutomationRunStatus.COMPLETED
+            else "automation.run.failed",
+            callback_attributes,
+        )
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True

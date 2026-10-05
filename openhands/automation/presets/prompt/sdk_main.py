@@ -56,9 +56,12 @@ Env vars (Local mode):
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
+  AUTOMATION_ID              - automation ID for observability correlation (optional)
+  AUTOMATION_NAME            - automation name for observability correlation (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_USER_ID         - owner user ID for observability attribution (optional)
   AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
+  AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
 
@@ -189,6 +192,7 @@ def _phase_poster() -> None:
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
+from openhands.sdk.automation import automation_conversation_kwargs
 from finish_tool_hook import finish_tool_required_hook_config
 from openhands.tools.preset import TaskOutcome
 
@@ -218,7 +222,6 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
-
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -382,9 +385,7 @@ that variable, but your terminal does not inherit it.
     # the service could not deliver them as turns. They open the conversation
     # with this one instead of each starting a run of its own.
     if event_context and event_context.get("follow_up_turns"):
-        follow_ups = "\n\n".join(
-            str(turn) for turn in event_context["follow_up_turns"]
-        )
+        follow_ups = "\n\n".join(str(turn) for turn in event_context["follow_up_turns"])
         context_sections.append(f"""## Follow-up messages
 
 More activity arrived on the same subject while this run was queued:
@@ -481,27 +482,13 @@ More activity arrived on the same subject while this run was queued:
                 if redacted:
                     _live_phase["pending"] = redacted[:200]
 
-    # Cloud workspaces supply richer automation tags (for example, whether the
-    # trigger was cron or webhook). Only add fallback tags in local mode.
-    default_tags = workspace.default_conversation_tags or {}
-    conversation_tags: dict[str, str] = {}
-    if not any(
-        default_tags.get(key)
-        for key in ("automationtrigger", "automationid", "automationrunid")
-    ):
-        conversation_tags["automationtrigger"] = "automation"
-
-    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
-    if automation_run_id and not default_tags.get("automationrunid"):
-        conversation_tags["automationrunid"] = automation_run_id
-
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "callbacks": [event_callback],
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": conversation_tags or None,
+        **automation_conversation_kwargs(),
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
