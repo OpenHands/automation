@@ -1,46 +1,17 @@
 """Version metadata helpers for the automation service."""
 
 import importlib.metadata
-from typing import Final, TypedDict
+from typing import TypedDict
 
 from openhands.automation import __version__
 
 
 SDK_PACKAGE_NAME = "openhands-sdk"
-SDK_TOOLS_PACKAGE_NAME: Final[str] = "openhands-tools"
-SDK_WORKSPACE_PACKAGE_NAME: Final[str] = "openhands-workspace"
-SDK_REPOSITORY_URL: Final[str] = "https://github.com/OpenHands/software-agent-sdk.git"
-# Temporary cross-repo pin for OpenHands/software-agent-sdk#5462 until released.
-SDK_OBSERVABILITY_REF: Final[str] = "834e23fafcd30b81888cb6e4cafcd9cd1f2a9617"
-SDK_PACKAGE_SUBDIRECTORIES: Final[dict[str, str]] = {
-    SDK_PACKAGE_NAME: "openhands-sdk",
-    SDK_TOOLS_PACKAGE_NAME: "openhands-tools",
-    SDK_WORKSPACE_PACKAGE_NAME: "openhands-workspace",
-}
-
-
-class SdkInstallInfo(TypedDict):
-    version: str
-    packages: dict[str, str]
 
 
 class ServerVersionInfo(TypedDict):
     package_version: str
     sdk_version: str
-
-
-def get_sdk_package_specs() -> dict[str, str]:
-    return {
-        package_name: (
-            f"{package_name} @ git+{SDK_REPOSITORY_URL}"
-            f"@{SDK_OBSERVABILITY_REF}#subdirectory={subdirectory}"
-        )
-        for package_name, subdirectory in SDK_PACKAGE_SUBDIRECTORIES.items()
-    }
-
-
-def get_sdk_install_info() -> SdkInstallInfo:
-    return {"version": get_sdk_version(), "packages": get_sdk_package_specs()}
 
 
 def get_sdk_version() -> str:

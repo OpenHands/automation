@@ -1,7 +1,7 @@
 """Link event-triggered runs to their source event trace.
 
-Revision ID: 031
-Revises: 030
+Revision ID: 032
+Revises: 031
 Create Date: 2026-10-02
 
 Store the IntegrationEvent row and serialized parent span context that caused an
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "031"
-down_revision: str = "030"
+revision: str = "032"
+down_revision: str = "031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

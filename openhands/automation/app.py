@@ -35,10 +35,7 @@ from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
-from openhands.automation.utils.version import (
-    get_sdk_install_info,
-    get_server_version_info,
-)
+from openhands.automation.utils.version import get_sdk_version, get_server_version_info
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
 
@@ -341,13 +338,13 @@ async def sdk_version():
     are available in the sandbox.
     """
     try:
-        sdk_info = get_sdk_install_info()
+        version = get_sdk_version()
     except PackageNotFoundError:
         return JSONResponse(
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return sdk_info
+    return {"version": version}
 
 
 @app.get("/server_info")

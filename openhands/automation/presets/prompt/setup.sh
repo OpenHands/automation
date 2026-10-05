@@ -13,7 +13,7 @@
 # new SDK — no tarball re-generation or hardcoded version pins needed.
 set -e
 
-echo "[setup] Fetching SDK install info from automation service"
+echo "[setup] Fetching SDK version from automation service"
 PYTHON_JSON=python3
 if ! command -v python3 >/dev/null 2>&1; then
     if command -v python >/dev/null 2>&1; then
@@ -26,18 +26,11 @@ if ! command -v python3 >/dev/null 2>&1; then
     fi
 fi
 set +e
-SDK_INFO=$(curl -sf "${AUTOMATION_API_URL}/sdk-version")
-SDK_VERSION=$(printf '%s' "$SDK_INFO" \
+SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
   | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
-SDK_SPEC=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; d=json.load(sys.stdin); print(d.get('packages', {}).get('openhands-sdk') or 'openhands-sdk==' + d['version'])" 2>/dev/null)
-TOOLS_SPEC=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; d=json.load(sys.stdin); print(d.get('packages', {}).get('openhands-tools') or 'openhands-tools==' + d['version'])" 2>/dev/null)
-WORKSPACE_SPEC=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; d=json.load(sys.stdin); print(d.get('packages', {}).get('openhands-workspace') or 'openhands-workspace==' + d['version'])" 2>/dev/null)
 set -e
-if [ -z "$SDK_VERSION" ] || [ -z "$SDK_SPEC" ] || [ -z "$TOOLS_SPEC" ] || [ -z "$WORKSPACE_SPEC" ]; then
-    echo "[setup] ERROR: Failed to fetch SDK install info from ${AUTOMATION_API_URL}/sdk-version" >&2
+if [ -z "$SDK_VERSION" ]; then
+    echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
     exit 1
 fi
 
@@ -63,11 +56,11 @@ if [ ! -x "$VENV_PYTHON" ]; then
     exit 1
 fi
 
-echo "[setup] Installing OpenHands SDK packages (version: $SDK_VERSION)"
+echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
 uv pip install --python "$VENV_PYTHON" --quiet \
-  "$SDK_SPEC" \
-  "$TOOLS_SPEC" \
-  "$WORKSPACE_SPEC"
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}"
 
 if ! "$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools, openhands.workspace'; then
     echo "[setup] ERROR: OpenHands SDK is not importable from .venv" >&2
