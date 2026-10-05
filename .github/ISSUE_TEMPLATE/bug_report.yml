@@ -51,8 +51,7 @@ body:
       attributes:
           label: Additional Context
           description: |
-              For nonvisual bugs, include logs, API responses, or a minimal
-              reproducer. Screenshots/video are optional and useful for visual
-              symptoms. Include environment details and redact secrets.
+              Include logs, API responses, or a small reproducer; media is optional.
+              Add environment details. Remove secrets.
       validations:
           required: false

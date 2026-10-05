@@ -18,22 +18,17 @@ APPROVE rather than a COMMENT that says the PR is ready.
 
 ## Issue triage: ownership and scope
 
-Read this guide during issue triage before recommending an owner or scope.
-Implementation checkpoints below are conditional review aids, not extra issue
-readiness gates. Do not require a patch, PR, implementation design, or
-before-and-after test evidence to make an otherwise actionable issue ready.
-Use the problem, expected outcome, reproduction/context where relevant, and
-explicit acceptance criteria and non-goals; ask only for missing information
-that prevents a scope or readiness decision.
+Use the ownership guidance below to choose the repository and scope. Ask only
+for missing details needed to understand the problem, expected result,
+reproduction, or agreed scope (including non-goals). Review checks are not issue
+readiness requirements: do not demand a patch, PR, design, or before/after tests.
+Logs, API responses, or a small reproducer can explain nonvisual bugs; media is
+optional.
 
-The authoritative label policy is
-[`.github/workflows/issue-readiness-check.yml`](../../.github/workflows/issue-readiness-check.yml):
-`ready-for-dev` grants require repository `write`, `maintain`, or `admin`
-permission, including for automation actors. The workflow enforces who may grant
-the label; it does not assess issue content. Do not invent additional readiness
-rules or override an authorized writer's decision with PR evidence requirements.
-Nonvisual bugs can be supported by logs, API responses, or a minimal reproducer;
-screenshots/video are useful for visual symptoms, not a universal requirement.
+The [label workflow](../../.github/workflows/issue-readiness-check.yml) requires
+`write`, `maintain`, or `admin` permission to grant `ready-for-dev`, even for bots.
+It checks permission, not issue content. Do not add readiness rules or overturn
+an authorized writer's decision by demanding PR evidence.
 
 ## Repository ownership
 
@@ -46,23 +41,18 @@ client belong in `OpenHands/software-agent-sdk`; Canvas UI belongs in
 
 ## Acceptance review
 
-Read the linked issue and current PR discussion before deciding whether the
-claimed outcome is delivered. Honor explicit defaults and non-goals, including
-`0 = disabled` / no-floor behavior: do not demand unconditional enforcement when
-the acceptance criteria intentionally preserve the default behavior. Distinguish
-introduced defects, unmet agreed acceptance, and unrelated pre-existing bugs;
-the last category does not automatically block an incremental improvement.
+Read the linked issue and current PR discussion. Check each agreed outcome,
+default, and non-goal. If `0` disables a limit or allows no minimum, do not
+require enforcing that limit anyway. Separate new bugs and unmet requirements
+from unrelated existing bugs; the latter need not block a focused improvement.
 
-Confirm the actual SDK/server and Canvas consumer versions before proposing a
-cross-repository fix. Automation owns reservation, scheduling, dispatch, and run
-state; SDK owns conversation execution and its server contract. A downstream
-pin or integration change may be needed even when SDK main already has a fix.
-Do not duplicate SDK behavior here or assume another repository's current main
-is the deployed dependency.
+When a fix crosses repositories, check the SDK/server and Canvas versions
+actually used. A fix on SDK `main` may still need a dependency update or
+integration change. Follow the ownership split above; do not copy SDK behavior here.
 
 ## Implementation review: conditional checkpoints
 
-Apply only checkpoints relevant to changed behavior and affected supported paths.
+Check only changed behavior and affected supported paths; report concrete failures.
 
 ### Run state and lifecycle
 
@@ -78,13 +68,11 @@ Verify that:
 - persisted status matches the real sandbox or process outcome; and
 - fire-and-forget work has an owner that observes and records failure.
 
-Trace reservation -> provisioning -> dispatch -> completion/cancellation from the
-first external mutation. Cancellation can win while provisioning is in flight:
-late sandbox handles still need an owner and cleanup. Guard subsequent database
-writes by the current run/claim identity and expected state, and check whether
-the write won before publishing success. Distinguish a rejected/stale claim from
-an execution failure so cleanup neither leaks late resources nor deletes a
-winner's sandbox. Verify rollback/release on each affected failure boundary.
+Start the run trace at the first database write or sandbox creation. If a run
+is canceled during provisioning, clean up any sandbox returned later. Before
+later writes, check the run/claim ID and expected state; report success only if
+the write succeeds. Treat a stale or rejected claim separately from execution
+failure so cleanup neither leaks its sandbox nor deletes the winner's.
 
 Identify the concrete interleaving or leaked resource. Do not request a new lock
 or abstraction without one.
@@ -116,19 +104,16 @@ with the SQLite fallback and concurrent-replica behavior. A PR should contain on
 coherent migration for its schema change, with one Alembic head and a complete
 upgrade path from the released schema.
 
-For PATCH/ORM changes, exercise the real transition with locked SQLAlchemy and
-driver versions: omitted leaves the value unchanged, explicit null clears an
-existing non-null value when allowed, and non-null replaces it. An unchanged
-`None -> None` assignment says nothing about `value -> None` persistence; verify
-flush/refresh or reload through the real path. For connection/TLS changes,
-dialect forwarding or a permissive mocked `connect(**kwargs)` does not establish
-that the actual asyncpg/pg8000 driver accepts the arguments.
+When PATCH or ORM behavior changes, test with the pinned SQLAlchemy and driver
+versions: omitted fields stay unchanged, allowed nulls clear an existing value,
+and supplied values replace it. Flush and refresh or reload to verify storage;
+`None -> None` does not test clearing a value.
 
-Inspect fixture resolution and module-local shadowing before calling a test a
-PostgreSQL test: an `async_engine` override can silently move existing cases to
-SQLite. Preserve intended PostgreSQL coverage for locks, concurrency, and driver
-behavior; report which backend actually ran rather than citing test counts as
-parity evidence.
+When connection or TLS options change, check that the real asyncpg/pg8000 driver
+accepts them; forwarding options or mocking `connect(**kwargs)` does not prove it.
+Check which fixtures tests actually use: a local `async_engine` override can
+silently replace PostgreSQL with SQLite. Preserve PostgreSQL lock, concurrency,
+and driver coverage, and report which backend ran, not just test counts.
 
 ### API and extension contracts
 
@@ -139,12 +124,11 @@ extensions release. Do not approve examples or generated tarballs that rely on
 environment variables, package versions, or endpoints the production dispatcher
 does not provide.
 
-For list/filter/pagination changes, check the actual Canvas consumer's paging
-contract. Ordering needs a stable unique tie key (for example `created_at, id`),
-not timestamps alone. Use tied timestamps across a page boundary and check for
-missing/duplicated rows under the supported offset or cursor contract. If an
-ordering weakness pre-exists, explain its relation to this PR's acceptance
-rather than automatically expanding scope.
+When lists, filters, or pagination change, check how the deployed Canvas pages
+results. Use a unique tie-breaker (e.g. `created_at, id`), not timestamps alone.
+Test equal timestamps across page boundaries for missing or duplicate rows,
+using the supported offset or cursor rules. Apply the scope guidance above to
+existing ordering bugs.
 
 ## Design context for deep PRs
 
