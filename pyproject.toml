@@ -79,7 +79,7 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["openhands/automation/presets"]
+extend-exclude = ["openhands/automation/presets", ".pr"]
 
 [tool.ruff.format]
 quote-style = "double"
