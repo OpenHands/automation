@@ -198,7 +198,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 7. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
-- **Happy path**: SDK inside sandbox POSTs to `POST /api/v1/automations/runs/{id}/complete`
+- **Happy path**: SDK inside sandbox POSTs to `POST /v1/runs/{id}/complete` on the service (injected as `AUTOMATION_CALLBACK_URL`; the service serves it under the `/api/automation` base path)
 - **Fallback**: Watchdog scans for runs past their `timeout_at` deadline, verifies status via sandbox bash history, and marks as COMPLETED or FAILED
 
 ### Env Vars Injected Into Sandbox
