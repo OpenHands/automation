@@ -366,6 +366,28 @@ async def test_thread_context_truncates_single_long_message_text(provider):
 
 
 @pytest.mark.asyncio
+async def test_thread_context_trims_large_prior_message_before_dropping_it(provider):
+    provider.thread_context_max_chars = 260
+    accepted = provider.accepted_event(envelope(thread_ts="1", ts="3"))
+    assert accepted is not None
+    web = FakeThreadWebClient(
+        [
+            {"user": "U1", "ts": "1", "text": "root"},
+            {"user": "U2", "ts": "2", "text": "x" * 1000},
+            {"user": "U3", "ts": "3", "text": "mention"},
+        ]
+    )
+
+    enriched = await provider.with_thread_context(accepted, web)
+
+    thread = enriched.context["slack_thread"]
+    assert [message["timestamp"] for message in thread["messages"]] == ["2", "3"]
+    assert thread["messages"][0]["text"].endswith("…")
+    assert len(json.dumps(thread["messages"], ensure_ascii=False)) <= 260
+    assert thread["truncated"] is True
+
+
+@pytest.mark.asyncio
 async def test_thread_context_follows_pagination_until_trigger(provider):
     accepted = provider.accepted_event(envelope(thread_ts="1", ts="3"))
     assert accepted is not None

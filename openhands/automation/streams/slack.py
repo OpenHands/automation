@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
@@ -205,8 +205,41 @@ class SlackStreamProvider:
             and len(json.dumps(messages, ensure_ascii=False))
             > self.thread_context_max_chars
         ):
-            messages.pop(0)
             truncated = True
+            message = dict(messages[0])
+            tail = messages[1:]
+            files = list(message["files"])
+            while files:
+                message["files"] = files
+                if (
+                    len(json.dumps([message, *tail], ensure_ascii=False))
+                    <= self.thread_context_max_chars
+                ):
+                    break
+                files.pop()
+
+            original_text = message["text"]
+            low, high = 0, len(original_text)
+            while low < high:
+                midpoint = (low + high + 1) // 2
+                message["text"] = original_text[:midpoint] + "…"
+                if (
+                    len(json.dumps([message, *tail], ensure_ascii=False))
+                    <= self.thread_context_max_chars
+                ):
+                    low = midpoint
+                else:
+                    high = midpoint - 1
+            message["text"] = original_text[:low] + (
+                "…" if low < len(original_text) else ""
+            )
+            if (
+                len(json.dumps([message, *tail], ensure_ascii=False))
+                <= self.thread_context_max_chars
+            ):
+                messages[0] = message
+                break
+            messages.pop(0)
         if (
             messages
             and len(json.dumps(messages, ensure_ascii=False))
@@ -239,13 +272,8 @@ class SlackStreamProvider:
             )
             messages = [message]
             truncated = True
-        return AcceptedEvent(
-            source=event.source,
-            event_key=event.event_key,
-            payload=event.payload,
-            provider_event_id=event.provider_event_id,
-            occurred_at=event.occurred_at,
-            parsed_event=event.parsed_event,
+        return replace(
+            event,
             context={"slack_thread": {"messages": messages, "truncated": truncated}},
         )
 

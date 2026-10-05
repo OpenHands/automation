@@ -371,11 +371,13 @@ with workspace_ctx as workspace:
     if slack_thread and slack_thread.get("messages"):
         transcript_lines = []
         if slack_thread.get("truncated"):
-            transcript_lines.append("[Earlier thread messages were truncated.]")
+            transcript_lines.append("[Some thread messages were omitted or truncated.]")
         for message in slack_thread["messages"]:
+            author = str(message.get("author", "unknown")).replace("\n", "\\n")
+            text = str(message.get("text", "")).replace("\n", "\\n")
             line = (
                 f"[{message.get('timestamp', '')}] "
-                f"{message.get('author', 'unknown')}: {message.get('text', '')}"
+                f"{author}: {text}"
             )
             if message.get("files"):
                 line += f" [files: {', '.join(message['files'])}]"
