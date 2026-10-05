@@ -179,6 +179,7 @@ async def create_pending_run(
     trigger_source: str | None = None,
     event_payload: dict[str, Any] | None = None,
     observability_parent_span_context: str | None = None,
+    sandbox_id: str | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -191,6 +192,9 @@ async def create_pending_run(
         event_payload: Optional synthetic event payload for manual test
             dispatches of event-triggered automations. Bypasses webhook
             signature verification because the caller is authenticated.
+        sandbox_id: Optional existing sandbox ID to reuse instead of creating
+            a new one. If provided, the dispatcher will validate and reuse the
+            specified sandbox.
 
     Returns:
         The created AutomationRun
@@ -207,6 +211,7 @@ async def create_pending_run(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),
         observability_parent_span_context=observability_parent_span_context,
+        sandbox_id=sandbox_id,
     )
     session.add(run)
 

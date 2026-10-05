@@ -285,6 +285,13 @@ async def _execute_run(
     # 2. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
+        # TODO(sandbox-reuse): Check if run.sandbox_id is set. If so:
+        #  1. Validate sandbox exists and is accessible
+        #  2. Validate sandbox belongs to same org
+        #  3. Validate sandbox is not busy (check for other running runs)
+        #  4. Get ExecutionContext from existing sandbox (new backend method)
+        #  5. If any validation fails, raise with appropriate error
+        # For now, always create new sandbox (existing behavior)
         ctx = await backend.get_execution_context(client)
     except ConcurrencyLimitReachedError as exc:
         logger.warning(

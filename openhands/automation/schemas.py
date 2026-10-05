@@ -1174,6 +1174,26 @@ class RunPhaseRequest(BaseModel):
         return " ".join(_PHASE_CONTROL_CHARS_RE.sub(" ", v).split())
 
 
+class DispatchAutomationRequest(BaseModel):
+    """Request body for manually dispatching an automation run.
+    
+    Allows optionally specifying an existing sandbox to reuse instead of
+    creating a new one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sandbox_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional: ID of an existing sandbox to reuse for this run. "
+            "If provided, the automation will run in the specified sandbox "
+            "instead of creating a new one. The sandbox must exist, be accessible, "
+            "and not be currently running another automation."
+        ),
+    )
+
+
 class AutomationRunResponse(BaseModel):
     """Response for a single automation run."""
 
