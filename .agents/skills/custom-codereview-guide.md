@@ -28,6 +28,18 @@ complete. Do not require a PR, passing implementation tests, or before-and-after
 fix evidence. Reconsider readiness when new information leaves scope or expected
 behavior unresolved.
 
+### Cross-repository release dependencies
+
+If an issue or PR here cannot be finished until a change in another repository
+is released, add the matching label and link the upstream issue or PR. Remove
+the label once that release ships. These labels do not affect readiness.
+
+| Label | Waiting on a release of |
+|---|---|
+| `needs-sdk-release` | `OpenHands/software-agent-sdk` (SDK, Agent Server, TypeScript client) |
+| `needs-extensions-release` | `OpenHands/extensions` |
+| `needs-canvas-release` | `OpenHands/OpenHands` (Agent Canvas) |
+
 ## Repository ownership
 
 This repository owns automation definitions, scheduling, webhook and stream
