@@ -338,6 +338,11 @@ def encrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     return encrypted
 
 
+def is_encrypted(content: bytes) -> bool:
+    """Whether `content` is a token `encrypt_file_tree` wrote, not plaintext."""
+    return content.startswith(FERNET_TOKEN_PREFIX.encode())
+
+
 def decrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     """Decrypt files previously written by `encrypt_file_tree`.
 
@@ -348,7 +353,7 @@ def decrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     cipher = Cipher(key)
     decrypted: dict[str, bytes] = {}
     for name, content in files.items():
-        if not content.startswith(FERNET_TOKEN_PREFIX.encode()):
+        if not is_encrypted(content):
             decrypted[name] = content
             continue
         secret = cipher.decrypt(content.decode(errors="replace"))
