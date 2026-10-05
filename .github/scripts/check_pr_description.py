@@ -2,9 +2,8 @@
 
 A PR that links issues (`Fixes #123`, `Closes #123`, `Resolves #123`, or a bare
 `#123` inside an `## Issue Number` section) may only merge once every linked
-issue carries the `ready-for-dev` label — see issue-readiness-check.yml, which
-requires write, maintain, or admin permission to grant the label, even for bots.
-It checks permission, not issue content.
+issue carries the `ready-for-dev` label. The separate issue-readiness-check.yml
+workflow enforces who may apply that label.
 
 Older issues are exempt: the rollout did not evaluate them retroactively.
 The cutoff is the UTC day after deployment, so issues opened earlier on
