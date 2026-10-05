@@ -3,12 +3,12 @@
 A PR that links issues (`Fixes #123`, `Closes #123`, `Resolves #123`, or a bare
 `#123` inside an `## Issue Number` section) may only merge once every linked
 issue carries the `ready-for-dev` label — see issue-readiness-check.yml, which
-applies that label when an issue meets the type-specific readiness criteria.
+enforces that the actor granting the label has write, maintain, or admin
+permission; it does not evaluate issue content.
 
 Issues created before the `ready-for-dev` rollout are grandfathered: the
-issue-readiness workflow only labels issues on `issues` events, so issues that
-predate it were never evaluated. Requiring the label retroactively would block
-PRs linked to those issues. The cutoff is the UTC day AFTER the rollout, so
+rollout did not retroactively evaluate older issues. Requiring the label
+retroactively would block PRs linked to those issues. The cutoff is the UTC day AFTER the rollout, so
 every issue predating deployment — including ones opened earlier that same day,
 before the workflow existed — is exempt.
 

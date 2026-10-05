@@ -14,6 +14,9 @@ Related repositories have different responsibilities:
 
 If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
 
+For issue triage, read [the review guide](.agents/skills/custom-codereview-guide.md#issue-triage-ownership-and-scope)
+for ownership, scope, and the distinction between issue readiness and PR review.
+
 ## Review-Facing Implementation Checklist
 
 Before opening a PR that changes scheduling, dispatch, run state, or sandbox

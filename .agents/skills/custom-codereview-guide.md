@@ -16,6 +16,25 @@ The repository's protected branch requires an approval. If the verdict is worth
 merging, the risk is low, and there are no unresolved material findings, submit
 APPROVE rather than a COMMENT that says the PR is ready.
 
+## Issue triage: ownership and scope
+
+Read this guide during issue triage before recommending an owner or scope.
+Implementation checkpoints below are conditional review aids, not extra issue
+readiness gates. Do not require a patch, PR, implementation design, or
+before-and-after test evidence to make an otherwise actionable issue ready.
+Use the problem, expected outcome, reproduction/context where relevant, and
+explicit acceptance criteria and non-goals; ask only for missing information
+that prevents a scope or readiness decision.
+
+The authoritative label policy is
+[`.github/workflows/issue-readiness-check.yml`](../../.github/workflows/issue-readiness-check.yml):
+`ready-for-dev` grants require repository `write`, `maintain`, or `admin`
+permission, including for automation actors. The workflow enforces who may grant
+the label; it does not assess issue content. Do not invent additional readiness
+rules or override an authorized writer's decision with PR evidence requirements.
+Nonvisual bugs can be supported by logs, API responses, or a minimal reproducer;
+screenshots/video are useful for visual symptoms, not a universal requirement.
+
 ## Repository ownership
 
 This repository owns automation definitions, scheduling, webhook and stream
@@ -25,7 +44,25 @@ client belong in `OpenHands/software-agent-sdk`; Canvas UI belongs in
 `OpenHands/OpenHands`; reusable extension content belongs in
 `OpenHands/extensions`.
 
-## Blocking checkpoints
+## Acceptance review
+
+Read the linked issue and current PR discussion before deciding whether the
+claimed outcome is delivered. Honor explicit defaults and non-goals, including
+`0 = disabled` / no-floor behavior: do not demand unconditional enforcement when
+the acceptance criteria intentionally preserve the default behavior. Distinguish
+introduced defects, unmet agreed acceptance, and unrelated pre-existing bugs;
+the last category does not automatically block an incremental improvement.
+
+Confirm the actual SDK/server and Canvas consumer versions before proposing a
+cross-repository fix. Automation owns reservation, scheduling, dispatch, and run
+state; SDK owns conversation execution and its server contract. A downstream
+pin or integration change may be needed even when SDK main already has a fix.
+Do not duplicate SDK behavior here or assume another repository's current main
+is the deployed dependency.
+
+## Implementation review: conditional checkpoints
+
+Apply only checkpoints relevant to changed behavior and affected supported paths.
 
 ### Run state and lifecycle
 
@@ -40,6 +77,14 @@ Verify that:
   artifacts;
 - persisted status matches the real sandbox or process outcome; and
 - fire-and-forget work has an owner that observes and records failure.
+
+Trace reservation -> provisioning -> dispatch -> completion/cancellation from the
+first external mutation. Cancellation can win while provisioning is in flight:
+late sandbox handles still need an owner and cleanup. Guard subsequent database
+writes by the current run/claim identity and expected state, and check whether
+the write won before publishing success. Distinguish a rejected/stale claim from
+an execution failure so cleanup neither leaks late resources nor deletes a
+winner's sandbox. Verify rollback/release on each affected failure boundary.
 
 Identify the concrete interleaving or leaked resource. Do not request a new lock
 or abstraction without one.
@@ -71,6 +116,20 @@ with the SQLite fallback and concurrent-replica behavior. A PR should contain on
 coherent migration for its schema change, with one Alembic head and a complete
 upgrade path from the released schema.
 
+For PATCH/ORM changes, exercise the real transition with locked SQLAlchemy and
+driver versions: omitted leaves the value unchanged, explicit null clears an
+existing non-null value when allowed, and non-null replaces it. An unchanged
+`None -> None` assignment says nothing about `value -> None` persistence; verify
+flush/refresh or reload through the real path. For connection/TLS changes,
+dialect forwarding or a permissive mocked `connect(**kwargs)` does not establish
+that the actual asyncpg/pg8000 driver accepts the arguments.
+
+Inspect fixture resolution and module-local shadowing before calling a test a
+PostgreSQL test: an `async_engine` override can silently move existing cases to
+SQLite. Preserve intended PostgreSQL coverage for locks, concurrency, and driver
+behavior; report which backend actually ran rather than citing test counts as
+parity evidence.
+
 ### API and extension contracts
 
 When request schemas, preset generation, environment variables, callback
@@ -79,6 +138,13 @@ consumer. Preserve compatibility or coordinate the required SDK, Canvas, or
 extensions release. Do not approve examples or generated tarballs that rely on
 environment variables, package versions, or endpoints the production dispatcher
 does not provide.
+
+For list/filter/pagination changes, check the actual Canvas consumer's paging
+contract. Ordering needs a stable unique tie key (for example `created_at, id`),
+not timestamps alone. Use tied timestamps across a page boundary and check for
+missing/duplicated rows under the supported offset or cursor contract. If an
+ordering weakness pre-exists, explain its relation to this PR's acceptance
+rather than automatically expanding scope.
 
 ## Design context for deep PRs
 

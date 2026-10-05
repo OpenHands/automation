@@ -50,6 +50,9 @@ body:
       id: additional-context
       attributes:
           label: Additional Context
-          description: Logs, screenshots, environment details, or anything else that helps.
+          description: |
+              For nonvisual bugs, include logs, API responses, or a minimal
+              reproducer. Screenshots/video are optional and useful for visual
+              symptoms. Include environment details and redact secrets.
       validations:
           required: false
