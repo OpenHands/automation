@@ -21,8 +21,8 @@ TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
     200: {
         "model": AutomationResponse,
         "description": (
-            "An automation created from this template already exists for this "
-            "user; it is returned unchanged."
+            "An automation created from this template already exists in this "
+            "organization; it is returned unchanged."
         ),
     },
 }
@@ -30,11 +30,10 @@ TEMPLATE_EXISTS_RESPONSE: dict[int | str, dict[str, Any]] = {
 
 async def find_existing_template_automation(
     session: AsyncSession,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
     template_id: str,
 ) -> Automation | None:
-    """Find the caller's live automation created from the given template.
+    """Find the org's live automation created from the given template.
 
     JSON extraction mirrors ``get_event_automations``: ``json_extract`` on
     SQLite, ``->``/``->>`` on PostgreSQL. Rows without provenance yield NULL and
@@ -56,7 +55,6 @@ async def find_existing_template_automation(
     result = await session.execute(
         select(Automation)
         .where(
-            Automation.user_id == user_id,
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
             template_filter,

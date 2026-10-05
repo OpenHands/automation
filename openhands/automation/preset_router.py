@@ -32,15 +32,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, authenticate_request
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    require_permission,
+)
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
-from openhands.automation.models import Automation, TarballUpload, UploadStatus
+from openhands.automation.models import (
+    Automation,
+    TarballUpload,
+    UploadStatus,
+)
 from openhands.automation.schemas import (
     AutomationResponse,
+    PublicAutomationState,
     TemplateProvenance,
     Trigger,
+    normalize_automation_state_enabled,
+    reject_public_draft_state,
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
@@ -49,6 +59,10 @@ from openhands.automation.telemetry import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
@@ -71,8 +85,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 
+_require_view_automations = require_permission("view_automations")
+
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
+SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
@@ -103,6 +120,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
+            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PROMPT_PRESET_CACHE
 
@@ -117,6 +135,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PLUGIN_PRESET_CACHE
 
@@ -194,16 +213,29 @@ class CreatePromptAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: PublicAutomationState | None = Field(
+        default=None,
+        description=(
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
+        ),
+    )
 
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
+
     @model_validator(mode="before")
     @classmethod
     def normalize_repos(cls, data: Any) -> Any:
         """Normalize repos to always be a list if provided."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict) and "repos" in data and data["repos"] is not None:
             repos = data["repos"]
             if isinstance(repos, (str, dict)):
@@ -247,6 +279,9 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -442,7 +477,7 @@ async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -464,13 +499,14 @@ async def create_automation_from_prompt(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
 
     # 1. Generate tarball with SDK code, prompt, and optional repos config
     tarball_content = _generate_tarball(body.prompt, repos=body.repos)
@@ -540,7 +576,8 @@ async def create_automation_from_prompt(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,
@@ -695,16 +732,29 @@ class CreatePluginAutomationRequest(BaseModel):
         default=True,
         description="Whether the automation starts enabled.",
     )
+    state: PublicAutomationState | None = Field(
+        default=None,
+        description=(
+            "Public automation lifecycle state. Use ACTIVE or INACTIVE; "
+            "drafts are managed through /v1/drafts."
+        ),
+    )
 
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_public_state(cls, v: Any) -> Any:
+        return reject_public_draft_state(v)
+
     @model_validator(mode="before")
     @classmethod
     def normalize_plugins_and_repos(cls, data: dict) -> dict:  # type: ignore[type-arg]
         """Normalize plugins and repos to always be lists."""
+        data = normalize_automation_state_enabled(data)
         if isinstance(data, dict):
             # Normalize plugins
             if "plugins" in data and data["plugins"] is not None:
@@ -792,6 +842,9 @@ def _generate_plugin_tarball(
 
     with tarfile.open(fileobj=tarball_buffer, mode="w:gz") as tar:
         _add_file_to_tar(tar, "main.py", preset_files["main.py"])
+        _add_file_to_tar(
+            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
+        )
         _add_file_to_tar(tar, "prompt.txt", prompt)
         _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
 
@@ -842,7 +895,7 @@ async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(authenticate_request),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -871,13 +924,14 @@ async def create_automation_from_plugin(
     # the existing automation unchanged instead of creating a duplicate.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
     model = resolve_model_profile_for_user(body.model, user)
+    state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
         body.variants, user, default_model=model
     )
@@ -970,7 +1024,8 @@ async def create_automation_from_plugin(
             entrypoint=_get_preset_entrypoint(),
             timeout=default_automation_timeout(body.timeout),
             keep_alive=body.keep_alive,
-            enabled=body.enabled,
+            enabled=automation_state_enabled(state),
+            state=state,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
             ).frontend_distinct_id,

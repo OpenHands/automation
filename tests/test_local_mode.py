@@ -93,23 +93,36 @@ class TestVerificationResult:
 class TestGetLastBashCommandResult:
     """Tests for get_last_bash_command_result function."""
 
+    @staticmethod
+    def _workspace(output=None, error=None):
+        from unittest.mock import AsyncMock, MagicMock
+
+        workspace = MagicMock()
+        workspace.__aenter__ = AsyncMock(return_value=workspace)
+        workspace.__aexit__ = AsyncMock(return_value=None)
+        workspace.get_command_output = AsyncMock(return_value=output)
+        if error is not None:
+            workspace.get_command_output.side_effect = error
+        return workspace
+
     @pytest.mark.asyncio
     async def test_handles_http_error(self):
         """Returns error result when HTTP request fails."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock, patch
 
         import httpx
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        error = httpx.HTTPStatusError(
             "Not found", request=MagicMock(), response=MagicMock(status_code=404)
         )
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
+        workspace = self._workspace(error=error)
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            result = await get_last_bash_command_result(
+                "http://localhost:3000", "test-key"
+            )
 
         assert result.found is False
         assert result.error is not None and "Not found" in result.error
@@ -117,20 +130,21 @@ class TestGetLastBashCommandResult:
     @pytest.mark.asyncio
     async def test_handles_transient_rate_limit(self):
         """Returns structured transient info for retryable agent-server errors."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock, patch
 
         import httpx
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        error = httpx.HTTPStatusError(
             "Rate limited", request=MagicMock(), response=MagicMock(status_code=429)
         )
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
+        workspace = self._workspace(error=error)
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            result = await get_last_bash_command_result(
+                "http://localhost:3000", "test-key"
+            )
 
         assert result.found is False
         assert result.error is not None and "HTTP 429" in result.error
@@ -143,19 +157,16 @@ class TestGetLastBashCommandResult:
     @pytest.mark.asyncio
     async def test_handles_empty_response(self):
         """Returns error result when no bash output found."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import patch
 
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
-        )
+        workspace = self._workspace(output=None)
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            result = await get_last_bash_command_result(
+                "http://localhost:3000", "test-key"
+            )
 
         assert result.found is False
         assert result.error == "No bash output found"
@@ -163,21 +174,18 @@ class TestGetLastBashCommandResult:
     @pytest.mark.asyncio
     async def test_handles_running_command(self):
         """Returns running result when exit_code is None."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import patch
 
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "items": [{"exit_code": None, "stdout": "", "stderr": ""}]
-        }
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
+        workspace = self._workspace(
+            output={"exit_code": None, "stdout": "", "stderr": ""}
         )
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            result = await get_last_bash_command_result(
+                "http://localhost:3000", "test-key"
+            )
 
         assert result.found is True
         assert result.exit_code is None
@@ -186,77 +194,57 @@ class TestGetLastBashCommandResult:
     @pytest.mark.asyncio
     async def test_handles_completed_command(self):
         """Returns completed result with exit code and output."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import patch
 
-        import httpx
-
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {
-            "items": [{"exit_code": 0, "stdout": "Hello", "stderr": ""}]
-        }
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        result = await get_last_bash_command_result(
-            mock_client, "http://localhost:3000", "test-key"
+        workspace = self._workspace(
+            output={"exit_code": 0, "stdout": "Hello", "stderr": ""}
         )
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            result = await get_last_bash_command_result(
+                "http://localhost:3000", "test-key"
+            )
 
         assert result.found is True
         assert result.exit_code == 0
         assert result.stdout == "Hello"
 
     @pytest.mark.asyncio
-    async def test_adds_command_id_filter_when_provided(self):
-        """When command_id is provided, params include command_id__eq."""
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_passes_command_id_to_sdk_when_provided(self):
+        """The SDK receives the command ID when one is available."""
+        from unittest.mock import patch
 
-        import httpx
+        workspace = self._workspace(output=None)
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            await get_last_bash_command_result(
+                "http://localhost:3000",
+                "test-key",
+                command_id="abc123",
+            )
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        await get_last_bash_command_result(
-            mock_client,
-            "http://localhost:3000",
-            "test-key",
-            command_id="abc123",
-        )
-
-        # Verify the request was made with command_id__eq in params
-        mock_client.get.assert_called_once()
-        _, kwargs = mock_client.get.call_args
-        assert kwargs["params"]["command_id__eq"] == "abc123"
-        assert kwargs["params"]["kind__eq"] == "BashOutput"
-        assert kwargs["params"]["sort_order"] == "TIMESTAMP_DESC"
-        assert kwargs["params"]["limit"] == 1
+        workspace.get_command_output.assert_awaited_once_with("abc123")
 
     @pytest.mark.asyncio
-    async def test_omits_command_id_filter_when_none(self):
-        """When command_id is None, params do NOT include command_id__eq."""
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_passes_none_to_sdk_without_command_id(self):
+        """The SDK receives None when no command ID is available."""
+        from unittest.mock import patch
 
-        import httpx
+        workspace = self._workspace(output=None)
+        with patch(
+            "openhands.automation.utils.agent_server.AsyncRemoteWorkspace",
+            return_value=workspace,
+        ):
+            await get_last_bash_command_result(
+                "http://localhost:3000",
+                "test-key",
+            )
 
-        mock_client = MagicMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"items": []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        await get_last_bash_command_result(
-            mock_client,
-            "http://localhost:3000",
-            "test-key",
-        )
-
-        mock_client.get.assert_called_once()
-        _, kwargs = mock_client.get.call_args
-        assert "command_id__eq" not in kwargs["params"]
-        assert kwargs["params"]["kind__eq"] == "BashOutput"
+        workspace.get_command_output.assert_awaited_once_with(None)
 
 
 class TestVerifyRunOnAgentServer:

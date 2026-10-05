@@ -3,8 +3,11 @@
 import asyncio
 import logging
 import re
+import unicodedata
 import uuid
-from typing import Any
+from datetime import timedelta
+from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -27,8 +30,11 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
+    AutomationDisableEvent,
+    AutomationDraft,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState as ModelAutomationState,
     TarballUpload,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
@@ -39,6 +45,7 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     CreateAutomationRequest,
     RunCompleteRequest,
+    RunPhaseRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -52,12 +59,27 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
-from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run import create_pending_run, record_first_run_outcome
+from openhands.automation.utils.conversation_outcome import (
+    fetch_latest_finish_tool_response_for_run,
+)
+from openhands.automation.utils.model_profiles import (
+    ensure_agent_profile_exists,
+    resolve_model_profile_for_user,
+    validate_agent_profile_combination,
+)
+from openhands.automation.utils.run import (
+    create_pending_run,
+    record_first_run_outcome,
+    skip_pending_runs_for_disabled_automation,
+)
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
 )
-from openhands.automation.utils.sandbox import cleanup_sandbox
+from openhands.automation.utils.sandbox import cleanup_sandbox, pause_sandbox
+from openhands.automation.utils.state import (
+    automation_state_enabled,
+    model_automation_state,
+)
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -68,13 +90,109 @@ from openhands.automation.utils.templates import (
     find_existing_template_automation,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
+from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Automations"])
 
-_require_manage_automations = require_permission("manage_automations")
+
+_require_view_automations = require_permission("view_automations")
+
+
+async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
+    """Authorize a write operation on a specific automation.
+
+    Admins and owners carry ``manage_automations`` and are always allowed.
+    A member (view-only) is allowed only when they are the creator of the
+    automation being modified — the ticket calls this the "creator escape
+    hatch."  ``require_permission`` can't express this because it has no
+    access to the automation row, so the check lives here in the handler
+    path instead of in the dependency.
+
+    Callers must have already passed a ``view_automations`` dependency so
+    the user is at least a member of the org.
+    """
+    if "manage_automations" in user.permissions:
+        return
+    if automation.user_id == user.user_id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only admins, owners, or the automation creator can modify it",
+    )
+
+
+def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
+    fields = set(update_data)
+    if not fields or not fields <= {"enabled", "state"}:
+        return False
+    if "state" in update_data:
+        state = model_automation_state(update_data["state"], update_data.get("enabled"))
+        return (
+            state == ModelAutomationState.INACTIVE
+            and update_data.get("enabled", False) is False
+        )
+    return update_data.get("enabled") is False
+
+
+def _assert_can_update_fields(
+    automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
+) -> None:
+    if automation.user_id == user.user_id:
+        return
+    if _is_disable_only_update(update_data):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "Only the automation creator can edit it; admins and owners can only "
+            "turn it off or delete it"
+        ),
+    )
+
+
+async def _get_draft_for_materialized_automation(
+    session: AsyncSession, automation: Automation
+) -> AutomationDraft | None:
+    result = await session.execute(
+        select(AutomationDraft).where(
+            AutomationDraft.materialized_automation_id == automation.id,
+            AutomationDraft.org_id == automation.org_id,
+            AutomationDraft.deleted_at.is_(None),
+        )
+    )
+    return result.scalars().first()
+
+
+def _draft_not_dispatchable_error(draft: AutomationDraft) -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "message": "Draft is not dispatchable",
+            "errors": draft.validation_errors or [],
+        },
+    )
+
+
+async def _assert_normal_api_can_use_draft_artifact(
+    session: AsyncSession, automation: Automation
+) -> None:
+    draft = await _get_draft_for_materialized_automation(session, automation)
+    if automation.state != ModelAutomationState.DRAFT and draft is None:
+        return
+
+    if draft is not None and not draft.dispatchable:
+        raise _draft_not_dispatchable_error(draft)
+
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail=(
+            "Draft automation artifacts must be dispatched or activated through "
+            "the draft API so the current draft is validated and materialized"
+        ),
+    )
 
 
 # --- CRUD ---
@@ -87,7 +205,7 @@ async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Create a new automation.
@@ -99,16 +217,22 @@ async def create_automation(
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
     """
+    validate_agent_profile_combination(body.agent_profile_id, body.model)
+
     # Enabling the same template twice returns the existing automation rather
     # than a duplicate. Before tarball validation, so a repeat enable costs one
     # query and leaves the new upload unreferenced rather than adopting it.
     if body.template is not None:
         existing = await find_existing_template_automation(
-            session, user.user_id, user.org_id, body.template.id
+            session, user.org_id, body.template.id
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
+
+    # After the template lookup, so a repeat enable stays one query and does
+    # not depend on the OpenHands API, and before the rest of the transaction.
+    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
 
     # Validate tarball_path (checks ownership for internal uploads)
     await validate_tarball_path(
@@ -117,17 +241,24 @@ async def create_automation(
         org_id=user.org_id,
         session=session,
     )
-    model = resolve_model_profile_for_user(body.model, user)
+    model = (
+        None
+        if body.agent_profile_id
+        else resolve_model_profile_for_user(body.model, user)
+    )
 
     preset_metadata: dict[str, Any] | None = None
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
+
+    state = model_automation_state(body.state, body.enabled)
 
     auto = Automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         model=model,
+        agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         tarball_path=body.tarball_path,
@@ -135,6 +266,8 @@ async def create_automation(
         entrypoint=body.entrypoint,
         timeout=default_automation_timeout(body.timeout),
         keep_alive=body.keep_alive,
+        enabled=automation_state_enabled(state),
+        state=state,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
@@ -161,23 +294,31 @@ async def create_automation(
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    created_by: Literal["me", "others"] | None = Query(default=None),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
-    """List automations for the authenticated user (excludes soft-deleted)."""
+    """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
-        Automation.user_id == user.user_id,
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
+    if created_by == "me":
+        base_query = base_query.where(Automation.user_id == user.user_id)
+    elif created_by == "others":
+        base_query = base_query.where(Automation.user_id != user.user_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
     )
     total = count_result.scalar() or 0
 
+    # id breaks created_at ties (e.g. one Git Sync import), so offset pages
+    # keep one order across requests.
     result = await session.execute(
-        base_query.order_by(Automation.created_at.desc()).offset(offset).limit(limit)
+        base_query.order_by(Automation.created_at.desc(), Automation.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     automations = result.scalars().all()
 
@@ -190,11 +331,11 @@ async def list_automations(
 @router.get("/{automation_id}")
 async def get_automation(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
     return AutomationResponse.model_validate(auto)
 
 
@@ -204,7 +345,7 @@ async def update_automation(
     body: UpdateAutomationRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     # Function scope commits the session when the handler returns, BEFORE the
     # response is sent and its background tasks run. With the default request
     # scope the deferred tarball delete would run before the commit, and a
@@ -212,16 +353,103 @@ async def update_automation(
     # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Partially update an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    """Partially update an automation.
+
+    Only the creator may edit the definition. Admins and owners may turn an
+    automation off but cannot reactivate it or change what it runs.
+    """
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
+    _assert_can_update_fields(auto, user, update_data)
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
 
-    if "model" in update_data:
-        update_data["model"] = resolve_model_profile_for_user(body.model, user)
+    requested_state = update_data.pop("state", None)
+    if requested_state is not None:
+        state = model_automation_state(
+            requested_state, update_data.get("enabled", auto.enabled)
+        )
+        if (
+            state == ModelAutomationState.DRAFT
+            and auto.state != ModelAutomationState.DRAFT
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Existing automations cannot be moved to draft state",
+            )
+        update_data["state"] = state
+        update_data["enabled"] = automation_state_enabled(state)
+    elif "enabled" in update_data:
+        update_data["state"] = model_automation_state(None, update_data["enabled"])
+
+    if auto.state == ModelAutomationState.DRAFT and (
+        "state" in update_data or "enabled" in update_data
+    ):
+        await _assert_normal_api_can_use_draft_artifact(session, auto)
+    elif update_data.get("enabled") is True:
+        await _assert_normal_api_can_use_draft_artifact(session, auto)
+
+    # Same rule CreateAutomationRequest enforces, applied to the merged view:
+    # either half of the pair can arrive alone in a partial update.
+    trigger = update_data.get("trigger") or auto.trigger or {}
+    if trigger.get("destination") == "continue_conversation":
+        keep_alive = update_data.get("keep_alive", auto.keep_alive)
+        if keep_alive is False:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "keep_alive cannot be false when destination is "
+                    "'continue_conversation': deleting the sandbox would "
+                    "destroy the conversation the next event continues"
+                ),
+            )
+        if keep_alive is not True:
+            update_data["keep_alive"] = True
+
+    disable_event: AutomationDisableEvent | None = None
+    skip_pending_reason: str | None = None
+    if update_data.get("enabled") is True:
+        update_data["disabled_reason"] = None
+        update_data["disabled_detail"] = None
+        update_data["disabled_at"] = None
+    elif update_data.get("enabled") is False:
+        state = update_data.get("state")
+        is_manual_inactive = state == ModelAutomationState.INACTIVE or (
+            state is None and auto.state != ModelAutomationState.DRAFT
+        )
+        skip_pending_reason = (
+            "Automation moved to draft by user"
+            if state == ModelAutomationState.DRAFT
+            else "Automation disabled by user"
+        )
+        if auto.enabled and is_manual_inactive:
+            disabled_at = utcnow()
+            disabled_detail = {"reason": "manual", "source": "user"}
+            update_data["disabled_reason"] = "manual"
+            update_data["disabled_detail"] = disabled_detail
+            update_data["disabled_at"] = disabled_at
+            disable_event = AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual",
+                detail=disabled_detail,
+                source="manual",
+            )
+
+    if "agent_profile_id" in update_data or "model" in update_data:
+        selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
+        validate_agent_profile_combination(selected_profile, body.model)
+        if selected_profile != auto.agent_profile_id:
+            # Only a newly selected profile is looked up: an update that sends
+            # the current one back must not start failing because the profile
+            # was deleted since, or the OpenHands API is down.
+            await ensure_agent_profile_exists(selected_profile, request, user)
+        if selected_profile:
+            update_data["model"] = None
+        elif "model" in update_data:
+            update_data["model"] = resolve_model_profile_for_user(body.model, user)
 
     original_prompt = auto.prompt
     for field, value in update_data.items():
@@ -247,6 +475,17 @@ async def update_automation(
         if auto.preset_metadata is not None:
             auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
 
+    if skip_pending_reason is not None:
+        await skip_pending_runs_for_disabled_automation(
+            session,
+            auto.id,
+            reason=skip_pending_reason,
+            disabled_detail=auto.disabled_detail,
+            completed_at=auto.disabled_at,
+        )
+    if disable_event is not None:
+        session.add(disable_event)
+
     # Note: updated_at is handled automatically by the model's onupdate=utcnow
     await session.flush()
     await session.refresh(auto)
@@ -265,13 +504,38 @@ async def update_automation(
 async def delete_automation(
     automation_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft delete an automation."""
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
+    was_enabled = auto.enabled
     auto.enabled = False
-    auto.deleted_at = utcnow()
+    auto.state = ModelAutomationState.INACTIVE
+    deleted_at = utcnow()
+    auto.deleted_at = deleted_at
+    if was_enabled:
+        disabled_detail = {"reason": "manual_delete", "source": "user"}
+        auto.disabled_reason = "manual_delete"
+        auto.disabled_detail = disabled_detail
+        auto.disabled_at = deleted_at
+        session.add(
+            AutomationDisableEvent(
+                automation_id=auto.id,
+                reason="manual_delete",
+                detail=disabled_detail,
+                source="manual_delete",
+            )
+        )
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation deleted by user",
+        disabled_detail=auto.disabled_detail,
+        completed_at=deleted_at,
+        include_manual=True,
+    )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
@@ -285,7 +549,7 @@ async def delete_automation(
 @router.get("/{automation_id}/tarball")
 async def download_automation_tarball(
     automation_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> Response:
@@ -297,7 +561,7 @@ async def download_automation_tarball(
     - s3:// or gs:// URLs: returns 422 (cannot proxy cloud storage URLs).
     - 404 if the automation has no accessible tarball.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
@@ -326,11 +590,27 @@ async def download_automation_tarball(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve tarball from storage",
             )
-        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        unsafe_chars = r'[\x00-\x1f\x7f"\\\/]'
+        safe_name = re.sub(unsafe_chars, "", auto.name) or "automation"
+        if safe_name.isascii():
+            disposition = f'attachment; filename="{safe_name}.tar"'
+        else:
+            # NFKD keeps accented letters' base form ("Café" -> "Cafe"), but it
+            # also maps compatibility characters onto removed ones (U+FF02 ->
+            # '"'), so sanitize again before dropping what is still non-ASCII.
+            normalized = re.sub(
+                unsafe_chars, "", unicodedata.normalize("NFKD", safe_name)
+            )
+            ascii_name = normalized.encode("ascii", errors="ignore").decode()
+            fallback = " ".join(ascii_name.split()) or "automation"
+            disposition = (
+                f'attachment; filename="{fallback}.tar"; '
+                f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"
+            )
         return Response(
             content=data,
             media_type="application/x-tar",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.tar"'},
+            headers={"Content-Disposition": disposition},
         )
 
     if is_http_url(auto.tarball_path):
@@ -356,7 +636,7 @@ async def download_automation_tarball(
 async def dispatch_automation(
     automation_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Manually dispatch an automation run.
@@ -364,13 +644,17 @@ async def dispatch_automation(
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
     """
-    auto = await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    await _assert_can_manage(auto, user)
+    await _assert_normal_api_can_use_draft_artifact(session, auto)
+
     run = await create_pending_run(
         session,
         auto,
         telemetry_distinct_id=get_request_telemetry_context(
             request
         ).frontend_distinct_id,
+        trigger_source="manual",
     )
     await session.flush()
     await session.refresh(run)
@@ -390,21 +674,24 @@ async def list_automation_runs(
     automation_id: uuid.UUID,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
     Returns runs ordered by creation time (latest first), with pagination.
     """
-    # Verify the automation exists and belongs to the user
-    await _get_user_automation(session, automation_id, user.user_id, user.org_id)
+    # Verify the automation exists and belongs to the caller's org
+    await _get_org_automation(session, automation_id, user.org_id)
 
-    # Count total runs for this automation
+    # Count lifetime runs by status for this automation
     count_result = await session.execute(
-        select(func.count()).where(AutomationRun.automation_id == automation_id)
+        select(AutomationRun.status, func.count())
+        .where(AutomationRun.automation_id == automation_id)
+        .group_by(AutomationRun.status)
     )
-    total = count_result.scalar() or 0
+    status_counts = {run_status.value: count for run_status, count in count_result}
+    total = sum(status_counts.values())
 
     # Fetch paginated runs ordered by latest first
     result = await session.execute(
@@ -419,6 +706,7 @@ async def list_automation_runs(
     return AutomationRunListResponse(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
+        status_counts=status_counts,
     )
 
 
@@ -430,7 +718,7 @@ async def complete_run(
     run_id: uuid.UUID,
     body: RunCompleteRequest,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
@@ -445,8 +733,10 @@ async def complete_run(
     parent automation.
 
     If keep_alive is not true, deletes the sandbox after updating the run
-    status. When post-run callbacks are configured, cleanup will happen after
-    callbacks instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
+    status, or -- when ``sandbox_cleanup_delay_seconds`` is set -- pauses it
+    and leaves deletion to the watchdog once the delay has passed. When
+    post-run callbacks are configured, cleanup will happen after callbacks
+    instead. keep_alive=true leaves cleanup to the runtime TTL reaper.
     """
     result = await session.execute(
         select(AutomationRun)
@@ -465,6 +755,15 @@ async def complete_run(
     # Optimistic locking: only update if the run is still RUNNING.
     # This prevents races between the watchdog and the callback.
     now = utcnow()
+    from openhands.automation.config import get_settings
+
+    settings = get_settings()
+    cleanup_delay = settings.sandbox_cleanup_delay_seconds
+    # Same gate as the cleanup branch below; a delay only replaces deletion
+    # with a pause and stamps when the watchdog should delete instead.
+    defer_cleanup = (
+        cleanup_delay > 0 and bool(run.sandbox_id) and automation.keep_alive is not True
+    )
     new_status = (
         AutomationRunStatus.COMPLETED
         if body.status == "COMPLETED"
@@ -474,6 +773,8 @@ async def complete_run(
         "status": new_status,
         "completed_at": now,
     }
+    if defer_cleanup:
+        values["sandbox_cleanup_due_at"] = now + timedelta(seconds=cleanup_delay)
     if body.conversation_id:
         values["conversation_id"] = body.conversation_id
     if body.cost is not None:
@@ -491,7 +792,18 @@ async def complete_run(
             previous=run.status_detail,
         )
     elif body.status == "COMPLETED":
+        # Task outcomes and blocking factors are agent/user-level result metadata;
+        # only SDK callback errors and system dispatch errors feed auto-disablement.
         values["status_detail"] = None
+    if body.conversation_id:
+        finish_tool_response = await fetch_latest_finish_tool_response_for_run(
+            run, body.conversation_id
+        )
+        if finish_tool_response is not None:
+            values["run_metadata"] = {
+                **(run.run_metadata or {}),
+                "finish_tool_response": finish_tool_response,
+            }
 
     stmt = (
         update(AutomationRun)
@@ -536,12 +848,22 @@ async def complete_run(
                 status.HTTP_409_CONFLICT,
                 detail=f"Run is {run.status.value}, expected RUNNING",
             )
+    if new_status == AutomationRunStatus.FAILED:
+        automation_disabled = await maybe_disable_unhealthy_automation(
+            session,
+            automation.id,
+        )
+    else:
+        automation_disabled = False
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
+    if automation_disabled:
+        telemetry_properties["automation_disabled"] = True
+
     await capture_automation_event(
         "automation_run_completed"
         if new_status == AutomationRunStatus.COMPLETED
@@ -556,11 +878,12 @@ async def complete_run(
 
     # Clean up immediately when this automation owns explicit cleanup. Once
     # post-run callbacks exist, this path should run them before deleting.
+    #
+    # A `continue_conversation` automation is forced keep_alive at creation, so
+    # deleting the sandbox out from under its conversation is already excluded
+    # here without a second condition.
     if run.sandbox_id and automation.keep_alive is not True:
         # Fire-and-forget sandbox deletion in background
-        from openhands.automation.config import get_settings
-
-        settings = get_settings()
         api_key = user.api_key
         if api_key is None:
             # Cookie-authenticated users don't carry an API key;
@@ -576,15 +899,80 @@ async def complete_run(
                 api_key = None
 
         if api_key is not None:
-            asyncio.create_task(
-                cleanup_sandbox(
-                    api_url=settings.openhands_api_base_url,
-                    api_key=api_key,
-                    sandbox_id=run.sandbox_id,
-                    run_id=str(run_id),
+            if cleanup_delay > 0:
+                # Deferred: pause now so the conversation stays resumable; the
+                # watchdog deletes the sandbox at sandbox_cleanup_due_at.
+                asyncio.create_task(
+                    pause_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
                 )
-            )
+            else:
+                asyncio.create_task(
+                    cleanup_sandbox(
+                        api_url=settings.openhands_api_base_url,
+                        api_key=api_key,
+                        sandbox_id=run.sandbox_id,
+                        run_id=str(run_id),
+                    )
+                )
 
+    return AutomationRunResponse.model_validate(run)
+
+
+# --- Run phase reporting ---
+
+
+@router.post("/runs/{run_id}/phase")
+async def report_run_phase(
+    run_id: uuid.UUID,
+    body: RunPhaseRequest,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationRunResponse:
+    """Record a live progress phase reported from inside the sandbox.
+
+    Best-effort telemetry for the dashboard: authenticated with the same
+    credentials injected into the sandbox (see ``complete_run``), the caller
+    must own the run's parent automation, and the write only lands while the
+    run is still PENDING or RUNNING (409 once terminal).
+    """
+    result = await session.execute(
+        select(AutomationRun)
+        .where(AutomationRun.id == run_id)
+        .options(selectinload(AutomationRun.automation))
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Verify the caller owns this automation
+    automation = run.automation
+    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+
+    stmt = (
+        update(AutomationRun)
+        .where(
+            AutomationRun.id == run_id,
+            AutomationRun.status.in_(
+                (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+            ),
+        )
+        .values(current_phase=body.phase)
+    )
+    db_result: CursorResult = await session.execute(stmt)  # type: ignore[assignment]
+    if db_result.rowcount == 0:
+        await session.refresh(run)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Run is {run.status.value}, expected PENDING or RUNNING",
+        )
+
+    await session.refresh(run)
     return AutomationRunResponse.model_validate(run)
 
 
@@ -595,7 +983,7 @@ async def complete_run(
 async def cancel_run(
     run_id: uuid.UUID,
     request: Request,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
     """Cancel a pending or running automation run.
@@ -614,8 +1002,9 @@ async def cancel_run(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     automation = run.automation
-    if automation.user_id != user.user_id or automation.org_id != user.org_id:
+    if automation.org_id != user.org_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your automation")
+    await _assert_can_manage(automation, user)
 
     # Only PENDING and RUNNING runs can be cancelled
     if run.status not in (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING):
@@ -662,8 +1051,16 @@ async def cancel_run(
         properties={"trigger_source": "manual"},
     )
 
-    # Clean up sandbox for runs that were RUNNING
+    # Clean up sandbox for runs that were RUNNING. Cancelling is explicit, so
+    # unlike `complete_run` the sandbox goes even when the run owns a subject
+    # -- but the subject is released with it, or the next event would pick this
+    # run and pay a lookup for a sandbox we just deleted. The key stays on the
+    # row as the record of what this run was about.
     if run.sandbox_id:
+        if run.subject_key and run.subject_released_at is None:
+            run.subject_released_at = utcnow()
+            await session.commit()
+
         from openhands.automation.config import get_settings
 
         settings = get_settings()
@@ -695,17 +1092,15 @@ async def cancel_run(
 # --- Helpers ---
 
 
-async def _get_user_automation(
+async def _get_org_automation(
     session: AsyncSession,
     automation_id: uuid.UUID,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
 ) -> Automation:
-    """Fetch a non-deleted automation, ensuring it belongs to the given user and org."""
+    """Fetch a non-deleted automation in the caller's org."""
     result = await session.execute(
         select(Automation).where(
             Automation.id == automation_id,
-            Automation.user_id == user_id,
             Automation.org_id == org_id,
             Automation.deleted_at.is_(None),
         )

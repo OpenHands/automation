@@ -53,8 +53,8 @@ class GitSyncConfigUpdateRequest(BaseModel):
 
     Omitted fields are unchanged; an explicit `null` clears that field's
     override, reverting to the env default (`interval_seconds` has no env var
-    and defaults to 0). Can only reconfigure or pause an already-running sync,
-    never enable one in a deployment that booted with it disabled.
+    and defaults to 0). Applies to the caller's organization only; setting a
+    repo URL is what enables that org's sync.
 
     `interval_seconds` is how often to sync automatically; 0 is manual-only.
 

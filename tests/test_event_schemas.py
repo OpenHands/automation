@@ -1004,3 +1004,74 @@ class TestGitHubDetectionRules:
         assert "issue_comment" in supported
         assert "push" in supported
         assert "release" in supported
+
+
+class TestHtmlUrlSurvivesParsing:
+    """`extra: "ignore"` drops anything not declared.
+
+    A continuation turn links back to what it is answering, and that link is
+    only reachable if the parsed model kept `html_url` -- the raw payload is
+    not what gets persisted as the run's `event_payload`.
+    """
+
+    def test_comment_and_issue_keep_their_links(self):
+        payload = {
+            "action": "created",
+            "comment": {
+                "id": 1,
+                "body": "Test comment",
+                "user": {"id": 1, "login": "testuser"},
+                "html_url": "https://github.com/org/test-repo/issues/5#issuecomment-1",
+            },
+            "issue": {
+                "number": 5,
+                "title": "Bug report",
+                "state": "open",
+                "user": {"id": 1, "login": "testuser"},
+                "html_url": "https://github.com/org/test-repo/issues/5",
+            },
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": "org/test-repo",
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
+
+        event = parse_event("github", payload)
+
+        assert isinstance(event, IssueCommentPayload)
+        assert (
+            event.comment.html_url
+            == "https://github.com/org/test-repo/issues/5#issuecomment-1"
+        )
+        assert event.issue.html_url == "https://github.com/org/test-repo/issues/5"
+
+    def test_a_payload_without_links_still_parses(self):
+        """GitHub always sends it, but the field stays optional."""
+        payload = {
+            "action": "created",
+            "comment": {
+                "id": 1,
+                "body": "Test comment",
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "issue": {
+                "number": 5,
+                "title": "Bug report",
+                "state": "open",
+                "user": {"id": 1, "login": "testuser"},
+            },
+            "repository": {
+                "id": 123,
+                "name": "test-repo",
+                "full_name": "org/test-repo",
+                "private": False,
+            },
+            "sender": {"id": 1, "login": "testuser"},
+        }
+
+        event = parse_event("github", payload)
+        assert isinstance(event, IssueCommentPayload)
+        assert event.comment.html_url is None

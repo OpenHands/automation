@@ -24,9 +24,15 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
-from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
+from openhands.automation.utils import (
+    get_next_fire_time,
+    get_prev_fire_time,
+    is_automation_due,
+    utcnow,
+)
 from openhands.automation.utils.run import create_pending_run
 
 
@@ -68,6 +74,7 @@ def _disable_invalid_cron_automation(
     error: BaseException,
 ) -> None:
     automation.enabled = False
+    automation.state = AutomationState.INACTIVE
     logger.error(
         "Disabling automation with invalid cron trigger: %s",
         reason,
@@ -137,6 +144,7 @@ async def _fetch_enabled_automations(
         select(Automation)
         .where(
             Automation.enabled.is_(True),
+            Automation.state == AutomationState.ACTIVE,
             Automation.deleted_at.is_(None),
             (Automation.last_polled_at.is_(None))
             | (Automation.last_polled_at < poll_threshold),
@@ -181,9 +189,10 @@ async def poll_and_schedule(
     Fetches enabled automations (using FOR UPDATE SKIP LOCKED on PostgreSQL for
     multi-worker safety), updates last_polled_at for ALL fetched automations
     (to ensure fair batch rotation), filters to those that are due, and creates
-    PENDING runs only when the automation has no in-flight run. All within a single
-    transaction so row locks are held throughout and no schedules can be lost or
-    duplicated by concurrent scheduler workers.
+    PENDING runs only when the automation has no in-flight run. A due cron slot
+    blocked by an in-flight run is consumed by advancing last_triggered_at to
+    that slot. All within a single transaction so row locks are held throughout
+    and schedules are not duplicated by concurrent scheduler workers.
 
     Note: SQLite deployments skip row locking (single-process mode assumed).
 
@@ -233,6 +242,13 @@ async def poll_and_schedule(
             try:
                 in_flight_status = in_flight_statuses.get(automation.id)
                 if in_flight_status is not None:
+                    trigger = automation.trigger
+                    skipped_fire_time = get_prev_fire_time(
+                        trigger["schedule"],
+                        trigger.get("timezone", "UTC"),
+                        now,
+                    )
+                    automation.last_triggered_at = skipped_fire_time
                     logger.info(
                         "Skipping cron run for active automation",
                         extra={
@@ -240,11 +256,14 @@ async def poll_and_schedule(
                             "existing_run_status": in_flight_status.value,
                             "trigger_source": "cron",
                             "skip_reason": "automation_run_in_flight",
+                            "skipped_fire_time": skipped_fire_time.isoformat(),
                         },
                     )
                     continue
 
-                run = await create_pending_run(session, automation)
+                run = await create_pending_run(
+                    session, automation, trigger_source="cron"
+                )
                 created_runs.append(run)
                 schedule_properties = {
                     "trigger_source": "cron",
@@ -252,13 +271,6 @@ async def poll_and_schedule(
                     if isinstance(automation.trigger, dict)
                     else None,
                 }
-                await capture_automation_event(
-                    "automation_run_scheduled",
-                    automation=automation,
-                    run=run,
-                    properties=schedule_properties,
-                    session=session,
-                )
                 await capture_automation_event(
                     "automation_run_created",
                     automation=automation,

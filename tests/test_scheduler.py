@@ -14,6 +14,7 @@ from openhands.automation.models import (
     Automation,
     AutomationRun,
     AutomationRunStatus,
+    AutomationState,
     Base,
 )
 from openhands.automation.scheduler import (
@@ -439,7 +440,7 @@ class TestPollAndSchedule:
     ):
         """An in-flight run prevents a second cron-created run."""
         now = _utc(2026, 7, 30, 12, 0, 30)
-        original_last_triggered_at = now - timedelta(minutes=2)
+        skipped_fire_time = get_prev_fire_time("* * * * *", "UTC", now)
         async with sqlite_session_factory() as session:
             automation = _due_automation("Blocked", now)
             session.add(automation)
@@ -468,7 +469,7 @@ class TestPollAndSchedule:
             updated = await session.get(Automation, automation_id)
             assert updated is not None
             assert _as_utc(updated.last_polled_at) == now
-            assert _as_utc(updated.last_triggered_at) == original_last_triggered_at
+            assert _as_utc(updated.last_triggered_at) == skipped_fire_time
 
         skip_record = next(
             record
@@ -479,6 +480,64 @@ class TestPollAndSchedule:
         assert skip_record.existing_run_status == active_status.value
         assert skip_record.trigger_source == "cron"
         assert skip_record.skip_reason == "automation_run_in_flight"
+        assert skip_record.skipped_fire_time == skipped_fire_time.isoformat()
+
+    async def test_poll_consumes_blocked_cron_slot_without_catch_up(
+        self, sqlite_session_factory, scheduler_telemetry_events
+    ):
+        """A blocked */5 slot is consumed and does not catch up after completion."""
+        minute_5 = _utc(2026, 7, 30, 12, 5, 10)
+        skipped_fire_time = _utc(2026, 7, 30, 12, 5, 0)
+        async with sqlite_session_factory() as session:
+            automation = _due_automation("Every five minutes", minute_5)
+            automation.trigger = {
+                "type": "cron",
+                "schedule": "*/5 * * * *",
+                "timezone": "UTC",
+            }
+            automation.last_triggered_at = _utc(2026, 7, 30, 12, 0, 0)
+            session.add(automation)
+            await session.flush()
+            active_run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+            )
+            session.add(active_run)
+            await session.commit()
+            automation_id = automation.id
+            active_run_id = active_run.id
+
+        assert await poll_and_schedule(sqlite_session_factory, now=minute_5) == []
+        async with sqlite_session_factory() as session:
+            updated = await session.get(Automation, automation_id)
+            assert updated is not None
+            assert _as_utc(updated.last_triggered_at) == skipped_fire_time
+            active_run = await session.get(AutomationRun, active_run_id)
+            assert active_run is not None
+            active_run.status = AutomationRunStatus.COMPLETED
+            await session.commit()
+
+        minute_7 = _utc(2026, 7, 30, 12, 7, 10)
+        minute_9 = _utc(2026, 7, 30, 12, 9, 0)
+        assert await poll_and_schedule(sqlite_session_factory, now=minute_7) == []
+        assert await poll_and_schedule(sqlite_session_factory, now=minute_9) == []
+
+        minute_10 = _utc(2026, 7, 30, 12, 10, 1)
+        created_runs = await poll_and_schedule(sqlite_session_factory, now=minute_10)
+
+        assert len(created_runs) == 1
+        assert created_runs[0].automation_id == automation_id
+        assert created_runs[0].trigger_source == "cron"
+        assert scheduler_telemetry_events == ["automation_run_created"]
+        async with sqlite_session_factory() as session:
+            run_count = await session.scalar(
+                select(func.count())
+                .select_from(AutomationRun)
+                .where(AutomationRun.automation_id == automation_id)
+            )
+            assert run_count == 2
+            updated = await session.get(Automation, automation_id)
+            assert updated is not None
 
     @pytest.mark.parametrize(
         "terminal_status",
@@ -507,10 +566,7 @@ class TestPollAndSchedule:
         created_runs = await poll_and_schedule(sqlite_session_factory, now=now)
 
         assert [run.automation_id for run in created_runs] == [automation_id]
-        assert scheduler_telemetry_events == [
-            "automation_run_scheduled",
-            "automation_run_created",
-        ]
+        assert scheduler_telemetry_events == ["automation_run_created"]
 
     async def test_poll_overlap_guard_allows_automation_without_run(
         self, sqlite_session_factory, scheduler_telemetry_events
@@ -527,7 +583,6 @@ class TestPollAndSchedule:
 
         assert [run.automation_id for run in created_runs] == [automation_id]
         assert scheduler_telemetry_events == [
-            "automation_run_scheduled",
             "automation_run_created",
         ]
 
@@ -575,7 +630,6 @@ class TestPollAndSchedule:
         assert [run.automation_id for run in created_runs] == [free_id]
         assert len(active_run_queries) == 1
         assert scheduler_telemetry_events == [
-            "automation_run_scheduled",
             "automation_run_created",
         ]
         async with sqlite_session_factory() as session:
@@ -617,7 +671,6 @@ class TestPollAndSchedule:
         assert first_runs == []
         assert [run.automation_id for run in second_runs] == [free_id]
         assert scheduler_telemetry_events == [
-            "automation_run_scheduled",
             "automation_run_created",
         ]
 
@@ -754,6 +807,28 @@ class TestPollAndSchedule:
         runs = await poll_and_schedule(async_session_factory)
 
         assert len(runs) == 0
+
+    async def test_poll_excludes_draft_even_if_enabled_flag_is_true(
+        self, async_session_factory
+    ):
+        """Draft state rows are never scheduled automatically."""
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Draft Automation",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                state=AutomationState.DRAFT,
+            )
+            session.add(automation)
+            await session.commit()
+
+        runs = await poll_and_schedule(async_session_factory)
+
+        assert runs == []
 
     async def test_poll_excludes_recently_triggered(self, async_session_factory):
         """Recently triggered automations are not returned as due."""
