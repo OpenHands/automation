@@ -1,0 +1,8 @@
+$ uv run python -m pytest tests/test_git_sync.py -k TestEncryptionKeyChangeReExports -v; pytest tests/test_git_sync_router.py -k marks_the_orgs_automations_dirty -v   # with the fix
+tests/test_git_sync.py::TestEncryptionKeyChangeReExports::test_setting_a_key_encrypts_already_synced_automations PASSED [ 25%]
+tests/test_git_sync.py::TestEncryptionKeyChangeReExports::test_clearing_the_key_re_exports_plaintext PASSED [ 50%]
+tests/test_git_sync.py::TestEncryptionKeyChangeReExports::test_rotating_the_key_re_encrypts_with_the_new_key PASSED [ 75%]
+tests/test_git_sync.py::TestEncryptionKeyChangeReExports::test_saving_the_same_key_again_does_not_re_export PASSED [100%]
+======================= 4 passed, 56 deselected in 7.03s =======================
+tests/test_git_sync_router.py::TestGitSyncConfig::test_changing_the_encryption_key_marks_the_orgs_automations_dirty PASSED [100%]
+======================= 1 passed, 57 deselected in 5.45s =======================

@@ -1,0 +1,34 @@
+$ uv run python 551-e2e.py   # unchanged code, origin/main 2f8d0b7
+service up on :18551 (local mode, SQLite); origin = bare repo
+commit under test: 2f8d0b7
+
+POST /v1/preset/prompt -> 201 id=f19411ff-58fd-4bdb-88ee-068582dd4661
+PUT /v1/git-sync/config (repo, no key) -> 200 encryption_enabled=False
+POST /v1/git-sync/sync -> 202 {'triggered': True}
+1) first sync without a key:
+  HEAD = ca5091c
+  automation.yaml      PLAINTEXT  first line: 'agent_profile_id: null'
+  tarball/prompt.txt   PLAINTEXT  first line: "Summarize yesterday's commits."
+
+PUT /v1/git-sync/config {encryption_key} -> 200 encryption_enabled=True dirty_count=0
+POST /v1/git-sync/sync -> 202 {'triggered': True}
+2) sync after saving the key: last_error=None dirty_count=0
+  HEAD = ca5091c
+  automation.yaml      PLAINTEXT  first line: 'agent_profile_id: null'
+  tarball/prompt.txt   PLAINTEXT  first line: "Summarize yesterday's commits."
+
+POST /v1/git-sync/sync -> 202 {'triggered': True}
+3) one more sync with nothing changed (expect no new commit):
+  HEAD = ca5091c
+  automation.yaml      PLAINTEXT  first line: 'agent_profile_id: null'
+  tarball/prompt.txt   PLAINTEXT  first line: "Summarize yesterday's commits."
+
+PUT /v1/git-sync/config {encryption_key: null} -> 200 encryption_enabled=False dirty_count=0
+POST /v1/git-sync/sync -> 202 {'triggered': True}
+4) sync after clearing the key:
+  HEAD = ca5091c
+  automation.yaml      PLAINTEXT  first line: 'agent_profile_id: null'
+  tarball/prompt.txt   PLAINTEXT  first line: "Summarize yesterday's commits."
+
+git log --oneline main:
+ca5091c Sync automations from agent server
