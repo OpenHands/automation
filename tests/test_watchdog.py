@@ -104,6 +104,8 @@ class TestVerifyAndMarkRunExitCodes:
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
+                run.bash_command_id = "command-123"
+                await session.flush()
                 result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
@@ -383,6 +385,8 @@ class TestVerifyAndMarkRunVerificationFailed:
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
+                run.bash_command_id = "command-123"
+                await session.flush()
                 result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
@@ -508,14 +512,8 @@ class TestVerifyAndMarkRunVerificationFailed:
             VerificationResult(outcome=VerificationOutcome.TRANSIENT_ERROR)
         )
         mock_backend.verify_run.side_effect = RuntimeError("temporary lookup failure")
-        with (
-            patch(
-                "openhands.automation.watchdog.get_backend", return_value=mock_backend
-            ),
-            patch(
-                "openhands.automation.watchdog._run_hard_deadline",
-                new=AsyncMock(return_value=utcnow() + timedelta(minutes=10)),
-            ),
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             result = await _verify_and_mark_run(session, run, mock_settings)
 
@@ -529,7 +527,7 @@ class TestVerifyAndMarkRunVerificationFailed:
     async def test_early_environment_unavailable_leaves_run_running(
         self, mock_settings
     ):
-        """A deferred scan marker does not replace the command's hard deadline."""
+        """A missing environment is terminal only once timeout_at passes."""
         verification = VerificationResult(
             outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
             detail="sandbox lookup returned no environment",
@@ -538,22 +536,14 @@ class TestVerifyAndMarkRunVerificationFailed:
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
         run.bash_command_id = "command-123"
-        # A previous STILL_RUNNING scan may have moved this marker to one
-        # watchdog interval ago while the real command budget remains open.
-        run.timeout_at = utcnow() - timedelta(seconds=1)
+        run.timeout_at = utcnow() + timedelta(minutes=10)
         run.status_detail = None
         session = MagicMock()
         session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
         mock_backend = _create_mock_backend(verification)
-        with (
-            patch(
-                "openhands.automation.watchdog.get_backend", return_value=mock_backend
-            ),
-            patch(
-                "openhands.automation.watchdog._run_hard_deadline",
-                new=AsyncMock(return_value=utcnow() + timedelta(minutes=10)),
-            ),
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
         ):
             result = await _verify_and_mark_run(session, run, mock_settings)
 
@@ -563,6 +553,33 @@ class TestVerifyAndMarkRunVerificationFailed:
         assert params["status_detail"]["kind"] == "environment_unavailable"
         assert params["status_detail"]["transient"] is True
         mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_still_running_keeps_dispatcher_deadline(self, mock_settings):
+        """Early liveness checks do not rewrite the phase-two timeout_at."""
+        verification = VerificationResult(outcome=VerificationOutcome.STILL_RUNNING)
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        defer = AsyncMock()
+
+        mock_backend = _create_mock_backend(verification)
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch("openhands.automation.watchdog._defer_still_running", new=defer),
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        defer.assert_not_awaited()
+        session.execute.assert_not_awaited()
 
 
 class TestVerifyAndMarkRunStillRunning:

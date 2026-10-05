@@ -103,20 +103,6 @@ async def _get_automation_timeout(
     )
 
 
-async def _run_hard_deadline(session: AsyncSession, run: AutomationRun) -> datetime:
-    """Return the stable execution-budget cap for a command-backed run."""
-    sandbox_cfg = get_config().sandbox
-    effective_timeout = resolve_automation_timeout_seconds(
-        await _get_automation_timeout(session, run)
-    )
-    anchor = ensure_utc(run.started_at or run.created_at)
-    return anchor + timedelta(
-        seconds=sandbox_cfg.sandbox_ready_timeout
-        + effective_timeout
-        + sandbox_cfg.run_timeout_hard_grace
-    )
-
-
 async def _defer_still_running(
     session: AsyncSession,
     run: AutomationRun,
@@ -137,7 +123,16 @@ async def _defer_still_running(
     terminal path.
     """
     extra = log_extra(run_id=str(run.id), sandbox_id=run.sandbox_id)
-    hard_deadline = await _run_hard_deadline(session, run)
+    sandbox_cfg = get_config().sandbox
+    effective_timeout = resolve_automation_timeout_seconds(
+        await _get_automation_timeout(session, run)
+    )
+    anchor = ensure_utc(run.started_at or run.created_at)
+    hard_deadline = anchor + timedelta(
+        seconds=sandbox_cfg.sandbox_ready_timeout
+        + effective_timeout
+        + sandbox_cfg.run_timeout_hard_grace
+    )
     if now >= hard_deadline:
         return False
 
@@ -234,12 +229,7 @@ async def _verify_and_mark_run(
     sandbox_id = run.sandbox_id
     extra = log_extra(run_id=run_id, sandbox_id=sandbox_id)
     now = utcnow()
-    if run.bash_command_id is not None:
-        # After STILL_RUNNING, timeout_at becomes a next-scan marker. It is not
-        # the execution budget, so use the stable cap for early-check guards.
-        deadline_reached = now >= await _run_hard_deadline(session, run)
-    else:
-        deadline_reached = run.timeout_at is not None and run.timeout_at <= now
+    deadline_reached = run.timeout_at is not None and run.timeout_at <= now
 
     # Get backend for this run (mode-specific logic encapsulated)
     backend = get_backend(run)
@@ -479,6 +469,8 @@ async def _verify_and_mark_run(
     # (enforced by the agent-server) has not fired yet, so defer instead of
     # destroying a live run. Must happen before any cleanup below.
     if verification.outcome == VerificationOutcome.STILL_RUNNING:
+        if not deadline_reached:
+            return False
         if await _defer_still_running(session, run, settings, now):
             return False
         logger.warning(
