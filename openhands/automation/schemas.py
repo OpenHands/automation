@@ -21,6 +21,9 @@ from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.models import AutomationState
+from openhands.automation.observability_associations import (
+    validate_observability_associations as validate_observability_association_exprs,
+)
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
     is_builtin_source,
@@ -497,6 +500,14 @@ class CreateAutomationRequest(BaseModel):
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -574,6 +585,13 @@ class CreateAutomationRequest(BaseModel):
         assert result is not None  # satisfy type checker
         return result
 
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -628,6 +646,14 @@ class UpdateAutomationRequest(BaseModel):
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -674,6 +700,13 @@ class UpdateAutomationRequest(BaseModel):
     def validate_entrypoint(cls, v: str | None) -> str | None:
         return validate_command_string(v, "entrypoint")
 
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -693,6 +726,10 @@ class WebhookConfig(BaseModel):
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
     signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
+    # HTTP header carrying the provider's own delivery id, or None when the
+    # source does not identify its deliveries. Built-in providers take it from
+    # their descriptor; a custom webhook takes it from its row.
+    event_id_header: str | None = None
 
 
 class EventResponse(BaseModel):
@@ -739,6 +776,16 @@ def _validate_signature_scheme(v: str) -> str:
         raise ValueError(
             f"Invalid signature_scheme '{v}'. Must be one of: "
             f"{', '.join(sorted(schemes))}"
+        )
+    return v
+
+
+def _validate_header_name(v: str) -> str:
+    """Validate an HTTP header name, shared by every configurable header."""
+    if not _HEADER_NAME_RE.match(v):
+        raise ValueError(
+            "Header must be alphanumeric with hyphens, 1-100 chars, "
+            "starting with a letter"
         )
     return v
 
@@ -793,6 +840,16 @@ class CustomWebhookCreate(BaseModel):
             "deliveries outside a 5-minute replay window."
         ),
     )
+    event_id_header: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Optional HTTP header name carrying the provider's own delivery id, "
+            "used to drop redelivered events (e.g. 'X-GitHub-Delivery'). "
+            "Omit it for a source that does not identify its deliveries: its "
+            "events are recorded and routed, but never deduplicated."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -843,12 +900,15 @@ class CustomWebhookCreate(BaseModel):
     @classmethod
     def validate_signature_header(cls, v: str) -> str:
         """Validate HTTP header name format."""
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookUpdate(BaseModel):
@@ -860,6 +920,7 @@ class CustomWebhookUpdate(BaseModel):
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
     signature_scheme: str | None = Field(default=None, max_length=50)
+    event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
     @field_validator("signature_scheme")
@@ -891,12 +952,15 @@ class CustomWebhookUpdate(BaseModel):
         """Validate HTTP header name format if provided."""
         if v is None:
             return v
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookResponse(BaseModel):
@@ -910,6 +974,7 @@ class CustomWebhookResponse(BaseModel):
     event_key_expr: str
     signature_header: str
     signature_scheme: str
+    event_id_header: str | None = None
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -978,6 +1043,7 @@ class AutomationResponse(BaseModel):
     prompt: str | None
     preset_metadata: dict | None = None
     trigger: dict
+    observability_associations: dict[str, str] | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1123,6 +1189,7 @@ class AutomationRunResponse(BaseModel):
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None

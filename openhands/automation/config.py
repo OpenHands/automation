@@ -269,7 +269,10 @@ class KVSettings(BaseSettings):
     # with Retry-After so clients can back off and retry.
     kv_lock_timeout_ms: int = 5000
 
-    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    # Maximum size in bytes for a single KV value (plaintext JSON, before
+    # encryption). This is a per-value limit, not a total across the keys an
+    # automation owns: each key is stored in its own row, so many small values
+    # never add up to a failure.
     #
     # Performance guidance - PostgreSQL TOAST behavior:
     #

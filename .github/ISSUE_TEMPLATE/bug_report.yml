@@ -50,6 +50,8 @@ body:
       id: additional-context
       attributes:
           label: Additional Context
-          description: Logs, screenshots, environment details, or anything else that helps.
+          description: |
+              Include logs, API responses, or a small reproducer; media is optional.
+              Add environment details. Remove secrets.
       validations:
           required: false

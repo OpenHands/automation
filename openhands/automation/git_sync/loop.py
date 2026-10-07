@@ -54,6 +54,7 @@ from openhands.automation.git_sync.serializer import (
     decrypt_file_tree,
     deserialize_automation,
     encrypt_file_tree,
+    is_encrypted,
     is_generated_path,
     serialize_automation,
 )
@@ -64,6 +65,9 @@ from openhands.automation.models import (
     AutomationState,
     TarballUpload,
     UploadStatus,
+)
+from openhands.automation.observability_associations import (
+    validate_observability_associations,
 )
 from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
@@ -506,6 +510,9 @@ async def _validate_and_resolve_fields(
         raise ValueError("automation.yaml missing required 'name' or 'entrypoint'")
 
     trigger = _TRIGGER_ADAPTER.validate_python(fields.get("trigger") or {})
+    observability_associations = validate_observability_associations(
+        fields.get("observability_associations")
+    )
     entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
@@ -548,6 +555,7 @@ async def _validate_and_resolve_fields(
         "model": fields.get("model"),
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
+        "observability_associations": observability_associations,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
@@ -927,6 +935,10 @@ def _exported_content_is_current(
     Compares decrypted plaintext, not the bytes on disk: Fernet uses a fresh IV
     per encryption, so identical content re-encrypts to different ciphertext
     and every cycle would look changed. Only serializer-owned paths count.
+
+    With a key set, a file still on disk as plaintext is stale too, though it
+    decrypts (passes through) to the same content: it was written before the
+    key was, and skipping it would leave it readable in the repo.
     """
     if not directory.is_dir():
         return False
@@ -937,6 +949,8 @@ def _exported_content_is_current(
             if is_generated_path(name)
         }
         if encryption_key:
+            if not all(is_encrypted(content) for content in on_disk.values()):
+                return False
             on_disk = decrypt_file_tree(on_disk, encryption_key)
     except Exception:
         # Unreadable or undecryptable (rotated key, corrupted commit): treat as

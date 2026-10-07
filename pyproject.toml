@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.17.0"
+version = "1.19.0"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -25,8 +25,8 @@ dependencies = [
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.50.1",
-  "openhands-workspace==1.50.1",
+  "openhands-sdk==1.53.0",
+  "openhands-workspace==1.53.0",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
   "pydantic>=2",
@@ -79,7 +79,7 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["openhands/automation/presets"]
+extend-exclude = ["openhands/automation/presets", ".pr"]
 
 [tool.ruff.format]
 quote-style = "double"

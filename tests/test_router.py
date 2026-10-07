@@ -1,9 +1,13 @@
 """Tests for API router endpoints."""
 
+import contextlib
 import io
+import re
 import tarfile
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote_to_bytes
 
 import httpx
 import pytest
@@ -1211,6 +1215,134 @@ class TestListAutomations:
         data = response.json()
         assert len(data["automations"]) == 2
         assert data["total"] == 5
+
+    async def _seed_automation(
+        self, async_session, *, user_id, org_id, name, age_minutes=0, created_at=None
+    ) -> Automation:
+        """Persist an automation by ``user_id``, created ``age_minutes`` ago or at
+        ``created_at``."""
+        automation = Automation(
+            user_id=user_id,
+            org_id=org_id,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+            created_at=created_at or utcnow() - timedelta(minutes=age_minutes),
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def _seed_mine_teammate_and_other_org(self, async_session):
+        """Persist the caller's automation, a newer teammate's, and another org's."""
+        await self._seed_automation(
+            async_session,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Mine",
+            age_minutes=2,
+        )
+        await self._seed_automation(
+            async_session,
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate",
+            age_minutes=1,
+        )
+        await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
+        )
+
+    async def test_list_automations_lists_every_creator_without_a_filter(
+        self, async_client, async_session
+    ):
+        """Without created_by, the org's automations from every creator are listed."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == ["Teammate", "Mine"]
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        ("created_by", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"])],
+    )
+    async def test_list_automations_filters_by_creator(
+        self, async_client, async_session, created_by, expected
+    ):
+        """created_by keeps the caller's automations or the rest of the org's."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == expected
+        assert data["total"] == len(expected)
+
+    async def test_list_automations_creator_filter_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only the filtered automations; pages keep newest-first."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Mine {i}",
+                age_minutes=i,
+            )
+        for i in range(2):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Teammate {i}",
+                age_minutes=i,
+            )
+
+        url = "/api/automation/v1?created_by=me&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
+
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
+        assert names == ["Mine 0", "Mine 1", "Mine 2"]
+
+    async def test_list_automations_pages_tied_created_at_by_id(
+        self, async_client, async_session
+    ):
+        """Automations with one created_at (e.g. one Git Sync import) page by id, so
+        each one is listed once across offsets."""
+        created_at = utcnow()
+        seeded = [
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Imported {i}",
+                created_at=created_at,
+            )
+            for i in range(5)
+        ]
+
+        pages = [
+            (await async_client.get(f"/api/automation/v1?limit=2&offset={o}")).json()
+            for o in (0, 2, 4)
+        ]
+
+        ids = [a["id"] for page in pages for a in page["automations"]]
+        assert ids == sorted((str(a.id) for a in seeded), reverse=True)
+
+    async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
+        """An unknown created_by value is a 422, not a silently unfiltered list."""
+        response = await async_client.get("/api/automation/v1?created_by=team")
+
+        assert response.status_code == 422
 
 
 class TestGetAutomation:
@@ -2598,6 +2730,45 @@ class TestCompleteRun:
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
 
+    async def test_complete_run_uses_propagated_parent_span_context(
+        self, async_client, async_session
+    ):
+        """Complete endpoint attaches callback span to propagated trace context."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch("openhands.automation.router.span") as mock_span:
+            mock_span.return_value = contextlib.nullcontext(None)
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                headers={
+                    "X-OpenHands-Observability-Parent-Span-Context": "parent-context"
+                },
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+        mock_span.assert_called_once()
+        assert mock_span.call_args.args[0] == "automation.callback.received"
+        assert mock_span.call_args.kwargs["parent_span_context"] == "parent-context"
+
     async def test_complete_run_ignores_task_result_metadata_for_status_detail(
         self, async_client, async_session
     ):
@@ -3679,6 +3850,104 @@ class TestReportRunPhase:
 
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
+
+    @pytest.mark.parametrize(
+        ("name", "sanitized_name", "fallback_name"),
+        [
+            ("My Automation", "My Automation", "My Automation"),
+            ("Monday — review", "Monday — review", "Monday review"),
+            ("Robot 🤖", "Robot 🤖", "Robot"),
+            ("自动化", "自动化", "automation"),
+            ("Café", "Café", "Cafe"),
+            ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'", "Cafe ;%'"),
+            ('"\\/\x00\n\r\t\x1f\x7f', "automation", "automation"),
+            (
+                "\uff02;filename*=UTF-8''spoofed",
+                "\uff02;filename*=UTF-8''spoofed",
+                ";filename*=UTF-8''spoofed",
+            ),
+            ("a\uff3cb\ufe68c\u2100d", "a\uff3cb\ufe68c\u2100d", "abcacd"),
+        ],
+        ids=[
+            "ascii",
+            "em-dash",
+            "emoji",
+            "cjk",
+            "latin-1",
+            "mixed",
+            "empty",
+            "nfkd-quote",
+            "nfkd-solidus",
+        ],
+    )
+    async def test_internal_url_encodes_download_filename(
+        self, name, sanitized_name, fallback_name, mock_authenticated_user
+    ):
+        """Download names round-trip safely without changing the stored archive."""
+        from openhands.automation.router import download_automation_tarball
+
+        upload = TarballUpload(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="test-tarball",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/download.tar",
+        )
+        automation = Automation(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=build_internal_url(upload.id),
+            entrypoint="python main.py",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            content = b'print("hello")\n'
+            member = tarfile.TarInfo("main.py")
+            member.size = len(content)
+            tar.addfile(member, io.BytesIO(content))
+        tarball_bytes = archive.getvalue()
+        store = MagicMock()
+        store.read.return_value = tarball_bytes
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = upload
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        with patch(
+            "openhands.automation.router._get_org_automation",
+            new_callable=AsyncMock,
+            return_value=automation,
+        ):
+            response = await download_automation_tarball(
+                automation_id=automation.id,
+                user=mock_authenticated_user,
+                session=session,
+                file_store=store,
+            )
+
+        assert response.status_code == 200
+        assert response.body == tarball_bytes
+        assert response.headers["content-type"] == "application/x-tar"
+        store.read.assert_called_once_with(upload.storage_path)
+        disposition = response.headers["content-disposition"]
+        assert disposition.isascii()
+        fallback_part, separator, extended = disposition.partition("; filename*=")
+        fallback = re.fullmatch(r'attachment; filename="([^"\\/]+)"', fallback_part)
+        assert fallback is not None
+        assert all(32 <= ord(char) < 127 for char in fallback.group(1))
+        assert fallback.group(1) == f"{fallback_name}.tar"
+        if sanitized_name.isascii():
+            assert separator == ""
+        else:
+            assert separator
+            charset, language, encoded = extended.split("'", 2)
+            assert charset.lower() == "utf-8"
+            assert language == ""
+            assert unquote_to_bytes(encoded).decode("utf-8") == f"{sanitized_name}.tar"
 
     async def test_internal_url_returns_tarball_bytes(
         self, async_client, async_session

@@ -16,6 +16,30 @@ The repository's protected branch requires an approval. If the verdict is worth
 merging, the risk is low, and there are no unresolved material findings, submit
 APPROVE rather than a COMMENT that says the PR is ready.
 
+## Issue triage: ownership and scope
+
+Use the ownership guidance below to choose the repository and scope. Ask only
+for missing details needed to understand the problem, expected result,
+reproduction, or agreed scope (including non-goals). Logs, API responses, or a
+small reproducer can explain nonvisual bugs; media is optional.
+
+Issue readiness means the work is clear enough to start—not that the fix is
+complete. Do not require a PR, passing implementation tests, or before-and-after
+fix evidence. Reconsider readiness when new information leaves scope or expected
+behavior unresolved.
+
+### Cross-repository release dependencies
+
+If an issue or PR here cannot be finished until a change in another repository
+is released, add the matching label and link the upstream issue or PR. Remove
+the label once that release ships. These labels do not affect readiness.
+
+| Label | Waiting on a release of |
+|---|---|
+| `needs-sdk-release` | `OpenHands/software-agent-sdk` (SDK, Agent Server, TypeScript client) |
+| `needs-extensions-release` | `OpenHands/extensions` |
+| `needs-canvas-release` | `OpenHands/OpenHands` (Agent Canvas) |
+
 ## Repository ownership
 
 This repository owns automation definitions, scheduling, webhook and stream
@@ -25,7 +49,20 @@ client belong in `OpenHands/software-agent-sdk`; Canvas UI belongs in
 `OpenHands/OpenHands`; reusable extension content belongs in
 `OpenHands/extensions`.
 
-## Blocking checkpoints
+## Acceptance review
+
+Read the linked issue and current PR discussion. Check each agreed outcome,
+default, and non-goal. If `0` disables a limit or allows no minimum, do not
+require enforcing that limit anyway. Separate new bugs and unmet requirements
+from unrelated existing bugs; the latter need not block a focused improvement.
+
+When a fix crosses repositories, check the SDK/server and Canvas versions
+actually used. A fix on SDK `main` may still need a dependency update or
+integration change. Follow the ownership split above; do not copy SDK behavior here.
+
+## Implementation review: conditional checkpoints
+
+Check only changed behavior and affected supported paths; report concrete failures.
 
 ### Run state and lifecycle
 
@@ -40,6 +77,12 @@ Verify that:
   artifacts;
 - persisted status matches the real sandbox or process outcome; and
 - fire-and-forget work has an owner that observes and records failure.
+
+Start the run trace at the first database write or sandbox creation. If a run
+is canceled during provisioning, clean up any sandbox returned later. Before
+later writes, check the run/claim ID and expected state; report success only if
+the write succeeds. Treat a stale or rejected claim separately from execution
+failure so cleanup neither leaks its sandbox nor deletes the winner's.
 
 Identify the concrete interleaving or leaked resource. Do not request a new lock
 or abstraction without one.
@@ -71,6 +114,17 @@ with the SQLite fallback and concurrent-replica behavior. A PR should contain on
 coherent migration for its schema change, with one Alembic head and a complete
 upgrade path from the released schema.
 
+When PATCH or ORM behavior changes, test with the pinned SQLAlchemy and driver
+versions: omitted fields stay unchanged, allowed nulls clear an existing value,
+and supplied values replace it. Flush and refresh or reload to verify storage;
+`None -> None` does not test clearing a value.
+
+When connection or TLS options change, check that the real asyncpg/pg8000 driver
+accepts them; forwarding options or mocking `connect(**kwargs)` does not prove it.
+Check which fixtures tests actually use: a local `async_engine` override can
+silently replace PostgreSQL with SQLite. Preserve PostgreSQL lock, concurrency,
+and driver coverage, and report which backend ran, not just test counts.
+
 ### API and extension contracts
 
 When request schemas, preset generation, environment variables, callback
@@ -79,6 +133,56 @@ consumer. Preserve compatibility or coordinate the required SDK, Canvas, or
 extensions release. Do not approve examples or generated tarballs that rely on
 environment variables, package versions, or endpoints the production dispatcher
 does not provide.
+
+When lists, filters, or pagination change, check how the deployed Canvas pages
+results. Use a unique tie-breaker (e.g. `created_at, id`), not timestamps alone.
+Test equal timestamps across page boundaries for missing or duplicate rows,
+using the supported offset or cursor rules. Apply the scope guidance above to
+existing ordering bugs.
+
+## Design context for deep PRs
+
+A diff shows each changed line, not the design. Expect durable design context
+when a reviewer cannot judge a PR from the diff in a couple of minutes, for
+example:
+
+- a new or changed automation contract, webhook or event payload, or dispatch
+  API;
+- a new module or subsystem, a cross-cutting refactor, or a migration;
+- a behavior change in scheduling, run history, dispatch, or sandbox lifecycle;
+  or
+- a large change whose intent cannot be reconstructed from the diff, even if no
+  single hunk is complex.
+
+Do not ask for design context on trivial, generated, or self-explanatory
+changes: a typo, a one-line guard, a config or dependency bump, a docs tweak, or
+a small localized fix. Size alone does not make a PR deep.
+
+Adequate design context states:
+
+- **Intent:** the problem and why this approach;
+- **Before and after:** the important behavior or API shape on each side;
+- **Compatibility and risk:** what callers, stored data, or deployments must
+  change, and what can break; and
+- **Code references:** links to the real code at a commit SHA.
+
+Put it in the PR description, or link a `.pr/` design doc that covers it from
+the `pr-design-doc` skill. Count a `.pr/` doc only when the link is pinned to a
+commit SHA, not the branch name. Approving a same-repository PR runs the
+`PR Artifacts` cleanup, which removes `.pr/` from the branch, so a branch link
+stops resolving before a human maintainer reads it, while a SHA link keeps
+working.
+
+Scale the response to the risk assessment:
+
+- **Deep and 🔴 HIGH risk without adequate context:** submit COMMENT, not
+  APPROVE, and ask for the write-up or a SHA-pinned doc.
+- **Deep and 🟡 MEDIUM risk:** ask for it when the change is hard to
+  reconstruct from the diff; a small, self-evident change does not need it.
+- **🟢 LOW risk:** never withhold approval for missing design context.
+
+Design context is a review aid, not a merge gate by itself. It does not excuse a
+correctness, security, or architecture defect.
 
 ## Evidence
 

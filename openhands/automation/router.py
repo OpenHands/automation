@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -34,6 +36,12 @@ from openhands.automation.models import (
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
     TarballUpload,
+)
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
@@ -259,6 +267,7 @@ async def create_automation(
         agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
+        observability_associations=body.observability_associations,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -292,6 +301,7 @@ async def create_automation(
 async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    created_by: Literal["me", "others"] | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationListResponse:
@@ -300,14 +310,22 @@ async def list_automations(
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
+    if created_by == "me":
+        base_query = base_query.where(Automation.user_id == user.user_id)
+    elif created_by == "others":
+        base_query = base_query.where(Automation.user_id != user.user_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
     )
     total = count_result.scalar() or 0
 
+    # id breaks created_at ties (e.g. one Git Sync import), so offset pages
+    # keep one order across requests.
     result = await session.execute(
-        base_query.order_by(Automation.created_at.desc()).offset(offset).limit(limit)
+        base_query.order_by(Automation.created_at.desc(), Automation.id.desc())
+        .offset(offset)
+        .limit(limit)
     )
     automations = result.scalars().all()
 
@@ -579,11 +597,27 @@ async def download_automation_tarball(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve tarball from storage",
             )
-        safe_name = re.sub(r'[\x00-\x1f\x7f"\\\/]', "", auto.name) or "automation"
+        unsafe_chars = r'[\x00-\x1f\x7f"\\\/]'
+        safe_name = re.sub(unsafe_chars, "", auto.name) or "automation"
+        if safe_name.isascii():
+            disposition = f'attachment; filename="{safe_name}.tar"'
+        else:
+            # NFKD keeps accented letters' base form ("Café" -> "Cafe"), but it
+            # also maps compatibility characters onto removed ones (U+FF02 ->
+            # '"'), so sanitize again before dropping what is still non-ASCII.
+            normalized = re.sub(
+                unsafe_chars, "", unicodedata.normalize("NFKD", safe_name)
+            )
+            ascii_name = normalized.encode("ascii", errors="ignore").decode()
+            fallback = " ".join(ascii_name.split()) or "automation"
+            disposition = (
+                f'attachment; filename="{fallback}.tar"; '
+                f"filename*=UTF-8''{quote(safe_name + '.tar', safe='')}"
+            )
         return Response(
             content=data,
             media_type="application/x-tar",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.tar"'},
+            headers={"Content-Disposition": disposition},
         )
 
     if is_http_url(auto.tarball_path):
@@ -621,14 +655,25 @@ async def dispatch_automation(
     await _assert_can_manage(auto, user)
     await _assert_normal_api_can_use_draft_artifact(session, auto)
 
-    run = await create_pending_run(
-        session,
-        auto,
-        telemetry_distinct_id=get_request_telemetry_context(
-            request
-        ).frontend_distinct_id,
-        trigger_source="manual",
-    )
+    telemetry_context = get_request_telemetry_context(request)
+    with span(
+        "automation.manual_dispatch.receive",
+        automation_attributes(
+            auto,
+            None,
+            **{"automation.run.trigger_source": "manual"},
+        ),
+    ):
+        run = await create_pending_run(
+            session,
+            auto,
+            telemetry_distinct_id=telemetry_context.frontend_distinct_id,
+            trigger_source="manual",
+            observability_parent_span_context=current_span_context(),
+        )
+        run_created_attributes = automation_attributes(auto, run)
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
     await session.flush()
     await session.refresh(run)
     await capture_automation_event(
@@ -831,6 +876,28 @@ async def complete_run(
 
     await session.refresh(run)
     logger.info("Run %s → %s", run_id, new_status.value)
+    callback_attributes = automation_attributes(
+        automation,
+        run,
+        **{
+            "automation.conversation_id": body.conversation_id,
+            "openhands.conversation_id": body.conversation_id,
+            "automation.callback.reconciled_watchdog_timeout": reconciled,
+        },
+    )
+    with span(
+        "automation.callback.received",
+        callback_attributes,
+        parent_span_context=request.headers.get(
+            "X-OpenHands-Observability-Parent-Span-Context"
+        ),
+    ):
+        add_event(
+            "automation.run.completed"
+            if new_status == AutomationRunStatus.COMPLETED
+            else "automation.run.failed",
+            callback_attributes,
+        )
     telemetry_properties: dict = {"trigger_source": "callback"}
     if reconciled:
         telemetry_properties["reconciled_watchdog_timeout"] = True
