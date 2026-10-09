@@ -119,7 +119,7 @@ class ExecutionBackend(ABC):
         """Clean up resources after verification fails.
 
         For Cloud mode: Deletes the sandbox when called by policy-aware callers.
-        For Local mode: No-op (persistent server).
+        For Local mode: Deletes the run workspace (the agent server persists).
 
         Args:
             run_id: Run ID string for logging
