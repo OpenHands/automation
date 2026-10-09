@@ -37,7 +37,8 @@ COPY openhands/ openhands/
 COPY migrations/ migrations/
 COPY alembic.ini .
 
-RUN uv pip install --system .
+# Unlocked resolve: keep cyclopts on the 4.x major the shipped image had.
+RUN uv pip install --system . "cyclopts<5"
 
 # Security: run as non-root (UID 42420 chosen arbitrarily)
 RUN groupadd -r automation && useradd -r -g automation -u 42420 automation
