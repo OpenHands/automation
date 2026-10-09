@@ -58,6 +58,9 @@ class AcceptedEvent:
     occurred_at: datetime | None = None
     # When set, persisted as the run's event_payload in place of `payload`.
     parsed_event: BaseModel | None = None
+    # Transport-provided prompt context. This never participates in trigger
+    # filtering and is kept outside the provider's raw event payload.
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +222,9 @@ async def accept_event(
         if isinstance(event.parsed_event, BaseModel)
         else webhook_payload
     )
+    if event.context:
+        event_payload = dict(event_payload)
+        event_payload["_automation_context"] = event.context
 
     run_ids: list[str] = []
     conversation_ids: list[str] = []
