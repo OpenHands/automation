@@ -3,6 +3,7 @@
 import ast
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -98,6 +99,38 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+RUN_TIMEOUT_CONSTANTS = ("RUN_TIMEOUT_SAFETY_MARGIN_SECONDS", "MIN_RUN_TIMEOUT_SECONDS")
+
+
+def _preset_run_timeout_nodes(preset_name: str) -> list[ast.stmt]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    constants = [
+        node
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in RUN_TIMEOUT_CONSTANTS
+    ]
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_resolve_run_timeout"
+    )
+    return [*constants, function_node]
+
+
+def _load_preset_run_timeout_resolver(
+    preset_name: str,
+) -> tuple[Callable[[Any, float], float | None], dict[str, Any]]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    namespace: dict[str, Any] = {"math": math}
+    module = ast.Module(body=_preset_run_timeout_nodes(preset_name), type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["_resolve_run_timeout"], namespace
+
+
 class TestPresetSessionUrl:
     """The session URL injected into a run must open the conversation in Agent Canvas.
 
@@ -122,6 +155,79 @@ class TestPresetSessionUrl:
         assert not builds_legacy_url, (
             f"{preset_name} preset still links to the legacy UI"
         )
+
+
+class TestPresetRunTimeout:
+    """The presets bound conversation.run() with the dispatcher's run timeout.
+
+    The SDK waits at most an hour by default, so a longer automation timeout is
+    cut short with the run reported as failed while the agent keeps working.
+    The wait must also end before the dispatcher's bash command timeout kills
+    the process, otherwise the completion callback is never sent.
+    """
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_budget_is_what_remains_after_elapsed_time_and_the_margin(
+        self, preset_name
+    ):
+        resolve, namespace = _load_preset_run_timeout_resolver(preset_name)
+        margin = namespace["RUN_TIMEOUT_SAFETY_MARGIN_SECONDS"]
+
+        timeout = resolve("10800", 120.0)
+
+        assert timeout == 10800 - 120.0 - margin
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_wait_ends_before_the_command_would_be_killed(self, preset_name):
+        resolve, _ = _load_preset_run_timeout_resolver(preset_name)
+
+        for budget, elapsed in [(10800, 0.0), (10800, 90.0), (3600, 45.5), (600, 5.0)]:
+            timeout = resolve(str(budget), elapsed)
+
+            assert timeout is not None
+            assert elapsed + timeout < budget
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_a_nearly_spent_budget_keeps_a_minimum_wait(self, preset_name):
+        resolve, namespace = _load_preset_run_timeout_resolver(preset_name)
+
+        assert resolve("60", 50.0) == namespace["MIN_RUN_TIMEOUT_SECONDS"]
+        assert resolve("60", 500.0) == namespace["MIN_RUN_TIMEOUT_SECONDS"]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize(
+        "raw_budget", [None, "", "  ", "abc", "nan", "inf", "-inf", "0", "-300"]
+    )
+    def test_an_unset_or_invalid_budget_keeps_the_sdk_default(
+        self, preset_name, raw_budget
+    ):
+        resolve, _ = _load_preset_run_timeout_resolver(preset_name)
+
+        assert resolve(raw_budget, 10.0) is None
+
+    def test_both_presets_share_the_same_resolver(self):
+        prompt_nodes = _preset_run_timeout_nodes("prompt")
+        plugin_nodes = _preset_run_timeout_nodes("plugin")
+
+        assert [ast.dump(node) for node in prompt_nodes] == [
+            ast.dump(node) for node in plugin_nodes
+        ]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_run_is_bounded_by_the_exported_timeout(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert 'os.environ.get("AUTOMATION_RUN_TIMEOUT")' in source
+        assert "time.monotonic() - SCRIPT_STARTED_AT" in source
+        assert "conversation.run(timeout=run_timeout)" in source
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_elapsed_clock_starts_before_the_slow_sdk_imports(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        started = source.index("SCRIPT_STARTED_AT = time.monotonic()")
+
+        assert started < source.index("from openhands.sdk import")
 
 
 class TestPresetFileSyntax:
