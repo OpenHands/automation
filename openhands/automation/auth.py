@@ -4,7 +4,8 @@ Supports three authentication methods (checked in order):
 1. API key via Authorization: Bearer header
 2. API key via X-Session-API-Key header (matches agent-server convention,
    useful behind reverse proxies that overwrite the Authorization header)
-3. Cookie: keycloak_auth cookie from the OpenHands web UI
+3. Cookie: the OpenHands web UI session cookie, either the new OAuth v2
+   ``openhands_auth`` JWT cookie or the legacy ``keycloak_auth`` cookie
 
 All methods validate against the OpenHands API GET /api/v1/users/me endpoint
 to get the user and organization identity.
@@ -38,7 +39,14 @@ logger = logging.getLogger("automation.auth")
 
 # Auth cache - initialized lazily to use config values
 _auth_cache: TTLCache[str, "AuthenticatedUser"] | None = None
-SESSION_COOKIE_NAME = "keycloak_auth"
+
+# Session cookies accepted from the OpenHands web UI. ``openhands_auth`` is
+# the OAuth v2 JWT cookie issued to new logins; ``keycloak_auth`` is the
+# legacy chunked cookie that existing sessions still carry. Both are checked,
+# new first, so a client mid-migration that holds the old cookie keeps working
+# while new logins authenticate with the new one. ``keycloak_auth`` alone is
+# chunked, but we reassemble either name defensively.
+SESSION_COOKIE_NAMES = ("openhands_auth", "keycloak_auth")
 X_ORG_ID_HEADER = "X-Org-Id"
 # Keep parity with OpenHands' cookie chunking helper: 8 * 3000 bytes is
 # comfortably above expected session token sizes while staying bounded.
@@ -348,31 +356,38 @@ def _extract_api_key(request: Request) -> str | None:
     return session_key or None
 
 
-def _extract_session_cookie(request: Request) -> str | None:
-    """Read OpenHands' possibly chunked session cookie.
+def _extract_session_cookie(request: Request) -> tuple[str, str] | None:
+    """Read OpenHands' session cookie and return ``(name, value)``.
 
-    OpenHands splits large keycloak_auth values across keycloak_auth,
-    keycloak_auth_1, keycloak_auth_2, etc. Automation validates by forwarding
-    the reassembled token back to OpenHands /api/v1/users/me.
+    Accepts the new ``openhands_auth`` JWT cookie and the legacy
+    ``keycloak_auth`` cookie, preferring the new one. OpenHands splits large
+    ``keycloak_auth`` values across ``keycloak_auth``, ``keycloak_auth_1``,
+    etc.; the chunks are reassembled here and the whole ``name=value`` pair is
+    forwarded to OpenHands ``/api/v1/users/me`` so upstream sees the cookie
+    under its original name.
     """
-    first = request.cookies.get(SESSION_COOKIE_NAME)
-    if not first:
-        return None
+    for name in SESSION_COOKIE_NAMES:
+        first = request.cookies.get(name)
+        if not first:
+            continue
 
-    parts = [first]
-    for index in range(1, MAX_SESSION_COOKIE_CHUNKS):
-        part = request.cookies.get(f"{SESSION_COOKIE_NAME}_{index}")
-        if part is None:
-            break
-        parts.append(part)
-    return "".join(parts)
+        parts = [first]
+        for index in range(1, MAX_SESSION_COOKIE_CHUNKS):
+            part = request.cookies.get(f"{name}_{index}")
+            if part is None:
+                break
+            parts.append(part)
+        return name, "".join(parts)
+    return None
 
 
 def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
     """Extract a credential and its auth method from the request.
 
-    Priority: Authorization: Bearer → X-Session-API-Key → keycloak_auth cookie.
-    Raises 401 if nothing usable is found.
+    Priority: Authorization: Bearer → X-Session-API-Key → session cookie
+    (``openhands_auth`` or ``keycloak_auth``). For cookie auth the credential
+    is the full ``name=value`` pair so the original cookie name reaches
+    upstream. Raises 401 if nothing usable is found.
     """
     api_key = _extract_api_key(request)
     if api_key:
@@ -380,12 +395,13 @@ def _extract_credential(request: Request) -> tuple[str, AuthMethod]:
 
     cookie = _extract_session_cookie(request)
     if cookie:
-        return cookie, AuthMethod.COOKIE
+        name, value = cookie
+        return f"{name}={value}", AuthMethod.COOKIE
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required: provide Bearer token, "
-        "X-Session-API-Key header, or keycloak_auth cookie",
+        "X-Session-API-Key header, or session cookie",
     )
 
 
@@ -395,7 +411,9 @@ def _upstream_headers(
     headers = (
         {"Authorization": f"Bearer {credential}"}
         if auth_method == AuthMethod.API_KEY
-        else {"Cookie": f"{SESSION_COOKIE_NAME}={credential}"}
+        # For cookie auth ``credential`` is already ``name=value``; preserve
+        # the caller's cookie name so upstream parses it correctly.
+        else {"Cookie": credential}
     )
     if x_org_id:
         headers[X_ORG_ID_HEADER] = x_org_id
