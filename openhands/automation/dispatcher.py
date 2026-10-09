@@ -350,6 +350,7 @@ async def _execute_run(
         f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/phase"
     )
     env_vars["AUTOMATION_API_URL"] = settings.resolved_base_url
+    env_vars["AUTOMATION_RUN_TIMEOUT"] = str(effective_timeout)
     env_vars["AUTOMATION_EVENT_PAYLOAD"] = json.dumps(
         _build_event_payload(automation, run)
     )

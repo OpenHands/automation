@@ -1376,6 +1376,7 @@ class TestExecuteRunDerivedConversationId:
         trigger: dict,
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
+        timeout: int | None = None,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
@@ -1384,6 +1385,7 @@ class TestExecuteRunDerivedConversationId:
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
+                timeout=timeout,
                 trigger=trigger,
                 tarball_path="https://example.com/code.tar.gz",
                 entrypoint="uv run main.py",
@@ -1518,3 +1520,37 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert env_vars["AUTOMATION_AGENT_PROFILE_ID"] == str(selected)
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_timeout_matches_the_command_timeout(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+            timeout=1200,
+        )
+
+        assert env_vars["AUTOMATION_RUN_TIMEOUT"] == "1200"
+        assert mock_execute.await_args.kwargs["timeout"] == 1200
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_timeout_defaults_to_the_configured_run_duration(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+        )
+
+        default_timeout = get_config().sandbox.default_run_duration
+        assert env_vars["AUTOMATION_RUN_TIMEOUT"] == str(default_timeout)
+        assert mock_execute.await_args.kwargs["timeout"] == default_timeout

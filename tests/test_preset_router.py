@@ -25,6 +25,11 @@ from openhands.automation.preset_router import (
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.automation.presets.run_timeout import (
+    MIN_RUN_TIMEOUT_SECONDS,
+    RUN_TIMEOUT_SAFETY_MARGIN_SECONDS,
+    resolve_run_timeout,
+)
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -122,6 +127,79 @@ class TestPresetSessionUrl:
         assert not builds_legacy_url, (
             f"{preset_name} preset still links to the legacy UI"
         )
+
+
+class TestPresetRunTimeout:
+    """The presets bound conversation.run() with the dispatcher's run timeout.
+
+    The SDK waits at most an hour by default, so a longer automation timeout is
+    cut short with the run reported as failed while the agent keeps working.
+    The wait must also end before the dispatcher's bash command timeout kills
+    the process, otherwise the completion callback is never sent.
+    """
+
+    def test_the_budget_is_what_remains_after_elapsed_time_and_the_margin(self):
+        timeout = resolve_run_timeout("10800", 120.0)
+
+        assert timeout == 10800 - 120.0 - RUN_TIMEOUT_SAFETY_MARGIN_SECONDS
+
+    def test_the_wait_ends_before_the_command_would_be_killed(self):
+        for budget, elapsed in [(10800, 0.0), (10800, 90.0), (3600, 45.5), (600, 5.0)]:
+            timeout = resolve_run_timeout(str(budget), elapsed)
+
+            assert timeout is not None
+            assert elapsed + timeout < budget
+
+    def test_a_nearly_spent_budget_keeps_a_minimum_wait(self):
+        assert resolve_run_timeout("60", 50.0) == MIN_RUN_TIMEOUT_SECONDS
+        assert resolve_run_timeout("60", 500.0) == MIN_RUN_TIMEOUT_SECONDS
+
+    @pytest.mark.parametrize(
+        "raw_budget", [None, "", "  ", "abc", "nan", "inf", "-inf", "0", "-300"]
+    )
+    def test_an_unset_or_invalid_budget_keeps_the_sdk_default(self, raw_budget):
+        assert resolve_run_timeout(raw_budget, 10.0) is None
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_presets_use_the_shared_resolver(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert "from run_timeout import resolve_run_timeout" in source
+        assert "def _resolve_run_timeout" not in source
+        assert "RUN_TIMEOUT_SAFETY_MARGIN_SECONDS" not in source
+
+    def test_the_shared_resolver_only_needs_the_standard_library(self):
+        module = ast.parse((PRESETS_DIR / "run_timeout.py").read_text())
+
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(module)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        from_imported = {
+            node.module.split(".")[0]
+            for node in ast.walk(module)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+
+        assert imported | from_imported <= {"math"}
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_run_is_bounded_by_the_exported_timeout(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        assert 'os.environ.get("AUTOMATION_RUN_TIMEOUT")' in source
+        assert "time.monotonic() - SCRIPT_STARTED_AT" in source
+        assert "conversation.run(timeout=run_timeout)" in source
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_elapsed_clock_starts_before_the_slow_sdk_imports(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
+
+        started = source.index("SCRIPT_STARTED_AT = time.monotonic()")
+
+        assert started < source.index("from openhands.sdk import")
 
 
 class TestPresetFileSyntax:
@@ -497,6 +575,7 @@ class TestGenerateTarball:
             names = tar.getnames()
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -622,6 +701,7 @@ class TestReplacePromptInTarball:
         for name in (
             "main.py",
             "finish_tool_hook.py",
+            "run_timeout.py",
             "setup.sh",
             "plugins_config.json",
             "repos_config.json",
@@ -1391,6 +1471,7 @@ class TestGeneratePluginTarball:
             names = tar.getnames()
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -1843,6 +1924,7 @@ class TestExperimentTarball:
             assert "plugins_config.json" not in names
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 
