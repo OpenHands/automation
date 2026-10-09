@@ -3,7 +3,6 @@
 import ast
 import io
 import json
-import math
 import os
 import re
 import socket
@@ -25,6 +24,11 @@ from openhands.automation.preset_router import (
     _get_preset_entrypoint,
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
+)
+from openhands.automation.presets.run_timeout import (
+    MIN_RUN_TIMEOUT_SECONDS,
+    RUN_TIMEOUT_SAFETY_MARGIN_SECONDS,
+    resolve_run_timeout,
 )
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
@@ -99,38 +103,6 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
-RUN_TIMEOUT_CONSTANTS = ("RUN_TIMEOUT_SAFETY_MARGIN_SECONDS", "MIN_RUN_TIMEOUT_SECONDS")
-
-
-def _preset_run_timeout_nodes(preset_name: str) -> list[ast.stmt]:
-    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
-    module = ast.parse(source_path.read_text(), filename=str(source_path))
-    constants = [
-        node
-        for node in module.body
-        if isinstance(node, ast.Assign)
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id in RUN_TIMEOUT_CONSTANTS
-    ]
-    function_node = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_resolve_run_timeout"
-    )
-    return [*constants, function_node]
-
-
-def _load_preset_run_timeout_resolver(
-    preset_name: str,
-) -> tuple[Callable[[Any, float], float | None], dict[str, Any]]:
-    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
-    namespace: dict[str, Any] = {"math": math}
-    module = ast.Module(body=_preset_run_timeout_nodes(preset_name), type_ignores=[])
-    ast.fix_missing_locations(module)
-    exec(compile(module, str(source_path), "exec"), namespace)
-    return namespace["_resolve_run_timeout"], namespace
-
-
 class TestPresetSessionUrl:
     """The session URL injected into a run must open the conversation in Agent Canvas.
 
@@ -166,52 +138,52 @@ class TestPresetRunTimeout:
     the process, otherwise the completion callback is never sent.
     """
 
-    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
-    def test_the_budget_is_what_remains_after_elapsed_time_and_the_margin(
-        self, preset_name
-    ):
-        resolve, namespace = _load_preset_run_timeout_resolver(preset_name)
-        margin = namespace["RUN_TIMEOUT_SAFETY_MARGIN_SECONDS"]
+    def test_the_budget_is_what_remains_after_elapsed_time_and_the_margin(self):
+        timeout = resolve_run_timeout("10800", 120.0)
 
-        timeout = resolve("10800", 120.0)
+        assert timeout == 10800 - 120.0 - RUN_TIMEOUT_SAFETY_MARGIN_SECONDS
 
-        assert timeout == 10800 - 120.0 - margin
-
-    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
-    def test_the_wait_ends_before_the_command_would_be_killed(self, preset_name):
-        resolve, _ = _load_preset_run_timeout_resolver(preset_name)
-
+    def test_the_wait_ends_before_the_command_would_be_killed(self):
         for budget, elapsed in [(10800, 0.0), (10800, 90.0), (3600, 45.5), (600, 5.0)]:
-            timeout = resolve(str(budget), elapsed)
+            timeout = resolve_run_timeout(str(budget), elapsed)
 
             assert timeout is not None
             assert elapsed + timeout < budget
 
-    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
-    def test_a_nearly_spent_budget_keeps_a_minimum_wait(self, preset_name):
-        resolve, namespace = _load_preset_run_timeout_resolver(preset_name)
+    def test_a_nearly_spent_budget_keeps_a_minimum_wait(self):
+        assert resolve_run_timeout("60", 50.0) == MIN_RUN_TIMEOUT_SECONDS
+        assert resolve_run_timeout("60", 500.0) == MIN_RUN_TIMEOUT_SECONDS
 
-        assert resolve("60", 50.0) == namespace["MIN_RUN_TIMEOUT_SECONDS"]
-        assert resolve("60", 500.0) == namespace["MIN_RUN_TIMEOUT_SECONDS"]
-
-    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     @pytest.mark.parametrize(
         "raw_budget", [None, "", "  ", "abc", "nan", "inf", "-inf", "0", "-300"]
     )
-    def test_an_unset_or_invalid_budget_keeps_the_sdk_default(
-        self, preset_name, raw_budget
-    ):
-        resolve, _ = _load_preset_run_timeout_resolver(preset_name)
+    def test_an_unset_or_invalid_budget_keeps_the_sdk_default(self, raw_budget):
+        assert resolve_run_timeout(raw_budget, 10.0) is None
 
-        assert resolve(raw_budget, 10.0) is None
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_the_presets_use_the_shared_resolver(self, preset_name):
+        source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
 
-    def test_both_presets_share_the_same_resolver(self):
-        prompt_nodes = _preset_run_timeout_nodes("prompt")
-        plugin_nodes = _preset_run_timeout_nodes("plugin")
+        assert "from run_timeout import resolve_run_timeout" in source
+        assert "def _resolve_run_timeout" not in source
+        assert "RUN_TIMEOUT_SAFETY_MARGIN_SECONDS" not in source
 
-        assert [ast.dump(node) for node in prompt_nodes] == [
-            ast.dump(node) for node in plugin_nodes
-        ]
+    def test_the_shared_resolver_only_needs_the_standard_library(self):
+        module = ast.parse((PRESETS_DIR / "run_timeout.py").read_text())
+
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(module)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        from_imported = {
+            node.module.split(".")[0]
+            for node in ast.walk(module)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+
+        assert imported | from_imported <= {"math"}
 
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     def test_the_run_is_bounded_by_the_exported_timeout(self, preset_name):
@@ -603,6 +575,7 @@ class TestGenerateTarball:
             names = tar.getnames()
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
             # Note: load_skills.py and clone_repos.py are no longer needed
@@ -728,6 +701,7 @@ class TestReplacePromptInTarball:
         for name in (
             "main.py",
             "finish_tool_hook.py",
+            "run_timeout.py",
             "setup.sh",
             "plugins_config.json",
             "repos_config.json",
@@ -1497,6 +1471,7 @@ class TestGeneratePluginTarball:
             names = tar.getnames()
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "plugins_config.json" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
@@ -1949,6 +1924,7 @@ class TestExperimentTarball:
             assert "plugins_config.json" not in names
             assert "main.py" in names
             assert "finish_tool_hook.py" in names
+            assert "run_timeout.py" in names
             assert "prompt.txt" in names
             assert "setup.sh" in names
 

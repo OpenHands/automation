@@ -73,7 +73,6 @@ Runtime-injected secrets (via conversation.update_secrets after Conversation cre
 
 import inspect
 import json
-import math
 import os
 import random
 import sys
@@ -137,21 +136,6 @@ print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else '
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 print(f"  AUTOMATION_RUN_TIMEOUT: {os.environ.get('AUTOMATION_RUN_TIMEOUT') or 'NONE'}")
 
-RUN_TIMEOUT_SAFETY_MARGIN_SECONDS = 60.0
-MIN_RUN_TIMEOUT_SECONDS = 30.0
-
-
-def _resolve_run_timeout(raw_budget, elapsed_seconds):
-    try:
-        budget = float(raw_budget)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(budget) or budget <= 0:
-        return None
-    remaining = budget - elapsed_seconds - RUN_TIMEOUT_SAFETY_MARGIN_SECONDS
-    return max(remaining, MIN_RUN_TIMEOUT_SECONDS)
-
-
 # --- Live phase reporting (best-effort, never fatal) -------------------------
 # Keep this block in sync with presets/prompt/sdk_main.py.
 AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
@@ -212,6 +196,7 @@ def _phase_poster() -> None:
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
+from run_timeout import resolve_run_timeout
 from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.tools.preset import TaskOutcome
 
@@ -609,7 +594,7 @@ More activity arrived on the same subject while this run was queued:
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
-        run_timeout = _resolve_run_timeout(
+        run_timeout = resolve_run_timeout(
             os.environ.get("AUTOMATION_RUN_TIMEOUT"),
             time.monotonic() - SCRIPT_STARTED_AT,
         )

@@ -214,7 +214,7 @@ Completion is handled asynchronously:
 | `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
-| `AUTOMATION_RUN_TIMEOUT` | Resolved run timeout in seconds (same value as the bash command timeout) | Preset scripts bound `conversation.run()` with it, less time already spent and a safety margin, so a timeout is reported through the completion callback before the command is killed |
+| `AUTOMATION_RUN_TIMEOUT` | Resolved run timeout in seconds (same value as the bash command timeout) | Preset scripts bound `conversation.run()` with it (via the shared `presets/run_timeout.py`), less time already spent and a safety margin, so a timeout is reported through the completion callback before the command is killed |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 | `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
 
@@ -291,6 +291,7 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
 - `openhands/automation/presets/prompt/sdk_main.py` - SDK boilerplate that fetches LLM, secrets, and MCP config
 - `openhands/automation/presets/prompt/setup.sh` - SDK installation script (installs from PyPI)
+- `openhands/automation/presets/finish_tool_hook.py`, `openhands/automation/presets/run_timeout.py` - Helpers shared by the prompt and plugin presets; the tarball builders bundle them next to `main.py` so each preset imports them instead of duplicating the code
 
 #### Request Schema
 
