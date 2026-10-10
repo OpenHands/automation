@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import Request
 from sqlalchemy import event
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -68,15 +68,48 @@ def is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite")
 
 
-def normalize_sqlite_url_for_alembic(url: str) -> str:
-    """Convert async SQLite URL to sync version for Alembic.
+ALEMBIC_SYNC_DRIVERS = {
+    "sqlite+aiosqlite": "sqlite",
+    "postgresql+asyncpg": "postgresql+pg8000",
+}
 
-    Alembic doesn't support async drivers, so we need to convert
-    sqlite+aiosqlite:// URLs to plain sqlite:// URLs.
+
+def normalize_url_for_alembic(url: str) -> str:
+    """Convert an async database URL to the sync driver Alembic uses.
+
+    Alembic runs synchronously and cannot drive aiosqlite or asyncpg, so
+    sqlite+aiosqlite:// becomes sqlite:// and postgresql+asyncpg:// becomes
+    postgresql+pg8000://. Any other URL is returned unchanged.
     """
-    if url.startswith("sqlite+aiosqlite"):
-        return url.replace("sqlite+aiosqlite", "sqlite", 1)
+    for async_driver, sync_driver in ALEMBIC_SYNC_DRIVERS.items():
+        if url.startswith(async_driver):
+            return url.replace(async_driver, sync_driver, 1)
     return url
+
+
+def alembic_engine_args(url: str) -> tuple[str, dict]:
+    """Return the sync URL and connect args Alembic uses for AUTOMATION_DB_URL.
+
+    The application engine takes TLS for a URL from its ``ssl`` query parameter.
+    pg8000 rejects ``ssl`` as a connect() keyword, so it is removed from the URL
+    and translated into an ``ssl_context``.
+    """
+    sync_url = normalize_url_for_alembic(url)
+    if not sync_url.startswith("postgresql+pg8000"):
+        return sync_url, {}
+    parsed = make_url(sync_url)
+    mode = parsed.query.get("ssl")
+    if isinstance(mode, tuple):
+        mode = mode[-1]
+    if mode is not None and mode.strip().lower() not in {"", *SUPPORTED_DB_SSL_MODES}:
+        raise ValueError(
+            f'Unsupported ssl="{mode}" in AUTOMATION_DB_URL for migrations. '
+            f"Supported values are: {', '.join(sorted(SUPPORTED_DB_SSL_MODES))}."
+        )
+    stripped = parsed.difference_update_query(["ssl"])
+    return stripped.render_as_string(hide_password=False), _build_pg8000_connect_args(
+        mode
+    )
 
 
 @dataclass
