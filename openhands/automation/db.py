@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import Request
 from sqlalchemy import event
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -85,6 +85,31 @@ def normalize_url_for_alembic(url: str) -> str:
         if url.startswith(async_driver):
             return url.replace(async_driver, sync_driver, 1)
     return url
+
+
+def alembic_engine_args(url: str) -> tuple[str, dict]:
+    """Return the sync URL and connect args Alembic uses for AUTOMATION_DB_URL.
+
+    The application engine takes TLS for a URL from its ``ssl`` query parameter.
+    pg8000 rejects ``ssl`` as a connect() keyword, so it is removed from the URL
+    and translated into an ``ssl_context``.
+    """
+    sync_url = normalize_url_for_alembic(url)
+    if not sync_url.startswith("postgresql+pg8000"):
+        return sync_url, {}
+    parsed = make_url(sync_url)
+    mode = parsed.query.get("ssl")
+    if isinstance(mode, tuple):
+        mode = mode[-1]
+    if mode is not None and mode.strip().lower() not in {"", *SUPPORTED_DB_SSL_MODES}:
+        raise ValueError(
+            f'Unsupported ssl="{mode}" in AUTOMATION_DB_URL for migrations. '
+            f"Supported values are: {', '.join(sorted(SUPPORTED_DB_SSL_MODES))}."
+        )
+    stripped = parsed.difference_update_query(["ssl"])
+    return stripped.render_as_string(hide_password=False), _build_pg8000_connect_args(
+        mode
+    )
 
 
 @dataclass

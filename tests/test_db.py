@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from openhands.automation import db as db_module
 from openhands.automation.config import ServiceSettings
@@ -16,6 +16,7 @@ from openhands.automation.db import (
     _build_asyncpg_connect_args,
     _build_pg8000_connect_args,
     _create_sqlite_engine,
+    alembic_engine_args,
     is_sqlite_url,
     normalize_url_for_alembic,
     set_sqlite_mode,
@@ -274,6 +275,55 @@ class TestNormalizeUrlForAlembic:
     def test_preserves_empty_url(self):
         """Empty URL is unchanged."""
         assert normalize_url_for_alembic("") == ""
+
+
+class TestAlembicEngineArgs:
+    """Tests for alembic_engine_args, the sync URL + pg8000 TLS args for migrations."""
+
+    def test_plain_asyncpg_url_gets_no_tls_args(self):
+        url, connect_args = alembic_engine_args("postgresql+asyncpg://u:p@h/db")
+        assert url == "postgresql+pg8000://u:p@h/db"
+        assert connect_args == {}
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [
+            ("require", {"ssl_context": True}),
+            ("disable", {"ssl_context": False}),
+            ("prefer", {}),
+        ],
+    )
+    def test_ssl_query_param_moves_into_pg8000_connect_args(self, mode, expected):
+        url, connect_args = alembic_engine_args(
+            f"postgresql+asyncpg://u:p@h/db?ssl={mode}&application_name=mig"
+        )
+        assert url == "postgresql+pg8000://u:p@h/db?application_name=mig"
+        assert connect_args == expected
+
+    @pytest.mark.parametrize("mode", ["verify-full", "sometimes"])
+    def test_unsupported_ssl_mode_is_rejected(self, mode):
+        with pytest.raises(ValueError, match="Unsupported ssl="):
+            alembic_engine_args(f"postgresql+asyncpg://u:p@h/db?ssl={mode}")
+
+    def test_percent_encoded_password_survives(self):
+        url, _ = alembic_engine_args(
+            "postgresql+asyncpg://u:p%40ss%25w@h/db?ssl=disable"
+        )
+        assert url == "postgresql+pg8000://u:p%40ss%25w@h/db"
+
+    def test_sqlite_url_is_only_normalized(self):
+        assert alembic_engine_args("sqlite+aiosqlite:///x.db?ssl=require") == (
+            "sqlite:///x.db?ssl=require",
+            {},
+        )
+
+    def test_pg8000_accepts_the_result(self):
+        url, connect_args = alembic_engine_args(
+            "postgresql+asyncpg://u:p@h/db?ssl=require"
+        )
+        engine = create_engine(url, connect_args=connect_args)
+        _, cparams = engine.dialect.create_connect_args(engine.url)
+        assert "ssl" not in cparams
 
 
 class TestSqliteMigrations:
