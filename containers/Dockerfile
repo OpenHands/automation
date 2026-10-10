@@ -8,6 +8,8 @@ ENV PYTHONPATH='/app'
 # Datadog labels
 LABEL com.datadoghq.tags.service="automation"
 
+COPY containers/constraints-1.14.0.txt containers/constraints-1.14.0.txt
+
 # Install uv + git (for SDK git dependencies)
 RUN printf '%s\n' \
         'Types: deb' \
@@ -28,7 +30,7 @@ RUN printf '%s\n' \
     apt-get install -y --no-install-recommends git && \
     apt-get upgrade -y --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    pip install --no-cache-dir uv ddtrace
+    pip install --no-cache-dir -c /app/containers/constraints-1.14.0.txt uv ddtrace
 
 # Copy everything and install
 COPY pyproject.toml ./
@@ -37,8 +39,7 @@ COPY openhands/ openhands/
 COPY migrations/ migrations/
 COPY alembic.ini .
 
-# Unlocked resolve: keep cyclopts on the 4.x major the shipped image had.
-RUN uv pip install --system . "cyclopts<5"
+RUN uv pip install --system -c containers/constraints-1.14.0.txt .
 
 # Security: run as non-root (UID 42420 chosen arbitrarily)
 RUN groupadd -r automation && useradd -r -g automation -u 42420 automation
