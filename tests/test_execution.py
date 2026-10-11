@@ -7,6 +7,7 @@ Only tests pure logic that can run without a network.  The e2e flow
 import io
 import subprocess
 import tarfile
+from pathlib import Path
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -60,6 +61,193 @@ class TestBuildTarball:
             assert setup_file is not None
             setup = setup_file.read().decode()
             assert "pip install" in setup
+
+
+def _build_plain_tarball() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        data = b"payload"
+        info = tarfile.TarInfo("payload.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _run_shell(command: str) -> tuple[int, str, str]:
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+    return result.returncode, result.stdout, result.stderr
+
+
+class TestArchiveExtraction:
+    @pytest.mark.parametrize("execution_path", ["dispatch", "blocking"])
+    @pytest.mark.parametrize(
+        "archive", [_build_plain_tarball(), None], ids=["tar", "gzip"]
+    )
+    @pytest.mark.asyncio
+    async def test_extracts_plain_and_gzip_archives(
+        self, archive, execution_path, tmp_path, monkeypatch
+    ):
+        data = (
+            archive
+            if archive is not None
+            else build_tarball({"payload.txt": "payload"})
+        )
+        tarball_path = tmp_path / "archive.tar"
+        work_dir = tmp_path / "work"
+        commands_run = []
+
+        async def upload(_workspace, uploaded_data, dest):
+            Path(dest).write_bytes(uploaded_data)
+
+        async def run(_workspace, command, **_kwargs):
+            result = _run_shell(command)
+            commands_run.append(result)
+            return result
+
+        async def start(_workspace, command, **_kwargs):
+            result = _run_shell(command)
+            commands_run.append(result)
+            return "command-1"
+
+        monkeypatch.setattr(
+            "openhands.automation.execution.TARBALL_PATH", str(tarball_path)
+        )
+        monkeypatch.setattr("openhands.automation.execution._upload", upload)
+        if execution_path == "dispatch":
+            with patch(
+                "openhands.automation.execution.AsyncRemoteWorkspace"
+            ) as workspace_cls:
+                workspace = workspace_cls.return_value
+                workspace.reset_client = AsyncMock()
+                with patch(
+                    "openhands.automation.execution._start_bash", side_effect=start
+                ):
+                    result = await execute_in_context(
+                        agent_url="https://agent.example.com",
+                        session_key="key",
+                        entrypoint="test -f payload.txt && printf EXECUTED",
+                        tarball_source=data,
+                        work_dir=str(work_dir),
+                    )
+            assert result.success is True
+            assert workspace.reset_client.await_count == 1
+            assert commands_run[0][0] == 0
+            assert commands_run[0][1] == "EXECUTED"
+        else:
+            context_manager = MagicMock()
+            context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+            context_manager.__aexit__ = AsyncMock(return_value=None)
+            with (
+                patch(
+                    "openhands.automation.execution.httpx.AsyncClient",
+                    return_value=context_manager,
+                ),
+                patch(
+                    "openhands.automation.execution._create_and_wait",
+                    new_callable=AsyncMock,
+                ) as create,
+                patch(
+                    "openhands.automation.execution.AsyncRemoteWorkspace"
+                ) as workspace_cls,
+                patch("openhands.automation.execution._bash", side_effect=run),
+                patch(
+                    "openhands.automation.execution.delete_sandbox",
+                    new_callable=AsyncMock,
+                ),
+            ):
+                workspace_cls.return_value.reset_client = AsyncMock()
+                create.return_value = ("sandbox-1", "key", "https://agent.example.com")
+                result = await run_automation(
+                    api_url="https://api.example.com",
+                    api_key="api-key",
+                    entrypoint="test -f payload.txt && printf EXECUTED",
+                    tarball_source=data,
+                    keep_sandbox=True,
+                    work_dir=str(work_dir),
+                )
+            assert result.success is True
+            assert result.stdout == "EXECUTED"
+
+    @pytest.mark.parametrize("execution_path", ["dispatch", "blocking"])
+    @pytest.mark.asyncio
+    async def test_malformed_archive_does_not_run_entrypoint(
+        self, execution_path, tmp_path, monkeypatch
+    ):
+        tarball_path = tmp_path / "archive.tar"
+        work_dir = tmp_path / "work"
+
+        async def upload(_workspace, uploaded_data, dest):
+            Path(dest).write_bytes(uploaded_data)
+
+        commands_run = []
+
+        async def run(_workspace, command, **_kwargs):
+            result = _run_shell(command)
+            commands_run.append(result)
+            return result
+
+        async def start(_workspace, command, **_kwargs):
+            result = _run_shell(command)
+            commands_run.append(result)
+            return "command-1"
+
+        monkeypatch.setattr(
+            "openhands.automation.execution.TARBALL_PATH", str(tarball_path)
+        )
+        monkeypatch.setattr("openhands.automation.execution._upload", upload)
+        if execution_path == "dispatch":
+            with patch(
+                "openhands.automation.execution.AsyncRemoteWorkspace"
+            ) as workspace_cls:
+                workspace = workspace_cls.return_value
+                workspace.reset_client = AsyncMock()
+                with patch(
+                    "openhands.automation.execution._start_bash", side_effect=start
+                ):
+                    result = await execute_in_context(
+                        agent_url="https://agent.example.com",
+                        session_key="key",
+                        entrypoint="printf ENTRYPOINT_RAN",
+                        tarball_source=b"malformed archive",
+                        work_dir=str(work_dir),
+                    )
+            assert result.success is True
+            assert commands_run[0][0] != 0
+            assert "ENTRYPOINT_RAN" not in commands_run[0][1]
+        else:
+            context_manager = MagicMock()
+            context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+            context_manager.__aexit__ = AsyncMock(return_value=None)
+            with (
+                patch(
+                    "openhands.automation.execution.httpx.AsyncClient",
+                    return_value=context_manager,
+                ),
+                patch(
+                    "openhands.automation.execution._create_and_wait",
+                    new_callable=AsyncMock,
+                ) as create,
+                patch(
+                    "openhands.automation.execution.AsyncRemoteWorkspace"
+                ) as workspace_cls,
+                patch("openhands.automation.execution._bash", side_effect=run),
+                patch(
+                    "openhands.automation.execution.delete_sandbox",
+                    new_callable=AsyncMock,
+                ),
+            ):
+                workspace_cls.return_value.reset_client = AsyncMock()
+                create.return_value = ("sandbox-1", "key", "https://agent.example.com")
+                result = await run_automation(
+                    api_url="https://api.example.com",
+                    api_key="api-key",
+                    entrypoint="printf ENTRYPOINT_RAN",
+                    tarball_source=b"malformed archive",
+                    keep_sandbox=True,
+                    work_dir=str(work_dir),
+                )
+            assert result.success is False
+            assert "ENTRYPOINT_RAN" not in result.stdout
 
 
 class TestShellQuote:
@@ -575,7 +763,7 @@ class TestPerRunTarballPath:
         )
 
         bash_cmd = mock_start_bash.call_args.args[1]
-        assert f"tar xzf {expected_path}" in bash_cmd
+        assert f"tar xf {expected_path}" in bash_cmd
         assert f"rm -f {expected_path}" in bash_cmd
         assert TARBALL_PATH not in bash_cmd
 
@@ -601,7 +789,7 @@ class TestPerRunTarballPath:
         uploaded_dest = mock_upload.call_args.args[2]
         assert uploaded_dest == TARBALL_PATH
         bash_cmd = mock_start_bash.call_args.args[1]
-        assert f"tar xzf {TARBALL_PATH}" in bash_cmd
+        assert f"tar xf {TARBALL_PATH}" in bash_cmd
 
     @pytest.mark.asyncio
     @patch("openhands.automation.execution._upload")

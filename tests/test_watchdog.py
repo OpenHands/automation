@@ -21,6 +21,7 @@ from openhands.automation.models import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.utils.time import ensure_utc
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_sandbox_after_terminal,
@@ -469,6 +470,7 @@ class TestVerifyAndMarkRunVerificationFailed:
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
         run.status_detail = None
+        run.timeout_at = utcnow() - timedelta(minutes=1)
         session = MagicMock()
         session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
 
@@ -528,7 +530,7 @@ class TestVerifyAndMarkRunStillRunning:
             assert run.status == AutomationRunStatus.RUNNING
             assert run.completed_at is None
             # Deadline pushed up to one watchdog interval into the future.
-            deferred_for = (run.timeout_at - utcnow()).total_seconds()
+            deferred_for = (ensure_utc(run.timeout_at) - utcnow()).total_seconds()
             assert 0 < deferred_for <= mock_settings.watchdog_interval_seconds
 
     @pytest.mark.asyncio

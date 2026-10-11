@@ -370,7 +370,7 @@ async def execute_in_context(
 
         cmd = (
             f"{env_prefix}mkdir -p {work_dir}"
-            f" && tar xzf {tarball_path} -C {work_dir}"
+            f" && tar xf {tarball_path} -C {work_dir}"
             f" && rm -f {tarball_path}"
             f" && cd {work_dir}"
             f" && ([ ! -f setup.sh ] || bash setup.sh)"
@@ -532,7 +532,7 @@ async def run_automation(
 
             cmd = (
                 f"{env_prefix}mkdir -p {work_dir}"
-                f" && tar xzf {TARBALL_PATH} -C {work_dir}"
+                f" && tar xf {TARBALL_PATH} -C {work_dir}"
                 f" && cd {work_dir}"
                 f" && ([ ! -f setup.sh ] || bash setup.sh)"
                 f" && {entrypoint}"
