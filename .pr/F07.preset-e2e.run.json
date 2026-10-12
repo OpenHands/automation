@@ -1,0 +1,68 @@
+{
+  "ok": true,
+  "elapsed_ms": 32576,
+  "wanted": [
+    "COMPLETED"
+  ],
+  "history": [
+    "PENDING",
+    "RUNNING",
+    "phase:Installing dependencies",
+    "phase:Loading skills",
+    "phase:Agent is working on the task",
+    "phase:finish: {\"message\": \"Created hello.txt in the current directory containing exactly \\\"hi\\\".\", \"status\": \"success\", \"outco",
+    "COMPLETED"
+  ],
+  "run": {
+    "id": "0c73f9a2-3304-47dc-be78-29d820ef91af",
+    "automation_id": "0c6d3bef-dfa7-4d13-ab08-bdab8f0d56d2",
+    "status": "COMPLETED",
+    "trigger_source": "manual",
+    "error_detail": null,
+    "status_detail": null,
+    "current_phase": "finish: {\"message\": \"Created hello.txt in the current directory containing exactly \\\"hi\\\".\", \"status\": \"success\", \"outcome_summary\": \"Created hello.txt with the exact content \\\"hi\\\".\"}",
+    "conversation_id": "9b4170bb-0f42-4a72-899e-8aef4381bbf5",
+    "cost": 0.00092193,
+    "timeout_at": "2026-10-12T04:59:07.182380Z",
+    "sandbox_id": null,
+    "bash_command_id": "795645f10a204840ad5e0f78e0c88ce2",
+    "observability_associations": null,
+    "run_metadata": {
+      "finish_tool_response": {
+        "message": "Created hello.txt in the current directory containing exactly \"hi\".",
+        "status": "success",
+        "outcome_summary": "Created hello.txt with the exact content \"hi\"."
+      }
+    },
+    "created_at": "2026-10-12T04:47:06Z",
+    "started_at": "2026-10-12T04:47:07.097883Z",
+    "completed_at": "2026-10-12T04:47:37.421551Z"
+  },
+  "checks": [
+    {
+      "check": "conversation_id exists",
+      "ok": true,
+      "actual": "9b4170bb-0f42-4a72-899e-8aef4381bbf5"
+    },
+    {
+      "check": "cost ge 0",
+      "ok": true,
+      "actual": "0.00092193"
+    },
+    {
+      "check": "run_metadata.finish_tool_response exists",
+      "ok": true,
+      "actual": "{\"message\": \"Created hello.txt in the current directory containing exactly \\\"hi\\\".\", \"status\": \"success\", \"outcome_summary\": \"Created hello.txt with the exact content \\\"hi\\\".\"}"
+    },
+    {
+      "check": "bash_command_id exists",
+      "ok": true,
+      "actual": "795645f10a204840ad5e0f78e0c88ce2"
+    },
+    {
+      "check": "status_detail eq null",
+      "ok": true,
+      "actual": "null"
+    }
+  ]
+}
