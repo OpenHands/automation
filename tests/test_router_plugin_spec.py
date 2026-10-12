@@ -140,6 +140,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
     response = await async_client.patch(
         f"/api/automation/v1/{created.json()['id']}",
         json={"plugin": {"source": str(plugin_v2), "ref": "main"}},
+        headers=agent_profiles_api.caller_auth,
     )
 
     assert response.status_code == 200
