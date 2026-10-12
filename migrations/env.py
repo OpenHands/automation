@@ -11,7 +11,8 @@ PostgreSQL mode:
 
 SQLite mode:
 - Reads AUTOMATION_DB_URL environment variable
-- No advisory locks (single-process mode assumed)
+- The whole upgrade runs in one real transaction opened with BEGIN IMMEDIATE,
+  which also holds off a second migrator until this one commits or rolls back
 
 Note: Uses pg8000 (sync driver) while the application uses asyncpg (async driver).
 This is intentional - Alembic runs synchronously, and both drivers produce
@@ -21,7 +22,7 @@ identical DDL/schema operations.
 import os
 
 from alembic import context
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from openhands.automation.db import _build_pg8000_connect_args
 from openhands.automation.models import Base
@@ -56,6 +57,31 @@ def is_sqlite() -> bool:
     return DB_URL.startswith("sqlite")
 
 
+def _use_explicit_sqlite_transactions(engine) -> None:
+    """Make every SQLite migration run inside one real transaction.
+
+    Python's sqlite3 driver only opens a transaction on its own before
+    INSERT/UPDATE/DELETE, so DDL that comes first commits immediately and
+    survives a later failure. A failed upgrade from 028 kept migration 029's
+    column while ``alembic_version`` rolled back to 028, and every retry then
+    failed on the duplicate column (OpenHands/OpenHands#18299).
+
+    This is SQLAlchemy's documented pysqlite recipe: turn off the driver's
+    implicit BEGIN and emit our own when SQLAlchemy begins a transaction.
+    SQLite DDL is transactional, so a failure now rolls back the schema, the
+    data and the revision together. IMMEDIATE takes the write lock up front,
+    so a concurrent migrator waits instead of interleaving with this one.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _disable_implicit_begin(dbapi_connection, _connection_record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _begin_immediate(connection):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def get_engine(database_name=DB_NAME):
     """Create database engine based on configuration.
 
@@ -70,7 +96,10 @@ def get_engine(database_name=DB_NAME):
         # For SQLite, remove async driver prefix if present (Alembic is sync)
         if url.startswith("sqlite+aiosqlite"):
             url = url.replace("sqlite+aiosqlite", "sqlite", 1)
-        return create_engine(url, pool_pre_ping=True)
+        engine = create_engine(url, pool_pre_ping=True)
+        if is_sqlite():
+            _use_explicit_sqlite_transactions(engine)
+        return engine
 
     # GCP Cloud SQL
     if GCP_DB_INSTANCE:
@@ -129,7 +158,9 @@ def run_migrations_online():
     runs at a time, even when multiple pods/containers attempt migrations
     concurrently.
 
-    SQLite: No locking needed (single-process mode assumed).
+    SQLite: The BEGIN IMMEDIATE issued by ``engine.begin()`` (see
+    ``_use_explicit_sqlite_transactions``) holds the database write lock for
+    the whole upgrade.
     """
     engine = get_engine()
     use_sqlite = is_sqlite()

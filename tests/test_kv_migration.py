@@ -7,7 +7,11 @@ fan-out described in issue #523:
 - a legacy aggregate document is decrypted into one row per key plus a metadata
   row carrying the original ``$version``;
 - the legacy table is gone afterwards (no dual-read path);
-- the downgrade reassembles a single document.
+- the downgrade reassembles a single document;
+- a failed upgrade from 028 or 029 leaves the schema, revision and ciphertext
+  exactly as they were, and the partial states earlier releases left behind
+  after such a failure are repaired on the next upgrade
+  (OpenHands/OpenHands#18299).
 
 The "fresh install needs no ``AUTOMATION_KV_SECRET``" case is covered by
 ``tests/test_db.py::TestSqliteMigrations``, which upgrades a new SQLite database
@@ -18,12 +22,41 @@ import os
 import sqlite3
 import subprocess
 import uuid
+from contextlib import closing
 
 import pytest
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SECRET = "kv-migration-test-secret"
+WRONG_SECRET = "not-the-secret-the-state-was-written-with"
+
+# What a failed upgrade left behind on SQLite before migrations ran in one
+# transaction (OpenHands/OpenHands#18299), copied from what released 029/030
+# create: 029's column on revision 028, or 030's rename and new, still empty
+# tables on revision 029.
+PARTIAL_029 = [
+    "ALTER TABLE automation_git_sync_org_config ADD COLUMN"
+    " consecutive_auth_failures INTEGER DEFAULT '0' NOT NULL",
+]
+PARTIAL_030 = [
+    "ALTER TABLE automation_kv RENAME TO automation_kv_legacy",
+    "CREATE TABLE automation_kv (id CHAR(32) NOT NULL,"
+    ' automation_id CHAR(32) NOT NULL, "key" VARCHAR(255) NOT NULL,'
+    " value_encrypted TEXT NOT NULL,"
+    " created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,"
+    " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,"
+    " PRIMARY KEY (id),"
+    " FOREIGN KEY(automation_id) REFERENCES automations (id) ON DELETE CASCADE)",
+    "CREATE UNIQUE INDEX ix_automation_kv_automation_id_key"
+    ' ON automation_kv (automation_id, "key")',
+    "CREATE TABLE automation_kv_meta (automation_id CHAR(32) NOT NULL,"
+    " version BIGINT DEFAULT '0' NOT NULL,"
+    " created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,"
+    " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,"
+    " PRIMARY KEY (automation_id),"
+    " FOREIGN KEY(automation_id) REFERENCES automations (id) ON DELETE CASCADE)",
+]
 
 
 def _alembic(db_url: str, *args: str, secret: str | None = SECRET) -> None:
@@ -53,11 +86,14 @@ def _python(code: str) -> None:
     assert result.returncode == 0, f"helper failed: {result.stderr}"
 
 
-def _alembic_expect_failure(db_url: str, *args: str) -> str:
+def _alembic_expect_failure(db_url: str, *args: str, secret: str | None = None) -> str:
     """Run alembic expecting a non-zero exit; return combined output."""
     env = os.environ.copy()
     env["AUTOMATION_DB_URL"] = db_url
-    env.pop("AUTOMATION_KV_SECRET", None)
+    if secret is None:
+        env.pop("AUTOMATION_KV_SECRET", None)
+    else:
+        env["AUTOMATION_KV_SECRET"] = secret
     result = subprocess.run(
         ["uv", "run", "alembic", *args],
         env=env,
@@ -81,6 +117,28 @@ def _assert_revision(db_path: str, revision: str) -> None:
     with sqlite3.connect(db_path) as connection:
         row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
     assert row == (revision,)
+
+
+def _snapshot(db_path: str) -> tuple[list, list, dict]:
+    """Schema, revision and every KV row, to prove a failure changed nothing."""
+    with closing(sqlite3.connect(db_path)) as connection:
+        schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+        revision = connection.execute("SELECT version_num FROM alembic_version")
+        kv_rows = {
+            name: connection.execute(f"SELECT * FROM {name} ORDER BY 1").fetchall()
+            for kind, name, _ in schema
+            if kind == "table" and name.startswith("automation_kv")
+        }
+        return schema, revision.fetchall(), kv_rows
+
+
+def _execute(db_path: str, statements: list[str]) -> None:
+    with closing(sqlite3.connect(db_path)) as connection:
+        for statement in statements:
+            connection.execute(statement)
+        connection.commit()
 
 
 def _seed_legacy_document(db_path: str) -> str:
@@ -109,19 +167,13 @@ con.commit()
     return automation_id
 
 
-def test_legacy_document_fans_out(sqlite_db_path):
-    db_url = f"sqlite:///{sqlite_db_path}"
-    _alembic(db_url, "upgrade", "028")
-    _assert_revision(sqlite_db_path, "028")
-    _seed_legacy_document(sqlite_db_path)
-
-    _alembic(db_url, "upgrade", "head")
-
+def _assert_fanned_out(db_path: str) -> None:
+    """The seeded legacy document is now per-key rows plus its ``$version``."""
     code = f"""
 import sqlite3, sys
 sys.path.insert(0, {PROJECT_ROOT!r})
 from openhands.automation.utils.kv import decrypt_value
-con = sqlite3.connect({sqlite_db_path!r})
+con = sqlite3.connect({db_path!r})
 tables = {{r[0] for r in con.execute(
     "SELECT name FROM sqlite_master WHERE type='table'")}}
 assert "automation_kv_meta" in tables
@@ -139,6 +191,17 @@ assert meta == (3,), meta
 print("OK")
 """
     _python(code)
+
+
+def test_legacy_document_fans_out(sqlite_db_path):
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", "028")
+    _assert_revision(sqlite_db_path, "028")
+    _seed_legacy_document(sqlite_db_path)
+
+    _alembic(db_url, "upgrade", "head")
+
+    _assert_fanned_out(sqlite_db_path)
 
 
 def test_downgrade_reassembles_document(sqlite_db_path):
@@ -166,34 +229,72 @@ print("OK")
     _python(code)
 
 
-def test_legacy_rows_without_secret_fails_and_rolls_back(sqlite_db_path):
-    """A populated legacy table without AUTOMATION_KV_SECRET aborts cleanly.
+@pytest.mark.parametrize("start", ["028", "029"])
+@pytest.mark.parametrize(
+    ("secret", "message"),
+    [
+        (None, "AUTOMATION_KV_SECRET is required"),
+        (WRONG_SECRET, "AUTOMATION_KV_SECRET must be the secret"),
+    ],
+    ids=["missing-secret", "wrong-secret"],
+)
+def test_failed_upgrade_changes_nothing_and_can_be_retried(
+    sqlite_db_path, start, secret, message
+):
+    """A KV upgrade that cannot decrypt the legacy state is rolled back whole.
 
-    This is the rollout hazard the migration documents: the legacy documents
-    cannot be decrypted without the deployment secret, so the upgrade must fail
-    loudly rather than silently dropping state, and must leave the database on
-    the pre-migration revision with no half-built tables behind.
+    The legacy documents cannot be decrypted without the secret they were
+    written with, so the upgrade must fail loudly rather than drop state. From
+    028 the failure comes after 029 has already added its column; from 029,
+    after 030 has renamed and created tables. Either way the schema, revision
+    and ciphertext must be exactly what they were, so that a retry with the
+    right secret completes (OpenHands/OpenHands#18299).
     """
     db_url = f"sqlite:///{sqlite_db_path}"
-    _alembic(db_url, "upgrade", "028")
-    _assert_revision(sqlite_db_path, "028")
+    _alembic(db_url, "upgrade", start)
     _seed_legacy_document(sqlite_db_path)
+    before = _snapshot(sqlite_db_path)
 
-    output = _alembic_expect_failure(db_url, "upgrade", "head")
-    assert "AUTOMATION_KV_SECRET is required" in output, output
+    output = _alembic_expect_failure(db_url, "upgrade", "head", secret=secret)
+    assert message in output, output
 
-    # Still on 028, and the rename/create work was rolled back with it.
-    _assert_revision(sqlite_db_path, "028")
-    code = f"""
-import sqlite3
-con = sqlite3.connect({sqlite_db_path!r})
-tables = {{r[0] for r in con.execute(
-    "SELECT name FROM sqlite_master WHERE type='table'")}}
-assert "automation_kv_legacy" not in tables, tables
-assert "automation_kv_meta" not in tables, tables
-assert "automation_kv" in tables, tables
-rows = con.execute("SELECT state_encrypted FROM automation_kv").fetchall()
-assert len(rows) == 1, rows
-print("OK")
-"""
-    _python(code)
+    assert _snapshot(sqlite_db_path) == before
+    _alembic(db_url, "upgrade", "head")
+    _assert_fanned_out(sqlite_db_path)
+
+
+@pytest.mark.parametrize(
+    ("start", "partial"),
+    [("028", PARTIAL_029), ("029", PARTIAL_030)],
+    ids=["029-column-on-028", "030-tables-on-029"],
+)
+def test_upgrade_repairs_state_left_by_earlier_failure(sqlite_db_path, start, partial):
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", start)
+    _seed_legacy_document(sqlite_db_path)
+    _execute(sqlite_db_path, partial)
+
+    _alembic(db_url, "upgrade", "head")
+
+    _assert_fanned_out(sqlite_db_path)
+
+
+def test_partial_030_state_with_rows_is_not_repaired(sqlite_db_path):
+    """Only the empty tables a failed 030 leaves behind are dropped."""
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", "029")
+    automation_id = _seed_legacy_document(sqlite_db_path)
+    _execute(
+        sqlite_db_path,
+        [
+            *PARTIAL_030,
+            "INSERT INTO automation_kv_meta (automation_id, version)"
+            f" VALUES ('{automation_id}', 1)",
+        ],
+    )
+    before = _snapshot(sqlite_db_path)
+
+    output = _alembic_expect_failure(db_url, "upgrade", "head", secret=SECRET)
+    assert "nothing was changed" in output, output
+
+    assert _snapshot(sqlite_db_path) == before

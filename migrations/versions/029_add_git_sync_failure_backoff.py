@@ -25,15 +25,26 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "automation_git_sync_org_config",
-        sa.Column(
-            "consecutive_auth_failures",
-            sa.Integer,
-            nullable=False,
-            server_default="0",
-        ),
-    )
+    # Before SQLite migrations ran in one transaction, a failure later in the
+    # same upgrade (e.g. 030 failing to decrypt KV state) rolled the revision
+    # back to 028 but kept this column, so every retry failed on it
+    # (OpenHands/OpenHands#18299). Nothing but this migration adds it.
+    existing = {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns(
+            "automation_git_sync_org_config"
+        )
+    }
+    if "consecutive_auth_failures" not in existing:
+        op.add_column(
+            "automation_git_sync_org_config",
+            sa.Column(
+                "consecutive_auth_failures",
+                sa.Integer,
+                nullable=False,
+                server_default="0",
+            ),
+        )
 
     if op.get_bind().dialect.name == "sqlite":
         return
