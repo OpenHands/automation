@@ -53,6 +53,7 @@ async def test_create_plugin_spec_automation(
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
+        headers=agent_profiles_api.caller_auth,
     )
 
     assert response.status_code == 201
@@ -104,6 +105,7 @@ async def test_create_plugin_spec_validates_manifest_config_defaults(
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
+        headers=agent_profiles_api.caller_auth,
     )
 
     assert response.status_code == 422
@@ -131,6 +133,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
             "plugin": {"source": str(plugin_v1)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
+        headers=agent_profiles_api.caller_auth,
     )
     assert created.status_code == 201
 
@@ -152,7 +155,9 @@ async def test_patch_plugin_spec_updates_plugin_source(
 
 
 @pytest.mark.asyncio
-async def test_patch_plugin_spec_rejects_runtime_overrides(async_client, tmp_path):
+async def test_patch_plugin_spec_rejects_runtime_overrides(
+    async_client, tmp_path, agent_profiles_api
+):
     plugin = write_plugin(tmp_path)
     created = await async_client.post(
         "/api/automation/v1/plugin-spec",
@@ -161,6 +166,7 @@ async def test_patch_plugin_spec_rejects_runtime_overrides(async_client, tmp_pat
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
+        headers=agent_profiles_api.caller_auth,
     )
     assert created.status_code == 201
 
