@@ -86,6 +86,10 @@ class Automation(Base):
     # Profile IDs belong to the configured Agent Server, not to this database.
     agent_profile_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
+    # Executable plugin-backed automation spec. When set, the dispatcher fetches
+    # the plugin source at run time and packages it as the run tarball.
+    plugin_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Trigger config — for MVP, only cron is supported.
     # Uses generic JSON type for cross-database compatibility (PostgreSQL + SQLite)
     trigger: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -292,6 +296,10 @@ class AutomationRun(Base):
     # For preset automations this may include the semantic task outcome parsed
     # from the final conversation action.
     run_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Runtime attributes resolved during dispatch, such as mutable plugin refs
+    # pinned to commit SHAs and the manifest used for this specific run.
+    resolved_runtime: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

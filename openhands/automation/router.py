@@ -20,6 +20,10 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
+from jsonschema import (
+    Draft202012Validator,
+    ValidationError as JSONSchemaValidationError,
+)
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +46,13 @@ from openhands.automation.observability import (
     automation_attributes,
     current_span_context,
     span,
+)
+from openhands.automation.plugin_specs import (
+    CreatePluginSpecAutomationRequest,
+    PluginSpecError,
+    entrypoint_for_manifest,
+    fetch_manifest,
+    validate_required_plugins,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
 from openhands.automation.schemas import (
@@ -295,6 +306,120 @@ async def create_automation(
         properties=creation_properties,
     )
     return AutomationResponse.model_validate(auto)
+
+
+@router.post(
+    "/plugin-spec",
+    status_code=status.HTTP_201_CREATED,
+    responses=TEMPLATE_EXISTS_RESPONSE,
+)
+async def create_automation_from_plugin_spec(
+    body: CreatePluginSpecAutomationRequest,
+    request: Request,
+    response: Response,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationResponse:
+    """Create an automation from an executable plugin specification."""
+    if body.template is not None:
+        existing = await find_existing_template_automation(
+            session, user.org_id, body.template.id
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return AutomationResponse.model_validate(existing)
+
+    try:
+        _plugin_path, _resolved_ref, manifest = fetch_manifest(body.plugin)
+        validate_required_plugins(manifest.runtime.plugins)
+        Draft202012Validator(manifest.config_schema or {"type": "object"}).validate(
+            body.config
+        )
+    except JSONSchemaValidationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Plugin automation config is invalid: {exc.message}",
+        ) from exc
+    except PluginSpecError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
+
+    llm_default = (
+        manifest.runtime.llm_profile.default_name
+        if manifest.runtime.llm_profile is not None
+        else None
+    )
+    model = resolve_model_profile_for_user(body.model or llm_default, user)
+    if (
+        manifest.runtime.llm_profile is not None
+        and manifest.runtime.llm_profile.required
+    ):
+        if not model:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Plugin automation requires an LLM profile",
+            )
+
+    agent_profile_name = body.agent_profile_name
+    if agent_profile_name is None and manifest.runtime.agent_profile is not None:
+        agent_profile_name = manifest.runtime.agent_profile.default_name
+    if (
+        manifest.runtime.agent_profile is not None
+        and manifest.runtime.agent_profile.required
+        and body.agent_profile_id is None
+        and not agent_profile_name
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Plugin automation requires an agent profile selection",
+        )
+
+    state = model_automation_state(body.state, body.enabled)
+    plugin_spec = {
+        "plugin": body.plugin.model_dump(exclude_none=True),
+        "config": body.config,
+        "agent_profile_name": agent_profile_name,
+    }
+    preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
+    if body.template is not None:
+        preset_metadata["template"] = body.template.model_dump(exclude_none=True)
+
+    automation = Automation(
+        user_id=user.user_id,
+        org_id=user.org_id,
+        name=body.name,
+        prompt=None,
+        preset_metadata=preset_metadata,
+        plugin_spec=plugin_spec,
+        model=model,
+        agent_profile_id=body.agent_profile_id,
+        trigger=body.trigger.model_dump(),
+        observability_associations=body.observability_associations,
+        tarball_path="plugin-spec://runtime",
+        setup_script_path=manifest.entrypoint.setup_script,
+        entrypoint=entrypoint_for_manifest(manifest),
+        timeout=default_automation_timeout(body.timeout),
+        keep_alive=body.keep_alive,
+        enabled=automation_state_enabled(state),
+        state=state,
+        telemetry_distinct_id=get_request_telemetry_context(
+            request
+        ).frontend_distinct_id,
+    )
+    session.add(automation)
+    await session.flush()
+    await session.refresh(automation)
+    await mark_git_sync_dirty(session, automation)
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=automation,
+        properties={"creation_path": "plugin_spec"},
+    )
+    return AutomationResponse.model_validate(automation)
+
 
 
 @router.get("")

@@ -1042,6 +1042,7 @@ class AutomationResponse(BaseModel):
     name: str
     prompt: str | None
     preset_metadata: dict | None = None
+    plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tarball_path: str
@@ -1191,6 +1192,7 @@ class AutomationRunResponse(BaseModel):
     bash_command_id: str | None = None
     observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
+    resolved_runtime: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None

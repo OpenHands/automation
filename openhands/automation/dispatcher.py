@@ -50,6 +50,7 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
+from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
@@ -61,6 +62,7 @@ from openhands.automation.utils.run import (
     mark_run_terminal,
     update_bash_command_id,
     update_run_current_phase,
+    update_run_resolved_runtime,
     update_run_timeout_at,
     update_sandbox_id,
 )
@@ -386,9 +388,31 @@ async def _execute_run(
         )
 
     # 4. Prepare tarball source
+    work_dir = backend.get_work_dir(run_id)
+    entrypoint = automation.entrypoint
     try:
         tarball_source: bytes | str
-        if is_http_url(tarball_path):
+        if automation.plugin_spec:
+            tarball_source, plugin_env, resolved_runtime = build_execution_payload(
+                plugin_spec=automation.plugin_spec,
+                agent_profile_id=str(automation.agent_profile_id)
+                if automation.agent_profile_id
+                else None,
+                agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                llm_profile_name=automation.model,
+                work_dir=work_dir,
+            )
+            env_vars.update(plugin_env)
+            entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
+            await update_run_resolved_runtime(
+                session_factory, run.id, resolved_runtime
+            )
+            logger.info(
+                "Plugin automation tarball built (%d bytes)",
+                len(tarball_source),
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+        elif is_http_url(tarball_path):
             tarball_source = tarball_path
             logger.info(
                 "HTTP URL tarball, will download in environment",
@@ -405,7 +429,7 @@ async def _execute_run(
                 len(tarball_source),
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
-    except PermanentDispatchError as exc:
+    except (PermanentDispatchError, PluginSpecError) as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
             exc,
@@ -450,12 +474,11 @@ async def _execute_run(
         return
 
     # 5. Execute in context
-    work_dir = backend.get_work_dir(run_id)
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
-            entrypoint=automation.entrypoint,
+            entrypoint=entrypoint,
             tarball_source=tarball_source,
             work_dir=work_dir,
             env_vars=env_vars,
