@@ -8,7 +8,7 @@ from starlette.requests import Request
 
 from openhands.automation.auth import AuthenticatedUser, AuthMethod
 from openhands.automation.utils.model_profiles import (
-    validate_agent_profile_allowed_tools,
+    validate_agent_profile_allowlists,
 )
 
 
@@ -43,7 +43,7 @@ def user() -> AuthenticatedUser:
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
+async def test_validate_agent_profile_allowlists_rejects_extra_tool(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000001"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -69,7 +69,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 uuid.UUID(profile_id),
                 None,
                 ["terminal"],
@@ -82,7 +82,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_accepts_exact_required_tools(user):
+async def test_validate_agent_profile_allowlists_accepts_exact_required_tools(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000002"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -102,7 +102,7 @@ async def test_validate_agent_profile_allowed_tools_accepts_exact_required_tools
         return httpx.Response(404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        resolved_id = await validate_agent_profile_allowed_tools(
+        resolved_id = await validate_agent_profile_allowlists(
             None,
             "hello-world",
             ["terminal"],
@@ -115,7 +115,7 @@ async def test_validate_agent_profile_allowed_tools_accepts_exact_required_tools
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_rejects_missing_required_tool(user):
+async def test_validate_agent_profile_allowlists_rejects_missing_allowed_tool(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000006"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -130,7 +130,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_missing_required_too
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 None,
                 "hello-world",
                 ["terminal"],
@@ -139,12 +139,12 @@ async def test_validate_agent_profile_allowed_tools_rejects_missing_required_too
             )
 
     assert exc.value.status_code == 422
-    assert "missing tools required" in exc.value.detail
+    assert "does not enable every tool allowed" in exc.value.detail
     assert "terminal" in exc.value.detail
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_rejects_implicit_default_tools(
+async def test_validate_agent_profile_allowlists_rejects_implicit_default_tools(
     user,
 ):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000007"
@@ -161,7 +161,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_implicit_default_too
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 None,
                 "hello-world",
                 ["terminal"],
@@ -170,12 +170,123 @@ async def test_validate_agent_profile_allowed_tools_rejects_implicit_default_too
             )
 
     assert exc.value.status_code == 422
-    assert "must explicitly enable tools" in exc.value.detail
+    assert "must explicitly enable the tools allowed" in exc.value.detail
     assert "terminal" in exc.value.detail
 
 
+
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_checks_local_profiles(
+async def test_validate_agent_profile_allowlists_rejects_mcp_ref_outside_allowlist(
+    user,
+):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000008"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
+        if request.url.path == "/api/agent-profiles/hello-world":
+            return httpx.Response(
+                200,
+                json={
+                    "profile": {
+                        "mcp_server_refs": ["github", "slack"],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(HTTPException) as exc:
+            await validate_agent_profile_allowlists(
+                None,
+                "hello-world",
+                None,
+                _request(client),
+                user,
+                allowed_mcp_server_refs=["github"],
+            )
+
+    assert exc.value.status_code == 422
+    assert "MCP server ref not allowed" in exc.value.detail
+    assert "slack" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowlists_rejects_missing_secret_ref(user):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000009"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
+        if request.url.path == "/api/agent-profiles/hello-world":
+            return httpx.Response(
+                200,
+                json={"profile": {"secret_refs": ["GITHUB_TOKEN"]}},
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(HTTPException) as exc:
+            await validate_agent_profile_allowlists(
+                None,
+                "hello-world",
+                None,
+                _request(client),
+                user,
+                allowed_secret_refs=["GITHUB_TOKEN", "SLACK_BOT_TOKEN"],
+            )
+
+    assert exc.value.status_code == 422
+    assert "does not enable every secret ref allowed" in exc.value.detail
+    assert "SLACK_BOT_TOKEN" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowlists_accepts_mcp_and_secret_allowlists(
+    user,
+):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000010"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
+        if request.url.path == "/api/agent-profiles/hello-world":
+            return httpx.Response(
+                200,
+                json={
+                    "profile": {
+                        "mcp_server_refs": ["github"],
+                        "secret_refs": ["GITHUB_TOKEN"],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        resolved_id = await validate_agent_profile_allowlists(
+            None,
+            "hello-world",
+            None,
+            _request(client),
+            user,
+            allowed_mcp_server_refs=["github"],
+            allowed_secret_refs=["GITHUB_TOKEN"],
+        )
+
+    assert resolved_id == uuid.UUID(profile_id)
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowlists_checks_local_profiles(
     monkeypatch, user
 ):
     from openhands.automation.config import clear_config_cache
@@ -214,7 +325,7 @@ async def test_validate_agent_profile_allowed_tools_checks_local_profiles(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 None,
                 "hello-world-agent",
                 ["terminal"],
@@ -232,7 +343,7 @@ async def test_validate_agent_profile_allowed_tools_checks_local_profiles(
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_rejects_missing_local_profile(
+async def test_validate_agent_profile_allowlists_rejects_missing_local_profile(
     monkeypatch, user
 ):
     from openhands.automation.config import clear_config_cache
@@ -247,7 +358,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_missing_local_profil
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 None,
                 "missing-profile",
                 ["terminal"],
@@ -261,7 +372,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_missing_local_profil
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_rejects_duplicate_names(user):
+async def test_validate_agent_profile_allowlists_rejects_duplicate_names(user):
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/agent-profiles":
             return httpx.Response(
@@ -283,7 +394,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_duplicate_names(user
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(HTTPException) as exc:
-            await validate_agent_profile_allowed_tools(
+            await validate_agent_profile_allowlists(
                 None,
                 "dupe",
                 ["terminal"],

@@ -82,7 +82,7 @@ from openhands.automation.utils.conversation_outcome import (
 from openhands.automation.utils.model_profiles import (
     ensure_agent_profile_exists,
     resolve_model_profile_for_user,
-    validate_agent_profile_allowed_tools,
+    validate_agent_profile_allowlists,
     validate_agent_profile_combination,
 )
 from openhands.automation.utils.run import (
@@ -381,14 +381,21 @@ async def create_automation_from_plugin_spec(
             if llm_default
             else None
         )
-    agent_profile_id = await validate_agent_profile_allowed_tools(
+    agent_profile_requirement = manifest.runtime.agent_profile
+    agent_profile_id = await validate_agent_profile_allowlists(
         None,
         agent_profile_name,
-        manifest.runtime.agent_profile.allowed_tools
-        if manifest.runtime.agent_profile is not None
+        agent_profile_requirement.allowed_tools
+        if agent_profile_requirement is not None
         else None,
         request,
         user,
+        allowed_mcp_server_refs=agent_profile_requirement.allowed_mcp_server_refs
+        if agent_profile_requirement is not None
+        else None,
+        allowed_secret_refs=agent_profile_requirement.allowed_secret_refs
+        if agent_profile_requirement is not None
+        else None,
     )
 
     state = model_automation_state(body.state, body.enabled)

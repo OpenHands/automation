@@ -171,14 +171,62 @@ def _parse_agent_profile_id(value: object) -> uuid.UUID:
         ) from exc
 
 
-async def validate_agent_profile_allowed_tools(
+def _string_set_from_profile_list(
+    value: object, field_name: str, resolved_name: str
+) -> set[str]:
+    if value is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Agent profile `{resolved_name}` must explicitly set `{field_name}`",
+        )
+    if not isinstance(value, list):
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Unexpected `{field_name}` field in OpenHands API agent profile response",
+        )
+    return {item for item in value if isinstance(item, str) and item}
+
+
+def _validate_exact_allowlist(
+    *,
+    selected: set[str],
+    allowed: list[str],
+    resolved_name: str,
+    label: str,
+) -> None:
+    allowed_set = set(allowed)
+    missing = sorted(allowed_set - selected)
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Agent profile `{resolved_name}` does not enable every {label} "
+                f"allowed by this automation plugin: {', '.join(missing)}"
+            ),
+        )
+    disallowed = sorted(selected - allowed_set)
+    if disallowed:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Agent profile `{resolved_name}` enables {label} not allowed by "
+                f"this automation plugin: {', '.join(disallowed)}"
+            ),
+        )
+
+
+
+async def validate_agent_profile_allowlists(
     agent_profile_id: uuid.UUID | None,
     agent_profile_name: str | None,
     allowed_tools: list[str] | None,
     request: Request,
     user: AuthenticatedUser,
+    *,
+    allowed_mcp_server_refs: list[str] | None = None,
+    allowed_secret_refs: list[str] | None = None,
 ) -> uuid.UUID | None:
-    """Reject missing/ambiguous profile names and disallowed explicit tools."""
+    """Reject missing/ambiguous profiles and profile fields outside allowlists."""
     if agent_profile_id is None and not agent_profile_name:
         return None
 
@@ -213,7 +261,11 @@ async def validate_agent_profile_allowed_tools(
     if not resolved_name or resolved_id is None:
         raise HTTPException(422, "Plugin automation requires an agent profile")
 
-    if allowed_tools is None:
+    if (
+        allowed_tools is None
+        and allowed_mcp_server_refs is None
+        and allowed_secret_refs is None
+    ):
         return resolved_id
 
     headers = _agent_profiles_headers(request, user)
@@ -248,43 +300,54 @@ async def validate_agent_profile_allowed_tools(
             "Unexpected response from OpenHands API for agent profile details",
         ) from exc
 
-    tools = profile.get("tools")
-    if tools is None:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            (
-                f"Agent profile `{resolved_name}` must explicitly enable tools "
-                f"required by this automation plugin: {', '.join(allowed_tools)}"
+    if allowed_tools is not None:
+        tools = profile.get("tools")
+        if tools is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                (
+                    f"Agent profile `{resolved_name}` must explicitly enable the "
+                    "tools allowed by this automation plugin: "
+                    f"{', '.join(allowed_tools)}"
+                ),
+            )
+        if not isinstance(tools, list):
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "Unexpected tools field in OpenHands API agent profile response",
+            )
+        selected_tools = {
+            tool.get("name")
+            for tool in tools
+            if isinstance(tool, dict) and tool.get("name")
+        }
+        _validate_exact_allowlist(
+            selected=selected_tools,
+            allowed=allowed_tools,
+            resolved_name=resolved_name,
+            label="tool",
+        )
+
+    if allowed_mcp_server_refs is not None:
+        _validate_exact_allowlist(
+            selected=_string_set_from_profile_list(
+                profile.get("mcp_server_refs"), "mcp_server_refs", resolved_name
             ),
+            allowed=allowed_mcp_server_refs,
+            resolved_name=resolved_name,
+            label="MCP server ref",
         )
-    if not isinstance(tools, list):
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Unexpected tools field in OpenHands API agent profile response",
-        )
-    selected_tools = {
-        tool.get("name")
-        for tool in tools
-        if isinstance(tool, dict) and tool.get("name")
-    }
-    missing = sorted(set(allowed_tools) - selected_tools)
-    if missing:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            (
-                f"Agent profile `{resolved_name}` is missing tools required by "
-                f"this automation plugin: {', '.join(missing)}"
+
+    if allowed_secret_refs is not None:
+        _validate_exact_allowlist(
+            selected=_string_set_from_profile_list(
+                profile.get("secret_refs"), "secret_refs", resolved_name
             ),
+            allowed=allowed_secret_refs,
+            resolved_name=resolved_name,
+            label="secret ref",
         )
-    disallowed = sorted(selected_tools - set(allowed_tools))
-    if disallowed:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            (
-                f"Agent profile `{resolved_name}` enables tools not allowed by "
-                f"this automation plugin: {', '.join(disallowed)}"
-            ),
-        )
+
     return resolved_id
 
 

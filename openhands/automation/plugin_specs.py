@@ -97,13 +97,33 @@ class AutomationPluginProfileRequirement(BaseModel):
         default=None,
         min_length=1,
         description=(
-            "Exact tool names the selected agent profile must explicitly enable."
+            "Exact tool names the selected agent profile is allowed to enable "
+            "for this plugin. The profile must enable all and only these tools."
+        ),
+    )
+    allowed_mcp_server_refs: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Exact MCP server refs the selected agent profile is allowed to "
+            "enable for this plugin. The profile must enable all and only "
+            "these MCP server refs."
+        ),
+    )
+    allowed_secret_refs: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Exact secret refs the selected agent profile is allowed to expose "
+            "to this plugin. The profile must expose all and only these secret refs."
         ),
     )
 
-    @field_validator("allowed_tools")
+    @field_validator(
+        "allowed_tools", "allowed_mcp_server_refs", "allowed_secret_refs"
+    )
     @classmethod
-    def validate_allowed_tools(cls, value: list[str] | None) -> list[str] | None:
+    def validate_allowlist(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
         seen: set[str] = set()
