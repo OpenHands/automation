@@ -144,6 +144,23 @@ async def _list_agent_profiles(
         ) from exc
 
 
+def _validate_unique_agent_profile_names(profiles: list[dict]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for profile in profiles:
+        name = profile.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    if duplicates:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Duplicate agent profile names found: " + ", ".join(sorted(duplicates)),
+        )
+
+
 async def validate_agent_profile_allowed_tools(
     agent_profile_id: uuid.UUID | None,
     agent_profile_name: str | None,
@@ -151,11 +168,12 @@ async def validate_agent_profile_allowed_tools(
     request: Request,
     user: AuthenticatedUser,
 ) -> None:
-    """Reject explicit agent-profile tools outside a plugin allowlist."""
-    if not allowed_tools:
+    """Reject missing/ambiguous profile names and disallowed explicit tools."""
+    if agent_profile_id is None and not agent_profile_name:
         return
 
     profiles = await _list_agent_profiles(request, user)
+    _validate_unique_agent_profile_names(profiles)
     resolved_name = agent_profile_name
     if agent_profile_id is not None:
         agent_profile_id_str = str(agent_profile_id)
@@ -203,6 +221,9 @@ async def validate_agent_profile_allowed_tools(
             status.HTTP_502_BAD_GATEWAY,
             "Unexpected response from OpenHands API for agent profile details",
         ) from exc
+
+    if allowed_tools is None:
+        return
 
     tools = profile.get("tools")
     if tools is None:

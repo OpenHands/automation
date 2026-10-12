@@ -330,11 +330,12 @@ async def create_automation_from_plugin_spec(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    plugin_config: dict[str, Any] = {}
     try:
         _plugin_path, _resolved_ref, manifest = fetch_manifest(body.plugin)
         validate_required_plugins(manifest.runtime.plugins)
         Draft202012Validator(manifest.config_schema or {"type": "object"}).validate(
-            body.config
+            plugin_config
         )
     except JSONSchemaValidationError as exc:
         raise HTTPException(
@@ -344,18 +345,15 @@ async def create_automation_from_plugin_spec(
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
-    await ensure_agent_profile_exists(body.agent_profile_id, request, user)
-
-    agent_profile_name = body.agent_profile_name
-    if agent_profile_name is None and manifest.runtime.agent_profile is not None:
-        agent_profile_name = manifest.runtime.agent_profile.default_name
-    has_agent_profile = body.agent_profile_id is not None or bool(agent_profile_name)
-    if has_agent_profile and body.model:
-        raise HTTPException(422, "An agent profile already specifies the model")
+    agent_profile_name = (
+        manifest.runtime.agent_profile.default_name
+        if manifest.runtime.agent_profile is not None
+        else None
+    )
+    has_agent_profile = bool(agent_profile_name)
     if (
         manifest.runtime.agent_profile is not None
         and manifest.runtime.agent_profile.required
-        and body.agent_profile_id is None
         and not agent_profile_name
     ):
         raise HTTPException(
@@ -371,18 +369,20 @@ async def create_automation_from_plugin_spec(
             if manifest.runtime.llm_profile is not None
             else None
         )
-        model = resolve_model_profile_for_user(body.model or llm_default, user)
-        if (
-            manifest.runtime.llm_profile is not None
-            and manifest.runtime.llm_profile.required
-            and not model
+        if manifest.runtime.llm_profile is not None and (
+            manifest.runtime.llm_profile.required and not llm_default
         ):
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "Plugin automation requires an LLM profile",
             )
+        model = (
+            resolve_model_profile_for_user(llm_default, user)
+            if llm_default
+            else None
+        )
     await validate_agent_profile_allowed_tools(
-        body.agent_profile_id,
+        None,
         agent_profile_name,
         manifest.runtime.agent_profile.allowed_tools
         if manifest.runtime.agent_profile is not None
@@ -394,7 +394,7 @@ async def create_automation_from_plugin_spec(
     state = model_automation_state(body.state, body.enabled)
     plugin_spec = {
         "plugin": body.plugin.model_dump(exclude_none=True),
-        "config": body.config,
+        "config": plugin_config,
         "agent_profile_name": agent_profile_name,
     }
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -409,7 +409,7 @@ async def create_automation_from_plugin_spec(
         preset_metadata=preset_metadata,
         plugin_spec=plugin_spec,
         model=model,
-        agent_profile_id=body.agent_profile_id,
+        agent_profile_id=None,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
         tarball_path="plugin-spec://runtime",

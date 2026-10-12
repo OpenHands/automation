@@ -181,3 +181,33 @@ async def test_validate_agent_profile_allowed_tools_rejects_missing_local_profil
     clear_config_cache()
     assert exc.value.status_code == 422
     assert "missing-profile" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowed_tools_rejects_duplicate_names(user):
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={
+                    "profiles": [
+                        {"id": "profile-1", "name": "dupe"},
+                        {"id": "profile-2", "name": "dupe"},
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(HTTPException) as exc:
+            await validate_agent_profile_allowed_tools(
+                None,
+                "dupe",
+                ["terminal"],
+                _request(client),
+                user,
+            )
+
+    assert exc.value.status_code == 422
+    assert "Duplicate agent profile names found: dupe" in exc.value.detail
+

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import tarfile
-import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -149,10 +148,6 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
-    config: dict[str, Any] = Field(default_factory=dict)
-    agent_profile_id: uuid.UUID | None = None
-    agent_profile_name: str | None = Field(default=None, min_length=1, max_length=100)
-    model: str | None = Field(default=None, min_length=1, max_length=64)
     trigger: Trigger
     observability_associations: dict[str, str] | None = None
     timeout: int | None = None

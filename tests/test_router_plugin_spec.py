@@ -41,7 +41,6 @@ async def test_create_plugin_spec_automation(async_client, tmp_path):
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
-            "config": {"message": "hi"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
     )
@@ -53,16 +52,14 @@ async def test_create_plugin_spec_automation(async_client, tmp_path):
     assert data["entrypoint"] == "python3 scripts/main.py"
     assert data["plugin_spec"] == {
         "plugin": {"source": str(plugin)},
-        "config": {"message": "hi"},
+        "config": {},
         "agent_profile_name": "agent-default",
     }
     assert data["model"] is None
 
 
 @pytest.mark.asyncio
-async def test_create_plugin_spec_rejects_model_with_agent_profile(
-    async_client, tmp_path
-):
+async def test_create_plugin_spec_rejects_runtime_overrides(async_client, tmp_path):
     plugin = write_plugin(tmp_path)
 
     response = await async_client.post(
@@ -70,27 +67,31 @@ async def test_create_plugin_spec_rejects_model_with_agent_profile(
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
-            "config": {"message": "hi"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "config": {"message": "hi"},
             "agent_profile_name": "agent-default",
             "model": "default",
         },
     )
 
     assert response.status_code == 422
-    assert "An agent profile already specifies the model" in response.text
+    assert "Extra inputs are not permitted" in response.text
 
 
 @pytest.mark.asyncio
-async def test_create_plugin_spec_validates_config(async_client, tmp_path):
+async def test_create_plugin_spec_validates_manifest_config_defaults(
+    async_client, tmp_path
+):
     plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["config_schema"]["required"] = ["message"]
+    (plugin / "automation-plugin.json").write_text(json.dumps(manifest))
 
     response = await async_client.post(
         "/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
-            "config": {"message": 1},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
     )
