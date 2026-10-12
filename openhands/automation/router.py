@@ -48,6 +48,7 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import (
+    AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
     entrypoint_for_manifest,
@@ -330,9 +331,63 @@ async def create_automation_from_plugin_spec(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    runtime_fields = await _resolve_plugin_spec_runtime_fields(
+        plugin=body.plugin,
+        request=request,
+        user=user,
+    )
+
+    state = model_automation_state(body.state, body.enabled)
+    preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
+    if body.template is not None:
+        preset_metadata["template"] = body.template.model_dump(exclude_none=True)
+
+    automation = Automation(
+        user_id=user.user_id,
+        org_id=user.org_id,
+        name=body.name,
+        prompt=None,
+        preset_metadata=preset_metadata,
+        plugin_spec=runtime_fields["plugin_spec"],
+        model=runtime_fields["model"],
+        agent_profile_id=runtime_fields["agent_profile_id"],
+        trigger=body.trigger.model_dump(),
+        observability_associations=body.observability_associations,
+        tarball_path=runtime_fields["tarball_path"],
+        setup_script_path=runtime_fields["setup_script_path"],
+        entrypoint=runtime_fields["entrypoint"],
+        timeout=default_automation_timeout(body.timeout),
+        keep_alive=body.keep_alive,
+        enabled=automation_state_enabled(state),
+        state=state,
+        telemetry_distinct_id=get_request_telemetry_context(
+            request
+        ).frontend_distinct_id,
+    )
+    session.add(automation)
+    await session.flush()
+    await session.refresh(automation)
+    await mark_git_sync_dirty(session, automation)
+    await capture_automation_event(
+        "automation_created",
+        request=request,
+        user=user,
+        automation=automation,
+        properties={"creation_path": "plugin_spec"},
+    )
+    return AutomationResponse.model_validate(automation)
+
+
+async def _resolve_plugin_spec_runtime_fields(
+    *,
+    plugin: AutomationPluginSource,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    """Validate a plugin spec and return automation fields derived from it."""
     plugin_config: dict[str, Any] = {}
     try:
-        _plugin_path, _resolved_ref, manifest = fetch_manifest(body.plugin)
+        _plugin_path, _resolved_ref, manifest = fetch_manifest(plugin)
         validate_required_plugins(manifest.runtime.plugins)
         Draft202012Validator(manifest.config_schema or {"type": "object"}).validate(
             plugin_config
@@ -381,6 +436,7 @@ async def create_automation_from_plugin_spec(
             if llm_default
             else None
         )
+
     agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
         None,
@@ -398,51 +454,17 @@ async def create_automation_from_plugin_spec(
         else None,
     )
 
-    state = model_automation_state(body.state, body.enabled)
-    plugin_spec = {
-        "plugin": body.plugin.model_dump(exclude_none=True),
-        "config": plugin_config,
+    return {
+        "plugin_spec": {
+            "plugin": plugin.model_dump(exclude_none=True),
+            "config": plugin_config,
+        },
+        "model": model,
+        "agent_profile_id": agent_profile_id,
+        "tarball_path": "plugin-spec://runtime",
+        "setup_script_path": manifest.entrypoint.setup_script,
+        "entrypoint": entrypoint_for_manifest(manifest),
     }
-    preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
-    if body.template is not None:
-        preset_metadata["template"] = body.template.model_dump(exclude_none=True)
-
-    automation = Automation(
-        user_id=user.user_id,
-        org_id=user.org_id,
-        name=body.name,
-        prompt=None,
-        preset_metadata=preset_metadata,
-        plugin_spec=plugin_spec,
-        model=model,
-        agent_profile_id=agent_profile_id,
-        trigger=body.trigger.model_dump(),
-        observability_associations=body.observability_associations,
-        tarball_path="plugin-spec://runtime",
-        setup_script_path=manifest.entrypoint.setup_script,
-        entrypoint=entrypoint_for_manifest(manifest),
-        timeout=default_automation_timeout(body.timeout),
-        keep_alive=body.keep_alive,
-        enabled=automation_state_enabled(state),
-        state=state,
-        telemetry_distinct_id=get_request_telemetry_context(
-            request
-        ).frontend_distinct_id,
-    )
-    session.add(automation)
-    await session.flush()
-    await session.refresh(automation)
-    await mark_git_sync_dirty(session, automation)
-    await capture_automation_event(
-        "automation_created",
-        request=request,
-        user=user,
-        automation=automation,
-        properties={"creation_path": "plugin_spec"},
-    )
-    return AutomationResponse.model_validate(automation)
-
-
 
 @router.get("")
 async def list_automations(
@@ -517,6 +539,48 @@ async def update_automation(
 
     update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
+    plugin_update_requested = "plugin" in update_data
+    if plugin_update_requested:
+        if update_data["plugin"] is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "plugin cannot be null",
+            )
+        if not auto.plugin_spec or auto.tarball_path != "plugin-spec://runtime":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Only plugin-spec automations can update plugin source",
+            )
+        runtime_overrides = sorted(
+            set(update_data)
+            & {
+                "agent_profile_id",
+                "model",
+                "prompt",
+                "tarball_path",
+                "setup_script_path",
+                "entrypoint",
+            }
+        )
+        if runtime_overrides:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                (
+                    "Plugin-spec automations derive runtime fields from the "
+                    "plugin manifest; remove: " + ", ".join(runtime_overrides)
+                ),
+            )
+        plugin_source = AutomationPluginSource.model_validate(
+            update_data.pop("plugin")
+        )
+        update_data.update(
+            await _resolve_plugin_spec_runtime_fields(
+                plugin=plugin_source,
+                request=request,
+                user=user,
+            )
+        )
+
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:
         update_data["trigger"] = body.trigger.model_dump()
@@ -592,7 +656,9 @@ async def update_automation(
                 source="manual",
             )
 
-    if "agent_profile_id" in update_data or "model" in update_data:
+    if not plugin_update_requested and (
+        "agent_profile_id" in update_data or "model" in update_data
+    ):
         selected_profile = update_data.get("agent_profile_id", auto.agent_profile_id)
         validate_agent_profile_combination(selected_profile, body.model)
         if selected_profile != auto.agent_profile_id:
