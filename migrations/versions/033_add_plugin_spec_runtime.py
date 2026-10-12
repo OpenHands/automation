@@ -1,7 +1,7 @@
 """add plugin spec runtime fields
 
-Revision ID: 033_add_plugin_spec_runtime
-Revises: 032_link_runs_to_triggering_events
+Revision ID: 033
+Revises: 032
 Create Date: 2026-10-12 17:20:00.000000
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "033_add_plugin_spec_runtime"
-down_revision: str | None = "032_link_runs_to_triggering_events"
+revision: str = "033"
+down_revision: str | None = "032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
