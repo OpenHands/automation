@@ -166,9 +166,7 @@ class AgentProfilesApi:
         self.profile_name = "agent-default"
         self.response = httpx.Response(
             200,
-            json={
-                "profiles": [{"id": self.profile_id, "name": self.profile_name}]
-            },
+            json={"profiles": [{"id": self.profile_id, "name": self.profile_name}]},
         )
         self.requests: list[httpx.Request] = []
 

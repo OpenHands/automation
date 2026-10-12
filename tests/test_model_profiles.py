@@ -12,9 +12,7 @@ from openhands.automation.utils.model_profiles import (
 )
 
 
-def _request(
-    client: httpx.AsyncClient, *, session_key: str | None = None
-) -> Request:
+def _request(client: httpx.AsyncClient, *, session_key: str | None = None) -> Request:
     headers = (
         [(b"x-session-api-key", session_key.encode())]
         if session_key is not None
@@ -113,7 +111,6 @@ async def test_validate_agent_profile_allowlists_accepts_exact_required_tools(us
     assert resolved_id == uuid.UUID(profile_id)
 
 
-
 @pytest.mark.asyncio
 async def test_validate_agent_profile_allowlists_rejects_missing_allowed_tool(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000006"
@@ -172,7 +169,6 @@ async def test_validate_agent_profile_allowlists_rejects_implicit_default_tools(
     assert exc.value.status_code == 422
     assert "must explicitly enable the tools allowed" in exc.value.detail
     assert "terminal" in exc.value.detail
-
 
 
 @pytest.mark.asyncio
@@ -302,11 +298,7 @@ async def test_validate_agent_profile_allowlists_checks_local_profiles(
         if request.url.path == "/api/agent-profiles":
             return httpx.Response(
                 200,
-                json={
-                    "profiles": [
-                        {"id": profile_id, "name": "hello-world-agent"}
-                    ]
-                },
+                json={"profiles": [{"id": profile_id, "name": "hello-world-agent"}]},
             )
         if request.url.path == "/api/agent-profiles/hello-world-agent":
             return httpx.Response(
@@ -337,8 +329,7 @@ async def test_validate_agent_profile_allowlists_checks_local_profiles(
     assert exc.value.status_code == 422
     assert "file_editor" in exc.value.detail
     assert all(
-        request.headers.get("X-Session-API-Key") == "local-key"
-        for request in requests
+        request.headers.get("X-Session-API-Key") == "local-key" for request in requests
     )
 
 
@@ -404,4 +395,3 @@ async def test_validate_agent_profile_allowlists_rejects_duplicate_names(user):
 
     assert exc.value.status_code == 422
     assert "Duplicate agent profile names found: dupe" in exc.value.detail
-

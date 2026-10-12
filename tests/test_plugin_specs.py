@@ -66,8 +66,7 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
     assert env["AUTOMATION_AGENT_PROFILE_NAME"] == "agent-default"
     assert env["AUTOMATION_LLM_PROFILE_NAME"] == "default"
     assert (
-        env["AUTOMATION_CONFIG_PATH"]
-        == "/tmp/automation-run/.automation/config.json"
+        env["AUTOMATION_CONFIG_PATH"] == "/tmp/automation-run/.automation/config.json"
     )
     assert runtime["entrypoint"] == "python3 scripts/main.py"
     assert runtime["manifest"]["runtime"]["agent_profile"]["allowed_tools"] == [
@@ -83,8 +82,12 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
         assert "scripts/main.py" in names
         assert "scripts/setup.sh" in names
         assert "setup.sh" in names
-        config = json.loads(tar.extractfile(".automation/config.json").read())
-        execution = json.loads(tar.extractfile(".automation/execution.json").read())
+        config_file = tar.extractfile(".automation/config.json")
+        execution_file = tar.extractfile(".automation/execution.json")
+        assert config_file is not None
+        assert execution_file is not None
+        config = json.loads(config_file.read())
+        execution = json.loads(execution_file.read())
 
     assert config == {"message": "hi"}
     assert execution["agent_profile_name"] == "agent-default"

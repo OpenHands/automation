@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tarfile
@@ -23,7 +24,7 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.plugin import PluginSource
-from openhands.sdk.plugin.fetch import fetch_plugin_with_resolution
+from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
 
 
 MANIFEST_NAME = "automation-plugin.json"
@@ -119,9 +120,7 @@ class AutomationPluginProfileRequirement(BaseModel):
         ),
     )
 
-    @field_validator(
-        "allowed_tools", "allowed_mcp_server_refs", "allowed_secret_refs"
-    )
+    @field_validator("allowed_tools", "allowed_mcp_server_refs", "allowed_secret_refs")
     @classmethod
     def validate_allowlist(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
@@ -213,6 +212,15 @@ def _contained_path(root: Path, relative: str) -> Path:
     return path
 
 
+def _cache_dir_for_plugin(plugin: AutomationPluginSource) -> Path | None:
+    if not plugin.ref:
+        return None
+    cache_key = hashlib.sha256(f"{plugin.source}\0{plugin.ref}".encode()).hexdigest()[
+        :16
+    ]
+    return DEFAULT_CACHE_DIR / "automation-plugin-refs" / cache_key
+
+
 def fetch_manifest(
     plugin: AutomationPluginSource,
 ) -> tuple[Path, str | None, AutomationPluginManifest]:
@@ -220,6 +228,7 @@ def fetch_manifest(
     try:
         plugin_path, resolved_ref = fetch_plugin_with_resolution(
             source=plugin.source,
+            cache_dir=_cache_dir_for_plugin(plugin),
             ref=plugin.ref,
             repo_path=plugin.repo_path,
         )
@@ -270,6 +279,7 @@ def validate_required_plugins(
         try:
             _, resolved_ref = fetch_plugin_with_resolution(
                 source=plugin.source,
+                cache_dir=_cache_dir_for_plugin(plugin),
                 ref=plugin.ref,
                 repo_path=plugin.repo_path,
             )
@@ -371,9 +381,7 @@ def _add_json(tar: tarfile.TarFile, name: str, data: Any) -> None:
     _add_bytes(tar, name, (json.dumps(data, indent=2) + "\n").encode())
 
 
-def _add_bytes(
-    tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644
-) -> None:
+def _add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) -> None:
     info = tarfile.TarInfo(name)
     info.size = len(data)
     info.mode = mode

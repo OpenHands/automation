@@ -404,9 +404,7 @@ async def _execute_run(
             )
             env_vars.update(plugin_env)
             entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
-            await update_run_resolved_runtime(
-                session_factory, run.id, resolved_runtime
-            )
+            await update_run_resolved_runtime(session_factory, run.id, resolved_runtime)
             logger.info(
                 "Plugin automation tarball built (%d bytes)",
                 len(tarball_source),

@@ -473,9 +473,7 @@ async def _resolve_plugin_spec_runtime_fields(
                 "Plugin automation requires an LLM profile",
             )
         model = (
-            resolve_model_profile_for_user(llm_default, user)
-            if llm_default
-            else None
+            resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
     agent_profile_requirement = manifest.runtime.agent_profile
@@ -652,9 +650,7 @@ async def update_automation(
                     "plugin manifest; remove: " + ", ".join(runtime_overrides)
                 ),
             )
-        plugin_source = AutomationPluginSource.model_validate(
-            update_data.pop("plugin")
-        )
+        plugin_source = AutomationPluginSource.model_validate(update_data.pop("plugin"))
         try:
             plugin_runtime_fields = await _resolve_plugin_spec_runtime_fields(
                 plugin=plugin_source,
@@ -662,10 +658,14 @@ async def update_automation(
                 user=user,
             )
         except HTTPException as exc:
-            if exc.status_code not in (
-                status.HTTP_401_UNAUTHORIZED,
-                status.HTTP_403_FORBIDDEN,
-            ) or exc.detail != "OpenHands API refused the request for agent profiles":
+            if (
+                exc.status_code
+                not in (
+                    status.HTTP_401_UNAUTHORIZED,
+                    status.HTTP_403_FORBIDDEN,
+                )
+                or exc.detail != "OpenHands API refused the request for agent profiles"
+            ):
                 raise
             plugin_runtime_fields = (
                 _resolve_plugin_spec_update_fields_reusing_existing_profiles(

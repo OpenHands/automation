@@ -640,6 +640,7 @@ class UpdateAutomationPluginSource(BaseModel):
             raise ValueError("repo_path cannot contain '..'")
         return value
 
+
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 

@@ -87,7 +87,6 @@ def validate_agent_profile_selection(
     validate_agent_profile_combination(agent_profile_id, model)
 
 
-
 def _agent_profiles_base_url() -> str:
     from openhands.automation.config import get_config
 
@@ -215,7 +214,6 @@ def _validate_exact_allowlist(
         )
 
 
-
 async def validate_agent_profile_allowlists(
     agent_profile_id: uuid.UUID | None,
     agent_profile_name: str | None,
@@ -317,9 +315,11 @@ async def validate_agent_profile_allowlists(
                 "Unexpected tools field in OpenHands API agent profile response",
             )
         selected_tools = {
-            tool.get("name")
+            name
             for tool in tools
-            if isinstance(tool, dict) and tool.get("name")
+            if isinstance(tool, dict)
+            and isinstance(name := tool.get("name"), str)
+            and name
         }
         _validate_exact_allowlist(
             selected=selected_tools,

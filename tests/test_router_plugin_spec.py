@@ -47,7 +47,7 @@ async def test_create_plugin_spec_automation(
     plugin = write_plugin(tmp_path)
 
     response = await async_client.post(
-        "/v1/plugin-spec",
+        "/api/automation/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
@@ -73,7 +73,7 @@ async def test_create_plugin_spec_rejects_runtime_overrides(async_client, tmp_pa
     plugin = write_plugin(tmp_path)
 
     response = await async_client.post(
-        "/v1/plugin-spec",
+        "/api/automation/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
@@ -98,7 +98,7 @@ async def test_create_plugin_spec_validates_manifest_config_defaults(
     (plugin / "automation-plugin.json").write_text(json.dumps(manifest))
 
     response = await async_client.post(
-        "/v1/plugin-spec",
+        "/api/automation/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
@@ -125,7 +125,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
     (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
 
     created = await async_client.post(
-        "/v1/plugin-spec",
+        "/api/automation/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin_v1)},
@@ -135,7 +135,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
     assert created.status_code == 201
 
     response = await async_client.patch(
-        f"/v1/{created.json()['id']}",
+        f"/api/automation/v1/{created.json()['id']}",
         json={"plugin": {"source": str(plugin_v2), "ref": "main"}},
     )
 
@@ -155,7 +155,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
 async def test_patch_plugin_spec_rejects_runtime_overrides(async_client, tmp_path):
     plugin = write_plugin(tmp_path)
     created = await async_client.post(
-        "/v1/plugin-spec",
+        "/api/automation/v1/plugin-spec",
         json={
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
@@ -165,7 +165,7 @@ async def test_patch_plugin_spec_rejects_runtime_overrides(async_client, tmp_pat
     assert created.status_code == 201
 
     response = await async_client.patch(
-        f"/v1/{created.json()['id']}",
+        f"/api/automation/v1/{created.json()['id']}",
         json={"plugin": {"source": str(plugin)}, "model": "default"},
     )
 
@@ -179,7 +179,7 @@ async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
 ):
     plugin = write_plugin(tmp_path)
     created = await async_client.post(
-        "/v1",
+        "/api/automation/v1",
         json={
             "name": "Raw Automation",
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
@@ -190,7 +190,7 @@ async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
     assert created.status_code == 201
 
     response = await async_client.patch(
-        f"/v1/{created.json()['id']}",
+        f"/api/automation/v1/{created.json()['id']}",
         json={"plugin": {"source": str(plugin)}},
     )
 
