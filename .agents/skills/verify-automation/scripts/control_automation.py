@@ -60,6 +60,8 @@ FAMILY_FILE_RE = re.compile(r"^F(\d{2})-[a-z0-9-]+\.md$")
 SUB_FEATURE_RE = re.compile(r"^- `(F\d{2}\.[a-z0-9][a-z0-9-]*)`: \S")
 RESULTS = ("pass", "fail", "xfail", "xpass", "blocked", "not-run")
 FERNET_TOKEN = re.compile(r"gAAAAA[A-Za-z0-9_\-]{40,}={0,2}")
+# Generated custom-webhook secrets are never known up front; match them by shape.
+WEBHOOK_SECRET = re.compile(r"whsec_[A-Za-z0-9_\-]{16,}")
 TERMINAL_RUN_STATUSES = ("COMPLETED", "FAILED", "CANCELLED", "SKIPPED")
 SERVICES = ("agent-server", "automation")
 # The deterministic local identity (auth.py `_get_local_user`).
@@ -131,6 +133,7 @@ class Redactor:
         for secret in sorted(self._secrets, key=len, reverse=True):
             if secret in value:
                 value = value.replace(secret, f"<redacted:{self._secrets[secret]}>")
+        value = WEBHOOK_SECRET.sub("<redacted:webhook-secret>", value)
         return FERNET_TOKEN.sub("<redacted:encrypted>", value)
 
     def obj(self, value: Any) -> Any:
@@ -1081,15 +1084,20 @@ def cmd_logs(args: argparse.Namespace) -> dict[str, Any]:
     path = run.log_path(args.service)
     if not path.exists():
         return {"ok": True, "lines": [], "note": f"no {args.service} log (attached?)"}
-    lines = path.read_text(errors="replace").splitlines()
-    if args.since_restart:
-        starts = [i for i, line in enumerate(lines) if line.startswith("=== ")]
-        if starts:
-            lines = lines[starts[-1] :]
-    if args.grep:
-        pattern = re.compile(args.grep)
-        lines = [line for line in lines if pattern.search(line)]
-    ok = args.expect_min is None or len(lines) >= args.expect_min
+    deadline = time.monotonic() + (args.wait or 0)
+    while True:
+        lines = path.read_text(errors="replace").splitlines()
+        if args.since_restart:
+            starts = [i for i, line in enumerate(lines) if line.startswith("=== ")]
+            if starts:
+                lines = lines[starts[-1] :]
+        if args.grep:
+            pattern = re.compile(args.grep)
+            lines = [line for line in lines if pattern.search(line)]
+        ok = args.expect_min is None or len(lines) >= args.expect_min
+        if ok or args.expect_min is None or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
     if args.expect_none:
         ok = not lines
     return {
@@ -2159,6 +2167,7 @@ def cmd_event_send(args: argparse.Namespace) -> dict[str, Any]:
             "X-Slack-Signature" if args.scheme == "slack_v0" else "X-Signature-256"
         )
         scheme = args.scheme
+    REDACT.add(secret, "webhook-secret")
     raw = args.data.encode() if args.data is not None else json.dumps(payload).encode()
     msg_id = args.event_id or f"msg_{secrets.token_hex(8)}"
     timestamp = int(time.time()) - (args.age or 0)
@@ -2211,6 +2220,7 @@ def cmd_event_requested_types(args: argparse.Namespace) -> dict[str, Any]:
         usage_error("--unsafe-unredacted requires --field or --print-header")
     run = resolve_run(args.run)
     secret = args.secret or run_webhook_secret(run)
+    REDACT.add(secret, "webhook-secret")
     headers: dict[str, str] = {}
     if secret and not args.unsigned:
         digest = hmac.new(
@@ -3241,7 +3251,10 @@ def parse_exclusions() -> set[str]:
 BULLET_RE = re.compile(r"^- \*\*(.+?)\*\*")
 BUG_MARK_RE = re.compile(r"\s#\s*bug\s*$")
 FENCE_RE = re.compile(r"^\s*```(\w*)\s*$")
-ASSIGN_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", re.MULTILINE)
+# Assignments at a line start or after `;`, `&&` or `||`: `A=1; B=2` carries both.
+ASSIGN_RE = re.compile(
+    r"(?:^|;|&&|\|\|)\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", re.MULTILINE
+)
 
 
 @dataclass
@@ -3398,7 +3411,7 @@ def outside_reads(script: str) -> set[str]:
 def undeclared_dependencies(bullets: list[Bullet]) -> list[str]:
     """Recipes that read a variable an earlier recipe sets, without `Requires:`.
 
-    `map run` carries line-start assignments from one bullet to the next, so in
+    `map run` carries top-level assignments from one bullet to the next, so in
     a full replay a bullet sees the value set by the last earlier bullet that
     assigned it. `--only` runs Preconditions, the selected bullets and their
     `Requires:` closure; anything else leaves the variable empty, and an empty
@@ -4318,6 +4331,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grep", help="regular expression")
     p.add_argument("--tail", type=int, default=40)
     p.add_argument("--expect-min", type=int, help="fail unless at least N lines match")
+    p.add_argument(
+        "--wait",
+        type=float,
+        metavar="SECONDS",
+        help="with --expect-min: poll the log until enough lines match",
+    )
     p.add_argument(
         "--expect-none", action="store_true", help="fail if any line matches"
     )
