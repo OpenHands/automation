@@ -378,13 +378,9 @@ async def create_automation_from_plugin_spec(
     return AutomationResponse.model_validate(automation)
 
 
-async def _resolve_plugin_spec_runtime_fields(
-    *,
+def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
-    request: Request,
-    user: AuthenticatedUser,
-) -> dict[str, Any]:
-    """Validate a plugin spec and return automation fields derived from it."""
+) -> tuple[dict[str, Any], Any]:
     plugin_config: dict[str, Any] = {}
     try:
         _plugin_path, _resolved_ref, manifest = fetch_manifest(plugin)
@@ -399,6 +395,51 @@ async def _resolve_plugin_spec_runtime_fields(
         ) from exc
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return plugin_config, manifest
+
+
+def _profile_requirements_signature(manifest: Any) -> dict[str, Any]:
+    agent_profile = manifest.runtime.agent_profile
+    llm_profile = manifest.runtime.llm_profile
+    return {
+        "agent_profile": agent_profile.model_dump(exclude_none=True)
+        if agent_profile is not None
+        else None,
+        "llm_profile": llm_profile.model_dump(exclude_none=True)
+        if llm_profile is not None
+        else None,
+    }
+
+
+def _plugin_runtime_fields(
+    *,
+    plugin: AutomationPluginSource,
+    plugin_config: dict[str, Any],
+    manifest: Any,
+    model: str | None,
+    agent_profile_id: uuid.UUID | None,
+) -> dict[str, Any]:
+    return {
+        "plugin_spec": {
+            "plugin": plugin.model_dump(exclude_none=True),
+            "config": plugin_config,
+        },
+        "model": model,
+        "agent_profile_id": agent_profile_id,
+        "tarball_path": "plugin-spec://runtime",
+        "setup_script_path": manifest.entrypoint.setup_script,
+        "entrypoint": entrypoint_for_manifest(manifest),
+    }
+
+
+async def _resolve_plugin_spec_runtime_fields(
+    *,
+    plugin: AutomationPluginSource,
+    request: Request,
+    user: AuthenticatedUser,
+) -> dict[str, Any]:
+    """Validate a plugin spec and return automation fields derived from it."""
+    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin)
 
     agent_profile_name = (
         manifest.runtime.agent_profile.default_name
@@ -454,17 +495,58 @@ async def _resolve_plugin_spec_runtime_fields(
         else None,
     )
 
-    return {
-        "plugin_spec": {
-            "plugin": plugin.model_dump(exclude_none=True),
-            "config": plugin_config,
-        },
-        "model": model,
-        "agent_profile_id": agent_profile_id,
-        "tarball_path": "plugin-spec://runtime",
-        "setup_script_path": manifest.entrypoint.setup_script,
-        "entrypoint": entrypoint_for_manifest(manifest),
-    }
+    return _plugin_runtime_fields(
+        plugin=plugin,
+        plugin_config=plugin_config,
+        manifest=manifest,
+        model=model,
+        agent_profile_id=agent_profile_id,
+    )
+
+
+def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+    *,
+    plugin: AutomationPluginSource,
+    automation: Automation,
+) -> dict[str, Any]:
+    """Resolve a plugin update without rereading agent profile details.
+
+    This fallback supports Bearer API-key clients when the OpenHands app server
+    accepts the key for `/users/me` but refuses the agent-profile API. It is safe
+    only when the new manifest keeps the same profile requirements as the
+    existing plugin spec; otherwise the selected profile must be revalidated.
+    """
+    old_plugin_payload = (
+        automation.plugin_spec.get("plugin")
+        if isinstance(automation.plugin_spec, dict)
+        else None
+    )
+    if not isinstance(old_plugin_payload, dict):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Existing plugin-spec automation is missing plugin source metadata",
+        )
+    old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
+    _old_config, old_manifest = _fetch_validated_plugin_manifest(old_plugin)
+    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin)
+    if _profile_requirements_signature(manifest) != _profile_requirements_signature(
+        old_manifest
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            (
+                "OpenHands API refused the request for agent profiles, and the "
+                "new plugin manifest changes profile requirements"
+            ),
+        )
+    return _plugin_runtime_fields(
+        plugin=plugin,
+        plugin_config=plugin_config,
+        manifest=manifest,
+        model=automation.model,
+        agent_profile_id=automation.agent_profile_id,
+    )
+
 
 @router.get("")
 async def list_automations(
@@ -573,13 +655,25 @@ async def update_automation(
         plugin_source = AutomationPluginSource.model_validate(
             update_data.pop("plugin")
         )
-        update_data.update(
-            await _resolve_plugin_spec_runtime_fields(
+        try:
+            plugin_runtime_fields = await _resolve_plugin_spec_runtime_fields(
                 plugin=plugin_source,
                 request=request,
                 user=user,
             )
-        )
+        except HTTPException as exc:
+            if exc.status_code not in (
+                status.HTTP_401_UNAUTHORIZED,
+                status.HTTP_403_FORBIDDEN,
+            ) or exc.detail != "OpenHands API refused the request for agent profiles":
+                raise
+            plugin_runtime_fields = (
+                _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+                    plugin=plugin_source,
+                    automation=auto,
+                )
+            )
+        update_data.update(plugin_runtime_fields)
 
     # Handle trigger field mapping (only if trigger has a real value)
     if body.trigger is not None:

@@ -1,7 +1,15 @@
 import json
+import uuid
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
+
+from openhands.automation.models import Automation
+from openhands.automation.plugin_specs import AutomationPluginSource
+from openhands.automation.router import (
+    _resolve_plugin_spec_update_fields_reusing_existing_profiles,
+)
 
 
 def write_plugin(root: Path) -> Path:
@@ -188,3 +196,52 @@ async def test_patch_plugin_source_rejects_non_plugin_spec_automation(
 
     assert response.status_code == 422
     assert "Only plugin-spec automations can update plugin source" in response.text
+
+
+def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
+    plugin_v1 = write_plugin(tmp_path / "v1")
+    plugin_v2 = write_plugin(tmp_path / "v2")
+    manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
+    manifest["entrypoint"] = {"command": "python3 scripts/main_v2.py"}
+    (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
+    profile_id = uuid.uuid4()
+    automation = Automation(
+        plugin_spec={"plugin": {"source": str(plugin_v1)}, "config": {}},
+        model=None,
+        agent_profile_id=profile_id,
+    )
+
+    fields = _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+        plugin=AutomationPluginSource(source=str(plugin_v2)),
+        automation=automation,
+    )
+
+    assert fields["plugin_spec"] == {
+        "plugin": {"source": str(plugin_v2)},
+        "config": {},
+    }
+    assert fields["agent_profile_id"] == profile_id
+    assert fields["model"] is None
+    assert fields["entrypoint"] == "python3 scripts/main_v2.py"
+
+
+def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_path):
+    plugin_v1 = write_plugin(tmp_path / "v1")
+    plugin_v2 = write_plugin(tmp_path / "v2")
+    manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
+    manifest["runtime"]["agent_profile"]["allowed_tools"] = ["terminal"]
+    (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
+    automation = Automation(
+        plugin_spec={"plugin": {"source": str(plugin_v1)}, "config": {}},
+        model=None,
+        agent_profile_id=uuid.uuid4(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+            plugin=AutomationPluginSource(source=str(plugin_v2)),
+            automation=automation,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "changes profile requirements" in exc_info.value.detail
