@@ -82,6 +82,7 @@ from openhands.automation.utils.conversation_outcome import (
 from openhands.automation.utils.model_profiles import (
     ensure_agent_profile_exists,
     resolve_model_profile_for_user,
+    validate_agent_profile_allowed_tools,
     validate_agent_profile_combination,
 )
 from openhands.automation.utils.run import (
@@ -374,6 +375,15 @@ async def create_automation_from_plugin_spec(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Plugin automation requires an agent profile selection",
         )
+    await validate_agent_profile_allowed_tools(
+        body.agent_profile_id,
+        agent_profile_name,
+        manifest.runtime.agent_profile.allowed_tools
+        if manifest.runtime.agent_profile is not None
+        else None,
+        request,
+        user,
+    )
 
     state = model_automation_state(body.state, body.enabled)
     plugin_spec = {

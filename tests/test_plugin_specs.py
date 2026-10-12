@@ -33,6 +33,7 @@ def write_plugin(root: Path, *, setup_script: str | None = None) -> Path:
                     "agent_profile": {
                         "required": True,
                         "default_name": "agent-default",
+                        "allowed_tools": ["terminal", "file_editor"],
                     },
                     "llm_profile": {"required": True, "default_name": "default"},
                 },
@@ -69,6 +70,11 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
         == "/tmp/automation-run/.automation/config.json"
     )
     assert runtime["entrypoint"] == "python3 scripts/main.py"
+    assert runtime["manifest"]["runtime"]["agent_profile"]["allowed_tools"] == [
+        "terminal",
+        "file_editor",
+    ]
+
     assert runtime["manifest"]["name"] == "hello-world-automation"
 
     with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:

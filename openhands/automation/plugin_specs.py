@@ -94,6 +94,21 @@ class AutomationPluginProfileRequirement(BaseModel):
 
     required: bool = True
     default_name: str | None = Field(default=None, min_length=1, max_length=64)
+    allowed_tools: list[str] | None = Field(default=None, min_length=1)
+
+    @field_validator("allowed_tools")
+    @classmethod
+    def validate_allowed_tools(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        seen: set[str] = set()
+        result: list[str] = []
+        for tool in value:
+            if not tool or tool in seen:
+                continue
+            seen.add(tool)
+            result.append(tool)
+        return result
 
 
 class AutomationPluginRuntime(BaseModel):

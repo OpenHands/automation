@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from urllib.parse import quote
 
 import httpx
 from cachetools import TTLCache
@@ -84,6 +85,133 @@ def validate_agent_profile_selection(
             "Agent profiles can only be selected through the API on this deployment",
         )
     validate_agent_profile_combination(agent_profile_id, model)
+
+
+
+async def _list_agent_profiles(
+    request: Request,
+    user: AuthenticatedUser,
+) -> list[dict]:
+    """Fetch agent profile summaries for the caller's organization."""
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
+    headers = {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
+    try:
+        resp = await get_http_client(request).get(
+            f"{settings.openhands_api_base_url}/api/agent-profiles", headers=headers
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Failed to reach OpenHands API for agent profiles",
+        ) from exc
+    if resp.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+        raise HTTPException(
+            resp.status_code, "OpenHands API refused the request for agent profiles"
+        )
+    try:
+        if resp.status_code != status.HTTP_200_OK:
+            raise ValueError(f"status {resp.status_code}")
+        profiles = resp.json()["profiles"]
+        if not isinstance(profiles, list):
+            raise TypeError("profiles is not a list")
+        return [profile for profile in profiles if isinstance(profile, dict)]
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning("Agent profile lookup failed: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Unexpected response from OpenHands API for agent profiles",
+        ) from exc
+
+
+async def validate_agent_profile_allowed_tools(
+    agent_profile_id: uuid.UUID | None,
+    agent_profile_name: str | None,
+    allowed_tools: list[str] | None,
+    request: Request,
+    user: AuthenticatedUser,
+) -> None:
+    """Reject explicit agent-profile tools outside a plugin allowlist."""
+    if not allowed_tools:
+        return
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
+    if settings.is_local_mode:
+        return
+
+    profiles = await _list_agent_profiles(request, user)
+    resolved_name = agent_profile_name
+    if agent_profile_id is not None:
+        agent_profile_id_str = str(agent_profile_id)
+        resolved_name = next(
+            (
+                profile.get("name")
+                for profile in profiles
+                if str(profile.get("id")) == agent_profile_id_str
+            ),
+            None,
+        )
+        if resolved_name is None:
+            raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
+    if not resolved_name:
+        raise HTTPException(422, "Plugin automation requires an agent profile")
+
+    headers = {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
+    try:
+        resp = await get_http_client(request).get(
+            f"{settings.openhands_api_base_url}/api/agent-profiles/"
+            f"{quote(resolved_name, safe='')}",
+            headers=headers,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Failed to reach OpenHands API for agent profile details",
+        ) from exc
+    if resp.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+        raise HTTPException(
+            resp.status_code, "OpenHands API refused the request for agent profiles"
+        )
+    if resp.status_code == status.HTTP_404_NOT_FOUND:
+        raise HTTPException(422, f"Agent profile `{resolved_name}` not found")
+    try:
+        if resp.status_code != status.HTTP_200_OK:
+            raise ValueError(f"status {resp.status_code}")
+        body = resp.json()
+        profile = body.get("profile") if isinstance(body, dict) else None
+        if not isinstance(profile, dict):
+            raise TypeError("profile is not an object")
+    except (ValueError, TypeError) as exc:
+        logger.warning("Agent profile detail lookup failed: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Unexpected response from OpenHands API for agent profile details",
+        ) from exc
+
+    tools = profile.get("tools")
+    if tools is None:
+        return
+    if not isinstance(tools, list):
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Unexpected tools field in OpenHands API agent profile response",
+        )
+    selected_tools = {
+        tool.get("name")
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name")
+    }
+    disallowed = sorted(selected_tools - set(allowed_tools))
+    if disallowed:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Agent profile `{resolved_name}` enables tools not allowed by "
+                f"this automation plugin: {', '.join(disallowed)}"
+            ),
+        )
 
 
 async def ensure_agent_profile_exists(
