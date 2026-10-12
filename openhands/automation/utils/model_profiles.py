@@ -88,18 +88,37 @@ def validate_agent_profile_selection(
 
 
 
+def _agent_profiles_base_url() -> str:
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
+    if settings.is_local_mode:
+        return settings.agent_server_url.rstrip("/")
+    return settings.openhands_api_base_url.rstrip("/")
+
+
+def _agent_profiles_headers(
+    request: Request, user: AuthenticatedUser
+) -> dict[str, str]:
+    from openhands.automation.config import get_config
+
+    settings = get_config().service
+    if settings.is_local_mode:
+        session_key = request.headers.get("X-Session-API-Key", "").strip()
+        if session_key:
+            return {"X-Session-API-Key": session_key}
+    return {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
+
+
 async def _list_agent_profiles(
     request: Request,
     user: AuthenticatedUser,
 ) -> list[dict]:
     """Fetch agent profile summaries for the caller's organization."""
-    from openhands.automation.config import get_config
-
-    settings = get_config().service
-    headers = {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
+    headers = _agent_profiles_headers(request, user)
     try:
         resp = await get_http_client(request).get(
-            f"{settings.openhands_api_base_url}/api/agent-profiles", headers=headers
+            f"{_agent_profiles_base_url()}/api/agent-profiles", headers=headers
         )
     except httpx.RequestError as exc:
         raise HTTPException(
@@ -135,11 +154,6 @@ async def validate_agent_profile_allowed_tools(
     """Reject explicit agent-profile tools outside a plugin allowlist."""
     if not allowed_tools:
         return
-    from openhands.automation.config import get_config
-
-    settings = get_config().service
-    if settings.is_local_mode:
-        return
 
     profiles = await _list_agent_profiles(request, user)
     resolved_name = agent_profile_name
@@ -158,10 +172,10 @@ async def validate_agent_profile_allowed_tools(
     if not resolved_name:
         raise HTTPException(422, "Plugin automation requires an agent profile")
 
-    headers = {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
+    headers = _agent_profiles_headers(request, user)
     try:
         resp = await get_http_client(request).get(
-            f"{settings.openhands_api_base_url}/api/agent-profiles/"
+            f"{_agent_profiles_base_url()}/api/agent-profiles/"
             f"{quote(resolved_name, safe='')}",
             headers=headers,
         )
