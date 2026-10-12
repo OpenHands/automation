@@ -83,9 +83,14 @@ async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
 
 @pytest.mark.asyncio
 async def test_validate_agent_profile_allowed_tools_accepts_subset(user):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000002"
+
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/agent-profiles":
-            return httpx.Response(200, json={"profiles": []})
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
@@ -97,13 +102,15 @@ async def test_validate_agent_profile_allowed_tools_accepts_subset(user):
         return httpx.Response(404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        await validate_agent_profile_allowed_tools(
+        resolved_id = await validate_agent_profile_allowed_tools(
             None,
             "hello-world",
             ["terminal", "file_editor", "task_tracker"],
             _request(client),
             user,
         )
+
+    assert resolved_id == uuid.UUID(profile_id)
 
 
 @pytest.mark.asyncio
@@ -116,10 +123,19 @@ async def test_validate_agent_profile_allowed_tools_checks_local_profiles(
     clear_config_cache()
     requests: list[httpx.Request] = []
 
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000003"
+
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path == "/api/agent-profiles":
-            return httpx.Response(200, json={"profiles": []})
+            return httpx.Response(
+                200,
+                json={
+                    "profiles": [
+                        {"id": profile_id, "name": "hello-world-agent"}
+                    ]
+                },
+            )
         if request.url.path == "/api/agent-profiles/hello-world-agent":
             return httpx.Response(
                 200,
@@ -191,8 +207,14 @@ async def test_validate_agent_profile_allowed_tools_rejects_duplicate_names(user
                 200,
                 json={
                     "profiles": [
-                        {"id": "profile-1", "name": "dupe"},
-                        {"id": "profile-2", "name": "dupe"},
+                        {
+                            "id": "0a1b2c3d-0000-4000-8000-000000000004",
+                            "name": "dupe",
+                        },
+                        {
+                            "id": "0a1b2c3d-0000-4000-8000-000000000005",
+                            "name": "dupe",
+                        },
                     ]
                 },
             )

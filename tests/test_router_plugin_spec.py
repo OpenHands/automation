@@ -33,7 +33,9 @@ def write_plugin(root: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_create_plugin_spec_automation(async_client, tmp_path):
+async def test_create_plugin_spec_automation(
+    async_client, tmp_path, agent_profiles_api
+):
     plugin = write_plugin(tmp_path)
 
     response = await async_client.post(
@@ -53,8 +55,8 @@ async def test_create_plugin_spec_automation(async_client, tmp_path):
     assert data["plugin_spec"] == {
         "plugin": {"source": str(plugin)},
         "config": {},
-        "agent_profile_name": "agent-default",
     }
+    assert data["agent_profile_id"] == agent_profiles_api.profile_id
     assert data["model"] is None
 
 
@@ -80,7 +82,7 @@ async def test_create_plugin_spec_rejects_runtime_overrides(async_client, tmp_pa
 
 @pytest.mark.asyncio
 async def test_create_plugin_spec_validates_manifest_config_defaults(
-    async_client, tmp_path
+    async_client, tmp_path, agent_profiles_api
 ):
     plugin = write_plugin(tmp_path)
     manifest = json.loads((plugin / "automation-plugin.json").read_text())

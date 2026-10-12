@@ -381,7 +381,7 @@ async def create_automation_from_plugin_spec(
             if llm_default
             else None
         )
-    await validate_agent_profile_allowed_tools(
+    agent_profile_id = await validate_agent_profile_allowed_tools(
         None,
         agent_profile_name,
         manifest.runtime.agent_profile.allowed_tools
@@ -395,7 +395,6 @@ async def create_automation_from_plugin_spec(
     plugin_spec = {
         "plugin": body.plugin.model_dump(exclude_none=True),
         "config": plugin_config,
-        "agent_profile_name": agent_profile_name,
     }
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
     if body.template is not None:
@@ -409,7 +408,7 @@ async def create_automation_from_plugin_spec(
         preset_metadata=preset_metadata,
         plugin_spec=plugin_spec,
         model=model,
-        agent_profile_id=None,
+        agent_profile_id=agent_profile_id,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
         tarball_path="plugin-spec://runtime",

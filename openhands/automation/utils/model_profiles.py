@@ -161,19 +161,30 @@ def _validate_unique_agent_profile_names(profiles: list[dict]) -> None:
         )
 
 
+def _parse_agent_profile_id(value: object) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Unexpected agent profile id in OpenHands API response",
+        ) from exc
+
+
 async def validate_agent_profile_allowed_tools(
     agent_profile_id: uuid.UUID | None,
     agent_profile_name: str | None,
     allowed_tools: list[str] | None,
     request: Request,
     user: AuthenticatedUser,
-) -> None:
+) -> uuid.UUID | None:
     """Reject missing/ambiguous profile names and disallowed explicit tools."""
     if agent_profile_id is None and not agent_profile_name:
-        return
+        return None
 
     profiles = await _list_agent_profiles(request, user)
     _validate_unique_agent_profile_names(profiles)
+    resolved_id = agent_profile_id
     resolved_name = agent_profile_name
     if agent_profile_id is not None:
         agent_profile_id_str = str(agent_profile_id)
@@ -187,8 +198,23 @@ async def validate_agent_profile_allowed_tools(
         )
         if resolved_name is None:
             raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
-    if not resolved_name:
+    elif agent_profile_name:
+        selected = next(
+            (
+                profile
+                for profile in profiles
+                if profile.get("name") == agent_profile_name
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(422, f"Agent profile `{agent_profile_name}` not found")
+        resolved_id = _parse_agent_profile_id(selected.get("id"))
+    if not resolved_name or resolved_id is None:
         raise HTTPException(422, "Plugin automation requires an agent profile")
+
+    if allowed_tools is None:
+        return resolved_id
 
     headers = _agent_profiles_headers(request, user)
     try:
@@ -222,12 +248,9 @@ async def validate_agent_profile_allowed_tools(
             "Unexpected response from OpenHands API for agent profile details",
         ) from exc
 
-    if allowed_tools is None:
-        return
-
     tools = profile.get("tools")
     if tools is None:
-        return
+        return resolved_id
     if not isinstance(tools, list):
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -247,6 +270,7 @@ async def validate_agent_profile_allowed_tools(
                 f"this automation plugin: {', '.join(disallowed)}"
             ),
         )
+    return resolved_id
 
 
 async def ensure_agent_profile_exists(

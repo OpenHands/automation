@@ -272,6 +272,8 @@ def build_execution_payload(
     config = plugin_spec.get("config") or {}
     plugin_path, resolved_ref, manifest = fetch_manifest(source)
     required_plugins = validate_required_plugins(manifest.runtime.plugins)
+    if agent_profile_name is None and manifest.runtime.agent_profile is not None:
+        agent_profile_name = manifest.runtime.agent_profile.default_name
 
     resolved_runtime = {
         "kind": "plugin_spec",
