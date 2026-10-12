@@ -1095,7 +1095,10 @@ def cmd_logs(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "ok": ok,
         "log": str(path),
-        "lines": [REDACT.text(line)[:2000] for line in lines[-args.tail :]],
+        "lines": [
+            REDACT.text(line) if args.full else REDACT.text(line)[:2000]
+            for line in lines[-args.tail :]
+        ],
         "total_matching": len(lines),
     }
 
@@ -1231,11 +1234,10 @@ def cmd_sink_read(args: argparse.Namespace) -> dict[str, Any]:
         ]
         if args.path:
             entries = [e for e in entries if e["path"].startswith(args.path)]
-        if args.contains:
-            entries = [
-                e for e in entries if args.contains in json.dumps(e, default=str)
-            ]
-        enough = args.expect_min is None or len(entries) >= args.expect_min
+        for needle in args.contains or []:
+            entries = [e for e in entries if needle in json.dumps(e, default=str)]
+        # Without --expect-min, --wait waits its full time (an absence check).
+        enough = args.expect_min is not None and len(entries) >= args.expect_min
         if enough or time.monotonic() >= deadline:
             break
         time.sleep(0.25)
@@ -2278,6 +2280,9 @@ def cmd_state_sql(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": all(c["ok"] for c in checks), **body}
     if checks:
         result["checks"] = checks
+    if args.save:
+        saved = {"query": args.query, **result}
+        result["saved"] = str(save_evidence(run, args.save, saved))
     if args.raw:
         # Show stored values as they are (e.g. to prove Fernet encryption).
         result["rows"] = [
@@ -3684,6 +3689,10 @@ def cmd_map_run(args: argparse.Namespace) -> dict[str, Any]:
         "ok": all(a["ok"] for a in attempts),
         "file": path.name,
         "launch_flags": flags,
+        "summary": {
+            status: [a["summary"].get(status, 0) for a in attempts]
+            for status in ("pass", "fail", "xfail", "xpass", "blocked")
+        },
         "attempts": [
             {
                 "run": a["run"],
@@ -4317,6 +4326,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only lines since the last (re)start",
     )
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="do not cut lines at 2000 characters (tracebacks in JSON logs)",
+    )
 
     p = sub(
         commands,
@@ -4672,6 +4686,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print stored values unredacted (first 80 chars)",
     )
+    p.add_argument(
+        "--save", metavar="FEATURE/NAME", help="save the rows (redacted) as evidence"
+    )
     p = sub(
         st_sub,
         "ls",
@@ -4748,7 +4765,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("name")
     p.add_argument("--path")
-    p.add_argument("--contains")
+    p.add_argument(
+        "--contains",
+        action="append",
+        help="keep requests containing this text (repeatable, all must match)",
+    )
     p.add_argument("--wait", type=float, default=0)
     p.add_argument("--expect-min", type=int)
     p.add_argument("--expect-max", type=int)
