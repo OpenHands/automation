@@ -72,7 +72,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
             await validate_agent_profile_allowed_tools(
                 uuid.UUID(profile_id),
                 None,
-                ["terminal", "file_editor", "task_tracker"],
+                ["terminal"],
                 _request(client),
                 user,
             )
@@ -82,7 +82,7 @@ async def test_validate_agent_profile_allowed_tools_rejects_extra_tool(user):
 
 
 @pytest.mark.asyncio
-async def test_validate_agent_profile_allowed_tools_accepts_subset(user):
+async def test_validate_agent_profile_allowed_tools_accepts_exact_required_tools(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000002"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -105,12 +105,73 @@ async def test_validate_agent_profile_allowed_tools_accepts_subset(user):
         resolved_id = await validate_agent_profile_allowed_tools(
             None,
             "hello-world",
-            ["terminal", "file_editor", "task_tracker"],
+            ["terminal"],
             _request(client),
             user,
         )
 
     assert resolved_id == uuid.UUID(profile_id)
+
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowed_tools_rejects_missing_required_tool(user):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000006"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
+        if request.url.path == "/api/agent-profiles/hello-world":
+            return httpx.Response(200, json={"profile": {"tools": []}})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(HTTPException) as exc:
+            await validate_agent_profile_allowed_tools(
+                None,
+                "hello-world",
+                ["terminal"],
+                _request(client),
+                user,
+            )
+
+    assert exc.value.status_code == 422
+    assert "missing tools required" in exc.value.detail
+    assert "terminal" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_profile_allowed_tools_rejects_implicit_default_tools(
+    user,
+):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000007"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
+            )
+        if request.url.path == "/api/agent-profiles/hello-world":
+            return httpx.Response(200, json={"profile": {"tools": None}})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(HTTPException) as exc:
+            await validate_agent_profile_allowed_tools(
+                None,
+                "hello-world",
+                ["terminal"],
+                _request(client),
+                user,
+            )
+
+    assert exc.value.status_code == 422
+    assert "must explicitly enable tools" in exc.value.detail
+    assert "terminal" in exc.value.detail
 
 
 @pytest.mark.asyncio

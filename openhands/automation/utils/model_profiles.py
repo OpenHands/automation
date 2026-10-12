@@ -250,7 +250,13 @@ async def validate_agent_profile_allowed_tools(
 
     tools = profile.get("tools")
     if tools is None:
-        return resolved_id
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Agent profile `{resolved_name}` must explicitly enable tools "
+                f"required by this automation plugin: {', '.join(allowed_tools)}"
+            ),
+        )
     if not isinstance(tools, list):
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -261,6 +267,15 @@ async def validate_agent_profile_allowed_tools(
         for tool in tools
         if isinstance(tool, dict) and tool.get("name")
     }
+    missing = sorted(set(allowed_tools) - selected_tools)
+    if missing:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Agent profile `{resolved_name}` is missing tools required by "
+                f"this automation plugin: {', '.join(missing)}"
+            ),
+        )
     disallowed = sorted(selected_tools - set(allowed_tools))
     if disallowed:
         raise HTTPException(

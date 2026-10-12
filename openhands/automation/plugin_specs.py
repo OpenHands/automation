@@ -93,7 +93,13 @@ class AutomationPluginProfileRequirement(BaseModel):
 
     required: bool = True
     default_name: str | None = Field(default=None, min_length=1, max_length=64)
-    allowed_tools: list[str] | None = Field(default=None, min_length=1)
+    allowed_tools: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Exact tool names the selected agent profile must explicitly enable."
+        ),
+    )
 
     @field_validator("allowed_tools")
     @classmethod
