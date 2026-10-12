@@ -346,25 +346,12 @@ async def create_automation_from_plugin_spec(
 
     await ensure_agent_profile_exists(body.agent_profile_id, request, user)
 
-    llm_default = (
-        manifest.runtime.llm_profile.default_name
-        if manifest.runtime.llm_profile is not None
-        else None
-    )
-    model = resolve_model_profile_for_user(body.model or llm_default, user)
-    if (
-        manifest.runtime.llm_profile is not None
-        and manifest.runtime.llm_profile.required
-    ):
-        if not model:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "Plugin automation requires an LLM profile",
-            )
-
     agent_profile_name = body.agent_profile_name
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:
         agent_profile_name = manifest.runtime.agent_profile.default_name
+    has_agent_profile = body.agent_profile_id is not None or bool(agent_profile_name)
+    if has_agent_profile and body.model:
+        raise HTTPException(422, "An agent profile already specifies the model")
     if (
         manifest.runtime.agent_profile is not None
         and manifest.runtime.agent_profile.required
@@ -375,6 +362,25 @@ async def create_automation_from_plugin_spec(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Plugin automation requires an agent profile selection",
         )
+
+    if has_agent_profile:
+        model = None
+    else:
+        llm_default = (
+            manifest.runtime.llm_profile.default_name
+            if manifest.runtime.llm_profile is not None
+            else None
+        )
+        model = resolve_model_profile_for_user(body.model or llm_default, user)
+        if (
+            manifest.runtime.llm_profile is not None
+            and manifest.runtime.llm_profile.required
+            and not model
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Plugin automation requires an LLM profile",
+            )
     await validate_agent_profile_allowed_tools(
         body.agent_profile_id,
         agent_profile_name,

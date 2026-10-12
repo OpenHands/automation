@@ -56,7 +56,29 @@ async def test_create_plugin_spec_automation(async_client, tmp_path):
         "config": {"message": "hi"},
         "agent_profile_name": "agent-default",
     }
-    assert data["model"] == "default"
+    assert data["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_model_with_agent_profile(
+    async_client, tmp_path
+):
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "config": {"message": "hi"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "agent_profile_name": "agent-default",
+            "model": "default",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "An agent profile already specifies the model" in response.text
 
 
 @pytest.mark.asyncio
