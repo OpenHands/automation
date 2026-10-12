@@ -143,7 +143,6 @@ class AutomationPluginRuntime(BaseModel):
 
     agent_profile: AutomationPluginProfileRequirement | None = None
     llm_profile: AutomationPluginProfileRequirement | None = None
-    required_secrets: list[str] = Field(default_factory=list)
     plugins: list[AutomationPluginSource] = Field(default_factory=list)
 
 
