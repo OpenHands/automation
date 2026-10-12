@@ -698,6 +698,28 @@ compatibility path. The migration requires `AUTOMATION_KV_SECRET` when legacy
 rows exist (they cannot be decrypted without it) and is a no-op on an empty
 database.
 
+If 030 cannot decrypt a legacy document (the secret is missing, or is not the
+one the state was written with), the whole upgrade rolls back and the service
+does not start. On SQLite, `migrations/env.py` runs the upgrade in one
+`BEGIN IMMEDIATE` transaction, so the schema, the KV rows and `alembic_version`
+are left exactly as they were. To recover:
+
+1. Back up the database file.
+2. Set `AUTOMATION_KV_SECRET` to the secret the state was written with, and
+   restart. The upgrade runs again.
+3. Check that the log says `SQLite database migrations applied successfully`
+   and that `alembic_version` is at the head revision.
+
+Releases up to 1.19.3 could leave a SQLite database half-migrated: 029's
+column added while the revision stayed at 028, or 030's tables left next to
+`automation_kv_legacy` at revision 029. The same restart repairs both, inside
+the same transaction. If the new tables already hold rows, 030 refuses and
+changes nothing. If the original secret is lost, the legacy state cannot be
+decrypted. The only way forward is to delete the rows of `automation_kv`,
+`automation_kv_meta` and, if present, `automation_kv_legacy`, which discards
+the KV state but keeps the automations. Git Sync tokens wrapped with the lost
+secret (when `AUTOMATION_GIT_SYNC_SECRET` is unset) must be entered again.
+
 ### Future TTL Support
 
 The `created_at` and `updated_at` timestamps provide the foundation for TTL:
