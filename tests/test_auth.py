@@ -471,6 +471,66 @@ class TestCookieAuthentication:
         assert exc_info.value.status_code == 401
         assert "Authentication required" in exc_info.value.detail
 
+    async def test_authenticate_valid_openhands_auth_cookie(
+        self, mock_request, mock_http_client
+    ):
+        """Valid openhands_auth (OAuth v2) cookie returns AuthenticatedUser."""
+        _set_mock_headers(mock_request, {})
+        mock_request.cookies = {"openhands_auth": "v2-cookie-value"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.COOKIE
+
+        # The original cookie name must reach upstream so it parses the JWT
+        # cookie rather than the legacy chunked one.
+        headers = mock_http_client.get.call_args[1]["headers"]
+        assert headers["Cookie"] == "openhands_auth=v2-cookie-value"
+        assert "Authorization" not in headers
+
+    async def test_openhands_auth_preferred_over_keycloak_auth(
+        self, mock_request, mock_http_client
+    ):
+        """When both cookies are present, the new openhands_auth cookie wins."""
+        _set_mock_headers(mock_request, {})
+        mock_request.cookies = {
+            "openhands_auth": "v2-cookie-value",
+            "keycloak_auth": "legacy-cookie-value",
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        await authenticate_request(mock_request, client=mock_http_client)
+
+        headers = mock_http_client.get.call_args[1]["headers"]
+        assert headers["Cookie"] == "openhands_auth=v2-cookie-value"
+
+    async def test_falls_back_to_keycloak_auth_when_new_cookie_absent(
+        self, mock_request, mock_http_client
+    ):
+        """A session still holding only the legacy cookie keeps working."""
+        _set_mock_headers(mock_request, {})
+        mock_request.cookies = {"keycloak_auth": "legacy-cookie-value"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
+        result = await authenticate_request(mock_request, client=mock_http_client)
+
+        assert result.auth_method == AuthMethod.COOKIE
+        headers = mock_http_client.get.call_args[1]["headers"]
+        assert headers["Cookie"] == "keycloak_auth=legacy-cookie-value"
+
     async def test_cookie_openhands_unavailable(self, mock_request, mock_http_client):
         """Connection error to OpenHands API with cookie auth raises 502."""
         _set_mock_headers(mock_request, {})
@@ -689,6 +749,45 @@ class TestAuthIntegration:
             assert response.status_code == 200
             data = response.json()
             assert "automations" in data
+        finally:
+            app.dependency_overrides.clear()
+
+    async def test_valid_openhands_auth_cookie_through_api(
+        self, async_engine, async_session_factory
+    ):
+        """Valid openhands_auth cookie flows through auth middleware."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = MOCK_USERS_ME_RESPONSE
+
+        async def override_get_session():
+            async with async_session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_session] = override_get_session
+        app.state.engine = async_engine
+        app.state.session_factory = async_session_factory
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.is_closed = False
+        app.state.http_client = mock_client
+
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get(
+                    "/api/automation/v1",
+                    cookies={"openhands_auth": "valid-v2-cookie-123"},
+                )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert "automations" in data
+            # The v2 cookie name is forwarded to OpenHands unchanged.
+            headers = mock_client.get.call_args[1]["headers"]
+            assert headers["Cookie"] == "openhands_auth=valid-v2-cookie-123"
         finally:
             app.dependency_overrides.clear()
 
