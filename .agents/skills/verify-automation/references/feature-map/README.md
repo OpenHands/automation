@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **0 sub-features**.
+The map has **257 sub-features**.
 
 ## Baseline preconditions
 
@@ -77,6 +77,22 @@ them honest: [../maintenance.md](../maintenance.md).
 | ID | Family | What it covers | Entry points | Needs | Sub-features |
 |---|---|---|---|---|---|
 | F01 | [Service status, version and API contract](F01-service-status.md) | liveness, readiness, SDK and service versions, OpenAPI document, router order, base path | `GET /health`, `/ready`, `/sdk-version`, `/server_info`, `/api/automation/openapi.json` | baseline | 7 |
+| F02 | [Authentication and CORS](F02-auth-and-cors.md) | local key in header and bearer forms, session-key rotation, public routes, org scoping, permissions, auth cache, upstream errors, CORS | every `/v1` route | baseline | 18 |
+| F03 | [Capabilities and preflight validation](F03-capabilities-and-validate.md) | capabilities by configuration and readiness, schedule, trigger, sample-event and profile validation | `GET /v1/capabilities`, `POST /v1/validate` | baseline | 17 |
+| F04 | [Tarball uploads](F04-uploads.md) | upload, size and type limits, list, get, delete, use by an automation | `/v1/uploads` | baseline | 13 |
+| F05 | [Automation CRUD and tarball download](F05-automation-crud.md) | create, list and filters, get, patch, delete, tarball download, template reuse | `/v1`, `/v1/{id}`, `/v1/{id}/tarball` | baseline | 21 |
+| F06 | [Prompt and plugin presets](F06-presets.md) | prompt and plugin presets, generated tarball, repos, shared templates, continue-conversation rules | `/v1/preset/prompt`, `/v1/preset/plugin` | baseline | 11 |
+| F07 | [Dispatch and run lifecycle](F07-dispatch-and-runs.md) | dispatch, run environment, phases, callbacks, cancel, runs list, a real preset run | `/v1/{id}/dispatch`, `/v1/{id}/runs`, `/v1/runs/{run_id}/...` | baseline; `llm`, `pypi` for the preset run | 16 |
+| F08 | [Cron scheduling](F08-cron-scheduling.md) | scheduler fires, run environment, timezones, no catch-up, poll floor, disabled automations | the scheduler loop (no route) | baseline; `map run --timeout 400` | 7 |
+| F09 | [Drafts](F09-drafts.md) | draft create from prompt, raw or plugin, validation, patch, test dispatch, delete | `/v1/drafts` | baseline | 19 |
+| F10 | [Custom webhooks](F10-custom-webhooks.md) | webhook create, secrets and rotation, list, patch, disable, delete, signed delivery | `/v1/webhooks` | baseline | 12 |
+| F11 | [Event ingestion and triggers](F11-event-triggers.md) | signature schemes, matching, filters, dedupe, built-in GitHub, Jira and Bitbucket sources, conversation coalescing, requested types | `/v1/events/{org_id}/{source}`, `/v1/events/{source}/requested-types` | `Launch:` webhook secret | 20 |
+| F12 | [Per-automation KV store](F12-kv-store.md) | user and run-token auth, get, put, patch, delete, counters, lists, versions, batches, isolation, encryption | `/v1/kv` | baseline | 30 |
+| F13 | [Git sync](F13-git-sync.md) | config, remote check, export and import, conflicts, deletes, encryption, errors, lease, loop interval | `/v1/git-sync/...` | `Launch:` git timeout | 29 |
+| F14 | [Watchdog, timeouts and auto-disable](F14-watchdog-and-auto-disable.md) | watchdog verdicts, timeouts, late callbacks, auth-failure and consecutive-failure disable, workspace purge | the watchdog loop (no route) | baseline | 13 |
+| F15 | [Telemetry consent](F15-telemetry-consent.md) | consent, capture gating, anonymous and aggregate events, persistence, cloud mode | `POST /v1/telemetry/consent` | `Launch:` telemetry sink | 9 |
+| F16 | [The run's contract with the Agent Server](F16-agent-server-contract.md) | bash command and output, uploads cleanup, conversation tags, model profiles, agent-server failures | Agent Server `/api/...` | baseline; `llm`, `pypi` | 8 |
+| F17 | [Stream sources (Slack Socket Mode)](F17-stream-sources.md) | stream supervisor, config parsing, retries, kill switch, Socket Mode delivery | the stream supervisor (no route) | baseline; a real Slack app for two blocked bullets | 7 |
 
 ## Not mapped
 

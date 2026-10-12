@@ -1846,7 +1846,12 @@ def cmd_run_wait(args: argparse.Namespace) -> dict[str, Any]:
             phase = found.get("current_phase")
             if phase and f"phase:{phase[:120]}" not in seen:
                 seen.append(f"phase:{phase[:120]}")
-            if status in wanted:
+            # A non-terminal match keeps polling until its --check specs hold
+            # too (e.g. RUNNING with a given phase); a terminal one cannot change.
+            if status in wanted and (
+                status in TERMINAL_RUN_STATUSES
+                or all(evaluate_check(found, spec)["ok"] for spec in args.check or [])
+            ):
                 break
             if status in TERMINAL_RUN_STATUSES and not args.keep_waiting:
                 break
