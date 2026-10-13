@@ -137,6 +137,12 @@ with the concrete prerequisite and the route attempted.
 - **Harness gap**: fix the CLI, prove the new verb live, re-drive.
 - **Product bug**: record `fail` with evidence and a minimal repro command list;
   report it in this repository (or the owning one), not in the map PR.
+- **Known bug, different failure**: a `known bug` bullet whose marked command
+  fails without matching its `# bug: PREDICATE` is reported `fail` with the
+  observed status and hint. Read the transcript: the documented bug may have
+  changed shape (update the predicate and the prose, citing the PR) or a new
+  failure may hide it (triage that failure on its own). Never widen the
+  predicate just to turn the bullet back to `xfail`.
 - **Intent gap** (behavior changed without documentation): report it to the
   user with the PR link; do not "fix" the map to bless it silently.
 
