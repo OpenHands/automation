@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import signal
 import sys
 import tarfile
@@ -423,20 +424,36 @@ def test_state_cat_field_output_is_redacted(run_dir, capsys):
     assert out == "<redacted:session-api-key>"
 
 
+def _assert_stops(pid: int, what: str) -> None:
+    deadline = time.monotonic() + 5
+    status = Path(f"/proc/{pid}/status")
+    while time.monotonic() < deadline:
+        # Gone, or a zombie waiting for a reaper: either way, not running.
+        if not status.exists() or "State:\tZ" in status.read_text():
+            return
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    pytest.fail(f"{what} kept running")
+
+
 def test_exec_timeout_ends_the_programs_descendants(run_dir, tmp_path, capsys):
     pidfile = tmp_path / "child.pid"
     script = f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 30"
     code, out = _run(capsys, "exec", "--timeout", "1", "--", "sh", "-c", script)
     assert code == 1
     assert json.loads(out)["exit_code"] == 124
-    child = int(pidfile.read_text())
-    deadline = time.monotonic() + 5
-    status = Path(f"/proc/{child}/status")
-    while time.monotonic() < deadline:
-        # Gone, or a zombie waiting for a reaper: either way, not running.
-        if not status.exists() or "State:\tZ" in status.read_text():
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(child, signal.SIGKILL)
-        pytest.fail("the spawned child outlived the exec timeout")
+    _assert_stops(int(pidfile.read_text()), "the child after an exec timeout")
+
+
+def test_recipe_timeout_ends_what_exec_started(run_dir, tmp_path):
+    """`map run` stops a timed-out recipe's group: exec's own group goes too."""
+    prog, child = tmp_path / "prog.pid", tmp_path / "child.pid"
+    script = f"echo $$ > {prog}; sleep 30 >/dev/null 2>&1 & echo $! > {child}; sleep 30"
+    recipe = tmp_path / "recipe.sh"
+    recipe.write_text(
+        f"{sys.executable} {SCRIPT} exec --timeout 60 -- sh -c {shlex.quote(script)}\n"
+    )
+    code, _, _, timed_out = ca.execute_recipe(recipe, dict(os.environ), timeout=3)
+    assert timed_out and code == 124
+    _assert_stops(int(prog.read_text()), "the exec program after a recipe timeout")
+    _assert_stops(int(child.read_text()), "its child after a recipe timeout")

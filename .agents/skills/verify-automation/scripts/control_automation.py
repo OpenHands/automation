@@ -2550,26 +2550,38 @@ def cmd_exec(args: argparse.Namespace) -> dict[str, Any]:
         RUN_ENV: str(run.dir),
     }
     started = time.monotonic()
-    # Its own process group, so a timeout or Ctrl-C also ends what it spawned.
-    proc = subprocess.Popen(
-        command,
-        cwd=args.cwd or run.data.get("checkout", REPO_ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+
+    # Its own process group, so a timeout also ends what it spawned. That group
+    # is outside the caller's, so a SIGTERM from the caller (a `map run` recipe
+    # timeout) must reach it through us: kill it at once, well inside the
+    # caller's grace period, then exit.
+    def interrupt(_signum: int, _frame: Any) -> NoReturn:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, interrupt)
     try:
-        stdout, stderr = proc.communicate(timeout=args.timeout)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        stop_process_group(proc.pid, grace=2.0)
-        stdout, stderr = proc.communicate()
-        code = 124
-    except BaseException:
-        stop_process_group(proc.pid, grace=2.0)
-        raise
+        proc = subprocess.Popen(
+            command,
+            cwd=args.cwd or run.data.get("checkout", REPO_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=args.timeout)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            stop_process_group(proc.pid, grace=2.0)
+            stdout, stderr = proc.communicate()
+            code = 124
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     elapsed = int((time.monotonic() - started) * 1000)
     result: dict[str, Any] = {
         "ok": code == 0,
