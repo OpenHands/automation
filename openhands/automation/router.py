@@ -53,6 +53,7 @@ from openhands.automation.plugin_specs import (
     PluginSpecError,
     entrypoint_for_manifest,
     fetch_manifest,
+    setup_script_for_manifest,
     validate_required_plugins,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
@@ -427,7 +428,7 @@ def _plugin_runtime_fields(
         "model": model,
         "agent_profile_id": agent_profile_id,
         "tarball_path": "plugin-spec://runtime",
-        "setup_script_path": manifest.entrypoint.setup_script,
+        "setup_script_path": setup_script_for_manifest(manifest),
         "entrypoint": entrypoint_for_manifest(manifest),
     }
 

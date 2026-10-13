@@ -40,6 +40,38 @@ def write_plugin(root: Path) -> Path:
     return plugin
 
 
+def write_conversation_plugin(root: Path) -> Path:
+    plugin = root / "conversation-plugin"
+    (plugin / "commands").mkdir(parents=True)
+    (plugin / "commands" / "hello.md").write_text("Say hello from the automation.\n")
+    (plugin / ".plugin").mkdir()
+    (plugin / ".plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "hello-world-automation",
+                "version": "0.1.0",
+                "description": "test plugin",
+            }
+        )
+    )
+    (plugin / "automation-plugin.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "openhands.automation.plugin.v1",
+                "name": "hello-world-automation",
+                "entrypoint": {"runner": "conversation", "command": "hello"},
+                "runtime": {
+                    "agent_profile": {
+                        "required": True,
+                        "default_name": "agent-default",
+                    },
+                },
+            }
+        )
+    )
+    return plugin
+
+
 @pytest.mark.asyncio
 async def test_create_plugin_spec_automation(
     async_client, tmp_path, agent_profiles_api
@@ -67,6 +99,34 @@ async def test_create_plugin_spec_automation(
     }
     assert data["agent_profile_id"] == agent_profiles_api.profile_id
     assert data["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_conversation_runner_uses_stock_runner(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_conversation_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["tarball_path"] == "plugin-spec://runtime"
+    assert data["setup_script_path"] == "setup.sh"
+    assert data["entrypoint"].endswith(" main.py")
+    assert data["plugin_spec"] == {
+        "plugin": {"source": str(plugin)},
+        "config": {},
+    }
+    assert data["agent_profile_id"] == agent_profiles_api.profile_id
 
 
 @pytest.mark.asyncio

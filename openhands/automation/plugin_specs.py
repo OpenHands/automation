@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -29,6 +30,10 @@ from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_reso
 
 MANIFEST_NAME = "automation-plugin.json"
 AUTOMATION_DIR = ".automation"
+PRESETS_DIR = Path(__file__).parent / "presets"
+PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
+SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
+_PLUGIN_PRESET_CACHE: dict[str, str] | None = None
 
 
 class PluginSpecError(ValueError):
@@ -60,11 +65,13 @@ class AutomationPluginSource(BaseModel):
 
 
 class AutomationPluginEntrypoint(BaseModel):
-    """Script command declared by an executable automation plugin."""
+    """Runner command declared by an executable automation plugin."""
 
     model_config = ConfigDict(extra="forbid")
 
+    runner: Literal["script", "conversation"] = "script"
     command: str = Field(..., min_length=1, max_length=500)
+    arguments: str | None = Field(default=None, max_length=5000)
     working_dir: str = Field(default=".", min_length=1, max_length=200)
     setup_script: str | None = Field(default=None, min_length=1, max_length=200)
 
@@ -85,6 +92,24 @@ class AutomationPluginEntrypoint(BaseModel):
         if result.startswith("/") or ".." in PurePosixPath(result).parts:
             raise ValueError("path must stay inside the plugin root")
         return result
+
+    @model_validator(mode="after")
+    def validate_runner_fields(self) -> AutomationPluginEntrypoint:
+        if self.runner == "script":
+            if self.arguments is not None:
+                raise ValueError(
+                    "entrypoint.arguments is only valid for conversation runners"
+                )
+            return self
+        if self.setup_script is not None:
+            raise ValueError("conversation runners use the stock setup.sh")
+        if self.working_dir != ".":
+            raise ValueError("conversation runners must use working_dir='.'")
+        if any(ch in self.command for ch in ("/", ":", "\\")):
+            raise ValueError(
+                "conversation runner command must be a plugin command name"
+            )
+        return self
 
 
 class AutomationPluginProfileRequirement(BaseModel):
@@ -252,6 +277,17 @@ def fetch_manifest(
 def _validate_manifest_paths(
     plugin_path: Path, manifest: AutomationPluginManifest
 ) -> None:
+    if manifest.entrypoint.runner == "conversation":
+        command_path = _contained_path(
+            plugin_path, f"commands/{manifest.entrypoint.command}.md"
+        )
+        if not command_path.is_file():
+            raise PluginSpecError(
+                "Conversation runner command does not exist: "
+                f"commands/{manifest.entrypoint.command}.md"
+            )
+        return
+
     working_dir = _contained_path(plugin_path, manifest.entrypoint.working_dir)
     if not working_dir.is_dir():
         raise PluginSpecError(
@@ -312,6 +348,7 @@ def build_execution_payload(
 
     resolved_runtime = {
         "kind": "plugin_spec",
+        "runner": manifest.entrypoint.runner,
         "plugin": source.model_dump(exclude_none=True),
         "plugin_resolved_ref": resolved_ref,
         "entrypoint": entrypoint_for_manifest(manifest),
@@ -322,13 +359,22 @@ def build_execution_payload(
         "llm_profile_name": llm_profile_name,
     }
 
-    tarball = _build_plugin_tarball(
-        plugin_path=plugin_path,
-        manifest=manifest,
-        config=config,
-        resolved_runtime=resolved_runtime,
-        required_plugins=required_plugins,
-    )
+    if manifest.entrypoint.runner == "conversation":
+        tarball = _build_stock_runner_tarball(
+            source=source,
+            manifest=manifest,
+            config=config,
+            resolved_runtime=resolved_runtime,
+            required_plugins=required_plugins,
+        )
+    else:
+        tarball = _build_plugin_tarball(
+            plugin_path=plugin_path,
+            manifest=manifest,
+            config=config,
+            resolved_runtime=resolved_runtime,
+            required_plugins=required_plugins,
+        )
     work_dir = work_dir.rstrip("/") or "/workspace/project"
     env = {
         "AUTOMATION_PLUGIN_ROOT": work_dir,
@@ -388,7 +434,73 @@ def _add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) 
     tar.addfile(info, io.BytesIO(data))
 
 
+def _load_plugin_preset_files() -> dict[str, str]:
+    global _PLUGIN_PRESET_CACHE
+    if _PLUGIN_PRESET_CACHE is None:
+        _PLUGIN_PRESET_CACHE = {
+            "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
+        }
+    return _PLUGIN_PRESET_CACHE
+
+
+def _preset_entrypoint() -> str:
+    python_path = ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
+    return f"{python_path} main.py"
+
+
+def setup_script_for_manifest(manifest: AutomationPluginManifest) -> str | None:
+    if manifest.entrypoint.runner == "conversation":
+        return "setup.sh"
+    return manifest.entrypoint.setup_script
+
+
 def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
+    if manifest.entrypoint.runner == "conversation":
+        return _preset_entrypoint()
     if manifest.entrypoint.working_dir in ("", "."):
         return manifest.entrypoint.command
     return f"cd {manifest.entrypoint.working_dir} && {manifest.entrypoint.command}"
+
+
+def _conversation_prompt_for_manifest(manifest: AutomationPluginManifest) -> str:
+    prompt = f"/{manifest.name}:{manifest.entrypoint.command}"
+    if manifest.entrypoint.arguments:
+        prompt = f"{prompt} {manifest.entrypoint.arguments}"
+    return prompt
+
+
+def _plugin_config_sources(
+    source: AutomationPluginSource, manifest: AutomationPluginManifest
+) -> list[dict[str, Any]]:
+    return [source.model_dump(exclude_none=True)] + [
+        plugin.model_dump(exclude_none=True) for plugin in manifest.runtime.plugins
+    ]
+
+
+def _build_stock_runner_tarball(
+    *,
+    source: AutomationPluginSource,
+    manifest: AutomationPluginManifest,
+    config: dict[str, Any],
+    resolved_runtime: dict[str, Any],
+    required_plugins: list[dict[str, Any]],
+) -> bytes:
+    preset_files = _load_plugin_preset_files()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _add_bytes(tar, "main.py", preset_files["main.py"].encode())
+        _add_bytes(
+            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"].encode()
+        )
+        _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
+        _add_bytes(
+            tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()
+        )
+        _add_json(tar, "plugins_config.json", _plugin_config_sources(source, manifest))
+        _add_json(tar, f"{AUTOMATION_DIR}/config.json", config)
+        _add_json(tar, f"{AUTOMATION_DIR}/execution.json", resolved_runtime)
+        _add_json(tar, f"{AUTOMATION_DIR}/plugins.json", required_plugins)
+    buf.seek(0)
+    return buf.read()
