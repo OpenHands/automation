@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import signal
 import sys
 import tarfile
 import threading
@@ -405,3 +407,36 @@ def test_without_a_run_errors_are_one_json_object(tmp_path, monkeypatch, capsys)
     assert code == 3
     assert payload["ok"] is False
     assert "launch --new --print-run" in payload["hint"]
+
+
+def test_state_ls_fails_required_entries_in_a_missing_directory(run_dir, capsys):
+    code, out = _run(capsys, "state", "ls", "workspaces/none", "--expect", "x.txt")
+    assert code == 1
+    assert json.loads(out)["exists"] is False
+    code, _ = _run(capsys, "state", "ls", "workspaces/none")
+    assert code == 0
+
+
+def test_state_cat_field_output_is_redacted(run_dir, capsys):
+    out = _printed(capsys, "state", "cat", "private/session_api_key", "--field", ".")
+    assert SESSION_KEY not in out
+    assert out == "<redacted:session-api-key>"
+
+
+def test_exec_timeout_ends_the_programs_descendants(run_dir, tmp_path, capsys):
+    pidfile = tmp_path / "child.pid"
+    script = f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 30"
+    code, out = _run(capsys, "exec", "--timeout", "1", "--", "sh", "-c", script)
+    assert code == 1
+    assert json.loads(out)["exit_code"] == 124
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    status = Path(f"/proc/{child}/status")
+    while time.monotonic() < deadline:
+        # Gone, or a zombie waiting for a reaper: either way, not running.
+        if not status.exists() or "State:\tZ" in status.read_text():
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("the spawned child outlived the exec timeout")

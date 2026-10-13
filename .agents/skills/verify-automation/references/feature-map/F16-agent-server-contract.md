@@ -60,14 +60,10 @@ Routes: none
 Preconditions:
 
 - A live run (`launch --new`) and a clean `doctor`.
-- The preset bullets (`F16.preset-conversation` through
-  `F16.model-fallback`) need an LLM and PyPI; the block below saves the
-  DeepSeek profiles (deepseek-flash active, deepseek-pro saved). The other
-  bullets use the stdlib `callback` fixture.
-
-```sh
-control-automation llm preset deepseek
-```
+- The preset bullets (`F16.preset-conversation`, `F16.model-profile`,
+  `F16.model-fallback`) need an LLM and PyPI; each saves the DeepSeek
+  profiles itself (deepseek-flash active, deepseek-pro saved), so the other
+  bullets, which use the stdlib `callback` fixture, run without credentials.
 
 - **The bash command (`F16.bash-command`).** A callback fixture run, then its command and output on the Agent Server.
   ```sh
@@ -91,6 +87,7 @@ control-automation llm preset deepseek
 - **The preset run's conversation (`F16.preset-conversation`).** A prompt preset on deepseek-flash, then its conversation on the Agent Server.
   Needs: llm, pypi
   ```sh
+  control-automation llm preset deepseek
   CA=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa contract preset","prompt":"Create a file named hello.txt in the current directory containing exactly: hi. Then call the finish tool. Do not do anything else.","trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 201 --field id)
   CR=$(control-automation api POST "/v1/$CA/dispatch" --expect 201 --field id)
   CID=$(control-automation run wait "$CA" --run-id "$CR" --status COMPLETED --timeout 900 --check run_metadata.finish_tool_response exists --save F16.preset-conversation/run --field conversation_id)
@@ -114,6 +111,7 @@ control-automation llm preset deepseek
 - **Named model profile (`F16.model-profile`).** `model` in the create body selects a saved Agent Server profile.
   Needs: llm, pypi
   ```sh
+  control-automation llm preset deepseek
   MA=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa contract pro","model":"deepseek-pro","prompt":"Create a file named hello.txt in the current directory containing exactly: hi. Then call the finish tool. Do not do anything else.","trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 201 --check model eq deepseek-pro --field id)
   MR=$(control-automation api POST "/v1/$MA/dispatch" --expect 201 --field id)
   MCID=$(control-automation run wait "$MA" --run-id "$MR" --status COMPLETED --timeout 900 --field conversation_id)
@@ -125,6 +123,7 @@ control-automation llm preset deepseek
 - **Unknown profile falls back (`F16.model-fallback`).** A `model` with no matching profile.
   Needs: llm, pypi
   ```sh
+  control-automation llm preset deepseek
   GA=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa contract ghost","model":"qa-no-such-profile","prompt":"Create a file named hello.txt in the current directory containing exactly: hi. Then call the finish tool. Do not do anything else.","trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 201 --check model eq qa-no-such-profile --field id)
   GR=$(control-automation api POST "/v1/$GA/dispatch" --expect 201 --field id)
   GCID=$(control-automation run wait "$GA" --run-id "$GR" --status COMPLETED --timeout 900 --check status_detail eq null --field conversation_id)

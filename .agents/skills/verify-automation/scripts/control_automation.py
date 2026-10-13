@@ -1883,6 +1883,7 @@ def cmd_run_wait(args: argparse.Namespace) -> dict[str, Any]:
         if value is None or not result["ok"]:
             emit(result)
             raise SystemExit(1)
+        value = REDACT.obj(value)
         print(value if isinstance(value, str) else json.dumps(value))
         raise SystemExit(0)
     return result
@@ -2100,6 +2101,7 @@ def cmd_fixture(args: argparse.Namespace) -> dict[str, Any]:
         if value is None:
             emit(result)
             raise SystemExit(1)
+        value = REDACT.obj(value)
         print(value if isinstance(value, str) else json.dumps(value))
         raise SystemExit(0)
     return result
@@ -2329,7 +2331,8 @@ def cmd_state_ls(args: argparse.Namespace) -> dict[str, Any]:
     root = run_relative(run, args.path)
     if not root.exists():
         return {
-            "ok": not args.expect_exists,
+            # A required entry cannot exist in a missing directory.
+            "ok": not args.expect_exists and not args.expect,
             "path": args.path,
             "exists": False,
             "entries": [],
@@ -2380,6 +2383,7 @@ def cmd_state_cat(args: argparse.Namespace) -> dict[str, Any]:
         if value is None or not ok:
             emit(result)
             raise SystemExit(1)
+        value = REDACT.obj(value)
         print(value if isinstance(value, str) else json.dumps(value))
         raise SystemExit(0)
     return result
@@ -2546,28 +2550,26 @@ def cmd_exec(args: argparse.Namespace) -> dict[str, Any]:
         RUN_ENV: str(run.dir),
     }
     started = time.monotonic()
+    # Its own process group, so a timeout or Ctrl-C also ends what it spawned.
+    proc = subprocess.Popen(
+        command,
+        cwd=args.cwd or run.data.get("checkout", REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            cwd=args.cwd or run.data.get("checkout", REPO_ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout,
-        )
-        code, stdout, stderr = completed.returncode, completed.stdout, completed.stderr
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = proc.communicate(timeout=args.timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        stop_process_group(proc.pid, grace=2.0)
+        stdout, stderr = proc.communicate()
         code = 124
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
+    except BaseException:
+        stop_process_group(proc.pid, grace=2.0)
+        raise
     elapsed = int((time.monotonic() - started) * 1000)
     result: dict[str, Any] = {
         "ok": code == 0,
