@@ -72,6 +72,14 @@ def write_conversation_plugin(root: Path) -> Path:
     return plugin
 
 
+def write_suggested_trigger_plugin(root: Path, suggested_trigger: dict) -> Path:
+    plugin = write_conversation_plugin(root)
+    data = json.loads((plugin / "automation-plugin.json").read_text())
+    data["suggested_trigger"] = suggested_trigger
+    (plugin / "automation-plugin.json").write_text(json.dumps(data))
+    return plugin
+
+
 @pytest.mark.asyncio
 async def test_create_plugin_spec_automation(
     async_client, tmp_path, agent_profiles_api
@@ -99,6 +107,51 @@ async def test_create_plugin_spec_automation(
     }
     assert data["agent_profile_id"] == agent_profiles_api.profile_id
     assert data["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_uses_manifest_suggested_trigger(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path, {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"}
+    )
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={"name": "Hello Plugin", "plugin": {"source": str(plugin)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["trigger"] == {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_unconfigured_suggested_event_source(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path,
+        {
+            "type": "event",
+            "source": "linear",
+            "on": "Issue",
+        },
+    )
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={"name": "Hello Plugin", "plugin": {"source": str(plugin)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "Event source `linear` is not configured" in response.text
 
 
 @pytest.mark.asyncio

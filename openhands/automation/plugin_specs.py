@@ -29,6 +29,8 @@ from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_reso
 
 
 MANIFEST_NAME = "automation-plugin.json"
+PLUGIN_MANIFEST_NAME = ".plugin/plugin.json"
+PLUGIN_AUTOMATION_KEY = "automation"
 AUTOMATION_DIR = ".automation"
 PRESETS_DIR = Path(__file__).parent / "presets"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
@@ -170,24 +172,30 @@ class AutomationPluginRuntime(BaseModel):
     plugins: list[AutomationPluginSource] = Field(default_factory=list)
 
 
-class AutomationPluginManifest(BaseModel):
-    """Manifest stored as automation-plugin.json in an executable plugin."""
+class AutomationPluginDefinition(BaseModel):
+    """Automation metadata embedded under .plugin/plugin.json's automation key."""
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["openhands.automation.plugin.v1"]
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str | None = Field(default=None, max_length=500)
     entrypoint: AutomationPluginEntrypoint
     runtime: AutomationPluginRuntime = Field(default_factory=AutomationPluginRuntime)
     config_schema: dict[str, Any] = Field(default_factory=dict)
+    suggested_trigger: Trigger | None = None
 
     @model_validator(mode="after")
-    def validate_config_schema(self) -> AutomationPluginManifest:
+    def validate_config_schema(self) -> AutomationPluginDefinition:
         schema_type = self.config_schema.get("type") if self.config_schema else "object"
         if schema_type != "object":
             raise ValueError("config_schema.type must be 'object' when provided")
         return self
+
+
+class AutomationPluginManifest(AutomationPluginDefinition):
+    """Complete automation plugin metadata resolved from a plugin manifest."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=500)
 
 
 class CreatePluginSpecAutomationRequest(BaseModel):
@@ -197,7 +205,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
-    trigger: Trigger
+    trigger: Trigger | None = None
     observability_associations: dict[str, str] | None = None
     timeout: int | None = None
     keep_alive: bool | None = None
@@ -249,7 +257,7 @@ def _cache_dir_for_plugin(plugin: AutomationPluginSource) -> Path | None:
 def fetch_manifest(
     plugin: AutomationPluginSource,
 ) -> tuple[Path, str | None, AutomationPluginManifest]:
-    """Fetch a plugin source and parse its automation-plugin.json manifest."""
+    """Fetch a plugin source and parse its automation metadata."""
     try:
         plugin_path, resolved_ref = fetch_plugin_with_resolution(
             source=plugin.source,
@@ -260,18 +268,58 @@ def fetch_manifest(
     except Exception as exc:
         raise PluginSpecError(f"Failed to fetch automation plugin: {exc}") from exc
 
-    manifest_path = _contained_path(plugin_path, MANIFEST_NAME)
-    if not manifest_path.is_file():
-        raise PluginSpecError(f"Automation plugin manifest not found: {MANIFEST_NAME}")
     try:
-        manifest = AutomationPluginManifest.model_validate_json(
-            manifest_path.read_text()
-        )
+        manifest = _read_manifest(plugin_path)
     except Exception as exc:
+        if isinstance(exc, PluginSpecError):
+            raise
         raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
 
     _validate_manifest_paths(plugin_path, manifest)
     return plugin_path, resolved_ref, manifest
+
+
+def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
+    plugin_manifest_path = _contained_path(plugin_path, PLUGIN_MANIFEST_NAME)
+    if plugin_manifest_path.is_file():
+        try:
+            plugin_metadata = json.loads(plugin_manifest_path.read_text())
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Invalid plugin manifest: {PLUGIN_MANIFEST_NAME}: {exc}"
+            ) from exc
+        automation_payload = plugin_metadata.get(PLUGIN_AUTOMATION_KEY)
+        if automation_payload is not None:
+            if not isinstance(automation_payload, dict):
+                raise PluginSpecError(
+                    "Invalid automation plugin manifest: "
+                    f"{PLUGIN_AUTOMATION_KEY} must be an object"
+                )
+            data = {
+                **automation_payload,
+                "name": plugin_metadata.get("name"),
+                "description": plugin_metadata.get("description"),
+            }
+            try:
+                return AutomationPluginManifest.model_validate(data)
+            except Exception as exc:
+                raise PluginSpecError(
+                    "Invalid automation plugin manifest: "
+                    f"{PLUGIN_MANIFEST_NAME}.{PLUGIN_AUTOMATION_KEY}: {exc}"
+                ) from exc
+
+    legacy_manifest_path = _contained_path(plugin_path, MANIFEST_NAME)
+    if not legacy_manifest_path.is_file():
+        raise PluginSpecError(
+            "Automation plugin manifest not found: "
+            f"{PLUGIN_MANIFEST_NAME} with `{PLUGIN_AUTOMATION_KEY}` or {MANIFEST_NAME}"
+        )
+    try:
+        return AutomationPluginManifest.model_validate_json(
+            legacy_manifest_path.read_text()
+        )
+    except Exception as exc:
+        raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
 
 
 def _validate_manifest_paths(

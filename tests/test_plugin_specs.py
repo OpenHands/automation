@@ -85,6 +85,39 @@ def write_conversation_plugin(root: Path) -> Path:
     return plugin
 
 
+def write_merged_conversation_plugin(root: Path) -> Path:
+    plugin = root / "merged-conversation-plugin"
+    (plugin / "commands").mkdir(parents=True)
+    (plugin / "commands" / "hello.md").write_text("Say hello.\n")
+    (plugin / ".plugin").mkdir()
+    (plugin / ".plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "hello-world-automation",
+                "version": "0.1.0",
+                "description": "test plugin",
+                "automation": {
+                    "schema_version": "openhands.automation.plugin.v1",
+                    "entrypoint": {"runner": "conversation", "command": "hello"},
+                    "suggested_trigger": {
+                        "type": "cron",
+                        "schedule": "0 9 * * *",
+                        "timezone": "UTC",
+                    },
+                    "runtime": {
+                        "agent_profile": {
+                            "required": True,
+                            "default_name": "agent-default",
+                            "allowed_tools": ["terminal"],
+                        },
+                    },
+                },
+            }
+        )
+    )
+    return plugin
+
+
 def test_fetch_manifest_and_build_execution_payload(tmp_path):
     plugin = write_plugin(tmp_path, setup_script="scripts/setup.sh")
 
@@ -198,4 +231,28 @@ def test_conversation_runner_rejects_missing_plugin_command(tmp_path):
     with pytest.raises(
         PluginSpecError, match="Conversation runner command does not exist"
     ):
+        fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+
+def test_fetch_manifest_reads_automation_from_plugin_json(tmp_path):
+    plugin = write_merged_conversation_plugin(tmp_path)
+
+    _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+    assert manifest.name == "hello-world-automation"
+    assert manifest.description == "test plugin"
+    assert manifest.entrypoint.runner == "conversation"
+    assert manifest.entrypoint.command == "hello"
+    assert manifest.suggested_trigger is not None
+    assert manifest.suggested_trigger.type == "cron"
+    assert manifest.suggested_trigger.schedule == "0 9 * * *"
+
+
+def test_fetch_manifest_rejects_invalid_suggested_cron(tmp_path):
+    plugin = write_merged_conversation_plugin(tmp_path)
+    data = json.loads((plugin / ".plugin" / "plugin.json").read_text())
+    data["automation"]["suggested_trigger"]["schedule"] = "0 0 31 2 *"
+    (plugin / ".plugin" / "plugin.json").write_text(json.dumps(data))
+
+    with pytest.raises(PluginSpecError, match="Invalid automation plugin manifest"):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))

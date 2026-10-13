@@ -63,6 +63,7 @@ from openhands.automation.schemas import (
     AutomationRunListResponse,
     AutomationRunResponse,
     CreateAutomationRequest,
+    EventTrigger,
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
@@ -111,6 +112,7 @@ from openhands.automation.utils.templates import (
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
+from openhands.automation.utils.webhook import get_webhook_config
 
 
 logger = logging.getLogger(__name__)
@@ -337,6 +339,12 @@ async def create_automation_from_plugin_spec(
         request=request,
         user=user,
     )
+    trigger = await _resolve_plugin_spec_trigger(
+        requested_trigger=body.trigger,
+        manifest=runtime_fields["manifest"],
+        user=user,
+        session=session,
+    )
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
@@ -352,7 +360,7 @@ async def create_automation_from_plugin_spec(
         plugin_spec=runtime_fields["plugin_spec"],
         model=runtime_fields["model"],
         agent_profile_id=runtime_fields["agent_profile_id"],
-        trigger=body.trigger.model_dump(),
+        trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
@@ -425,12 +433,36 @@ def _plugin_runtime_fields(
             "plugin": plugin.model_dump(exclude_none=True),
             "config": plugin_config,
         },
+        "manifest": manifest,
         "model": model,
         "agent_profile_id": agent_profile_id,
         "tarball_path": "plugin-spec://runtime",
         "setup_script_path": setup_script_for_manifest(manifest),
         "entrypoint": entrypoint_for_manifest(manifest),
     }
+
+
+async def _resolve_plugin_spec_trigger(
+    *,
+    requested_trigger: Any,
+    manifest: Any,
+    user: AuthenticatedUser,
+    session: AsyncSession,
+) -> Any:
+    trigger = requested_trigger or manifest.suggested_trigger
+    if trigger is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Plugin automation requires a trigger or manifest suggested_trigger",
+        )
+    if isinstance(trigger, EventTrigger):
+        webhook = await get_webhook_config(trigger.source, user.org_id, session)
+        if webhook is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Event source `{trigger.source}` is not configured",
+            )
+    return trigger
 
 
 async def _resolve_plugin_spec_runtime_fields(
@@ -674,6 +706,7 @@ async def update_automation(
                     automation=auto,
                 )
             )
+        plugin_runtime_fields.pop("manifest", None)
         update_data.update(plugin_runtime_fields)
 
     # Handle trigger field mapping (only if trigger has a real value)
