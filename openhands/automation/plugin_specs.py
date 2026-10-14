@@ -6,11 +6,24 @@ import hashlib
 import io
 import json
 import os
+import re
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from jsonschema import (
+    Draft202012Validator,
+    ValidationError as JSONSchemaValidationError,
+    validators as jsonschema_validators,
+)
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
@@ -36,6 +49,10 @@ PRESETS_DIR = Path(__file__).parent / "presets"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
 _PLUGIN_PRESET_CACHE: dict[str, str] | None = None
+_CONFIG_TEMPLATE_RE = re.compile(
+    r"{{\s*(?P<json>json\s+)?config\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
+)
+_TRIGGER_ADAPTER: TypeAdapter[Trigger] = TypeAdapter(Trigger)
 
 
 class PluginSpecError(ValueError):
@@ -172,6 +189,14 @@ class AutomationPluginRuntime(BaseModel):
     plugins: list[AutomationPluginSource] = Field(default_factory=list)
 
 
+class AutomationPluginDedupe(BaseModel):
+    """Install dedupe hints declared by an automation plugin."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fields: list[str] = Field(default_factory=list)
+
+
 class AutomationPluginDefinition(BaseModel):
     """Automation metadata embedded under .plugin/plugin.json's automation key."""
 
@@ -182,12 +207,21 @@ class AutomationPluginDefinition(BaseModel):
     runtime: AutomationPluginRuntime = Field(default_factory=AutomationPluginRuntime)
     config_schema: dict[str, Any] = Field(default_factory=dict)
     suggested_trigger: Trigger | None = None
+    suggested_trigger_template: dict[str, Any] | None = None
+    dedupe: AutomationPluginDedupe | None = None
 
     @model_validator(mode="after")
     def validate_config_schema(self) -> AutomationPluginDefinition:
         schema_type = self.config_schema.get("type") if self.config_schema else "object"
         if schema_type != "object":
             raise ValueError("config_schema.type must be 'object' when provided")
+        if (
+            self.suggested_trigger is not None
+            and self.suggested_trigger_template is not None
+        ):
+            raise ValueError(
+                "Only one of suggested_trigger or suggested_trigger_template may be set"
+            )
         return self
 
 
@@ -205,6 +239,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
+    config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None
     observability_associations: dict[str, str] | None = None
     timeout: int | None = None
@@ -380,6 +415,86 @@ def _validate_manifest_paths(
             )
 
 
+def _extend_with_default(validator_class: type[Draft202012Validator]) -> Any:
+    validate_properties = validator_class.VALIDATORS["properties"]
+
+    def set_defaults(
+        validator: Any, properties: dict[str, Any], instance: Any, schema: Any
+    ) -> Any:
+        if isinstance(instance, dict):
+            for property_name, subschema in properties.items():
+                if "default" in subschema:
+                    instance.setdefault(property_name, subschema["default"])
+        yield from validate_properties(validator, properties, instance, schema)
+
+    return jsonschema_validators.extend(validator_class, {"properties": set_defaults})
+
+
+_DEFAULTING_VALIDATOR = _extend_with_default(Draft202012Validator)
+
+
+def validate_plugin_config(
+    manifest: AutomationPluginManifest,
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Apply JSON Schema defaults and validate install-time plugin config."""
+    plugin_config = dict(config or {})
+    schema = manifest.config_schema or {"type": "object"}
+    try:
+        _DEFAULTING_VALIDATOR(schema).validate(plugin_config)
+    except JSONSchemaValidationError as exc:
+        raise PluginSpecError(
+            f"Plugin automation config is invalid: {exc.message}"
+        ) from exc
+    return plugin_config
+
+
+def _config_value(config: dict[str, Any], path: str) -> Any:
+    current: Any = config
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            raise PluginSpecError(
+                f"Trigger template references missing config value: config.{path}"
+            )
+        current = current[part]
+    return current
+
+
+def _render_config_templates(value: Any, config: dict[str, Any]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _render_config_templates(item, config) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_render_config_templates(item, config) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        resolved = _config_value(config, match.group("path"))
+        if match.group("json"):
+            return json.dumps(resolved)
+        return str(resolved)
+
+    return _CONFIG_TEMPLATE_RE.sub(replace, value)
+
+
+def resolve_suggested_trigger(
+    manifest: AutomationPluginManifest,
+    config: dict[str, Any],
+) -> Trigger | None:
+    """Resolve static or config-templated suggested trigger metadata."""
+    if manifest.suggested_trigger is not None:
+        return manifest.suggested_trigger
+    if manifest.suggested_trigger_template is None:
+        return None
+    rendered = _render_config_templates(manifest.suggested_trigger_template, config)
+    try:
+        return _TRIGGER_ADAPTER.validate_python(rendered)
+    except Exception as exc:
+        raise PluginSpecError(f"Rendered suggested trigger is invalid: {exc}") from exc
+
+
 def validate_required_plugins(
     plugins: list[AutomationPluginSource],
 ) -> list[dict[str, Any]]:
@@ -415,8 +530,9 @@ def build_execution_payload(
 ) -> tuple[bytes, dict[str, str], dict[str, Any], list[dict[str, Any]]]:
     """Preflight, validate, and package a plugin-backed automation run."""
     source = AutomationPluginSource.model_validate(plugin_spec["plugin"])
-    config = plugin_spec.get("config") or {}
+    requested_config = plugin_spec.get("config") or {}
     resolved_ref, manifest = preflight_manifest(source)
+    config = validate_plugin_config(manifest, requested_config)
     required_plugins = validate_required_plugins(manifest.runtime.plugins)
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:

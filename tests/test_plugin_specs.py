@@ -10,6 +10,9 @@ from openhands.automation.plugin_specs import (
     PluginSpecError,
     build_execution_payload,
     fetch_manifest,
+    preflight_manifest,
+    resolve_suggested_trigger,
+    validate_plugin_config,
 )
 
 
@@ -55,6 +58,15 @@ def write_plugin(root: Path, *, setup_script: str | None = None) -> Path:
         json.dumps({"name": "hello-world-automation", **automation})
     )
     return plugin
+
+
+def _write_automation_manifest(plugin: Path, manifest: dict) -> None:
+    (plugin / "automation-plugin.json").write_text(json.dumps(manifest))
+    plugin_manifest = json.loads((plugin / ".plugin" / "plugin.json").read_text())
+    plugin_manifest["automation"] = {
+        key: value for key, value in manifest.items() if key != "name"
+    }
+    (plugin / ".plugin" / "plugin.json").write_text(json.dumps(plugin_manifest))
 
 
 def write_conversation_plugin(root: Path) -> Path:
@@ -124,6 +136,74 @@ def write_merged_conversation_plugin(root: Path) -> Path:
         )
     )
     return plugin
+
+
+def test_validate_plugin_config_applies_defaults(tmp_path):
+    plugin = write_plugin(tmp_path)
+    data = json.loads((plugin / "automation-plugin.json").read_text())
+    data["config_schema"] = {
+        "type": "object",
+        "required": ["repository"],
+        "additionalProperties": False,
+        "properties": {
+            "repository": {"type": "string"},
+            "label": {"type": "string", "default": "ready-for-review"},
+        },
+    }
+    _write_automation_manifest(plugin, data)
+
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(plugin))
+    )
+
+    assert validate_plugin_config(manifest, {"repository": "OpenHands/automation"}) == {
+        "repository": "OpenHands/automation",
+        "label": "ready-for-review",
+    }
+
+
+def test_resolve_suggested_trigger_template_uses_normal_install_config(tmp_path):
+    plugin = write_plugin(tmp_path)
+    data = json.loads((plugin / "automation-plugin.json").read_text())
+    data["config_schema"] = {
+        "type": "object",
+        "required": ["repository"],
+        "properties": {
+            "repository": {"type": "string"},
+            "label": {"type": "string", "default": "ready-for-review"},
+        },
+    }
+    data["suggested_trigger_template"] = {
+        "type": "event",
+        "source": "github",
+        "on": "pull_request.labeled",
+        "filter": (
+            "repository.full_name == {{ json config.repository }} && "
+            "contains(pull_request.labels[].name, {{ json config.label }})"
+        ),
+    }
+    _write_automation_manifest(plugin, data)
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(plugin))
+    )
+    config = validate_plugin_config(manifest, {"repository": "OpenHands/automation"})
+
+    trigger = resolve_suggested_trigger(manifest, config)
+
+    assert trigger is not None
+    assert trigger.model_dump() == {
+        "type": "event",
+        "source": "github",
+        "on": "pull_request.labeled",
+        "filter": (
+            'repository.full_name == "OpenHands/automation" && '
+            'contains(pull_request.labels[].name, "ready-for-review")'
+        ),
+        "destination": "dispatch_run",
+        "subject_key_expr": None,
+        "turn_text_expr": None,
+        "wake_agent": True,
+    }
 
 
 def test_fetch_manifest_and_build_execution_payload(tmp_path):

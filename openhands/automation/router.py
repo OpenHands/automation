@@ -20,10 +20,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
-from jsonschema import (
-    Draft202012Validator,
-    ValidationError as JSONSchemaValidationError,
-)
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +49,9 @@ from openhands.automation.plugin_specs import (
     PluginSpecError,
     entrypoint_for_manifest,
     preflight_manifest,
+    resolve_suggested_trigger,
     setup_script_for_manifest,
+    validate_plugin_config,
     validate_required_plugins,
 )
 from openhands.automation.preset_router import regenerate_preset_prompt_tarball
@@ -336,12 +334,14 @@ async def create_automation_from_plugin_spec(
 
     runtime_fields = await _resolve_plugin_spec_runtime_fields(
         plugin=body.plugin,
+        plugin_config=body.config,
         request=request,
         user=user,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
         manifest=runtime_fields["manifest"],
+        plugin_config=runtime_fields["plugin_spec"]["config"],
         user=user,
         session=session,
     )
@@ -389,22 +389,15 @@ async def create_automation_from_plugin_spec(
 
 def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
+    plugin_config: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], Any]:
-    plugin_config: dict[str, Any] = {}
     try:
         _resolved_ref, manifest = preflight_manifest(plugin)
         validate_required_plugins(manifest.runtime.plugins)
-        Draft202012Validator(manifest.config_schema or {"type": "object"}).validate(
-            plugin_config
-        )
-    except JSONSchemaValidationError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"Plugin automation config is invalid: {exc.message}",
-        ) from exc
+        resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    return plugin_config, manifest
+    return resolved_config, manifest
 
 
 def _profile_requirements_signature(manifest: Any) -> dict[str, Any]:
@@ -446,10 +439,16 @@ async def _resolve_plugin_spec_trigger(
     *,
     requested_trigger: Any,
     manifest: Any,
+    plugin_config: dict[str, Any],
     user: AuthenticatedUser,
     session: AsyncSession,
 ) -> Any:
-    trigger = requested_trigger or manifest.suggested_trigger
+    try:
+        trigger = requested_trigger or resolve_suggested_trigger(
+            manifest, plugin_config
+        )
+    except PluginSpecError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     if trigger is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -468,11 +467,12 @@ async def _resolve_plugin_spec_trigger(
 async def _resolve_plugin_spec_runtime_fields(
     *,
     plugin: AutomationPluginSource,
+    plugin_config: dict[str, Any] | None,
     request: Request,
     user: AuthenticatedUser,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it."""
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin)
+    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, plugin_config)
 
     agent_profile_name = (
         manifest.runtime.agent_profile.default_name
@@ -547,19 +547,25 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
     only when the new manifest keeps the same profile requirements as the
     existing plugin spec; otherwise the selected profile must be revalidated.
     """
+    existing_plugin_spec = automation.plugin_spec
     old_plugin_payload = (
-        automation.plugin_spec.get("plugin")
-        if isinstance(automation.plugin_spec, dict)
+        existing_plugin_spec.get("plugin")
+        if isinstance(existing_plugin_spec, dict)
         else None
     )
-    if not isinstance(old_plugin_payload, dict):
+    if not isinstance(existing_plugin_spec, dict) or not isinstance(
+        old_plugin_payload, dict
+    ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Existing plugin-spec automation is missing plugin source metadata",
         )
+    requested_config = existing_plugin_spec.get("config")
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest = _fetch_validated_plugin_manifest(old_plugin)
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin)
+    _old_config, old_manifest = _fetch_validated_plugin_manifest(
+        old_plugin, requested_config
+    )
+    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, requested_config)
     if _profile_requirements_signature(manifest) != _profile_requirements_signature(
         old_manifest
     ):
@@ -687,6 +693,9 @@ async def update_automation(
         try:
             plugin_runtime_fields = await _resolve_plugin_spec_runtime_fields(
                 plugin=plugin_source,
+                plugin_config=auto.plugin_spec.get("config")
+                if auto.plugin_spec
+                else None,
                 request=request,
                 user=user,
             )

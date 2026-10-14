@@ -109,6 +109,7 @@ async def test_create_plugin_spec_automation(
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "config": {"message": "hi"},
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -122,7 +123,7 @@ async def test_create_plugin_spec_automation(
     )
     assert data["plugin_spec"] == {
         "plugin": {"source": str(plugin)},
-        "config": {},
+        "config": {"message": "hi"},
     }
     assert data["agent_profile_id"] == agent_profiles_api.profile_id
     assert data["model"] is None
@@ -147,6 +148,62 @@ async def test_create_plugin_spec_uses_manifest_suggested_trigger(
         "type": "cron",
         "schedule": "0 9 * * *",
         "timezone": "UTC",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_renders_suggested_trigger_template(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["config_schema"] = {
+        "type": "object",
+        "required": ["repository"],
+        "properties": {
+            "repository": {"type": "string"},
+            "label": {"type": "string", "default": "ready-for-review"},
+        },
+    }
+    manifest["suggested_trigger_template"] = {
+        "type": "event",
+        "source": "github",
+        "on": "pull_request.labeled",
+        "filter": (
+            "repository.full_name == {{ json config.repository }} && "
+            "contains(pull_request.labels[].name, {{ json config.label }})"
+        ),
+    }
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "config": {"repository": "OpenHands/automation"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["plugin_spec"]["config"] == {
+        "repository": "OpenHands/automation",
+        "label": "ready-for-review",
+    }
+    assert data["trigger"] == {
+        "type": "event",
+        "source": "github",
+        "on": "pull_request.labeled",
+        "filter": (
+            'repository.full_name == "OpenHands/automation" && '
+            'contains(pull_request.labels[].name, "ready-for-review")'
+        ),
+        "destination": "dispatch_run",
+        "subject_key_expr": None,
+        "turn_text_expr": None,
+        "wake_agent": True,
     }
 
 
@@ -211,7 +268,6 @@ async def test_create_plugin_spec_rejects_runtime_overrides(async_client, tmp_pa
             "name": "Hello Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "config": {"message": "hi"},
             "agent_profile_name": "agent-default",
             "model": "default",
         },
@@ -242,6 +298,29 @@ async def test_create_plugin_spec_validates_manifest_config_defaults(
 
     assert response.status_code == 422
     assert "Plugin automation config is invalid" in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_applies_config_defaults(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["config_schema"]["properties"]["message"]["default"] = "hello"
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["config"] == {"message": "hello"}
 
 
 @pytest.mark.asyncio
