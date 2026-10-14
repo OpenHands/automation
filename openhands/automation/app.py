@@ -35,7 +35,12 @@ from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry_router import router as telemetry_router
 from openhands.automation.uploads import router as uploads_router
-from openhands.automation.utils.version import get_sdk_version, get_server_version_info
+from openhands.automation.utils.version import (
+    SDK_GIT_REF,
+    SDK_GIT_REPOSITORY,
+    get_sdk_version,
+    get_server_version_info,
+)
 from openhands.automation.watchdog import watchdog_loop
 from openhands.automation.webhook_router import router as webhook_router
 
@@ -344,7 +349,11 @@ async def sdk_version():
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
-    return {"version": version}
+    return {
+        "version": version,
+        "git_repository": SDK_GIT_REPOSITORY,
+        "git_ref": SDK_GIT_REF,
+    }
 
 
 @app.get("/server_info")

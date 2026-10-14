@@ -23,27 +23,36 @@ def write_plugin(root: Path, *, setup_script: str | None = None) -> Path:
     entrypoint = {"command": "python3 scripts/main.py"}
     if setup_script:
         entrypoint["setup_script"] = setup_script
-    (plugin / "automation-plugin.json").write_text(
+    automation = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "entrypoint": entrypoint,
+        "runtime": {
+            "agent_profile": {
+                "required": True,
+                "default_name": "agent-default",
+                "allowed_tools": ["terminal", "file_editor"],
+            },
+            "llm_profile": {"required": True, "default_name": "default"},
+        },
+        "config_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"message": {"type": "string"}},
+        },
+    }
+    (plugin / ".plugin").mkdir()
+    (plugin / ".plugin" / "plugin.json").write_text(
         json.dumps(
             {
-                "schema_version": "openhands.automation.plugin.v1",
                 "name": "hello-world-automation",
-                "entrypoint": entrypoint,
-                "runtime": {
-                    "agent_profile": {
-                        "required": True,
-                        "default_name": "agent-default",
-                        "allowed_tools": ["terminal", "file_editor"],
-                    },
-                    "llm_profile": {"required": True, "default_name": "default"},
-                },
-                "config_schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {"message": {"type": "string"}},
-                },
+                "version": "0.1.0",
+                "description": "test plugin",
+                "automation": automation,
             }
         )
+    )
+    (plugin / "automation-plugin.json").write_text(
+        json.dumps({"name": "hello-world-automation", **automation})
     )
     return plugin
 
@@ -53,34 +62,33 @@ def write_conversation_plugin(root: Path) -> Path:
     (plugin / "commands").mkdir(parents=True)
     (plugin / "commands" / "hello.md").write_text("Say hello to $ARGUMENTS.\n")
     (plugin / ".plugin").mkdir()
+    automation = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "entrypoint": {
+            "runner": "conversation",
+            "command": "hello",
+            "arguments": "world",
+        },
+        "runtime": {
+            "agent_profile": {
+                "required": True,
+                "default_name": "agent-default",
+                "allowed_tools": ["terminal"],
+            },
+        },
+    }
     (plugin / ".plugin" / "plugin.json").write_text(
         json.dumps(
             {
                 "name": "hello-world-automation",
                 "version": "0.1.0",
                 "description": "test plugin",
+                "automation": automation,
             }
         )
     )
     (plugin / "automation-plugin.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "openhands.automation.plugin.v1",
-                "name": "hello-world-automation",
-                "entrypoint": {
-                    "runner": "conversation",
-                    "command": "hello",
-                    "arguments": "world",
-                },
-                "runtime": {
-                    "agent_profile": {
-                        "required": True,
-                        "default_name": "agent-default",
-                        "allowed_tools": ["terminal"],
-                    },
-                },
-            }
-        )
+        json.dumps({"name": "hello-world-automation", **automation})
     )
     return plugin
 
@@ -124,7 +132,7 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
     _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
     assert manifest.name == "hello-world-automation"
 
-    tarball, env, runtime = build_execution_payload(
+    tarball, env, runtime, plugin_fetches = build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin)}, "config": {"message": "hi"}},
         agent_profile_id="profile-id",
         agent_profile_name="agent-default",
@@ -132,13 +140,17 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
         work_dir="/tmp/automation-run",
     )
 
+    assert plugin_fetches == [{"source": str(plugin)}]
     assert env["AUTOMATION_AGENT_PROFILE_ID"] == "profile-id"
     assert env["AUTOMATION_AGENT_PROFILE_NAME"] == "agent-default"
     assert env["AUTOMATION_LLM_PROFILE_NAME"] == "default"
     assert (
         env["AUTOMATION_CONFIG_PATH"] == "/tmp/automation-run/.automation/config.json"
     )
-    assert runtime["entrypoint"] == "python3 scripts/main.py"
+    assert (
+        runtime["entrypoint"]
+        == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main.py'
+    )
     assert runtime["manifest"]["runtime"]["agent_profile"]["allowed_tools"] == [
         "terminal",
         "file_editor",
@@ -148,9 +160,9 @@ def test_fetch_manifest_and_build_execution_payload(tmp_path):
 
     with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
         names = set(tar.getnames())
-        assert "automation-plugin.json" in names
-        assert "scripts/main.py" in names
-        assert "scripts/setup.sh" in names
+        assert "automation-plugin.json" not in names
+        assert "scripts/main.py" not in names
+        assert "scripts/setup.sh" not in names
         assert "setup.sh" in names
         config_file = tar.extractfile(".automation/config.json")
         execution_file = tar.extractfile(".automation/execution.json")
@@ -186,7 +198,7 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
     assert manifest.entrypoint.runner == "conversation"
 
-    tarball, env, runtime = build_execution_payload(
+    tarball, env, runtime, plugin_fetches = build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin)}, "config": {"message": "hi"}},
         agent_profile_id="profile-id",
         agent_profile_name="agent-default",
@@ -194,6 +206,7 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
         work_dir="/tmp/automation-run",
     )
 
+    assert plugin_fetches == [{"source": str(plugin)}]
     assert runtime["runner"] == "conversation"
     assert runtime["entrypoint"].endswith(" main.py")
     assert (

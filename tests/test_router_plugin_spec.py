@@ -16,26 +16,35 @@ def write_plugin(root: Path) -> Path:
     plugin = root / "plugin"
     (plugin / "scripts").mkdir(parents=True)
     (plugin / "scripts" / "main.py").write_text("print('hello')\n")
-    (plugin / "automation-plugin.json").write_text(
+    automation = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "entrypoint": {"command": "python3 scripts/main.py"},
+        "runtime": {
+            "agent_profile": {
+                "required": True,
+                "default_name": "agent-default",
+            },
+            "llm_profile": {"required": True, "default_name": "default"},
+        },
+        "config_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"message": {"type": "string"}},
+        },
+    }
+    (plugin / ".plugin").mkdir()
+    (plugin / ".plugin" / "plugin.json").write_text(
         json.dumps(
             {
-                "schema_version": "openhands.automation.plugin.v1",
                 "name": "hello-world-automation",
-                "entrypoint": {"command": "python3 scripts/main.py"},
-                "runtime": {
-                    "agent_profile": {
-                        "required": True,
-                        "default_name": "agent-default",
-                    },
-                    "llm_profile": {"required": True, "default_name": "default"},
-                },
-                "config_schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {"message": {"type": "string"}},
-                },
+                "version": "0.1.0",
+                "description": "test plugin",
+                "automation": automation,
             }
         )
+    )
+    (plugin / "automation-plugin.json").write_text(
+        json.dumps({"name": "hello-world-automation", **automation})
     )
     return plugin
 
@@ -45,38 +54,46 @@ def write_conversation_plugin(root: Path) -> Path:
     (plugin / "commands").mkdir(parents=True)
     (plugin / "commands" / "hello.md").write_text("Say hello from the automation.\n")
     (plugin / ".plugin").mkdir()
+    automation = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "entrypoint": {"runner": "conversation", "command": "hello"},
+        "runtime": {
+            "agent_profile": {
+                "required": True,
+                "default_name": "agent-default",
+            },
+        },
+    }
     (plugin / ".plugin" / "plugin.json").write_text(
         json.dumps(
             {
                 "name": "hello-world-automation",
                 "version": "0.1.0",
                 "description": "test plugin",
+                "automation": automation,
             }
         )
     )
     (plugin / "automation-plugin.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "openhands.automation.plugin.v1",
-                "name": "hello-world-automation",
-                "entrypoint": {"runner": "conversation", "command": "hello"},
-                "runtime": {
-                    "agent_profile": {
-                        "required": True,
-                        "default_name": "agent-default",
-                    },
-                },
-            }
-        )
+        json.dumps({"name": "hello-world-automation", **automation})
     )
     return plugin
+
+
+def _write_plugin_automation(plugin: Path, manifest: dict) -> None:
+    (plugin / "automation-plugin.json").write_text(json.dumps(manifest))
+    metadata = json.loads((plugin / ".plugin" / "plugin.json").read_text())
+    metadata["automation"] = {
+        key: value for key, value in manifest.items() if key != "name"
+    }
+    (plugin / ".plugin" / "plugin.json").write_text(json.dumps(metadata))
 
 
 def write_suggested_trigger_plugin(root: Path, suggested_trigger: dict) -> Path:
     plugin = write_conversation_plugin(root)
     data = json.loads((plugin / "automation-plugin.json").read_text())
     data["suggested_trigger"] = suggested_trigger
-    (plugin / "automation-plugin.json").write_text(json.dumps(data))
+    _write_plugin_automation(plugin, data)
     return plugin
 
 
@@ -100,7 +117,9 @@ async def test_create_plugin_spec_automation(
     data = response.json()
     assert data["name"] == "Hello Plugin"
     assert data["tarball_path"] == "plugin-spec://runtime"
-    assert data["entrypoint"] == "python3 scripts/main.py"
+    assert (
+        data["entrypoint"] == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main.py'
+    )
     assert data["plugin_spec"] == {
         "plugin": {"source": str(plugin)},
         "config": {},
@@ -209,7 +228,7 @@ async def test_create_plugin_spec_validates_manifest_config_defaults(
     plugin = write_plugin(tmp_path)
     manifest = json.loads((plugin / "automation-plugin.json").read_text())
     manifest["config_schema"]["required"] = ["message"]
-    (plugin / "automation-plugin.json").write_text(json.dumps(manifest))
+    _write_plugin_automation(plugin, manifest)
 
     response = await async_client.post(
         "/api/automation/v1/plugin-spec",
@@ -237,7 +256,7 @@ async def test_patch_plugin_spec_updates_plugin_source(
         "command": "python3 scripts/main_v2.py",
         "setup_script": "setup.sh",
     }
-    (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
+    _write_plugin_automation(plugin_v2, manifest)
 
     created = await async_client.post(
         "/api/automation/v1/plugin-spec",
@@ -264,7 +283,10 @@ async def test_patch_plugin_spec_updates_plugin_source(
     }
     assert data["tarball_path"] == "plugin-spec://runtime"
     assert data["setup_script_path"] == "setup.sh"
-    assert data["entrypoint"] == "python3 scripts/main_v2.py"
+    assert (
+        data["entrypoint"]
+        == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main_v2.py'
+    )
     assert data["agent_profile_id"] == agent_profiles_api.profile_id
 
 
@@ -323,7 +345,7 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
     manifest["entrypoint"] = {"command": "python3 scripts/main_v2.py"}
-    (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
+    _write_plugin_automation(plugin_v2, manifest)
     profile_id = uuid.uuid4()
     automation = Automation(
         plugin_spec={"plugin": {"source": str(plugin_v1)}, "config": {}},
@@ -342,7 +364,10 @@ def test_plugin_spec_update_fallback_reuses_existing_profile(tmp_path):
     }
     assert fields["agent_profile_id"] == profile_id
     assert fields["model"] is None
-    assert fields["entrypoint"] == "python3 scripts/main_v2.py"
+    assert (
+        fields["entrypoint"]
+        == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main_v2.py'
+    )
 
 
 def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_path):
@@ -350,7 +375,7 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
     plugin_v2 = write_plugin(tmp_path / "v2")
     manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
     manifest["runtime"]["agent_profile"]["allowed_tools"] = ["terminal"]
-    (plugin_v2 / "automation-plugin.json").write_text(json.dumps(manifest))
+    _write_plugin_automation(plugin_v2, manifest)
     automation = Automation(
         plugin_spec={"plugin": {"source": str(plugin_v1)}, "config": {}},
         model=None,

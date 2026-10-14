@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -2282,7 +2282,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", specifier = "==1.53.0" },
+    { name = "openhands-sdk", git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=b3aacc186f84f5093707863fb1e8828a7202b57f" },
     { name = "openhands-workspace", specifier = "==1.53.0" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
@@ -2315,8 +2315,8 @@ dev = [
 
 [[package]]
 name = "openhands-sdk"
-version = "1.53.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.54.0"
+source = { git = "https://github.com/OpenHands/software-agent-sdk.git?subdirectory=openhands-sdk&rev=b3aacc186f84f5093707863fb1e8828a7202b57f#b3aacc186f84f5093707863fb1e8828a7202b57f" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -2336,10 +2336,6 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
     { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/48/ecf01830b8f79f2b131e04aa8efd2d784a7b6382e551e5b13d46ce1e2a61/openhands_sdk-1.53.0.tar.gz", hash = "sha256:daa53aff1316902034b211a06a300a9e730159e157ff0a992d083a276cbd98de", size = 766636, upload-time = "2026-10-05T13:19:29.581Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/b5/5a579bc2e88557d14d909ca7044d15609ea10755acac0f72d4b9307689bc/openhands_sdk-1.53.0-py3-none-any.whl", hash = "sha256:37e8349f02d64bc089c02a2233c824a949e67ef6a2e2d0ac6be2a9303d364220", size = 911858, upload-time = "2026-10-05T13:19:25.455Z" },
 ]
 
 [[package]]

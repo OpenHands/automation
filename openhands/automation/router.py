@@ -52,7 +52,7 @@ from openhands.automation.plugin_specs import (
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
     entrypoint_for_manifest,
-    fetch_manifest,
+    preflight_manifest,
     setup_script_for_manifest,
     validate_required_plugins,
 )
@@ -392,7 +392,7 @@ def _fetch_validated_plugin_manifest(
 ) -> tuple[dict[str, Any], Any]:
     plugin_config: dict[str, Any] = {}
     try:
-        _plugin_path, _resolved_ref, manifest = fetch_manifest(plugin)
+        _resolved_ref, manifest = preflight_manifest(plugin)
         validate_required_plugins(manifest.runtime.plugins)
         Draft202012Validator(manifest.config_schema or {"type": "object"}).validate(
             plugin_config

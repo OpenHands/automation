@@ -24,7 +24,7 @@ from openhands.automation.schemas import (
     validate_command_string,
 )
 from openhands.automation.utils.timeout import validate_automation_timeout
-from openhands.sdk.plugin import PluginSource
+from openhands.sdk.plugin import PluginSource, preflight_plugin
 from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
 
 
@@ -279,6 +279,49 @@ def fetch_manifest(
     return plugin_path, resolved_ref, manifest
 
 
+def preflight_manifest(
+    plugin: AutomationPluginSource,
+) -> tuple[str | None, AutomationPluginManifest]:
+    """Strictly resolve a plugin source and parse its automation metadata."""
+    try:
+        with preflight_plugin(
+            source=plugin.source,
+            ref=plugin.ref,
+            repo_path=plugin.repo_path,
+            allow_local=True,
+        ) as checked:
+            manifest = _read_manifest_from_plugin_metadata(checked.manifest)
+            _validate_manifest_paths(checked.path, manifest)
+            return checked.resolved_ref, manifest
+    except Exception as exc:
+        if isinstance(exc, PluginSpecError):
+            raise
+        raise PluginSpecError(f"Failed to preflight automation plugin: {exc}") from exc
+
+
+def _read_manifest_from_plugin_metadata(
+    plugin_metadata: dict[str, Any],
+) -> AutomationPluginManifest:
+    automation_payload = plugin_metadata.get(PLUGIN_AUTOMATION_KEY)
+    if not isinstance(automation_payload, dict):
+        raise PluginSpecError(
+            "Invalid automation plugin manifest: "
+            f"{PLUGIN_MANIFEST_NAME}.{PLUGIN_AUTOMATION_KEY} must be an object"
+        )
+    data = {
+        **automation_payload,
+        "name": plugin_metadata.get("name"),
+        "description": plugin_metadata.get("description"),
+    }
+    try:
+        return AutomationPluginManifest.model_validate(data)
+    except Exception as exc:
+        raise PluginSpecError(
+            "Invalid automation plugin manifest: "
+            f"{PLUGIN_MANIFEST_NAME}.{PLUGIN_AUTOMATION_KEY}: {exc}"
+        ) from exc
+
+
 def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
     plugin_manifest_path = _contained_path(plugin_path, PLUGIN_MANIFEST_NAME)
     if plugin_manifest_path.is_file():
@@ -288,25 +331,8 @@ def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
             raise PluginSpecError(
                 f"Invalid plugin manifest: {PLUGIN_MANIFEST_NAME}: {exc}"
             ) from exc
-        automation_payload = plugin_metadata.get(PLUGIN_AUTOMATION_KEY)
-        if automation_payload is not None:
-            if not isinstance(automation_payload, dict):
-                raise PluginSpecError(
-                    "Invalid automation plugin manifest: "
-                    f"{PLUGIN_AUTOMATION_KEY} must be an object"
-                )
-            data = {
-                **automation_payload,
-                "name": plugin_metadata.get("name"),
-                "description": plugin_metadata.get("description"),
-            }
-            try:
-                return AutomationPluginManifest.model_validate(data)
-            except Exception as exc:
-                raise PluginSpecError(
-                    "Invalid automation plugin manifest: "
-                    f"{PLUGIN_MANIFEST_NAME}.{PLUGIN_AUTOMATION_KEY}: {exc}"
-                ) from exc
+        if plugin_metadata.get(PLUGIN_AUTOMATION_KEY) is not None:
+            return _read_manifest_from_plugin_metadata(plugin_metadata)
 
     legacy_manifest_path = _contained_path(plugin_path, MANIFEST_NAME)
     if not legacy_manifest_path.is_file():
@@ -357,19 +383,20 @@ def _validate_manifest_paths(
 def validate_required_plugins(
     plugins: list[AutomationPluginSource],
 ) -> list[dict[str, Any]]:
-    """Fetch secondary plugins and return source specs with resolved refs."""
+    """Preflight secondary plugins and return source specs with resolved refs."""
     resolved: list[dict[str, Any]] = []
     for plugin in plugins:
         try:
-            _, resolved_ref = fetch_plugin_with_resolution(
+            with preflight_plugin(
                 source=plugin.source,
-                cache_dir=_cache_dir_for_plugin(plugin),
                 ref=plugin.ref,
                 repo_path=plugin.repo_path,
-            )
+                allow_local=True,
+            ) as checked:
+                resolved_ref = checked.resolved_ref
         except Exception as exc:
             raise PluginSpecError(
-                f"Failed to fetch required plugin {plugin.source!r}: {exc}"
+                f"Failed to preflight required plugin {plugin.source!r}: {exc}"
             ) from exc
         item = plugin.model_dump(exclude_none=True)
         if resolved_ref:
@@ -385,12 +412,13 @@ def build_execution_payload(
     agent_profile_name: str | None,
     llm_profile_name: str | None,
     work_dir: str,
-) -> tuple[bytes, dict[str, str], dict[str, Any]]:
-    """Fetch, validate, and package a plugin-backed automation run."""
+) -> tuple[bytes, dict[str, str], dict[str, Any], list[dict[str, Any]]]:
+    """Preflight, validate, and package a plugin-backed automation run."""
     source = AutomationPluginSource.model_validate(plugin_spec["plugin"])
     config = plugin_spec.get("config") or {}
-    plugin_path, resolved_ref, manifest = fetch_manifest(source)
+    resolved_ref, manifest = preflight_manifest(source)
     required_plugins = validate_required_plugins(manifest.runtime.plugins)
+    plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:
         agent_profile_name = manifest.runtime.agent_profile.default_name
 
@@ -410,14 +438,14 @@ def build_execution_payload(
     if manifest.entrypoint.runner == "conversation":
         tarball = _build_stock_runner_tarball(
             source=source,
+            resolved_ref=resolved_ref,
             manifest=manifest,
             config=config,
             resolved_runtime=resolved_runtime,
             required_plugins=required_plugins,
         )
     else:
-        tarball = _build_plugin_tarball(
-            plugin_path=plugin_path,
+        tarball = _build_runtime_metadata_tarball(
             manifest=manifest,
             config=config,
             resolved_runtime=resolved_runtime,
@@ -425,7 +453,6 @@ def build_execution_payload(
         )
     work_dir = work_dir.rstrip("/") or "/workspace/project"
     env = {
-        "AUTOMATION_PLUGIN_ROOT": work_dir,
         "AUTOMATION_CONFIG_PATH": f"{work_dir}/.automation/config.json",
         "AUTOMATION_EXECUTION_SPEC_PATH": f"{work_dir}/.automation/execution.json",
         "AUTOMATION_REQUIRED_PLUGINS_PATH": f"{work_dir}/.automation/plugins.json",
@@ -436,12 +463,11 @@ def build_execution_payload(
         env["AUTOMATION_AGENT_PROFILE_NAME"] = agent_profile_name
     if llm_profile_name:
         env["AUTOMATION_LLM_PROFILE_NAME"] = llm_profile_name
-    return tarball, env, resolved_runtime
+    return tarball, env, resolved_runtime, plugin_fetches
 
 
-def _build_plugin_tarball(
+def _build_runtime_metadata_tarball(
     *,
-    plugin_path: Path,
     manifest: AutomationPluginManifest,
     config: dict[str, Any],
     resolved_runtime: dict[str, Any],
@@ -449,23 +475,16 @@ def _build_plugin_tarball(
 ) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path in sorted(plugin_path.rglob("*")):
-            if path.is_dir() or path.is_symlink():
-                continue
-            rel = path.relative_to(plugin_path).as_posix()
-            if any(part == ".git" for part in path.relative_to(plugin_path).parts):
-                continue
-            if rel == "setup.sh" and manifest.entrypoint.setup_script != "setup.sh":
-                continue
-            tar.add(path, arcname=rel, recursive=False)
         _add_json(tar, f"{AUTOMATION_DIR}/config.json", config)
         _add_json(tar, f"{AUTOMATION_DIR}/execution.json", resolved_runtime)
         _add_json(tar, f"{AUTOMATION_DIR}/plugins.json", required_plugins)
-        if (
-            manifest.entrypoint.setup_script
-            and manifest.entrypoint.setup_script != "setup.sh"
-        ):
-            wrapper = f"#!/usr/bin/env bash\nbash {manifest.entrypoint.setup_script}\n"
+        if manifest.entrypoint.setup_script:
+            setup_script = manifest.entrypoint.setup_script
+            wrapper = (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'bash "$AUTOMATION_PLUGIN_ROOT/{setup_script}"\n'
+            )
             _add_bytes(tar, "setup.sh", wrapper.encode(), mode=0o755)
     buf.seek(0)
     return buf.read()
@@ -508,8 +527,11 @@ def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
     if manifest.entrypoint.runner == "conversation":
         return _preset_entrypoint()
     if manifest.entrypoint.working_dir in ("", "."):
-        return manifest.entrypoint.command
-    return f"cd {manifest.entrypoint.working_dir} && {manifest.entrypoint.command}"
+        return f'cd "$AUTOMATION_PLUGIN_ROOT" && {manifest.entrypoint.command}'
+    return (
+        f'cd "$AUTOMATION_PLUGIN_ROOT/{manifest.entrypoint.working_dir}" '
+        f"&& {manifest.entrypoint.command}"
+    )
 
 
 def _conversation_prompt_for_manifest(manifest: AutomationPluginManifest) -> str:
@@ -519,17 +541,41 @@ def _conversation_prompt_for_manifest(manifest: AutomationPluginManifest) -> str
     return prompt
 
 
+def _resolved_plugin_source(
+    plugin: AutomationPluginSource, resolved_ref: str | None
+) -> dict[str, Any]:
+    data = plugin.model_dump(exclude_none=True)
+    if resolved_ref:
+        data["ref"] = resolved_ref
+    return data
+
+
 def _plugin_config_sources(
-    source: AutomationPluginSource, manifest: AutomationPluginManifest
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    required_plugins: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [source.model_dump(exclude_none=True)] + [
-        plugin.model_dump(exclude_none=True) for plugin in manifest.runtime.plugins
-    ]
+    sources = [_resolved_plugin_source(source, resolved_ref)]
+    for plugin in required_plugins:
+        item = {k: v for k, v in plugin.items() if k != "resolved_ref"}
+        if resolved_ref := plugin.get("resolved_ref"):
+            item["ref"] = resolved_ref
+        sources.append(item)
+    return sources
+
+
+def _plugin_fetch_requests(
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    required_plugins: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _plugin_config_sources(source, resolved_ref, required_plugins)
 
 
 def _build_stock_runner_tarball(
     *,
     source: AutomationPluginSource,
+    resolved_ref: str | None,
     manifest: AutomationPluginManifest,
     config: dict[str, Any],
     resolved_runtime: dict[str, Any],
@@ -546,7 +592,11 @@ def _build_stock_runner_tarball(
         _add_bytes(
             tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()
         )
-        _add_json(tar, "plugins_config.json", _plugin_config_sources(source, manifest))
+        _add_json(
+            tar,
+            "plugins_config.json",
+            _plugin_config_sources(source, resolved_ref, required_plugins),
+        )
         _add_json(tar, f"{AUTOMATION_DIR}/config.json", config)
         _add_json(tar, f"{AUTOMATION_DIR}/execution.json", resolved_runtime)
         _add_json(tar, f"{AUTOMATION_DIR}/plugins.json", required_plugins)

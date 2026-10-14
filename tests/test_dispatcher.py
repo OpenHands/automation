@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -23,6 +24,7 @@ from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
     _execute_run_safe,
+    _fetch_plugins_on_agent_server,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -53,6 +55,68 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def mock_client():
     """Mock httpx.AsyncClient for tests."""
     return MagicMock()
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_posts_pinned_sources():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "path": "/tmp/plugin-cache/abc123",
+                "resolved_ref": "abc123",
+                "source": "github:org/plugin",
+                "repo_path": None,
+                "manifest": {"name": "plugin"},
+                "skills": [],
+                "commands": ["run"],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetched = await _fetch_plugins_on_agent_server(
+            client=client,
+            agent_url="http://agent-server",
+            session_key="session-key",
+            plugin_fetches=[
+                {
+                    "source": "github:org/plugin",
+                    "ref": "abc123",
+                    "repo_path": None,
+                    "resolved_ref": "ignored-runtime-only-field",
+                }
+            ],
+        )
+
+    assert fetched[0]["path"] == "/tmp/plugin-cache/abc123"
+    assert requests[0].url == "http://agent-server/api/plugins/fetch"
+    assert requests[0].headers["x-session-api-key"] == "session-key"
+    assert json.loads(requests[0].content) == {
+        "source": "github:org/plugin",
+        "ref": "abc123",
+        "repo_path": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_surfaces_structured_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": {"code": "missing_secret", "message": "Missing secret"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(Exception, match="missing_secret"):
+            await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url="http://agent-server",
+                session_key="session-key",
+                plugin_fetches=[{"source": "github:org/plugin"}],
+            )
 
 
 @pytest.mark.asyncio

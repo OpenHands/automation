@@ -86,6 +86,41 @@ from openhands.automation.utils.unhealthy import (
 logger = logging.getLogger("automation.dispatcher")
 
 
+async def _fetch_plugins_on_agent_server(
+    *,
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    plugin_fetches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fetch already-preflighted plugins on the target agent server."""
+    fetched: list[dict[str, Any]] = []
+    headers = {"X-Session-API-Key": session_key} if session_key else {}
+    for plugin in plugin_fetches:
+        request = {
+            key: value
+            for key, value in plugin.items()
+            if key in {"source", "ref", "repo_path"}
+        }
+        response = await client.post(
+            f"{agent_url.rstrip('/')}/api/plugins/fetch",
+            json=request,
+            headers=headers,
+            timeout=get_config().http.http_timeout,
+        )
+        if response.status_code >= 400:
+            try:
+                detail: Any = response.json().get("detail")
+            except Exception:
+                detail = response.text
+            raise PluginSpecError(
+                f"Agent server failed to fetch plugin {request.get('source')!r}: "
+                f"{detail}"
+            )
+        fetched.append(response.json())
+    return fetched
+
+
 async def _download_internal_tarball(
     upload_id: uuid.UUID,
     session: AsyncSession | None,
@@ -284,7 +319,52 @@ async def _execute_run(
     # drives both the bash command timeout and the watchdog cleanup deadline.
     effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
 
-    # 2. Get execution context - if this fails, nothing to clean up
+    # 2. Preflight plugin automations before creating a sandbox. The agent server
+    # performs the real fetch after it is ready, but this catches bad sources,
+    # refs, manifests, and required plugins without consuming sandbox capacity.
+    work_dir = backend.get_work_dir(run_id)
+    entrypoint = automation.entrypoint
+    plugin_env: dict[str, str] = {}
+    resolved_runtime: dict[str, Any] | None = None
+    plugin_fetches: list[dict[str, Any]] = []
+    tarball_source: bytes | str | None = None
+    try:
+        if automation.plugin_spec:
+            tarball_source, plugin_env, resolved_runtime, plugin_fetches = (
+                build_execution_payload(
+                    plugin_spec=automation.plugin_spec,
+                    agent_profile_id=str(automation.agent_profile_id)
+                    if automation.agent_profile_id
+                    else None,
+                    agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                    llm_profile_name=automation.model,
+                    work_dir=work_dir,
+                )
+            )
+            entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
+    except PluginSpecError as exc:
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="preflight_plugin",
+                code=type(exc).__name__,
+            ),
+        )
+        return
+
+    # 3. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
         ctx = await backend.get_execution_context(client)
@@ -339,7 +419,7 @@ async def _execute_run(
         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
     )
 
-    # 3. Build env vars (must be after get_execution_context for cloud mode API key)
+    # 4. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars.update(automation_env_metadata(automation, run))
@@ -387,27 +467,30 @@ async def _execute_run(
             run_id=run.id,
         )
 
-    # 4. Prepare tarball source
-    work_dir = backend.get_work_dir(run_id)
-    entrypoint = automation.entrypoint
+    # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:
-        tarball_source: bytes | str
         if automation.plugin_spec:
-            tarball_source, plugin_env, resolved_runtime = build_execution_payload(
-                plugin_spec=automation.plugin_spec,
-                agent_profile_id=str(automation.agent_profile_id)
-                if automation.agent_profile_id
-                else None,
-                agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
-                llm_profile_name=automation.model,
-                work_dir=work_dir,
-            )
+            assert isinstance(tarball_source, bytes)
             env_vars.update(plugin_env)
-            entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
-            await update_run_resolved_runtime(session_factory, run.id, resolved_runtime)
+            fetched_plugins = await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url=ctx.agent_url,
+                session_key=ctx.session_key,
+                plugin_fetches=plugin_fetches,
+            )
+            if fetched_plugins:
+                env_vars["AUTOMATION_PLUGIN_ROOT"] = fetched_plugins[0]["path"]
+            if resolved_runtime is not None:
+                resolved_runtime["fetched_plugins"] = fetched_plugins
+                if fetched_plugins:
+                    resolved_runtime["plugin_path"] = fetched_plugins[0]["path"]
+                await update_run_resolved_runtime(
+                    session_factory, run.id, resolved_runtime
+                )
             logger.info(
-                "Plugin automation tarball built (%d bytes)",
+                "Plugin automation payload built (%d bytes) and %d plugin(s) fetched",
                 len(tarball_source),
+                len(fetched_plugins),
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
         elif is_http_url(tarball_path):
@@ -471,7 +554,7 @@ async def _execute_run(
         )
         return
 
-    # 5. Execute in context
+    # 6. Execute in context
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
@@ -523,7 +606,7 @@ async def _execute_run(
         )
         return
 
-    # 6. Handle result
+    # 7. Handle result
     if result.success:
         add_event(
             "automation.entrypoint.start",
