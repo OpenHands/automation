@@ -22,10 +22,12 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.auth import X_ORG_ID_HEADER
 from openhands.automation.backends import get_backend
 from openhands.automation.config import ServiceSettings, get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
@@ -56,6 +58,9 @@ from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.kv import create_kv_token
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_allowlists_with_client,
+)
 from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
@@ -84,6 +89,67 @@ from openhands.automation.utils.unhealthy import (
 
 
 logger = logging.getLogger("automation.dispatcher")
+
+
+def _plugin_agent_profile_requirement(
+    resolved_runtime: dict[str, Any],
+) -> dict[str, Any] | None:
+    manifest = resolved_runtime.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    runtime = manifest.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    requirement = runtime.get("agent_profile")
+    return requirement if isinstance(requirement, dict) else None
+
+
+async def _validate_plugin_run_agent_profile(
+    *,
+    client: httpx.AsyncClient,
+    backend: Any,
+    automation: Automation,
+    resolved_runtime: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    requirement = _plugin_agent_profile_requirement(resolved_runtime)
+    if requirement is None:
+        return None, None
+    if automation.agent_profile_id is None:
+        if requirement.get("required", True):
+            raise PluginSpecError(
+                "Plugin automation requires an agent profile selection"
+            )
+        return None, None
+
+    settings = get_config().service
+    api_key = await backend.get_api_key()
+    if backend.is_local_mode:
+        base_url = settings.agent_server_url.rstrip("/")
+        headers = {"X-Session-API-Key": api_key}
+    else:
+        base_url = settings.openhands_api_base_url.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            X_ORG_ID_HEADER: str(automation.org_id),
+        }
+
+    try:
+        resolved_id, profile = await validate_agent_profile_allowlists_with_client(
+            automation.agent_profile_id,
+            None,
+            requirement.get("allowed_tools"),
+            client,
+            base_url=base_url,
+            headers=headers,
+            allowed_mcp_server_refs=requirement.get("allowed_mcp_server_refs"),
+            allowed_secret_refs=requirement.get("allowed_secret_refs"),
+            fetch_profile_detail=True,
+        )
+    except HTTPException as exc:
+        raise PluginSpecError(str(exc.detail)) from exc
+    if resolved_id is None:
+        raise PluginSpecError("Plugin automation requires an agent profile selection")
+    return str(resolved_id), getattr(profile, "agent_kind", None) if profile else None
 
 
 async def _fetch_plugins_on_agent_server(
@@ -342,6 +408,18 @@ async def _execute_run(
                     allow_local_sources=backend.is_local_mode,
                 )
             )
+            profile_id, profile_kind = await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=automation,
+                resolved_runtime=resolved_runtime,
+            )
+            if profile_id:
+                plugin_env["AUTOMATION_AGENT_PROFILE_ID"] = profile_id
+                resolved_runtime["agent_profile_id"] = profile_id
+            if profile_kind:
+                plugin_env["AUTOMATION_AGENT_PROFILE_KIND"] = profile_kind
+                resolved_runtime["agent_profile_kind"] = profile_kind
             entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
     except PluginSpecError as exc:
         logger.error(

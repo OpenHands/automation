@@ -92,9 +92,14 @@ sandbox_id = os.environ.get("SANDBOX_ID", "")
 session_key = os.environ.get("OH_SESSION_API_KEYS_0") or os.environ.get(
     "SESSION_API_KEY", ""
 )
-model_profile = os.environ.get("AUTOMATION_MODEL") or None
+model_profile = (
+    os.environ.get("AUTOMATION_LLM_PROFILE_NAME")
+    or os.environ.get("AUTOMATION_MODEL")
+    or None
+)
 agent_profile_id = os.environ.get("AUTOMATION_AGENT_PROFILE_ID") or None
 agent_profile_name = os.environ.get("AUTOMATION_AGENT_PROFILE_NAME") or None
+agent_profile_kind = os.environ.get("AUTOMATION_AGENT_PROFILE_KIND") or None
 automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
 
 print("=== EXECUTION MODE ===")
@@ -132,6 +137,11 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.automation import automation_conversation_kwargs
+from openhands.sdk.conversation.request import (
+    AgentLaunchAdditions,
+    StartConversationRequest,
+)
+from openhands.sdk.workspace.local import LocalWorkspace
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -169,14 +179,25 @@ def _agent_has_finish_tool(agent):
     return any(getattr(tool, "name", None) == "finish" for tool in agent.tools)
 
 
-def _finish_hook_config_for_agent(agent):
-    if not _agent_has_finish_tool(agent):
-        print("  finish hook: disabled (finish tool unavailable)")
-        return None
+def _finish_tool_hook_config():
     from finish_tool_hook import finish_tool_required_hook_config
 
     print("  finish hook: enabled")
     return finish_tool_required_hook_config(SCRIPT_DIR)
+
+
+def _finish_hook_config_for_agent(agent):
+    if not _agent_has_finish_tool(agent):
+        print("  finish hook: disabled (finish tool unavailable)")
+        return None
+    return _finish_tool_hook_config()
+
+
+def _finish_hook_config_for_profile() -> object | None:
+    if agent_profile_kind != "openhands":
+        print("  finish hook: disabled (finish tool unavailable)")
+        return None
+    return _finish_tool_hook_config()
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -326,23 +347,8 @@ More activity arrived on the same subject while this run was queued:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace/profile APIs
-    print("\n=== GET_LLM ===")
-    try:
-        llm = workspace.get_llm(profile_name=model_profile)
-    except FileNotFoundError:
-        if not model_profile:
-            raise
-        print(
-            f"  profile {model_profile!r} not found; "
-            "falling back to active/default profile"
-        )
-        llm = workspace.get_llm()
-    print(f"  profile: {model_profile or 'DEFAULT'}")
-    print(f"  model: {llm.model}")
-    print(f"  api_key present: {bool(llm.api_key)}")
-
-    # Get secrets via workspace
+    # Get secrets via workspace. The agent-server applies the selected
+    # profile's secret_refs when agent_profile_id is present.
     print("\n=== GET_SECRETS ===")
     secrets = {}
     try:
@@ -353,56 +359,76 @@ More activity arrived on the same subject while this run was queued:
         # Not a hard failure — user may not have secrets configured
         print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    # Get MCP config via workspace
-    print("\n=== GET_MCP_CONFIG ===")
-    mcp_config = {}
-    try:
-        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+    agent = None
+    if agent_profile_id:
+        print("\n=== AGENT PROFILE ===")
+        print(f"  profile id: {agent_profile_id}")
+        print(f"  profile name: {agent_profile_name or 'UNKNOWN'}")
+        print(f"  profile kind: {agent_profile_kind or 'UNKNOWN'}")
+        print(f"  llm override: {model_profile or 'PROFILE_DEFAULT'}")
+    else:
+        # Get LLM config via workspace/profile APIs
+        print("\n=== GET_LLM ===")
+        try:
+            llm = workspace.get_llm(profile_name=model_profile)
+        except FileNotFoundError:
+            if not model_profile:
+                raise
+            print(
+                f"  profile {model_profile!r} not found; "
+                "falling back to active/default profile"
+            )
+            llm = workspace.get_llm()
+        print(f"  profile: {model_profile or 'DEFAULT'}")
+        print(f"  model: {llm.model}")
+        print(f"  api_key present: {bool(llm.api_key)}")
+
+        # Get MCP config via workspace
+        print("\n=== GET_MCP_CONFIG ===")
+        mcp_config = {}
+        try:
+            mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+            if mcp_config:
+                print(f"  servers: {list(mcp_config.keys())}")
+            else:
+                print("  no MCP servers configured")
+        except Exception as e:
+            # Not a hard failure — user may not have MCP configured
+            print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+
+        # Get default agent with tools and condenser (CLI mode to disable browser)
+        print("\n=== AGENT ===")
+        # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
+        agent = get_default_agent(
+            llm=llm,
+            cli_mode=True,
+            finish_tool_response_schema=TaskOutcome,
+        )
+
+        # Add MCP config and agent_context using model_copy if configured
+        # (Plugin MCP configs will be merged when plugins are loaded)
+        agent_updates = {}
         if mcp_config:
-            print(f"  servers: {list(mcp_config.keys())}")
-        else:
-            print("  no MCP servers configured")
-    except Exception as e:
-        # Not a hard failure — user may not have MCP configured
-        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+            agent_updates["mcp_config"] = mcp_config
+        if agent_context:
+            agent_updates["agent_context"] = agent_context
+        if agent_updates:
+            agent = agent.model_copy(update=agent_updates)
 
-    # Get default agent with tools and condenser (CLI mode to disable browser)
-    print("\n=== AGENT ===")
-    # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
-    agent = get_default_agent(
-        llm=llm,
-        cli_mode=True,
-        finish_tool_response_schema=TaskOutcome,
-    )
-
-    # Add MCP config and agent_context using model_copy if configured
-    # (Plugin MCP configs will be merged when plugins are loaded)
-    agent_updates = {}
-    if mcp_config:
-        agent_updates["mcp_config"] = mcp_config
-    if agent_context:
-        agent_updates["agent_context"] = agent_context
-    if agent_updates:
-        agent = agent.model_copy(update=agent_updates)
-
-    print(f"  tools: {[t.name for t in agent.tools]}")
-    print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
-    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
-    condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
-    print(f"  condenser: {condenser_name}")
+        print(f"  tools: {[t.name for t in agent.tools]}")
+        print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+        print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
+        condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
+        print(f"  condenser: {condenser_name}")
 
     # Create conversation with plugins
     print("\n=== CONVERSATION ===")
 
     conversation_kwargs = {
-        "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
-        "delete_on_close": False,  # Keep conversation history after completion
         **automation_conversation_kwargs(),
     }
-    if hook_config := _finish_hook_config_for_agent(agent):
-        conversation_kwargs["hook_config"] = hook_config
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
     # A `continue_conversation` run must use the derived id: RemoteConversation
@@ -410,7 +436,29 @@ More activity arrived on the same subject while this run was queued:
     automation_conversation_id = os.environ.get("AUTOMATION_CONVERSATION_ID")
     if automation_conversation_id:
         conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
-    conversation = Conversation(**conversation_kwargs)
+
+    if agent_profile_id:
+        request_kwargs = {
+            **conversation_kwargs,
+            "workspace": LocalWorkspace(working_dir=workspace.working_dir),
+            "agent_profile_id": uuid.UUID(agent_profile_id),
+        }
+        if hook_config := _finish_hook_config_for_profile():
+            request_kwargs["hook_config"] = hook_config
+        if model_profile:
+            request_kwargs["agent_launch_additions"] = AgentLaunchAdditions(
+                llm_profile_ref=model_profile
+            )
+        conversation = RemoteConversation.create(
+            workspace, StartConversationRequest(**request_kwargs)
+        )
+    else:
+        assert agent is not None
+        conversation_kwargs["agent"] = agent
+        conversation_kwargs["delete_on_close"] = False
+        if hook_config := _finish_hook_config_for_agent(agent):
+            conversation_kwargs["hook_config"] = hook_config
+        conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")

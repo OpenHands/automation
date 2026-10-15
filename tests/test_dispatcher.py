@@ -25,6 +25,7 @@ from openhands.automation.dispatcher import (
     _execute_run,
     _execute_run_safe,
     _fetch_plugins_on_agent_server,
+    _validate_plugin_run_agent_profile,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -99,6 +100,73 @@ async def test_fetch_plugins_on_agent_server_posts_pinned_sources():
         "ref": "abc123",
         "repo_path": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_plugin_profile_validation_rejects_drift(monkeypatch):
+    from openhands.automation.config import clear_config_cache
+    from openhands.automation.plugin_specs import PluginSpecError
+
+    profile_id = uuid.UUID("0a1b2c3d-0000-4000-8000-000000000011")
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": str(profile_id), "name": "plugin-agent"}]},
+            )
+        if request.url.path == "/api/agent-profiles/plugin-agent":
+            return httpx.Response(
+                200,
+                json={
+                    "profile": {
+                        "id": str(profile_id),
+                        "name": "plugin-agent",
+                        "llm_profile_ref": "default",
+                        "tools": [
+                            {"name": "terminal", "params": {}},
+                            {"name": "file_editor", "params": {}},
+                        ],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://openhands-api")
+    clear_config_cache()
+    automation = SimpleNamespace(
+        agent_profile_id=profile_id,
+        org_id=TEST_ORG_ID,
+    )
+    backend = SimpleNamespace(
+        is_local_mode=False,
+        get_api_key=AsyncMock(return_value="run-api-key"),
+    )
+    resolved_runtime = {
+        "manifest": {
+            "runtime": {
+                "agent_profile": {
+                    "required": True,
+                    "allowed_tools": ["terminal"],
+                }
+            }
+        }
+    }
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(PluginSpecError, match="file_editor"):
+            await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=cast(Automation, automation),
+                resolved_runtime=resolved_runtime,
+            )
+
+    clear_config_cache()
+    assert requests[0].headers["authorization"] == "Bearer run-api-key"
+    assert requests[0].headers["x-org-id"] == str(TEST_ORG_ID)
 
 
 @pytest.mark.asyncio

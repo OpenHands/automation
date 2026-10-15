@@ -74,8 +74,20 @@ class AutomationPluginSource(BaseModel):
     @classmethod
     def validate_source(cls, value: str) -> str:
         source = value.strip()
-        parsed = urlparse(source)
-        if parsed.scheme in {"http", "https"} and parsed.username is not None:
+        try:
+            source_type, parsed_source = parse_extension_source(source)
+        except Exception:
+            source_type = None
+            parsed_source = source
+        parsed = urlparse(parsed_source)
+        shorthand_path = source.removeprefix("github:")
+        if (
+            parsed.scheme in {"http", "https"}
+            and (parsed.username is not None or parsed.password is not None)
+        ) or (
+            source_type == SourceType.GITHUB
+            and ("@" in shorthand_path or ":" in shorthand_path)
+        ):
             raise ValueError(
                 "plugin source URLs must not include credentials; use a "
                 "credential-free source"

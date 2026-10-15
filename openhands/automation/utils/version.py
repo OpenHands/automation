@@ -7,7 +7,7 @@ from openhands.automation import __version__
 
 
 SDK_PACKAGE_NAME = "openhands-sdk"
-SDK_GIT_REF = "b3aacc186f84f5093707863fb1e8828a7202b57f"
+SDK_GIT_REF = "69dfd6f4bece6157f58e56ea5372b82f75667e16"
 SDK_GIT_REPOSITORY = "https://github.com/OpenHands/software-agent-sdk.git"
 
 

@@ -16,8 +16,10 @@ from openhands.automation.auth import (
     get_http_client,
     upstream_auth_headers,
 )
-from openhands.sdk.profiles.agent_profile import (
+from openhands.sdk.profiles import (
     AgentProfileBase,
+    AgentProfileInfo,
+    AgentProfileListResponse,
     OpenHandsAgentProfile,
     validate_agent_profile,
 )
@@ -116,20 +118,8 @@ def _agent_profiles_headers(
     return {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
 
 
-def _parse_agent_profile_summary(payload: object) -> AgentProfileBase:
-    if not isinstance(payload, dict):
-        raise TypeError("profile is not an object")
-    try:
-        return validate_agent_profile(payload)
-    except (TypeError, ValueError, ValidationError):
-        return AgentProfileBase.model_validate(payload)
-
-
-def _agent_profiles_from_response(resp: httpx.Response) -> list[AgentProfileBase]:
-    profiles = resp.json()["profiles"]
-    if not isinstance(profiles, list):
-        raise TypeError("profiles is not a list")
-    return [_parse_agent_profile_summary(profile) for profile in profiles]
+def _agent_profiles_from_response(resp: httpx.Response) -> list[AgentProfileInfo]:
+    return AgentProfileListResponse.model_validate(resp.json()).profiles
 
 
 def _agent_profile_detail_from_response(resp: httpx.Response) -> AgentProfileBase:
@@ -140,16 +130,14 @@ def _agent_profile_detail_from_response(resp: httpx.Response) -> AgentProfileBas
     return validate_agent_profile(profile)
 
 
-async def _list_agent_profiles(
-    request: Request,
-    user: AuthenticatedUser,
-) -> list[AgentProfileBase]:
-    """Fetch agent profile summaries for the caller's organization."""
-    headers = _agent_profiles_headers(request, user)
+async def _list_agent_profiles_from_api(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    headers: dict[str, str],
+) -> list[AgentProfileInfo]:
     try:
-        resp = await get_http_client(request).get(
-            f"{_agent_profiles_base_url()}/api/agent-profiles", headers=headers
-        )
+        resp = await client.get(f"{base_url}/api/agent-profiles", headers=headers)
     except httpx.RequestError as exc:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -171,7 +159,19 @@ async def _list_agent_profiles(
         ) from exc
 
 
-def _validate_unique_agent_profile_names(profiles: list[AgentProfileBase]) -> None:
+async def _list_agent_profiles(
+    request: Request,
+    user: AuthenticatedUser,
+) -> list[AgentProfileInfo]:
+    """Fetch agent profile summaries for the caller's organization."""
+    return await _list_agent_profiles_from_api(
+        get_http_client(request),
+        base_url=_agent_profiles_base_url(),
+        headers=_agent_profiles_headers(request, user),
+    )
+
+
+def _validate_unique_agent_profile_names(profiles: list[AgentProfileInfo]) -> None:
     duplicates = sorted(
         name
         for name, count in Counter(profile.name for profile in profiles).items()
@@ -223,21 +223,25 @@ def _validate_exact_allowlist(
         )
 
 
-async def validate_agent_profile_allowlists(
+async def validate_agent_profile_allowlists_with_client(
     agent_profile_id: uuid.UUID | None,
     agent_profile_name: str | None,
     allowed_tools: list[str] | None,
-    request: Request,
-    user: AuthenticatedUser,
+    client: httpx.AsyncClient,
     *,
+    base_url: str,
+    headers: dict[str, str],
     allowed_mcp_server_refs: list[str] | None = None,
     allowed_secret_refs: list[str] | None = None,
-) -> uuid.UUID | None:
+    fetch_profile_detail: bool = False,
+) -> tuple[uuid.UUID | None, AgentProfileBase | None]:
     """Reject missing/ambiguous profiles and profile fields outside allowlists."""
     if agent_profile_id is None and not agent_profile_name:
-        return None
+        return None, None
 
-    profiles = await _list_agent_profiles(request, user)
+    profiles = await _list_agent_profiles_from_api(
+        client, base_url=base_url, headers=headers
+    )
     _validate_unique_agent_profile_names(profiles)
     resolved_id = agent_profile_id
     resolved_name = agent_profile_name
@@ -260,22 +264,24 @@ async def validate_agent_profile_allowlists(
         )
         if selected is None:
             raise HTTPException(422, f"Agent profile `{agent_profile_name}` not found")
-        resolved_id = selected.id
+        if selected.id is None:
+            raise HTTPException(422, f"Agent profile `{agent_profile_name}` has no id")
+        resolved_id = uuid.UUID(str(selected.id))
     if not resolved_name or resolved_id is None:
         raise HTTPException(422, "Plugin automation requires an agent profile")
 
-    if (
-        allowed_tools is None
-        and allowed_mcp_server_refs is None
-        and allowed_secret_refs is None
-    ):
-        return resolved_id
+    needs_detail = (
+        fetch_profile_detail
+        or allowed_tools is not None
+        or allowed_mcp_server_refs is not None
+        or allowed_secret_refs is not None
+    )
+    if not needs_detail:
+        return resolved_id, None
 
-    headers = _agent_profiles_headers(request, user)
     try:
-        resp = await get_http_client(request).get(
-            f"{_agent_profiles_base_url()}/api/agent-profiles/"
-            f"{quote(resolved_name, safe='')}",
+        resp = await client.get(
+            f"{base_url}/api/agent-profiles/{quote(resolved_name, safe='')}",
             headers=headers,
         )
     except httpx.RequestError as exc:
@@ -338,6 +344,29 @@ async def validate_agent_profile_allowlists(
             label="secret ref",
         )
 
+    return resolved_id, profile
+
+
+async def validate_agent_profile_allowlists(
+    agent_profile_id: uuid.UUID | None,
+    agent_profile_name: str | None,
+    allowed_tools: list[str] | None,
+    request: Request,
+    user: AuthenticatedUser,
+    *,
+    allowed_mcp_server_refs: list[str] | None = None,
+    allowed_secret_refs: list[str] | None = None,
+) -> uuid.UUID | None:
+    resolved_id, _profile = await validate_agent_profile_allowlists_with_client(
+        agent_profile_id,
+        agent_profile_name,
+        allowed_tools,
+        get_http_client(request),
+        base_url=_agent_profiles_base_url(),
+        headers=_agent_profiles_headers(request, user),
+        allowed_mcp_server_refs=allowed_mcp_server_refs,
+        allowed_secret_refs=allowed_secret_refs,
+    )
     return resolved_id
 
 

@@ -119,6 +119,46 @@ async def test_validate_agent_profile_allowlists_accepts_exact_required_tools(us
 
 
 @pytest.mark.asyncio
+async def test_validate_agent_profile_allowlists_accepts_acp_summary_without_detail(
+    user,
+):
+    profile_id = "0a1b2c3d-0000-4000-8000-000000000012"
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={
+                    "profiles": [
+                        {
+                            "id": profile_id,
+                            "name": "codex",
+                            "agent_kind": "acp",
+                            "revision": 3,
+                            "llm_profile_ref": None,
+                            "mcp_server_refs": ["github"],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        resolved_id = await validate_agent_profile_allowlists(
+            None,
+            "codex",
+            None,
+            _request(client),
+            user,
+        )
+
+    assert resolved_id == uuid.UUID(profile_id)
+    assert [request.url.path for request in requests] == ["/api/agent-profiles"]
+
+
+@pytest.mark.asyncio
 async def test_validate_agent_profile_allowlists_rejects_missing_allowed_tool(user):
     profile_id = "0a1b2c3d-0000-4000-8000-000000000006"
 

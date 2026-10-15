@@ -146,6 +146,20 @@ def test_plugin_source_rejects_url_credentials():
         AutomationPluginSource(source="https://user:pass@github.com/acme/private.git")
 
 
+def test_plugin_source_rejects_github_shorthand_credentials():
+    with pytest.raises(ValidationError, match="must not include credentials"):
+        AutomationPluginSource(source="github:user:token@acme/private")
+
+
+def test_required_plugin_source_rejects_github_shorthand_credentials(tmp_path):
+    plugin = write_conversation_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["runtime"]["plugins"] = [{"source": "github:user:token@acme/private"}]
+
+    with pytest.raises(ValidationError, match="must not include credentials"):
+        plugin_specs.AutomationPluginManifest.model_validate(manifest)
+
+
 def test_preflight_rejects_local_source_when_local_sources_disabled(tmp_path):
     plugin = write_plugin(tmp_path)
 
@@ -377,6 +391,9 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
 
     assert prompt == "/hello-world-automation:hello world"
     assert plugins_config == [{"source": str(plugin)}]
+    assert "StartConversationRequest" in main_source
+    assert "RemoteConversation.create" in main_source
+    assert "AUTOMATION_LLM_PROFILE_NAME" in main_source
     assert "experiment_config.json" not in main_source
     assert "threading" not in main_source
     assert "conversation_title" not in main_source
