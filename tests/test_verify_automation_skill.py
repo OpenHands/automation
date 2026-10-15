@@ -379,9 +379,14 @@ def test_map_check_requires_a_bug_marker_in_known_bug_bullets(family, capsys):
     "marker, problem",
     [
         ("# bug", "needs the documented failure"),
-        ("# bug: exit", "is not PATH OP"),
+        ("# bug: exit", "write `exit N`"),
         ("# bug: exit 0", "from 1 to 255"),
         ("# bug: exit 1 && status eq 500", "stands alone"),
+        ("# bug: exit eq 2", "reserved for the marked command's status"),
+        (
+            "# bug: status eq 500 && exit eq 2",
+            "reserved for the marked command's status",
+        ),
         ("# bug: status is 500", "is not PATH OP"),
         ("# bug: status eq", "takes one value"),
         ("# bug: detail missing 500", "takes no value"),

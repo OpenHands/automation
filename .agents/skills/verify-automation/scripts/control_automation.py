@@ -3448,6 +3448,13 @@ def parse_bug_predicate(text: str) -> list[list[str]]:
             if len(clauses) > 1:
                 raise ValueError("`exit N` stands alone; it cannot be joined")
             continue
+        if clause and clause[0] == "exit":
+            # The CLI's own `exit` field is set only on its usage and
+            # environment errors, which must never read as the bug.
+            raise ValueError(
+                f"`{' '.join(clause)}`: `exit` is reserved for the marked "
+                "command's status; write `exit N`"
+            )
         if len(clause) < 2 or clause[1] not in CHECK_OPS:
             raise ValueError(
                 f"`{' '.join(clause)}` is not PATH OP [VALUE] with OP in "

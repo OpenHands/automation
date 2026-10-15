@@ -222,7 +222,9 @@ Then exactly four H2 sections, in this order:
      hold (`status eq 200 && response.body.id missing`).
    - `exit N` (the marked command's exit status) is the last resort, for a
      line whose symptom has no value to name. It says only that the line
-     failed that way.
+     failed that way. `exit` is reserved for it: a clause on the CLI's own
+     `exit` field (`exit eq 2`), which only its usage and environment errors
+     set, is rejected.
    - `xpass` must mean the correct value was observed, so the marked command
      asserts positively. `map check` rejects `if cmd; then false; fi`,
      `! cmd` and `test !` on a `# bug` line, because an unrelated error in
