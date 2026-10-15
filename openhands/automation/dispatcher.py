@@ -339,6 +339,7 @@ async def _execute_run(
                     agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
                     llm_profile_name=automation.model,
                     work_dir=work_dir,
+                    allow_local_sources=backend.is_local_mode,
                 )
             )
             entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint

@@ -12,6 +12,14 @@ from openhands.automation.router import (
 )
 
 
+@pytest.fixture(autouse=True)
+def allow_local_plugin_sources_in_router_tests(monkeypatch):
+    monkeypatch.setattr(
+        "openhands.automation.router._allow_local_plugin_sources",
+        lambda: True,
+    )
+
+
 def write_plugin(root: Path) -> Path:
     plugin = root / "plugin"
     (plugin / "scripts").mkdir(parents=True)

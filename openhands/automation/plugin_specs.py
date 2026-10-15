@@ -10,6 +10,7 @@ import re
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from jsonschema import (
     Draft202012Validator,
@@ -37,6 +38,7 @@ from openhands.automation.schemas import (
     validate_command_string,
 )
 from openhands.automation.utils.timeout import validate_automation_timeout
+from openhands.sdk.extensions.fetch import SourceType, parse_extension_source
 from openhands.sdk.plugin import PluginSource, preflight_plugin
 from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
 
@@ -67,6 +69,18 @@ class AutomationPluginSource(BaseModel):
     source: str = Field(..., min_length=1)
     ref: str | None = Field(default=None, min_length=1)
     repo_path: str | None = Field(default=None, min_length=1)
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        source = value.strip()
+        parsed = urlparse(source)
+        if parsed.scheme in {"http", "https"} and parsed.username is not None:
+            raise ValueError(
+                "plugin source URLs must not include credentials; use a "
+                "credential-free source"
+            )
+        return source
 
     @field_validator("repo_path")
     @classmethod
@@ -271,6 +285,37 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         return validate_automation_timeout(value)
 
 
+def validate_plugin_source_allowed(
+    plugin: AutomationPluginSource,
+    *,
+    allow_local_sources: bool,
+) -> None:
+    """Reject plugin sources that are unsafe for automation-service preflight."""
+    if allow_local_sources:
+        return
+
+    raw_source = plugin.source.strip()
+    if raw_source.lower().startswith("file://"):
+        raise PluginSpecError("file:// plugin sources are not allowed in cloud mode")
+
+    try:
+        source_type, url = parse_extension_source(raw_source)
+    except Exception as exc:
+        raise PluginSpecError(f"Invalid plugin source: {exc}") from exc
+
+    if source_type == SourceType.LOCAL:
+        raise PluginSpecError("Local plugin sources are not allowed in cloud mode")
+    if source_type == SourceType.GITHUB:
+        return
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+        raise PluginSpecError(
+            "Cloud plugin sources must use github:owner/repo or "
+            "https://github.com/owner/repo.git"
+        )
+
+
 def _contained_path(root: Path, relative: str) -> Path:
     path = root / relative
     try:
@@ -316,14 +361,17 @@ def fetch_manifest(
 
 def preflight_manifest(
     plugin: AutomationPluginSource,
+    *,
+    allow_local_sources: bool = True,
 ) -> tuple[str | None, AutomationPluginManifest]:
     """Strictly resolve a plugin source and parse its automation metadata."""
+    validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
     try:
         with preflight_plugin(
             source=plugin.source,
             ref=plugin.ref,
             repo_path=plugin.repo_path,
-            allow_local=True,
+            allow_local=allow_local_sources,
         ) as checked:
             manifest = _read_manifest_from_plugin_metadata(checked.manifest)
             _validate_manifest_paths(checked.path, manifest)
@@ -497,16 +545,19 @@ def resolve_suggested_trigger(
 
 def validate_required_plugins(
     plugins: list[AutomationPluginSource],
+    *,
+    allow_local_sources: bool = True,
 ) -> list[dict[str, Any]]:
     """Preflight secondary plugins and return source specs with resolved refs."""
     resolved: list[dict[str, Any]] = []
     for plugin in plugins:
+        validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
         try:
             with preflight_plugin(
                 source=plugin.source,
                 ref=plugin.ref,
                 repo_path=plugin.repo_path,
-                allow_local=True,
+                allow_local=allow_local_sources,
             ) as checked:
                 resolved_ref = checked.resolved_ref
         except Exception as exc:
@@ -527,13 +578,19 @@ def build_execution_payload(
     agent_profile_name: str | None,
     llm_profile_name: str | None,
     work_dir: str,
+    allow_local_sources: bool = True,
 ) -> tuple[bytes, dict[str, str], dict[str, Any], list[dict[str, Any]]]:
     """Preflight, validate, and package a plugin-backed automation run."""
     source = AutomationPluginSource.model_validate(plugin_spec["plugin"])
     requested_config = plugin_spec.get("config") or {}
-    resolved_ref, manifest = preflight_manifest(source)
+    resolved_ref, manifest = preflight_manifest(
+        source, allow_local_sources=allow_local_sources
+    )
     config = validate_plugin_config(manifest, requested_config)
-    required_plugins = validate_required_plugins(manifest.runtime.plugins)
+    required_plugins = validate_required_plugins(
+        manifest.runtime.plugins,
+        allow_local_sources=allow_local_sources,
+    )
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:
         agent_profile_name = manifest.runtime.agent_profile.default_name

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
@@ -387,13 +388,23 @@ async def create_automation_from_plugin_spec(
     return AutomationResponse.model_validate(automation)
 
 
+def _allow_local_plugin_sources() -> bool:
+    return get_config().service.is_local_mode
+
+
 def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
     plugin_config: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], Any]:
+    allow_local_sources = _allow_local_plugin_sources()
     try:
-        _resolved_ref, manifest = preflight_manifest(plugin)
-        validate_required_plugins(manifest.runtime.plugins)
+        _resolved_ref, manifest = preflight_manifest(
+            plugin, allow_local_sources=allow_local_sources
+        )
+        validate_required_plugins(
+            manifest.runtime.plugins,
+            allow_local_sources=allow_local_sources,
+        )
         resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc

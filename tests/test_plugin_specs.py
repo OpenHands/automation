@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
@@ -13,6 +14,7 @@ from openhands.automation.plugin_specs import (
     preflight_manifest,
     resolve_suggested_trigger,
     validate_plugin_config,
+    validate_required_plugins,
 )
 
 
@@ -136,6 +138,62 @@ def write_merged_conversation_plugin(root: Path) -> Path:
         )
     )
     return plugin
+
+
+def test_plugin_source_rejects_url_credentials():
+    with pytest.raises(ValidationError, match="must not include credentials"):
+        AutomationPluginSource(source="https://user:pass@github.com/acme/private.git")
+
+
+def test_preflight_rejects_local_source_when_local_sources_disabled(tmp_path):
+    plugin = write_plugin(tmp_path)
+
+    with pytest.raises(
+        PluginSpecError, match="Local plugin sources are not allowed in cloud mode"
+    ):
+        preflight_manifest(
+            AutomationPluginSource(source=str(plugin)),
+            allow_local_sources=False,
+        )
+
+
+def test_preflight_rejects_file_source_when_local_sources_disabled():
+    with pytest.raises(
+        PluginSpecError, match="file:// plugin sources are not allowed in cloud mode"
+    ):
+        preflight_manifest(
+            AutomationPluginSource(source="file:///tmp/private-plugin"),
+            allow_local_sources=False,
+        )
+
+
+def test_preflight_rejects_non_github_git_source_when_local_sources_disabled():
+    with pytest.raises(
+        PluginSpecError,
+        match="Cloud plugin sources must use github:owner/repo",
+    ):
+        preflight_manifest(
+            AutomationPluginSource(source="https://127.0.0.1/acme/private.git"),
+            allow_local_sources=False,
+        )
+
+
+def test_required_plugins_reject_local_source_when_local_sources_disabled(tmp_path):
+    plugin = write_plugin(tmp_path)
+    required_plugin = write_plugin(tmp_path / "required")
+    manifest_data = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest_data.setdefault("runtime", {})["plugins"] = [
+        {"source": str(required_plugin)}
+    ]
+    _write_automation_manifest(plugin, manifest_data)
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(plugin))
+    )
+
+    with pytest.raises(
+        PluginSpecError, match="Local plugin sources are not allowed in cloud mode"
+    ):
+        validate_required_plugins(manifest.runtime.plugins, allow_local_sources=False)
 
 
 def test_validate_plugin_config_applies_defaults(tmp_path):
