@@ -66,6 +66,7 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
+    normalize_keep_alive_for_trigger,
 )
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.telemetry import (
@@ -347,6 +348,11 @@ async def create_automation_from_plugin_spec(
         session=session,
     )
 
+    try:
+        keep_alive = normalize_keep_alive_for_trigger(body.keep_alive, trigger)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}
     if body.template is not None:
@@ -367,7 +373,7 @@ async def create_automation_from_plugin_spec(
         setup_script_path=runtime_fields["setup_script_path"],
         entrypoint=runtime_fields["entrypoint"],
         timeout=default_automation_timeout(body.timeout),
-        keep_alive=body.keep_alive,
+        keep_alive=keep_alive,
         enabled=automation_state_enabled(state),
         state=state,
         telemetry_distinct_id=get_request_telemetry_context(

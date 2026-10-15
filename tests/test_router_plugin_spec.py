@@ -152,11 +152,13 @@ async def test_create_plugin_spec_uses_manifest_suggested_trigger(
     )
 
     assert response.status_code == 201
-    assert response.json()["trigger"] == {
+    data = response.json()
+    assert data["trigger"] == {
         "type": "cron",
         "schedule": "0 9 * * *",
         "timezone": "UTC",
     }
+    assert data["keep_alive"] is None
 
 
 @pytest.mark.asyncio
@@ -213,6 +215,62 @@ async def test_create_plugin_spec_renders_suggested_trigger_template(
         "turn_text_expr": None,
         "wake_agent": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_continue_conversation_defaults_keep_alive_true(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path,
+        {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment.created",
+            "destination": "continue_conversation",
+            "subject_key_expr": "repository.full_name",
+        },
+    )
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={"name": "Hello Plugin", "plugin": {"source": str(plugin)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["trigger"]["destination"] == "continue_conversation"
+    assert data["keep_alive"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_rejects_keep_alive_false_for_continue_conversation(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path,
+        {
+            "type": "event",
+            "source": "github",
+            "on": "issue_comment.created",
+            "destination": "continue_conversation",
+            "subject_key_expr": "repository.full_name",
+        },
+    )
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin)},
+            "keep_alive": False,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 400
+    assert "keep_alive cannot be false" in response.text
 
 
 @pytest.mark.asyncio
