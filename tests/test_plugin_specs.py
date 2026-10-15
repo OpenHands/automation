@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import openhands.automation.plugin_specs as plugin_specs
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     PluginSpecError,
@@ -373,6 +374,33 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
 
     assert prompt == "/hello-world-automation:hello world"
     assert plugins_config == [{"source": str(plugin)}]
+
+
+def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):
+    plugin = write_conversation_plugin(tmp_path)
+    sentinel_main = "print('plugin-spec conversation runner')\n"
+    monkeypatch.setattr(
+        plugin_specs,
+        "_PLUGIN_SPEC_PRESET_CACHE",
+        {
+            "main.py": sentinel_main,
+            "setup.sh": "#!/usr/bin/env bash\n",
+            "finish_tool_hook.py": "# finish hook\n",
+        },
+    )
+
+    tarball, _env, _runtime, _plugin_fetches = build_execution_payload(
+        plugin_spec={"plugin": {"source": str(plugin)}, "config": {}},
+        agent_profile_id="profile-id",
+        agent_profile_name="agent-default",
+        llm_profile_name=None,
+        work_dir="/tmp/automation-run",
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        main_file = tar.extractfile("main.py")
+        assert main_file is not None
+        assert main_file.read().decode() == sentinel_main
 
 
 def test_conversation_runner_rejects_missing_plugin_command(tmp_path):

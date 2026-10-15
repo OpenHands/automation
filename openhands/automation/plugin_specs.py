@@ -48,9 +48,9 @@ PLUGIN_MANIFEST_NAME = ".plugin/plugin.json"
 PLUGIN_AUTOMATION_KEY = "automation"
 AUTOMATION_DIR = ".automation"
 PRESETS_DIR = Path(__file__).parent / "presets"
-PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
+PLUGIN_SPEC_PRESET_DIR = PRESETS_DIR / "plugin_spec"
 SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
-_PLUGIN_PRESET_CACHE: dict[str, str] | None = None
+_PLUGIN_SPEC_PRESET_CACHE: dict[str, str] | None = None
 _CONFIG_TEMPLATE_RE = re.compile(
     r"{{\s*(?P<json>json\s+)?config\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
 )
@@ -674,15 +674,15 @@ def _add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) 
     tar.addfile(info, io.BytesIO(data))
 
 
-def _load_plugin_preset_files() -> dict[str, str]:
-    global _PLUGIN_PRESET_CACHE
-    if _PLUGIN_PRESET_CACHE is None:
-        _PLUGIN_PRESET_CACHE = {
-            "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
-            "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+def _load_plugin_spec_preset_files() -> dict[str, str]:
+    global _PLUGIN_SPEC_PRESET_CACHE
+    if _PLUGIN_SPEC_PRESET_CACHE is None:
+        _PLUGIN_SPEC_PRESET_CACHE = {
+            "main.py": (PLUGIN_SPEC_PRESET_DIR / "sdk_main.py").read_text(),
+            "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
-    return _PLUGIN_PRESET_CACHE
+    return _PLUGIN_SPEC_PRESET_CACHE
 
 
 def _preset_entrypoint() -> str:
@@ -754,7 +754,7 @@ def _build_stock_runner_tarball(
     resolved_runtime: dict[str, Any],
     required_plugins: list[dict[str, Any]],
 ) -> bytes:
-    preset_files = _load_plugin_preset_files()
+    preset_files = _load_plugin_spec_preset_files()
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
