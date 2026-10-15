@@ -367,13 +367,20 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
         assert "automation-plugin.json" not in names
         prompt_file = tar.extractfile("prompt.txt")
         plugins_file = tar.extractfile("plugins_config.json")
+        main_file = tar.extractfile("main.py")
         assert prompt_file is not None
         assert plugins_file is not None
+        assert main_file is not None
         prompt = prompt_file.read().decode()
         plugins_config = json.loads(plugins_file.read())
+        main_source = main_file.read().decode()
 
     assert prompt == "/hello-world-automation:hello world"
     assert plugins_config == [{"source": str(plugin)}]
+    assert "experiment_config.json" not in main_source
+    assert "threading" not in main_source
+    assert "conversation_title" not in main_source
+    assert "report_phase" not in main_source
 
 
 def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):

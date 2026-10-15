@@ -72,12 +72,8 @@ Runtime-injected secrets (via conversation.update_secrets after Conversation cre
 import inspect
 import json
 import os
-import random
 import sys
-import threading
-import time
 import uuid
-from datetime import datetime, timezone
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -133,63 +129,6 @@ print(f"  AUTOMATION_USER_ID: {'OK' if automation_user_id else 'NONE'}")
 print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else 'NONE'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
-# --- Live phase reporting (best-effort, never fatal) -------------------------
-# Keep this block in sync with presets/prompt/sdk_main.py.
-AUTOMATION_PHASE_URL = os.environ.get("AUTOMATION_PHASE_URL", "")
-_PHASE_TOKEN = (
-    os.environ.get("AUTOMATION_CALLBACK_API_KEY")
-    or os.environ.get("OPENHANDS_API_KEY")
-    or ""
-)
-PHASE_POST_INTERVAL_SECONDS = 4.0
-
-
-def report_phase(message: str) -> None:
-    """POST a short progress phase to the automation service. Never raises."""
-    if not AUTOMATION_PHASE_URL or not _PHASE_TOKEN or not message:
-        return
-    try:
-        import httpx  # installed alongside the SDK by setup.sh
-
-        httpx.post(
-            AUTOMATION_PHASE_URL,
-            json={"phase": message[:200]},
-            headers={"Authorization": f"Bearer {_PHASE_TOKEN}"},
-            timeout=5.0,
-        )
-    except Exception:
-        pass  # phases are cosmetic; the run must never fail because of them
-
-
-def _redact_phase(text: str) -> str:
-    """Redact secrets from a phase; drop it entirely if redaction is missing."""
-    try:
-        from openhands.sdk.utils.redact import (
-            redact_api_key_literals,
-            redact_text_secrets,
-        )
-
-        return redact_api_key_literals(redact_text_secrets(text))
-    except Exception:
-        return ""
-
-
-# Latest pending live phase; a daemon thread posts it at most once per
-# interval so the conversation event thread never blocks on network I/O.
-# Deliberately unlocked: each key is a single reference read/write (atomic
-# under the GIL) and last-writer-wins is acceptable for cosmetic telemetry.
-_live_phase: dict = {"pending": None, "posted": None, "stop": False}
-
-
-def _phase_poster() -> None:
-    while not _live_phase["stop"]:
-        time.sleep(PHASE_POST_INTERVAL_SECONDS)
-        message = _live_phase["pending"]
-        if message and message != _live_phase["posted"]:
-            _live_phase["posted"] = message
-            report_phase(message)
-
-
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
@@ -223,44 +162,6 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
-
-
-def _build_conversation_title(event_context) -> str | None:
-    """Build a descriptive conversation title from the automation event context.
-
-    Returns "{automation_name} — {repo}#{number}" for PR/issue events,
-    "{automation_name} — {timestamp}" otherwise, or None when no automation
-    name is available (keeps the agent-server's default autotitle behavior).
-    """
-    if not isinstance(event_context, dict):
-        return None
-    name = event_context.get("automation_name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    name = " ".join(name.split())
-
-    context = None
-    event = event_context.get("event")
-    if isinstance(event, dict):
-        repo = event.get("repository")
-        repo_name = repo.get("full_name") if isinstance(repo, dict) else None
-        number = None
-        for key in ("pull_request", "issue"):
-            obj = event.get(key)
-            if isinstance(obj, dict):
-                candidate = obj.get("number")
-                if isinstance(candidate, int) and not isinstance(candidate, bool):
-                    number = candidate
-                    break
-        if number is None:
-            candidate = event.get("number")
-            if isinstance(candidate, int) and not isinstance(candidate, bool):
-                number = candidate
-        if isinstance(repo_name, str) and repo_name and number is not None:
-            context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
-    if context is None:
-        context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return f"{name} — {context}"[:200]
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -307,7 +208,6 @@ else:
 with workspace_ctx as workspace:
     # -- All remaining setup happens inside the workspace context --
     # This ensures failures trigger the __exit__ callback
-    report_phase("Setting up workspace")
 
     # Parse event payload if present (for event-triggered automations)
     event_context = None
@@ -330,7 +230,6 @@ with workspace_ctx as workspace:
         with open(REPOS_CONFIG_FILE) as f:
             repos_config = json.load(f)
         if repos_config:
-            report_phase("Cloning repositories")
             clone_result = workspace.clone_repos(repos_config)
             print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
             if clone_result.failed_repos:
@@ -341,7 +240,6 @@ with workspace_ctx as workspace:
     # Load ALL skills via workspace.load_skills_from_agent_server()
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
-    report_phase("Loading skills")
     loaded_skills, agent_context = workspace.load_skills_from_agent_server(
         project_dirs=repo_dirs if repo_dirs else None
     )
@@ -353,34 +251,11 @@ with workspace_ctx as workspace:
         repos_context = workspace.get_repos_context(clone_result.repo_mappings)
 
     # Load configuration files
-    EXPERIMENT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "experiment_config.json")
     PLUGINS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "plugins_config.json")
     PROMPT_FILE = os.path.join(SCRIPT_DIR, "prompt.txt")
 
-    # Experiment-aware variant selection
-    experiment_id: str | None = None
-    selected_variant: str | None = None
-
-    if os.path.exists(EXPERIMENT_CONFIG_FILE):
-        with open(EXPERIMENT_CONFIG_FILE) as f:
-            experiment_config = json.load(f)
-
-        experiment_id = experiment_config["experiment_id"]
-        variants = experiment_config["variants"]
-        weights = [v["weight"] for v in variants]
-        selected = random.choices(variants, weights=weights, k=1)[0]
-
-        selected_variant = selected["name"]
-        model_profile = selected.get("model") or model_profile
-        plugins_config = selected["plugins"]
-        print("\n=== EXPERIMENT ===")
-        print(f"  id: {experiment_id}")
-        print(f"  variant: {selected_variant}")
-        print(f"  model_profile: {model_profile or 'DEFAULT'}")
-        print(f"  weights: {dict(zip([v['name'] for v in variants], weights))}")
-    else:
-        with open(PLUGINS_CONFIG_FILE) as f:
-            plugins_config = json.load(f)
+    with open(PLUGINS_CONFIG_FILE) as f:
+        plugins_config = json.load(f)
 
     with open(PROMPT_FILE) as f:
         USER_PROMPT = f.read()
@@ -478,7 +353,6 @@ More activity arrived on the same subject while this run was queued:
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
-    report_phase("Configuring agent")
     # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
     agent = get_default_agent(
         llm=llm,
@@ -505,42 +379,13 @@ More activity arrived on the same subject while this run was queued:
     # Create conversation with plugins
     print("\n=== CONVERSATION ===")
 
-    received_events: list = []
-    last_event_time = {"ts": time.time()}
-
-    def event_callback(event) -> None:
-        received_events.append(event)
-        last_event_time["ts"] = time.time()
-        # Surface the LLM-authored ~10-word action summary as a live phase.
-        # Name-based check keeps this resilient across SDK versions.
-        if type(event).__name__ == "ActionEvent":
-            summary = getattr(event, "summary", None)
-            if isinstance(summary, str) and summary.strip():
-                redacted = _redact_phase(" ".join(summary.split()))
-                if redacted:
-                    _live_phase["pending"] = redacted[:200]
-
-    # Build experiment tags (if running an A/B test)
-    experiment_tags: dict[str, str] = {}
-    if experiment_id:
-        experiment_tags["experimentid"] = experiment_id
-        if selected_variant is None:
-            raise RuntimeError(
-                "BUG: experiment_id is set but selected_variant is None — "
-                "experiment config may be malformed."
-            )
-        experiment_tags["variant"] = selected_variant
-        if model_profile:
-            experiment_tags["modelprofile"] = model_profile
-
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
-        "callbacks": [event_callback],
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
-        **automation_conversation_kwargs(conversation_tags=experiment_tags),
+        **automation_conversation_kwargs(),
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
@@ -553,24 +398,6 @@ More activity arrived on the same subject while this run was queued:
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
-    if experiment_tags:
-        print(f"  experiment tags: {experiment_tags}")
-
-    # Set a descriptive title so automation runs are distinguishable in the
-    # conversation panel — otherwise the agent-server's autotitle falls back
-    # to a truncated prompt prefix. Failure is non-fatal; the run continues.
-    conversation_title = _build_conversation_title(event_context)
-    if conversation_title:
-        try:
-            resp = workspace.client.patch(
-                f"/api/conversations/{conversation.id}",
-                json={"title": conversation_title},
-            )
-            resp.raise_for_status()
-            print(f"  title: {conversation_title}")
-        except Exception as e:
-            # Not a hard failure — autotitle fallback still applies
-            print(f"  set title failed (non-fatal): {e}")
 
     # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:
@@ -584,8 +411,6 @@ More activity arrived on the same subject while this run was queued:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
-    report_phase("Agent is working on the task")
-    threading.Thread(target=_phase_poster, name="phase-poster", daemon=True).start()
 
     cost = None
     try:
@@ -593,25 +418,14 @@ More activity arrived on the same subject while this run was queued:
         conversation.send_message(USER_PROMPT)
         conversation.run()
 
-        # Post-run bookkeeping is best-effort: the conversation has already
-        # succeeded, and nothing below may raise out of the workspace context
-        # or the __exit__ callback would report FAILED for a successful run.
-        # The callback's cost comes from conversation.close() (cached stats),
-        # not from this live fetch.
         try:
-            # Wait for the stream to settle
-            while time.time() - last_event_time["ts"] < 2.0:
-                time.sleep(0.1)
-
             cost = (
                 conversation.conversation_stats.get_combined_metrics().accumulated_cost
             )
         except Exception as e:
             print(f"  WARNING: post-run stats fetch failed (non-fatal): {e}")
         print(f"  cost: {cost}")
-        print(f"  events received: {len(received_events)}")
     finally:
-        _live_phase["stop"] = True
         try:
             conversation.close()
         except Exception as e:
