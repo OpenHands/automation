@@ -131,7 +131,6 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
-from finish_tool_hook import finish_tool_required_hook_config
 from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.tools.preset import TaskOutcome
 
@@ -162,6 +161,22 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
+
+def _agent_has_finish_tool(agent):
+    if "FinishTool" in getattr(agent, "include_default_tools", []):
+        return True
+    return any(getattr(tool, "name", None) == "finish" for tool in agent.tools)
+
+
+def _finish_hook_config_for_agent(agent):
+    if not _agent_has_finish_tool(agent):
+        print("  finish hook: disabled (finish tool unavailable)")
+        return None
+    from finish_tool_hook import finish_tool_required_hook_config
+
+    print("  finish hook: enabled")
+    return finish_tool_required_hook_config(SCRIPT_DIR)
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -383,10 +398,11 @@ More activity arrived on the same subject while this run was queued:
         "agent": agent,
         "workspace": workspace,
         "plugins": plugin_sources,  # All plugins loaded here
-        "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
         **automation_conversation_kwargs(),
     }
+    if hook_config := _finish_hook_config_for_agent(agent):
+        conversation_kwargs["hook_config"] = hook_config
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
     # A `continue_conversation` run must use the derived id: RemoteConversation
@@ -410,7 +426,6 @@ More activity arrived on the same subject while this run was queued:
         session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
-
 
     cost = None
     try:

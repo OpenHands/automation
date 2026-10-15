@@ -2,17 +2,24 @@
 
 import logging
 import uuid
+from collections import Counter
 from urllib.parse import quote
 
 import httpx
 from cachetools import TTLCache
 from fastapi import HTTPException, Request, status
+from pydantic import ValidationError
 
 from openhands.automation.auth import (
     X_ORG_ID_HEADER,
     AuthenticatedUser,
     get_http_client,
     upstream_auth_headers,
+)
+from openhands.sdk.profiles.agent_profile import (
+    AgentProfileBase,
+    OpenHandsAgentProfile,
+    validate_agent_profile,
 )
 
 
@@ -109,10 +116,34 @@ def _agent_profiles_headers(
     return {**upstream_auth_headers(request), X_ORG_ID_HEADER: str(user.org_id)}
 
 
+def _parse_agent_profile_summary(payload: object) -> AgentProfileBase:
+    if not isinstance(payload, dict):
+        raise TypeError("profile is not an object")
+    try:
+        return validate_agent_profile(payload)
+    except (TypeError, ValueError, ValidationError):
+        return AgentProfileBase.model_validate(payload)
+
+
+def _agent_profiles_from_response(resp: httpx.Response) -> list[AgentProfileBase]:
+    profiles = resp.json()["profiles"]
+    if not isinstance(profiles, list):
+        raise TypeError("profiles is not a list")
+    return [_parse_agent_profile_summary(profile) for profile in profiles]
+
+
+def _agent_profile_detail_from_response(resp: httpx.Response) -> AgentProfileBase:
+    body = resp.json()
+    profile = body.get("profile") if isinstance(body, dict) else None
+    if not isinstance(profile, dict):
+        raise TypeError("profile is not an object")
+    return validate_agent_profile(profile)
+
+
 async def _list_agent_profiles(
     request: Request,
     user: AuthenticatedUser,
-) -> list[dict]:
+) -> list[AgentProfileBase]:
     """Fetch agent profile summaries for the caller's organization."""
     headers = _agent_profiles_headers(request, user)
     try:
@@ -131,11 +162,8 @@ async def _list_agent_profiles(
     try:
         if resp.status_code != status.HTTP_200_OK:
             raise ValueError(f"status {resp.status_code}")
-        profiles = resp.json()["profiles"]
-        if not isinstance(profiles, list):
-            raise TypeError("profiles is not a list")
-        return [profile for profile in profiles if isinstance(profile, dict)]
-    except (ValueError, KeyError, TypeError) as exc:
+        return _agent_profiles_from_response(resp)
+    except (ValueError, KeyError, TypeError, ValidationError) as exc:
         logger.warning("Agent profile lookup failed: %s", exc)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -143,47 +171,28 @@ async def _list_agent_profiles(
         ) from exc
 
 
-def _validate_unique_agent_profile_names(profiles: list[dict]) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for profile in profiles:
-        name = profile.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        if name in seen:
-            duplicates.add(name)
-        seen.add(name)
+def _validate_unique_agent_profile_names(profiles: list[AgentProfileBase]) -> None:
+    duplicates = sorted(
+        name
+        for name, count in Counter(profile.name for profile in profiles).items()
+        if count > 1
+    )
     if duplicates:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Duplicate agent profile names found: " + ", ".join(sorted(duplicates)),
+            "Duplicate agent profile names found: " + ", ".join(duplicates),
         )
 
 
-def _parse_agent_profile_id(value: object) -> uuid.UUID:
-    try:
-        return uuid.UUID(str(value))
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Unexpected agent profile id in OpenHands API response",
-        ) from exc
-
-
 def _string_set_from_profile_list(
-    value: object, field_name: str, resolved_name: str
+    value: list[str] | None, field_name: str, resolved_name: str
 ) -> set[str]:
     if value is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"Agent profile `{resolved_name}` must explicitly set `{field_name}`",
         )
-    if not isinstance(value, list):
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            f"Unexpected `{field_name}` field in OpenHands API agent profile response",
-        )
-    return {item for item in value if isinstance(item, str) and item}
+    return set(value)
 
 
 def _validate_exact_allowlist(
@@ -236,9 +245,9 @@ async def validate_agent_profile_allowlists(
         agent_profile_id_str = str(agent_profile_id)
         resolved_name = next(
             (
-                profile.get("name")
+                profile.name
                 for profile in profiles
-                if str(profile.get("id")) == agent_profile_id_str
+                if str(profile.id) == agent_profile_id_str
             ),
             None,
         )
@@ -246,16 +255,12 @@ async def validate_agent_profile_allowlists(
             raise HTTPException(422, f"Agent profile `{agent_profile_id}` not found")
     elif agent_profile_name:
         selected = next(
-            (
-                profile
-                for profile in profiles
-                if profile.get("name") == agent_profile_name
-            ),
+            (profile for profile in profiles if profile.name == agent_profile_name),
             None,
         )
         if selected is None:
             raise HTTPException(422, f"Agent profile `{agent_profile_name}` not found")
-        resolved_id = _parse_agent_profile_id(selected.get("id"))
+        resolved_id = selected.id
     if not resolved_name or resolved_id is None:
         raise HTTPException(422, "Plugin automation requires an agent profile")
 
@@ -287,11 +292,8 @@ async def validate_agent_profile_allowlists(
     try:
         if resp.status_code != status.HTTP_200_OK:
             raise ValueError(f"status {resp.status_code}")
-        body = resp.json()
-        profile = body.get("profile") if isinstance(body, dict) else None
-        if not isinstance(profile, dict):
-            raise TypeError("profile is not an object")
-    except (ValueError, TypeError) as exc:
+        profile = _agent_profile_detail_from_response(resp)
+    except (ValueError, TypeError, ValidationError) as exc:
         logger.warning("Agent profile detail lookup failed: %s", exc)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -299,8 +301,7 @@ async def validate_agent_profile_allowlists(
         ) from exc
 
     if allowed_tools is not None:
-        tools = profile.get("tools")
-        if tools is None:
+        if not isinstance(profile, OpenHandsAgentProfile) or profile.tools is None:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 (
@@ -309,18 +310,7 @@ async def validate_agent_profile_allowlists(
                     f"{', '.join(allowed_tools)}"
                 ),
             )
-        if not isinstance(tools, list):
-            raise HTTPException(
-                status.HTTP_502_BAD_GATEWAY,
-                "Unexpected tools field in OpenHands API agent profile response",
-            )
-        selected_tools = {
-            name
-            for tool in tools
-            if isinstance(tool, dict)
-            and isinstance(name := tool.get("name"), str)
-            and name
-        }
+        selected_tools = {tool.name for tool in profile.tools}
         _validate_exact_allowlist(
             selected=selected_tools,
             allowed=allowed_tools,
@@ -331,7 +321,7 @@ async def validate_agent_profile_allowlists(
     if allowed_mcp_server_refs is not None:
         _validate_exact_allowlist(
             selected=_string_set_from_profile_list(
-                profile.get("mcp_server_refs"), "mcp_server_refs", resolved_name
+                profile.mcp_server_refs, "mcp_server_refs", resolved_name
             ),
             allowed=allowed_mcp_server_refs,
             resolved_name=resolved_name,
@@ -341,7 +331,7 @@ async def validate_agent_profile_allowlists(
     if allowed_secret_refs is not None:
         _validate_exact_allowlist(
             selected=_string_set_from_profile_list(
-                profile.get("secret_refs"), "secret_refs", resolved_name
+                profile.secret_refs, "secret_refs", resolved_name
             ),
             allowed=allowed_secret_refs,
             resolved_name=resolved_name,
@@ -396,13 +386,10 @@ async def ensure_agent_profile_exists(
     try:
         if resp.status_code != status.HTTP_200_OK:
             raise ValueError(f"status {resp.status_code}")
-        profiles = resp.json()["profiles"]
         known = frozenset(
-            str(profile["id"])
-            for profile in profiles
-            if isinstance(profile, dict) and profile.get("id")
+            str(profile.id) for profile in _agent_profiles_from_response(resp)
         )
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, ValidationError) as exc:
         logger.warning("Agent profile lookup failed: %s", exc)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,

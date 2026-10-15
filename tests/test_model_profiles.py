@@ -27,6 +27,16 @@ def _request(client: httpx.AsyncClient, *, session_key: str | None = None) -> Re
     )
 
 
+def _profile_detail(profile_id: str, name: str = "hello-world", **profile):
+    payload = {
+        "id": profile_id,
+        "name": name,
+        "llm_profile_ref": "default",
+    }
+    payload.update(profile)
+    return {"profile": payload}
+
+
 @pytest.fixture
 def user() -> AuthenticatedUser:
     return AuthenticatedUser(
@@ -53,15 +63,13 @@ async def test_validate_agent_profile_allowlists_rejects_extra_tool(user):
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
-                json={
-                    "name": "hello-world",
-                    "profile": {
-                        "tools": [
-                            {"name": "terminal", "params": {}},
-                            {"name": "browser_tool_set", "params": {}},
-                        ]
-                    },
-                },
+                json=_profile_detail(
+                    profile_id,
+                    tools=[
+                        {"name": "terminal", "params": {}},
+                        {"name": "browser_tool_set", "params": {}},
+                    ],
+                ),
             )
         return httpx.Response(404)
 
@@ -92,10 +100,9 @@ async def test_validate_agent_profile_allowlists_accepts_exact_required_tools(us
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
-                json={
-                    "name": "hello-world",
-                    "profile": {"tools": [{"name": "terminal", "params": {}}]},
-                },
+                json=_profile_detail(
+                    profile_id, tools=[{"name": "terminal", "params": {}}]
+                ),
             )
         return httpx.Response(404)
 
@@ -122,7 +129,7 @@ async def test_validate_agent_profile_allowlists_rejects_missing_allowed_tool(us
                 json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
             )
         if request.url.path == "/api/agent-profiles/hello-world":
-            return httpx.Response(200, json={"profile": {"tools": []}})
+            return httpx.Response(200, json=_profile_detail(profile_id, tools=[]))
         return httpx.Response(404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -153,7 +160,7 @@ async def test_validate_agent_profile_allowlists_rejects_implicit_default_tools(
                 json={"profiles": [{"id": profile_id, "name": "hello-world"}]},
             )
         if request.url.path == "/api/agent-profiles/hello-world":
-            return httpx.Response(200, json={"profile": {"tools": None}})
+            return httpx.Response(200, json=_profile_detail(profile_id, tools=None))
         return httpx.Response(404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -186,11 +193,7 @@ async def test_validate_agent_profile_allowlists_rejects_mcp_ref_outside_allowli
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
-                json={
-                    "profile": {
-                        "mcp_server_refs": ["github", "slack"],
-                    }
-                },
+                json=_profile_detail(profile_id, mcp_server_refs=["github", "slack"]),
             )
         return httpx.Response(404)
 
@@ -223,7 +226,7 @@ async def test_validate_agent_profile_allowlists_rejects_missing_secret_ref(user
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
-                json={"profile": {"secret_refs": ["GITHUB_TOKEN"]}},
+                json=_profile_detail(profile_id, secret_refs=["GITHUB_TOKEN"]),
             )
         return httpx.Response(404)
 
@@ -258,12 +261,11 @@ async def test_validate_agent_profile_allowlists_accepts_mcp_and_secret_allowlis
         if request.url.path == "/api/agent-profiles/hello-world":
             return httpx.Response(
                 200,
-                json={
-                    "profile": {
-                        "mcp_server_refs": ["github"],
-                        "secret_refs": ["GITHUB_TOKEN"],
-                    }
-                },
+                json=_profile_detail(
+                    profile_id,
+                    mcp_server_refs=["github"],
+                    secret_refs=["GITHUB_TOKEN"],
+                ),
             )
         return httpx.Response(404)
 
@@ -303,15 +305,14 @@ async def test_validate_agent_profile_allowlists_checks_local_profiles(
         if request.url.path == "/api/agent-profiles/hello-world-agent":
             return httpx.Response(
                 200,
-                json={
-                    "name": "hello-world-agent",
-                    "profile": {
-                        "tools": [
-                            {"name": "terminal", "params": {}},
-                            {"name": "file_editor", "params": {}},
-                        ]
-                    },
-                },
+                json=_profile_detail(
+                    profile_id,
+                    name="hello-world-agent",
+                    tools=[
+                        {"name": "terminal", "params": {}},
+                        {"name": "file_editor", "params": {}},
+                    ],
+                ),
             )
         return httpx.Response(404)
 

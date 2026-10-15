@@ -135,7 +135,12 @@ class AutomationPluginEntrypoint(BaseModel):
                 )
             return self
         if self.setup_script is not None:
-            raise ValueError("conversation runners use the stock setup.sh")
+            raise ValueError(
+                "entrypoint.setup_script is not supported for conversation runners; "
+                "the automation service provides the setup script for the stock SDK "
+                "conversation runner. Use runner='script' if the plugin needs a "
+                "custom setup script."
+            )
         if self.working_dir != ".":
             raise ValueError("conversation runners must use working_dir='.'")
         if any(ch in self.command for ch in ("/", ":", "\\")):
