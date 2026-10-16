@@ -370,6 +370,7 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
         names = set(tar.getnames())
         assert {
             "main.py",
+            "prompt_builder.py",
             "setup.sh",
             "prompt.txt",
             "plugins_config.json",
@@ -392,6 +393,10 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     assert plugins_config == [{"source": str(plugin)}]
     assert "StartConversationRequest" in main_source
     assert "RemoteConversation.create" in main_source
+    assert "get_default_agent" not in main_source
+    assert "Conversation(**conversation_kwargs)" not in main_source
+    assert "clone_repos" not in main_source
+    assert "repos_config.json" not in main_source
     assert "AUTOMATION_LLM_PROFILE_NAME" in main_source
     assert "experiment_config.json" not in main_source
     assert "threading" not in main_source
@@ -407,6 +412,9 @@ def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch
         "_PLUGIN_SPEC_PRESET_CACHE",
         {
             "main.py": sentinel_main,
+            "prompt_builder.py": (
+                "def build_user_prompt(prompt, event_context):\n    return prompt\n"
+            ),
             "setup.sh": "#!/usr/bin/env bash\n",
         },
     )

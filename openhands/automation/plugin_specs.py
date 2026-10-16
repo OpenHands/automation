@@ -263,6 +263,13 @@ class AutomationPluginDefinition(BaseModel):
             raise ValueError(
                 "Only one of suggested_trigger or suggested_trigger_template may be set"
             )
+        if self.entrypoint.runner == "conversation" and (
+            self.runtime.agent_profile is None
+            or not self.runtime.agent_profile.required
+        ):
+            raise ValueError(
+                "conversation runners must declare a required runtime.agent_profile"
+            )
         return self
 
 
@@ -712,6 +719,9 @@ def _load_plugin_spec_preset_files() -> dict[str, str]:
     if _PLUGIN_SPEC_PRESET_CACHE is None:
         _PLUGIN_SPEC_PRESET_CACHE = {
             "main.py": (PLUGIN_SPEC_PRESET_DIR / "sdk_main.py").read_text(),
+            "prompt_builder.py": (
+                PLUGIN_SPEC_PRESET_DIR / "prompt_builder.py"
+            ).read_text(),
             "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
         }
     return _PLUGIN_SPEC_PRESET_CACHE
@@ -790,6 +800,7 @@ def _build_stock_runner_tarball(
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
+        _add_bytes(tar, "prompt_builder.py", preset_files["prompt_builder.py"].encode())
         _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
         _add_bytes(
             tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()
