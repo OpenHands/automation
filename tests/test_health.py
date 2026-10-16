@@ -8,7 +8,6 @@ from httpx import ASGITransport, AsyncClient
 
 from openhands.automation import __version__
 from openhands.automation.app import app
-from openhands.automation.utils.version import SDK_GIT_REF, SDK_GIT_REPOSITORY
 
 
 @pytest.fixture
@@ -88,9 +87,8 @@ class TestSdkVersionEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        assert "version" in data
         assert data["version"] == importlib.metadata.version("openhands-sdk")
-        assert data["git_repository"] == SDK_GIT_REPOSITORY
-        assert data["git_ref"] == SDK_GIT_REF
 
     async def test_no_auth_required(self, health_client):
         """GET /sdk-version is accessible without any authentication token."""
@@ -125,7 +123,6 @@ class TestServerInfoEndpoint:
         assert response.json() == {
             "package_version": __version__,
             "sdk_version": importlib.metadata.version("openhands-sdk"),
-            "sdk_git_ref": SDK_GIT_REF,
         }
 
     async def test_no_auth_required(self, health_client):

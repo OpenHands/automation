@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# control-automation: drive an isolated OpenHands Automation Service (and the
+# Agent Server it dispatches to) through their REST APIs and capture evidence.
+# See ../SKILL.md and `control-automation --help`.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../../.." && pwd)"
+
+if [[ -n "${CONTROL_AUTOMATION_PYTHON:-}" ]]; then
+  PYTHON=("$CONTROL_AUTOMATION_PYTHON")
+elif [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+  PYTHON=("$REPO_ROOT/.venv/bin/python")
+elif command -v uv >/dev/null 2>&1; then
+  PYTHON=(uv run --quiet --project "$REPO_ROOT" python)
+else
+  printf '%s\n' '{"ok": false, "exit": 3, "error": "No Python environment found.", "hint": "Run `uv sync --dev` (or `make build`) in the repository root first."}'
+  exit 3
+fi
+
+exec "${PYTHON[@]}" "$SCRIPT_DIR/control_automation.py" "$@"
