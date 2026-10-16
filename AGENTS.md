@@ -184,6 +184,7 @@ Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Merge the cleanup PR and let release-please update the release PR before merging it.
 - Cleanup PRs follow the normal review and required-check protections for `main`.
 
 
