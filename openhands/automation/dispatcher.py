@@ -98,6 +98,16 @@ def _is_retryable_http_status(status_code: int) -> bool:
     return status_code in _RETRYABLE_HTTP_STATUS_CODES or status_code >= 500
 
 
+def _run_status_kind_for_http_status(status_code: int) -> RunStatusDetailKind:
+    if status_code == 429:
+        return RunStatusDetailKind.RATE_LIMITED
+    if status_code in {408, 504}:
+        return RunStatusDetailKind.TIMEOUT
+    if status_code >= 500:
+        return RunStatusDetailKind.SERVER_ERROR
+    return RunStatusDetailKind.UNKNOWN
+
+
 def _http_exception_status_detail(
     exc: HTTPException,
     *,
@@ -106,17 +116,9 @@ def _http_exception_status_detail(
     operation: str,
 ) -> dict[str, Any]:
     status_code = exc.status_code
-    if status_code == 429:
-        kind = RunStatusDetailKind.RATE_LIMITED
-    elif status_code == 408:
-        kind = RunStatusDetailKind.TIMEOUT
-    elif status_code >= 500:
-        kind = RunStatusDetailKind.SERVER_ERROR
-    else:
-        kind = RunStatusDetailKind.UNKNOWN
     return make_run_status_detail(
         phase=phase,
-        kind=kind,
+        kind=_run_status_kind_for_http_status(status_code),
         detail=str(exc.detail),
         transient=_is_retryable_http_status(status_code),
         source=source,
@@ -481,6 +483,28 @@ async def _execute_run(
         )
         return
     except PluginSpecError as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None and _is_retryable_http_status(status_code):
+            logger.warning(
+                "Transient plugin preflight error: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(),
+            )
+            await _fail(
+                str(exc),
+                status_detail=make_run_status_detail(
+                    phase=RunStatusPhase.DISPATCH,
+                    kind=_run_status_kind_for_http_status(status_code),
+                    detail=str(exc),
+                    transient=True,
+                    source="automation_service",
+                    operation="preflight_plugin",
+                    code=getattr(exc, "code", None) or type(exc).__name__,
+                    status_code=status_code,
+                ),
+            )
+            return
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
             exc,
@@ -497,7 +521,8 @@ async def _execute_run(
                 transient=False,
                 source="automation_service",
                 operation="preflight_plugin",
-                code=type(exc).__name__,
+                code=getattr(exc, "code", None) or type(exc).__name__,
+                status_code=status_code,
             ),
         )
         return

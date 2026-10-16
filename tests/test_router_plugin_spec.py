@@ -20,6 +20,30 @@ def allow_local_plugin_sources_in_router_tests(monkeypatch):
     )
 
 
+def test_preflight_manifest_preserves_retryable_plugin_source_error(monkeypatch):
+    from contextlib import contextmanager
+
+    from openhands.automation.plugin_specs import preflight_manifest
+    from openhands.sdk.plugin import PluginSourceError
+
+    @contextmanager
+    def fail_preflight(**kwargs):
+        raise PluginSourceError("source_unavailable", "GitHub unavailable")
+        yield
+
+    monkeypatch.setattr(
+        "openhands.automation.plugin_specs.preflight_plugin", fail_preflight
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        preflight_manifest(AutomationPluginSource(source="github:org/plugin"))
+
+    exc = exc_info.value
+    assert getattr(exc, "code") == "source_unavailable"
+    assert getattr(exc, "status_code") == 502
+    assert "GitHub unavailable" in str(exc)
+
+
 def write_plugin(root: Path) -> Path:
     plugin = root / "plugin"
     (plugin / "scripts").mkdir(parents=True)

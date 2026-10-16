@@ -39,7 +39,7 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.extensions.fetch import SourceType, parse_extension_source
-from openhands.sdk.plugin import PluginSource, preflight_plugin
+from openhands.sdk.plugin import PluginSource, PluginSourceError, preflight_plugin
 from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
 
 
@@ -59,6 +59,17 @@ _TRIGGER_ADAPTER: TypeAdapter[Trigger] = TypeAdapter(Trigger)
 
 class PluginSpecError(ValueError):
     """Raised when an executable automation plugin spec is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 class AutomationPluginSource(BaseModel):
@@ -393,6 +404,12 @@ def preflight_manifest(
             manifest = _read_manifest_from_plugin_metadata(checked.manifest)
             _validate_manifest_paths(checked.path, manifest)
             return checked.resolved_ref, manifest
+    except PluginSourceError as exc:
+        raise PluginSpecError(
+            f"Failed to preflight automation plugin: {exc}",
+            code=exc.code,
+            status_code=exc.status_code,
+        ) from exc
     except Exception as exc:
         if isinstance(exc, PluginSpecError):
             raise

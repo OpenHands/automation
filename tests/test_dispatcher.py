@@ -1543,6 +1543,49 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.status_detail["transient"] is False
 
+    async def test_retryable_plugin_preflight_failure_stays_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A transient plugin-source outage is not permanent."""
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                side_effect=PluginSpecError(
+                    "Failed to preflight automation plugin: source unavailable",
+                    code="source_unavailable",
+                    status_code=502,
+                ),
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["kind"] == "server_error"
+            assert updated.status_detail["status_code"] == 502
+            assert updated.status_detail["code"] == "source_unavailable"
+            assert updated.status_detail["transient"] is True
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
     async def test_plugin_fetch_transport_failure_releases_context(
         self, async_session_factory, mock_settings
     ):
