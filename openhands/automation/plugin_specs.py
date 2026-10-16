@@ -49,7 +49,6 @@ PLUGIN_AUTOMATION_KEY = "automation"
 AUTOMATION_DIR = ".automation"
 PRESETS_DIR = Path(__file__).parent / "presets"
 PLUGIN_SPEC_PRESET_DIR = PRESETS_DIR / "plugin_spec"
-SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
 _PLUGIN_SPEC_PRESET_CACHE: dict[str, str] | None = None
 _CONFIG_TEMPLATE_RE = re.compile(
     r"{{\s*(?P<json>json\s+)?config\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
@@ -714,7 +713,6 @@ def _load_plugin_spec_preset_files() -> dict[str, str]:
         _PLUGIN_SPEC_PRESET_CACHE = {
             "main.py": (PLUGIN_SPEC_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_SPEC_PRESET_DIR / "setup.sh").read_text(),
-            "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PLUGIN_SPEC_PRESET_CACHE
 
@@ -792,9 +790,6 @@ def _build_stock_runner_tarball(
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _add_bytes(tar, "main.py", preset_files["main.py"].encode())
-        _add_bytes(
-            tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"].encode()
-        )
         _add_bytes(tar, "setup.sh", preset_files["setup.sh"].encode(), mode=0o755)
         _add_bytes(
             tar, "prompt.txt", _conversation_prompt_for_manifest(manifest).encode()

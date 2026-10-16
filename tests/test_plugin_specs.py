@@ -370,7 +370,6 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
         names = set(tar.getnames())
         assert {
             "main.py",
-            "finish_tool_hook.py",
             "setup.sh",
             "prompt.txt",
             "plugins_config.json",
@@ -409,7 +408,6 @@ def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch
         {
             "main.py": sentinel_main,
             "setup.sh": "#!/usr/bin/env bash\n",
-            "finish_tool_hook.py": "# finish hook\n",
         },
     )
 

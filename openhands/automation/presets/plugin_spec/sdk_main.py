@@ -142,7 +142,6 @@ from openhands.sdk.conversation.request import (
     StartConversationRequest,
 )
 from openhands.sdk.workspace.local import LocalWorkspace
-from openhands.tools.preset import TaskOutcome
 
 try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
@@ -171,33 +170,6 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
-
-
-def _agent_has_finish_tool(agent):
-    if "FinishTool" in getattr(agent, "include_default_tools", []):
-        return True
-    return any(getattr(tool, "name", None) == "finish" for tool in agent.tools)
-
-
-def _finish_tool_hook_config():
-    from finish_tool_hook import finish_tool_required_hook_config
-
-    print("  finish hook: enabled")
-    return finish_tool_required_hook_config(SCRIPT_DIR)
-
-
-def _finish_hook_config_for_agent(agent):
-    if not _agent_has_finish_tool(agent):
-        print("  finish hook: disabled (finish tool unavailable)")
-        return None
-    return _finish_tool_hook_config()
-
-
-def _finish_hook_config_for_profile() -> object | None:
-    if agent_profile_kind != "openhands":
-        print("  finish hook: disabled (finish tool unavailable)")
-        return None
-    return _finish_tool_hook_config()
 
 
 # Workspace base directory (for RemoteWorkspace working_dir)
@@ -398,12 +370,7 @@ More activity arrived on the same subject while this run was queued:
 
         # Get default agent with tools and condenser (CLI mode to disable browser)
         print("\n=== AGENT ===")
-        # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
-        agent = get_default_agent(
-            llm=llm,
-            cli_mode=True,
-            finish_tool_response_schema=TaskOutcome,
-        )
+        agent = get_default_agent(llm=llm, cli_mode=True)
 
         # Add MCP config and agent_context using model_copy if configured
         # (Plugin MCP configs will be merged when plugins are loaded)
@@ -443,8 +410,6 @@ More activity arrived on the same subject while this run was queued:
             "workspace": LocalWorkspace(working_dir=workspace.working_dir),
             "agent_profile_id": uuid.UUID(agent_profile_id),
         }
-        if hook_config := _finish_hook_config_for_profile():
-            request_kwargs["hook_config"] = hook_config
         if model_profile:
             request_kwargs["agent_launch_additions"] = AgentLaunchAdditions(
                 llm_profile_ref=model_profile
@@ -456,8 +421,6 @@ More activity arrived on the same subject while this run was queued:
         assert agent is not None
         conversation_kwargs["agent"] = agent
         conversation_kwargs["delete_on_close"] = False
-        if hook_config := _finish_hook_config_for_agent(agent):
-            conversation_kwargs["hook_config"] = hook_config
         conversation = Conversation(**conversation_kwargs)
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
