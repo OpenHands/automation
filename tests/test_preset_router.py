@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+import tenacity
 
 from openhands.automation.models import Automation, TarballUpload, UploadStatus
 from openhands.automation.preset_router import (
@@ -25,8 +27,13 @@ from openhands.automation.preset_router import (
     _replace_prompt_in_tarball,
     _resolve_experiment_variant_models,
 )
+from openhands.sdk.agent import ACPAgent
+from openhands.sdk.context import AgentContext
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
 from openhands.sdk.plugin import PluginSource
+from openhands.sdk.settings import ACPAgentSettings, OpenHandsAgentSettings
+from openhands.sdk.skills import Skill
+from openhands.sdk.workspace import RemoteWorkspace
 from openhands.workspace import RepoSource
 
 
@@ -96,6 +103,252 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
         namespace,
     )
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
+
+
+_AGENT_HELPER_NAMES = (
+    "_is_retryable_error",
+    "_fetch_agent_settings",
+    "_merge_agent_context",
+    "_resolve_agent",
+)
+
+
+def _load_preset_agent_helpers(
+    preset_name: str, *, get_default_agent: Callable[..., Any] | None = None
+) -> dict[str, Any]:
+    """Load the preset's agent-settings helpers, bound to the real SDK types.
+
+    ``get_default_agent`` comes from openhands-tools, which only the sandbox
+    installs, so tests that reach it pass a stand-in.
+    """
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_nodes = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in _AGENT_HELPER_NAMES
+    ]
+    assert {node.name for node in function_nodes} == set(_AGENT_HELPER_NAMES)
+    namespace: dict[str, Any] = {
+        "ACPAgentSettings": ACPAgentSettings,
+        "get_default_agent": get_default_agent,
+        "httpx": httpx,
+        "tenacity": tenacity,
+    }
+    helpers = ast.Module(body=[*function_nodes], type_ignores=[])
+    ast.fix_missing_locations(helpers)
+    exec(compile(helpers, str(source_path), "exec"), namespace)
+    return namespace
+
+
+def _settings_response(agent_settings: Any) -> httpx.Response:
+    """The agent server's ``GET /api/settings`` reply for these agent settings."""
+    return httpx.Response(
+        200,
+        json={
+            "agent_settings": agent_settings.model_dump(
+                mode="json", context={"expose_secrets": "plaintext"}
+            ),
+            "conversation_settings": {},
+            "llm_api_key_is_set": False,
+        },
+    )
+
+
+def _workspace_replying(
+    *replies: httpx.Response | Exception,
+) -> tuple[RemoteWorkspace, list[httpx.Request]]:
+    """A workspace whose agent server answers each request with the next reply."""
+    requests: list[httpx.Request] = []
+    pending = iter(replies)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        reply = next(pending)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    workspace = RemoteWorkspace(host="http://agent-server.test", working_dir="/tmp")
+    workspace._client = httpx.Client(
+        base_url=workspace.host, transport=httpx.MockTransport(handler)
+    )
+    return workspace, requests
+
+
+@pytest.fixture
+def retry_waits(monkeypatch) -> list[float]:
+    """Record the waits between retry attempts instead of sleeping through them."""
+    waits: list[float] = []
+    monkeypatch.setattr("tenacity.nap.time.sleep", waits.append)
+    return waits
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+class TestPresetAgentSettings:
+    """The presets pick the agent from the server's ``agent_kind``.
+
+    The helpers are loaded from the preset source and run against the real SDK
+    settings models and ``RemoteWorkspace``, so an SDK change that breaks the
+    ACP path fails here instead of inside a sandbox.
+    """
+
+    def test_fetch_returns_the_servers_acp_settings(self, preset_name):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(
+            _settings_response(ACPAgentSettings(acp_server="claude-code"))
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert isinstance(settings, ACPAgentSettings)
+        assert settings.acp_server == "claude-code"
+        assert [request.url.path for request in requests] == ["/api/settings"]
+
+    def test_fetch_retries_transient_errors(self, preset_name, retry_waits):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(
+            httpx.Response(503),
+            httpx.ConnectError("connection refused"),
+            _settings_response(ACPAgentSettings(acp_server="claude-code")),
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert isinstance(settings, ACPAgentSettings)
+        assert len(requests) == 3
+        assert retry_waits == [1, 2]
+
+    def test_fetch_makes_as_many_attempts_as_get_llm(self, preset_name, retry_waits):
+        """A flaky server gets the same number of attempts ``main`` gave it."""
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, settings_requests = _workspace_replying(
+            *(httpx.Response(503) for _ in range(10))
+        )
+        llm_workspace, llm_requests = _workspace_replying(
+            *(httpx.Response(503) for _ in range(10))
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+        with pytest.raises(httpx.HTTPStatusError):
+            llm_workspace.get_llm()
+
+        assert settings is None
+        assert len(settings_requests) == len(llm_requests) == 3
+
+    def test_fetch_gives_up_at_once_without_a_settings_endpoint(
+        self, preset_name, retry_waits, capsys
+    ):
+        """Agent servers that predate ``GET /api/settings`` keep the default path."""
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, requests = _workspace_replying(httpx.Response(404))
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        assert settings is None
+        assert len(requests) == 1
+        assert retry_waits == []
+        assert "agent settings unavailable (HTTP 404)" in capsys.readouterr().out
+
+    def test_fetch_does_not_print_rejected_plaintext_settings(
+        self, preset_name, capsys
+    ):
+        helpers = _load_preset_agent_helpers(preset_name)
+        workspace, _ = _workspace_replying(
+            httpx.Response(
+                200,
+                json={
+                    "agent_settings": {
+                        "agent_kind": "openhands",
+                        "llm": {"model": "gpt", "api_key": {"value": "sk-plaintext"}},
+                    },
+                    "conversation_settings": {},
+                    "llm_api_key_is_set": True,
+                },
+            )
+        )
+
+        settings = helpers["_fetch_agent_settings"](workspace)
+
+        output = capsys.readouterr().out
+        assert settings is None
+        assert "agent settings unavailable (ValidationError)" in output
+        assert "sk-plaintext" not in output
+
+    def test_merge_agent_context_keeps_acp_secrets(self, preset_name):
+        helpers = _load_preset_agent_helpers(preset_name)
+        settings = ACPAgentSettings(
+            acp_server="claude-code",
+            agent_context=AgentContext(secrets={"ANTHROPIC_API_KEY": "sk-test"}),
+        )
+        skill = Skill(name="repo-guide", content="Follow the repository guide.")
+        skills_context = AgentContext(skills=[skill], load_public_skills=False)
+
+        merged = helpers["_merge_agent_context"](settings, skills_context)
+
+        assert merged.secrets == {"ANTHROPIC_API_KEY": "sk-test"}
+        assert merged.skills == [skill]
+        assert merged.load_public_skills is False
+        merged.validate_acp_compatibility()
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            pytest.param(OpenHandsAgentSettings(), id="openhands"),
+            pytest.param(ACPAgentSettings(acp_server="claude-code"), id="acp-bare"),
+            pytest.param(None, id="unavailable"),
+        ],
+    )
+    def test_merge_agent_context_uses_the_skills_context_otherwise(
+        self, preset_name, settings
+    ):
+        helpers = _load_preset_agent_helpers(preset_name)
+        skills_context = AgentContext(skills=[], load_public_skills=True)
+
+        merged = helpers["_merge_agent_context"](settings, skills_context)
+
+        assert merged is skills_context
+
+    def test_resolve_agent_builds_the_configured_acp_agent(self, preset_name):
+        get_default_agent = MagicMock()
+        helpers = _load_preset_agent_helpers(
+            preset_name, get_default_agent=get_default_agent
+        )
+        settings = ACPAgentSettings(acp_server="claude-code")
+
+        agent = helpers["_resolve_agent"](
+            settings, llm=None, cli_mode=True, finish_tool_response_schema=dict
+        )
+
+        assert isinstance(agent, ACPAgent)
+        assert agent.acp_server == "claude-code"
+        assert agent.acp_command == settings.resolve_acp_command()
+        get_default_agent.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            pytest.param(OpenHandsAgentSettings(), id="openhands"),
+            pytest.param(None, id="unavailable"),
+        ],
+    )
+    def test_resolve_agent_uses_the_default_agent_otherwise(
+        self, preset_name, settings
+    ):
+        get_default_agent = MagicMock()
+        helpers = _load_preset_agent_helpers(
+            preset_name, get_default_agent=get_default_agent
+        )
+        llm = object()
+
+        agent = helpers["_resolve_agent"](
+            settings, llm=llm, cli_mode=True, finish_tool_response_schema=dict
+        )
+
+        assert agent is get_default_agent.return_value
+        get_default_agent.assert_called_once_with(
+            llm=llm, cli_mode=True, finish_tool_response_schema=dict
+        )
 
 
 class TestPresetSessionUrl:
@@ -538,6 +791,9 @@ class TestGenerateTarball:
             assert "get_default_agent" in main_content
             assert "model_copy" in main_content
             assert "prompt.txt" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
 
     def test_generate_tarball_setup_sh_executable(self):
         """setup.sh in tarball has executable permissions."""
@@ -1455,6 +1711,10 @@ class TestGeneratePluginTarball:
             assert "PluginSource.model_validate" in main_content
             assert '"plugins": plugin_sources' in main_content
             assert "Conversation(**conversation_kwargs)" in main_content
+            assert "ACPAgentSettings" in main_content
+            assert "_fetch_agent_settings" in main_content
+            assert "create_agent()" in main_content
+            assert "get_default_agent" in main_content
 
     def test_generate_plugin_tarball_setup_sh_executable(self):
         """setup.sh in plugin tarball has executable permissions."""

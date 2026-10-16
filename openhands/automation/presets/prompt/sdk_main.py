@@ -30,10 +30,11 @@ The script:
   2. Opens the workspace context EARLY (ensures callback on any failure)
   3. Clones repos via workspace.clone_repos()
   4. Loads skills via workspace.load_skills_from_agent_server()
-  5. Gets LLM config via workspace.get_llm()
+  5. Gets LLM config via workspace.get_llm() (skipped for an ACP agent)
   6. Gets secrets via workspace.get_secrets()
   7. Gets MCP config via workspace.get_mcp_config()
-  8. Gets default agent with tools and condenser
+  8. Builds the agent for the server's agent_kind: the configured ACP agent,
+     or the default agent with tools and condenser
   9. Creates a RemoteConversation, sets a descriptive title, and injects secrets
   10. Sends the user's prompt (with event context if available) and runs
   11. On context manager exit, the workspace sends a completion callback
@@ -200,9 +201,14 @@ try:
     from openhands.sdk.mcp.config import coerce_mcp_config as _coerce_mcp_config
 except ImportError:
     _coerce_mcp_config = None
+from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.tools.preset.default import get_default_agent
 from openhands.workspace import OpenHandsCloudWorkspace
+
+# Installed with the SDK, which depends on both.
+import httpx
+import tenacity
 
 
 def _conversation_supports_user_id() -> bool:
@@ -210,6 +216,71 @@ def _conversation_supports_user_id() -> bool:
         return "user_id" in inspect.signature(Conversation.__new__).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _is_retryable_error(error: BaseException) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code >= 500
+    return isinstance(error, (httpx.ConnectError, httpx.TimeoutException))
+
+
+def _fetch_agent_settings(workspace):
+    """Read the server's agent settings, or return None when they are unavailable.
+
+    workspace._fetch_agent_settings() makes a single request, so this applies
+    the retry policy the SDK uses for get_llm() and get_mcp_config(). If the
+    settings still cannot be read, the caller takes the default LLM path, which
+    never needed them: Cloud mode reads the LLM from the Cloud API, and older
+    agent servers do not serve GET /api/settings at all.
+    """
+    retryer = tenacity.Retrying(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=5),
+        retry=tenacity.retry_if_exception(_is_retryable_error),
+        reraise=True,
+    )
+    try:
+        return retryer(workspace._fetch_agent_settings)
+    except Exception as e:
+        # Name the error only: the settings are fetched with secrets in
+        # plaintext, and a validation error can quote the value it rejected.
+        reason = type(e).__name__
+        if isinstance(e, httpx.HTTPStatusError):
+            reason = f"HTTP {e.response.status_code}"
+        print(f"  agent settings unavailable ({reason})")
+        return None
+
+
+def _merge_agent_context(agent_settings, skills_context):
+    """Return the agent context for the run, with the loaded skills applied.
+
+    ACP settings can carry provider credentials in agent_context.secrets, so
+    the loaded skills are grafted onto that context instead of replacing it.
+    """
+    if not isinstance(agent_settings, ACPAgentSettings):
+        return skills_context
+    if agent_settings.agent_context is None:
+        return skills_context
+    return agent_settings.agent_context.model_copy(
+        update={
+            "skills": skills_context.skills,
+            "load_public_skills": skills_context.load_public_skills,
+        }
+    )
+
+
+def _resolve_agent(
+    agent_settings, llm=None, cli_mode: bool = True, finish_tool_response_schema=None
+):
+    """Build the agent matching the server's configured agent_kind."""
+    if isinstance(agent_settings, ACPAgentSettings):
+        return agent_settings.create_agent()
+    # Get default agent with tools and condenser (CLI mode to disable browser)
+    return get_default_agent(
+        llm=llm,
+        cli_mode=cli_mode,
+        finish_tool_response_schema=finish_tool_response_schema,
+    )
 
 
 def _normalize_mcp_config(raw_mcp_config):
@@ -341,6 +412,18 @@ with workspace_ctx as workspace:
             # Collect cloned repo directories for skill loading
             repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
 
+    # Fetch agent settings up front: the configured agent_kind determines
+    # whether this run needs an LLM at all. ACP agents have none, and newer
+    # SDKs raise ValueError from get_llm() for ACP settings when no LLM
+    # profile is active, so get_llm() must not be called on that path.
+    print("\n=== AGENT SETTINGS ===")
+    agent_settings = _fetch_agent_settings(workspace)
+    is_acp_agent = isinstance(agent_settings, ACPAgentSettings)
+    if agent_settings is None:
+        print("  agent_kind: unknown (using the default agent)")
+    else:
+        print(f"  agent_kind: {agent_settings.agent_kind}")
+
     # Load ALL skills via workspace.load_skills_from_agent_server()
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
@@ -349,6 +432,7 @@ with workspace_ctx as workspace:
         project_dirs=repo_dirs if repo_dirs else None
     )
     print(f"  loaded {len(loaded_skills)} skills")
+    agent_context = _merge_agent_context(agent_settings, agent_context)
 
     # Get repos context (mapping of URLs to local paths)
     repos_context = ""
@@ -401,21 +485,29 @@ More activity arrived on the same subject while this run was queued:
 
 {USER_PROMPT}"""
 
-    # Get LLM config via workspace/profile APIs
+    # Get LLM config via workspace/profile APIs. Skipped for ACP agents: they
+    # have no LLM (the subprocess manages its own model) and newer SDKs raise
+    # ValueError from get_llm() for ACP settings when no profile is active.
     print("\n=== GET_LLM ===")
-    try:
-        llm = workspace.get_llm(profile_name=model_profile)
-    except FileNotFoundError:
-        if not model_profile:
-            raise
-        print(
-            f"  profile {model_profile!r} not found; "
-            "falling back to active/default profile"
-        )
-        llm = workspace.get_llm()
-    print(f"  profile: {model_profile or 'DEFAULT'}")
-    print(f"  model: {llm.model}")
-    print(f"  api_key present: {bool(llm.api_key)}")
+    if is_acp_agent:
+        print("  skipped: ACP agent has no LLM")
+        if model_profile:
+            print(f"  profile {model_profile!r} ignored")
+        llm = None
+    else:
+        try:
+            llm = workspace.get_llm(profile_name=model_profile)
+        except FileNotFoundError:
+            if not model_profile:
+                raise
+            print(
+                f"  profile {model_profile!r} not found; "
+                "falling back to active/default profile"
+            )
+            llm = workspace.get_llm()
+        print(f"  profile: {model_profile or 'DEFAULT'}")
+        print(f"  model: {llm.model}")
+        print(f"  api_key present: {bool(llm.api_key)}")
 
     # Get secrets via workspace
     print("\n=== GET_SECRETS ===")
@@ -440,11 +532,11 @@ More activity arrived on the same subject while this run was queued:
         # Not a hard failure — user may not have MCP configured
         print(f"  get_mcp_config() failed (ok if no MCP): {e}")
 
-    # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")
     report_phase("Configuring agent")
     # Keep finish-tool schema wiring in sync with presets/plugin/sdk_main.py.
-    agent = get_default_agent(
+    agent = _resolve_agent(
+        agent_settings,
         llm=llm,
         cli_mode=True,
         finish_tool_response_schema=TaskOutcome,
