@@ -60,6 +60,10 @@ Common env vars:
   AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
+  AUTOMATION_RUN_TIMEOUT     - seconds the run may last, counted from the start of
+                               the entrypoint command; bounds conversation.run() so
+                               a timeout is reported before the command is killed
+                               (optional; unset keeps the SDK default)
 
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
   AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
@@ -76,6 +80,8 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+
+SCRIPT_STARTED_AT = time.monotonic()
 
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
@@ -128,6 +134,7 @@ print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_USER_ID: {'OK' if automation_user_id else 'NONE'}")
 print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else 'NONE'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
+print(f"  AUTOMATION_RUN_TIMEOUT: {os.environ.get('AUTOMATION_RUN_TIMEOUT') or 'NONE'}")
 
 # --- Live phase reporting (best-effort, never fatal) -------------------------
 # Keep this block in sync with presets/prompt/sdk_main.py.
@@ -189,6 +196,7 @@ def _phase_poster() -> None:
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
+from run_timeout import resolve_run_timeout
 from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.tools.preset import TaskOutcome
 
@@ -586,7 +594,15 @@ More activity arrived on the same subject while this run was queued:
     try:
         print(f"  sending prompt: {USER_PROMPT[:80]}...")
         conversation.send_message(USER_PROMPT)
-        conversation.run()
+        run_timeout = resolve_run_timeout(
+            os.environ.get("AUTOMATION_RUN_TIMEOUT"),
+            time.monotonic() - SCRIPT_STARTED_AT,
+        )
+        if run_timeout is None:
+            conversation.run()
+        else:
+            print(f"  run timeout: {run_timeout:.0f}s")
+            conversation.run(timeout=run_timeout)
 
         # Post-run bookkeeping is best-effort: the conversation has already
         # succeeded, and nothing below may raise out of the workspace context
