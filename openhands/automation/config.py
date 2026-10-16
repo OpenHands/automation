@@ -211,6 +211,12 @@ class SandboxSettings(BaseSettings):
             verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
+        AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS: Sandboxes tried per run when
+            one fails to start before the entrypoint runs; 1 disables retries
+            (default: 3)
+        AUTOMATION_SANDBOX_PROVISION_RETRY_DELAY: Base delay in seconds before
+            the next attempt, doubled per attempt with +/-50% jitter
+            (default: 30)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
         AUTOMATION_EXTERNAL_MAX_FILESIZE: Max tarball size (default: 100MB)
         AUTOMATION_RATE_LIMIT_MIN_WAIT: Initial 429 wait (default: 10)
@@ -230,6 +236,8 @@ class SandboxSettings(BaseSettings):
     run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
+    sandbox_provision_max_attempts: int = Field(default=3, ge=1)
+    sandbox_provision_retry_delay: float = Field(default=30, ge=0)
     external_download_timeout: int = 120
     external_max_filesize: int = 100 * 1024 * 1024  # 100 MB
     rate_limit_min_wait: int = 10
