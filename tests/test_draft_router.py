@@ -67,6 +67,24 @@ async def test_create_incomplete_draft_saves_partial_body(async_client, async_se
     assert draft.materialized_automation_id is None
 
 
+async def test_prompt_draft_accepts_description(async_client):
+    response = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Described draft",
+                "description": "Summarizes weekly support trends.",
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["draft"]["description"] == (
+        "Summarizes weekly support trends."
+    )
+
+
 async def test_create_draft_rejects_unknown_endpoint_fields(async_client):
     response = await async_client.post(
         "/api/automation/v1/drafts",
@@ -168,6 +186,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
             "endpoint": "/v1/preset/prompt",
             "draft": {
                 "name": "Runnable draft",
+                "description": "Summarizes weekly support trends.",
                 "prompt": "Write a short greeting.",
                 "trigger": {"type": "cron", "schedule": "0 9 * * *"},
             },
@@ -195,6 +214,7 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     assert automation is not None
     assert automation.enabled is False
     assert automation.state == AutomationState.DRAFT
+    assert automation.description == "Summarizes weekly support trends."
     assert automation.prompt == "Write a short greeting."
     assert automation.tarball_path.startswith("oh-internal://uploads/")
 

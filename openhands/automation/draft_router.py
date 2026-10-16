@@ -337,6 +337,7 @@ async def _materialize_raw_draft(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": None,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -375,6 +376,7 @@ async def _materialize_prompt_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -425,6 +427,7 @@ async def _materialize_plugin_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": model,

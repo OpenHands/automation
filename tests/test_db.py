@@ -302,6 +302,11 @@ class TestSqliteMigrations:
             assert "custom_webhooks" in tables
             assert "alembic_version" in tables
 
+            automation_columns = {
+                column["name"] for column in inspector.get_columns("automations")
+            }
+            assert "description" in automation_columns
+
             run_indexes = {
                 index["name"] for index in inspector.get_indexes("automation_runs")
             }

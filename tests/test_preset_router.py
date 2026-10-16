@@ -1318,6 +1318,63 @@ class TestCreateAutomationFromPrompt:
 # --- Plugin Preset Tests ---
 
 
+class TestPresetAutomationDescriptionValidation:
+    @pytest.mark.parametrize(
+        ("request_cls_name", "extra_fields"),
+        [
+            pytest.param("CreatePromptAutomationRequest", {}, id="prompt"),
+            pytest.param(
+                "CreatePluginAutomationRequest",
+                {"plugins": [{"source": "github:owner/repo"}]},
+                id="plugin",
+            ),
+        ],
+    )
+    def test_accepts_description(self, request_cls_name, extra_fields):
+        from openhands.automation import preset_router
+
+        request_cls = getattr(preset_router, request_cls_name)
+        request = request_cls.model_validate(
+            {
+                "name": "Test",
+                "description": "Summarizes weekly support trends.",
+                "prompt": "Test prompt",
+                "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                **extra_fields,
+            }
+        )
+
+        assert request.description == "Summarizes weekly support trends."
+
+    @pytest.mark.parametrize(
+        ("request_cls_name", "extra_fields"),
+        [
+            pytest.param("CreatePromptAutomationRequest", {}, id="prompt"),
+            pytest.param(
+                "CreatePluginAutomationRequest",
+                {"plugins": [{"source": "github:owner/repo"}]},
+                id="plugin",
+            ),
+        ],
+    )
+    def test_rejects_description_over_2000_characters(
+        self, request_cls_name, extra_fields
+    ):
+        from openhands.automation import preset_router
+
+        request_cls = getattr(preset_router, request_cls_name)
+        with pytest.raises(ValueError, match="at most 2000 characters"):
+            request_cls.model_validate(
+                {
+                    "name": "Test",
+                    "description": "x" * 2001,
+                    "prompt": "Test prompt",
+                    "trigger": {"type": "cron", "schedule": "0 0 * * *"},
+                    **extra_fields,
+                }
+            )
+
+
 class TestCreatePluginAutomationRequestValidation:
     """Tests for CreatePluginAutomationRequest validation."""
 

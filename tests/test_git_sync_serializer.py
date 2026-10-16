@@ -125,6 +125,7 @@ class TestSerializeAutomation:
 
     def test_automation_yaml_fields(self):
         automation = _make_automation(
+            description="Summarizes weekly support trends.",
             prompt="do the thing",
             observability_associations={
                 "scm.repository.full_name": "repository.full_name",
@@ -137,12 +138,21 @@ class TestSerializeAutomation:
 
         fields = yaml.safe_load(files["automation.yaml"])
         assert fields["name"] == "My Automation"
+        assert fields["description"] == "Summarizes weekly support trends."
         assert fields["prompt"] == "do the thing"
         assert fields["observability_associations"] == {
             "scm.repository.full_name": "repository.full_name",
             "scm.pull_request.number": "pull_request.number",
         }
         assert fields["tarball_source"] == {"type": "internal", "url": None}
+
+    def test_null_description_is_omitted(self):
+        automation = _make_automation(description=None)
+
+        files = serialize_automation(automation, _make_tarball({"main.py": b"x"}))
+
+        fields = yaml.safe_load(files["automation.yaml"])
+        assert "description" not in fields
 
     def test_external_url_skips_tarball_dir(self):
         automation = _make_automation(tarball_path="https://example.com/x.tar.gz")
@@ -184,6 +194,7 @@ class TestSerializeAutomation:
 class TestDeserializeAutomation:
     def test_roundtrip(self):
         automation = _make_automation(
+            description="Runs the weekly support report.",
             observability_associations={
                 "scm.repository.full_name": "repository.full_name",
             }
@@ -195,6 +206,7 @@ class TestDeserializeAutomation:
 
         assert result is not None
         assert result.fields["name"] == "My Automation"
+        assert result.fields["description"] == "Runs the weekly support report."
         assert result.fields["entrypoint"] == "python main.py"
         assert result.fields["observability_associations"] == {
             "scm.repository.full_name": "repository.full_name",
