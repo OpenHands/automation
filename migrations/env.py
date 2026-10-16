@@ -157,23 +157,20 @@ def run_migrations_online():
     use_sqlite = is_sqlite()
 
     with migration_engine() as engine, engine.begin() as connection:
-        # Acquire advisory lock for PostgreSQL only
+        # Acquire advisory lock for PostgreSQL only. A transaction-level lock
+        # is released only once the commit is visible, so a replica waiting
+        # on it finds the database at head instead of re-running migrations.
         if not use_sqlite:
-            connection.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
+            lock_sql = f"SELECT pg_advisory_xact_lock({MIGRATION_LOCK_ID})"
+            connection.execute(text(lock_sql))
 
-        try:
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-                # Enable batch mode for SQLite to handle ALTER TABLE limitations
-                render_as_batch=use_sqlite,
-            )
-            context.run_migrations()
-        finally:
-            # Release the lock for PostgreSQL
-            if not use_sqlite:
-                unlock_sql = f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})"
-                connection.execute(text(unlock_sql))
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            # Enable batch mode for SQLite to handle ALTER TABLE limitations
+            render_as_batch=use_sqlite,
+        )
+        context.run_migrations()
 
 
 if context.is_offline_mode():
