@@ -26,13 +26,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     fi
 fi
 set +e
-SDK_INFO=$(curl -sf "${AUTOMATION_API_URL}/sdk-version")
-SDK_VERSION=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin).get('version') or '')" 2>/dev/null)
-SDK_GIT_REPOSITORY=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin).get('git_repository') or '')" 2>/dev/null)
-SDK_GIT_REF=$(printf '%s' "$SDK_INFO" \
-  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin).get('git_ref') or '')" 2>/dev/null)
+SDK_VERSION=$(curl -sf "${AUTOMATION_API_URL}/sdk-version" \
+  | ${PYTHON_JSON} -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null)
 set -e
 if [ -z "$SDK_VERSION" ]; then
     echo "[setup] ERROR: Failed to fetch SDK version from ${AUTOMATION_API_URL}/sdk-version" >&2
@@ -61,19 +56,11 @@ if [ ! -x "$VENV_PYTHON" ]; then
     exit 1
 fi
 
-if [ -n "$SDK_GIT_REPOSITORY" ] && [ -n "$SDK_GIT_REF" ]; then
-    echo "[setup] Installing OpenHands SDK from git (${SDK_GIT_REF})"
-    uv pip install --python "$VENV_PYTHON" --quiet \
-      "openhands-sdk @ git+${SDK_GIT_REPOSITORY}@${SDK_GIT_REF}#subdirectory=openhands-sdk" \
-      "openhands-tools @ git+${SDK_GIT_REPOSITORY}@${SDK_GIT_REF}#subdirectory=openhands-tools" \
-      "openhands-workspace @ git+${SDK_GIT_REPOSITORY}@${SDK_GIT_REF}#subdirectory=openhands-workspace"
-else
-    echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
-    uv pip install --python "$VENV_PYTHON" --quiet \
-      "openhands-sdk==${SDK_VERSION}" \
-      "openhands-tools==${SDK_VERSION}" \
-      "openhands-workspace==${SDK_VERSION}"
-fi
+echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
+uv pip install --python "$VENV_PYTHON" --quiet \
+  "openhands-sdk==${SDK_VERSION}" \
+  "openhands-tools==${SDK_VERSION}" \
+  "openhands-workspace==${SDK_VERSION}"
 
 if ! "$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools, openhands.workspace'; then
     echo "[setup] ERROR: OpenHands SDK is not importable from .venv" >&2
