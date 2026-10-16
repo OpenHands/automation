@@ -112,7 +112,7 @@ from openhands.automation.utils.templates import (
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
-from openhands.automation.utils.webhook import get_webhook_config
+from openhands.automation.utils.webhook import get_webhook_config, is_builtin_source
 
 
 logger = logging.getLogger(__name__)
@@ -471,7 +471,7 @@ async def _resolve_plugin_spec_trigger(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Plugin automation requires a trigger or manifest suggested_trigger",
         )
-    if isinstance(trigger, EventTrigger):
+    if isinstance(trigger, EventTrigger) and not is_builtin_source(trigger.source):
         webhook = await get_webhook_config(trigger.source, user.org_id, session)
         if webhook is None:
             raise HTTPException(
