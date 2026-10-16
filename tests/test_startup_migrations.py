@@ -2,13 +2,14 @@
 
 import asyncio
 import sys
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, text
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 from starlette.datastructures import State
@@ -90,9 +91,9 @@ def _url(server: dict, database: str) -> URL:
     return URL.create("postgresql+pg8000", database=database, **server)
 
 
-def _run_admin_sql(server: dict, statement: str) -> None:
+def _run_admin_sql(server: dict, statement: str, database: str = "postgres") -> None:
     engine = create_engine(
-        _url(server, "postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
+        _url(server, database), isolation_level="AUTOCOMMIT", poolclass=NullPool
     )
     try:
         with engine.connect() as conn:
@@ -153,6 +154,33 @@ def _assert_at_head_and_released(server: dict, database: str) -> None:
     assert lock_free
 
 
+def _migration_lock_waiters(server: dict, database: str) -> int:
+    engine = create_engine(_url(server, database), poolclass=NullPool)
+    try:
+        with engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks"
+                    " WHERE locktype = 'advisory' AND objid = :lock AND NOT granted"
+                    " AND database = ("
+                    "SELECT oid FROM pg_database WHERE datname = current_database())"
+                ),
+                {"lock": MIGRATION_LOCK_ID},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+
+async def _wait_for_migration_lock_waiters(
+    server: dict, database: str, count: int
+) -> None:
+    for _ in range(600):
+        if _migration_lock_waiters(server, database) == count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{count} replicas never queued on the migration lock")
+
+
 async def _upgrade_in_another_process() -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         sys.executable,
@@ -177,19 +205,49 @@ async def test_run_migrations_brings_an_empty_database_to_head(
     _assert_at_head_and_released(postgres_server, empty_database)
 
 
-async def test_service_and_another_replica_can_migrate_at_once(
+async def test_a_replica_waiting_on_the_lock_finds_the_database_at_head(
     point_migrations_at, empty_database, postgres_server
 ):
-    """The advisory lock makes one wait for the other, then find head."""
+    """The waiting replica must not read the schema before the first commits."""
     point_migrations_at(empty_database)
-    other_replica = await _upgrade_in_another_process()
 
-    _, returncode = await asyncio.gather(
-        app_module.run_migrations(get_config().service), other_replica.wait()
-    )
+    def slow_commit(conn) -> None:
+        # Widen the gap between finishing the upgrade and committing it.
+        time.sleep(1)
+
+    gate = create_engine(_url(postgres_server, empty_database), poolclass=NullPool)
+    event.listen(Engine, "commit", slow_commit)
+    try:
+        with gate.connect() as conn:
+            # Hold the lock so both replicas queue on it, the service first.
+            # PostgreSQL grants it to waiters in the order they asked.
+            conn.execute(text(f"SELECT pg_advisory_lock({MIGRATION_LOCK_ID})"))
+            service = asyncio.create_task(
+                app_module.run_migrations(get_config().service)
+            )
+            await _wait_for_migration_lock_waiters(postgres_server, empty_database, 1)
+            other_replica = await _upgrade_in_another_process()
+            await _wait_for_migration_lock_waiters(postgres_server, empty_database, 2)
+            conn.execute(text(f"SELECT pg_advisory_unlock({MIGRATION_LOCK_ID})"))
+        await service
+        returncode = await other_replica.wait()
+    finally:
+        event.remove(Engine, "commit", slow_commit)
+        gate.dispose()
 
     assert returncode == 0
     _assert_at_head_and_released(postgres_server, empty_database)
+
+
+async def test_a_failed_migration_reports_its_own_error(
+    point_migrations_at, empty_database, postgres_server
+):
+    point_migrations_at(empty_database)
+    # The first migration creates this table.
+    _run_admin_sql(postgres_server, "CREATE TABLE automations (id int)", empty_database)
+
+    with pytest.raises(RuntimeError, match='relation "automations" already exists'):
+        await app_module.run_migrations(get_config().service)
 
 
 async def test_run_migrations_raises_the_database_error(point_migrations_at):
