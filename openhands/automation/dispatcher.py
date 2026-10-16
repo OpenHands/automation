@@ -91,6 +91,41 @@ from openhands.automation.utils.unhealthy import (
 logger = logging.getLogger("automation.dispatcher")
 
 
+_RETRYABLE_HTTP_STATUS_CODES = {408, 429}
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_HTTP_STATUS_CODES or status_code >= 500
+
+
+def _http_exception_status_detail(
+    exc: HTTPException,
+    *,
+    phase: RunStatusPhase,
+    source: str,
+    operation: str,
+) -> dict[str, Any]:
+    status_code = exc.status_code
+    if status_code == 429:
+        kind = RunStatusDetailKind.RATE_LIMITED
+    elif status_code == 408:
+        kind = RunStatusDetailKind.TIMEOUT
+    elif status_code >= 500:
+        kind = RunStatusDetailKind.SERVER_ERROR
+    else:
+        kind = RunStatusDetailKind.UNKNOWN
+    return make_run_status_detail(
+        phase=phase,
+        kind=kind,
+        detail=str(exc.detail),
+        transient=_is_retryable_http_status(status_code),
+        source=source,
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
 def _plugin_agent_profile_requirement(
     resolved_runtime: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -146,6 +181,8 @@ async def _validate_plugin_run_agent_profile(
             fetch_profile_detail=True,
         )
     except HTTPException as exc:
+        if _is_retryable_http_status(exc.status_code):
+            raise
         raise PluginSpecError(str(exc.detail)) from exc
     if resolved_id is None:
         raise PluginSpecError("Plugin automation requires an agent profile selection")
@@ -179,10 +216,15 @@ async def _fetch_plugins_on_agent_server(
                 detail: Any = response.json().get("detail")
             except Exception:
                 detail = response.text
-            raise PluginSpecError(
+            message = (
                 f"Agent server failed to fetch plugin {request.get('source')!r}: "
                 f"{detail}"
             )
+            if _is_retryable_http_status(response.status_code):
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            raise PluginSpecError(message)
         fetched.append(response.json())
     return fetched
 
@@ -421,6 +463,23 @@ async def _execute_run(
                 plugin_env["AUTOMATION_AGENT_PROFILE_KIND"] = profile_kind
                 resolved_runtime["agent_profile_kind"] = profile_kind
             entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
+    except HTTPException as exc:
+        logger.warning(
+            "Transient plugin preflight error: %s",
+            exc.detail,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc.detail),
+            status_detail=_http_exception_status_detail(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="openhands_api",
+                operation="validate_agent_profile",
+            ),
+        )
+        return
     except PluginSpecError as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
@@ -608,6 +667,24 @@ async def _execute_run(
                 source="automation_service",
                 operation="prepare_tarball",
                 code=type(exc).__name__,
+            ),
+        )
+        return
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Transient plugin fetch error: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="agent_server",
+                operation="fetch_plugin",
             ),
         )
         return
