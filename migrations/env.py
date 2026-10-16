@@ -21,7 +21,7 @@ identical DDL/schema operations.
 import os
 
 from alembic import context
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from openhands.automation.db import _build_pg8000_connect_args
 from openhands.automation.models import Base
@@ -56,6 +56,16 @@ def is_sqlite() -> bool:
     return DB_URL.startswith("sqlite")
 
 
+def _configure_sqlite_transaction_control(engine):
+    @event.listens_for(engine, "connect")
+    def _disable_sqlite_legacy_transactions(dbapi_connection, _connection_record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _begin_sqlite_transaction(connection):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def get_engine(database_name=DB_NAME):
     """Create database engine based on configuration.
 
@@ -70,7 +80,10 @@ def get_engine(database_name=DB_NAME):
         # For SQLite, remove async driver prefix if present (Alembic is sync)
         if url.startswith("sqlite+aiosqlite"):
             url = url.replace("sqlite+aiosqlite", "sqlite", 1)
-        return create_engine(url, pool_pre_ping=True)
+        engine = create_engine(url, pool_pre_ping=True)
+        if url.startswith("sqlite"):
+            _configure_sqlite_transaction_control(engine)
+        return engine
 
     # GCP Cloud SQL
     if GCP_DB_INSTANCE:
