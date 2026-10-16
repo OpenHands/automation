@@ -13,7 +13,7 @@ what is stored and generated; F07 runs a prompt preset end to end.
 
 Source: `openhands/automation/preset_router.py`, `openhands/automation/presets/`, `openhands/automation/router.py`, `openhands/automation/utils/templates.py`
 
-Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset/plugin`
+Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset/plugin`, `POST /api/automation/v1/plugin-spec`
 
 ## Sub-features
 
@@ -26,6 +26,7 @@ Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset
 - `F06.plugin-create`: a plugin preset answers 201 with `preset_metadata {preset_type: plugin, prompt, plugins}` and a tarball that adds `plugins_config.json`; a single plugin object is normalized to a list.
 - `F06.plugin-validation`: an empty `plugins` list, both or neither of `plugins`/`variants`, variants without `experiment_id`, one variant, duplicate variant names, `experiment_id` with `plugins`, a zero weight and an absolute or `..` `repo_path` each answer 422 with their own message.
 - `F06.plugin-variants`: valid A/B variants produce `experiment_config.json` (each variant's model falling back to the automation `model`) and no `plugins_config.json`; `preset_metadata` has no `plugins` key.
+- `F06.plugin-spec-create`: a plugin-spec create reads an executable plugin manifest, resolves defaults from its config schema, stores `preset_metadata.preset_type: plugin_spec`, stores `plugin_spec.plugin` and `plugin_spec.config`, uses `tarball_path: plugin-spec://runtime`, and rejects custom event sources that have no webhook configured.
 - `F06.continue-keep-alive`, known bug: a preset with an event trigger whose `destination` is `continue_conversation` should store `keep_alive: true` as `POST /v1` does; it stores `null`.
 - `F06.continue-keep-alive-false`, known bug: a preset with `continue_conversation` and `keep_alive: false` should answer 422 as `POST /v1` does; it answers 201.
 - `F06.continue-patch-enforced`: any later PATCH of such a preset forces `keep_alive: true`, and PATCH `keep_alive: false` answers 400.
@@ -33,8 +34,9 @@ Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset
 
 ## How to get to it (agent POV)
 
-- REST: `POST /v1/preset/prompt` (`CreatePromptAutomationRequest`) and
-  `POST /v1/preset/plugin` (`CreatePluginAutomationRequest`), both
+- REST: `POST /v1/preset/prompt` (`CreatePromptAutomationRequest`),
+  `POST /v1/preset/plugin` (`CreatePluginAutomationRequest`), and
+  `POST /v1/plugin-spec` (`CreatePluginSpecAutomationRequest`), all
   `extra="forbid"`; responses are the F05 `AutomationResponse`. Reading,
   editing, deleting and downloading a preset go through the F05 routes
   (`GET/PATCH/DELETE /v1/{id}`, `GET /v1/{id}/tarball`), which these recipes
@@ -142,6 +144,12 @@ Preconditions:
   tar xzOf "$AUTOMATION_VERIFY_RUN/qa-plugin.tar" plugins_config.json | grep -q '"ref": "v1"'
   control-automation api POST /v1/preset/plugin --json '{"name":"qa-plugin-one","prompt":"hi","plugins":{"source":"github:qa-org/qa-plugin"},"trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 201 --check preset_metadata.plugins len-eq 1 --check preset_metadata.plugins.0.source eq github:qa-org/qa-plugin
   ```
+- **Create a plugin-spec automation (`F06.plugin-spec-create`).** The executable manifest path preflights its source before storing an automation.
+  ```sh
+  control-automation api POST /v1/plugin-spec --json '{"name":"qa-plugin-spec","plugin":{"source":"github:qa-org/qa-plugin","ref":"main"},"trigger":{"type":"cron","schedule":"0 0 1 1 *"}}' --expect 422 --check detail contains 'Failed to preflight automation plugin' --save F06.plugin-spec-create/missing-plugin
+  ```
+  A real catalog-backed plugin source answers 201 with `preset_metadata.preset_type: plugin_spec`, `tarball_path: plugin-spec://runtime`, `setup_script_path: setup.sh`, and the manifest-derived entrypoint; this negative recipe drives the route without depending on an external test repository.
+
   Plugins are not fetched at create time; the run's `main.py` loads them.
 - **Plugin preset validation (`F06.plugin-validation`).** One message per rule.
   ```sh

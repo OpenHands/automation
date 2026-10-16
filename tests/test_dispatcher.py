@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +25,8 @@ from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
     _execute_run_safe,
+    _fetch_plugins_on_agent_server,
+    _validate_plugin_run_agent_profile,
     dispatch_pending_runs,
     dispatcher_loop,
 )
@@ -53,6 +57,183 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def mock_client():
     """Mock httpx.AsyncClient for tests."""
     return MagicMock()
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_posts_pinned_sources():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "path": "/tmp/plugin-cache/abc123",
+                "resolved_ref": "abc123",
+                "source": "github:org/plugin",
+                "repo_path": None,
+                "manifest": {"name": "plugin"},
+                "skills": [],
+                "commands": ["run"],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetched = await _fetch_plugins_on_agent_server(
+            client=client,
+            agent_url="http://agent-server",
+            session_key="session-key",
+            plugin_fetches=[
+                {
+                    "source": "github:org/plugin",
+                    "ref": "abc123",
+                    "repo_path": None,
+                    "resolved_ref": "ignored-runtime-only-field",
+                }
+            ],
+        )
+
+    assert fetched[0]["path"] == "/tmp/plugin-cache/abc123"
+    assert requests[0].url == "http://agent-server/api/plugins/fetch"
+    assert requests[0].headers["x-session-api-key"] == "session-key"
+    assert json.loads(requests[0].content) == {
+        "source": "github:org/plugin",
+        "ref": "abc123",
+        "repo_path": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_plugin_profile_validation_rejects_drift(monkeypatch):
+    from openhands.automation.config import clear_config_cache
+    from openhands.automation.plugin_specs import PluginSpecError
+
+    profile_id = uuid.UUID("0a1b2c3d-0000-4000-8000-000000000011")
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": str(profile_id), "name": "plugin-agent"}]},
+            )
+        if request.url.path == "/api/agent-profiles/plugin-agent":
+            return httpx.Response(
+                200,
+                json={
+                    "profile": {
+                        "id": str(profile_id),
+                        "name": "plugin-agent",
+                        "llm_profile_ref": "default",
+                        "tools": [
+                            {"name": "terminal", "params": {}},
+                            {"name": "file_editor", "params": {}},
+                        ],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://openhands-api")
+    clear_config_cache()
+    automation = SimpleNamespace(
+        agent_profile_id=profile_id,
+        org_id=TEST_ORG_ID,
+    )
+    backend = SimpleNamespace(
+        is_local_mode=False,
+        get_api_key=AsyncMock(return_value="run-api-key"),
+    )
+    resolved_runtime = {
+        "manifest": {
+            "runtime": {
+                "agent_profile": {
+                    "required": True,
+                    "allowed_tools": ["terminal"],
+                }
+            }
+        }
+    }
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(PluginSpecError, match="file_editor"):
+            await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=cast(Automation, automation),
+                resolved_runtime=resolved_runtime,
+            )
+
+    clear_config_cache()
+    assert requests[0].headers["authorization"] == "Bearer run-api-key"
+    assert requests[0].headers["x-org-id"] == str(TEST_ORG_ID)
+
+
+@pytest.mark.asyncio
+async def test_plugin_profile_validation_preserves_transient_api_failures(monkeypatch):
+    from openhands.automation.config import clear_config_cache
+
+    profile_id = uuid.UUID("0a1b2c3d-0000-4000-8000-000000000011")
+
+    def fail_connect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://openhands-api")
+    clear_config_cache()
+    automation = SimpleNamespace(agent_profile_id=profile_id, org_id=TEST_ORG_ID)
+    backend = SimpleNamespace(
+        is_local_mode=False,
+        get_api_key=AsyncMock(return_value="run-api-key"),
+    )
+    resolved_runtime = {"manifest": {"runtime": {"agent_profile": {"required": True}}}}
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_connect)) as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=cast(Automation, automation),
+                resolved_runtime=resolved_runtime,
+            )
+
+    clear_config_cache()
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_surfaces_structured_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": {"code": "missing_secret", "message": "Missing secret"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(Exception, match="missing_secret"):
+            await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url="http://agent-server",
+                session_key="session-key",
+                plugin_fetches=[{"source": "github:org/plugin"}],
+            )
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_preserves_retryable_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "agent server unavailable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url="http://agent-server",
+                session_key="session-key",
+                plugin_fetches=[{"source": "github:org/plugin"}],
+            )
+
+    assert exc_info.value.response.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -1361,6 +1542,105 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["source"] == "sandbox_api"
             assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.status_detail["transient"] is False
+
+    async def test_retryable_plugin_preflight_failure_stays_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A transient plugin-source outage is not permanent."""
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                side_effect=PluginSpecError(
+                    "Failed to preflight automation plugin: source unavailable",
+                    code="source_unavailable",
+                    status_code=502,
+                ),
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["kind"] == "server_error"
+            assert updated.status_detail["status_code"] == 502
+            assert updated.status_detail["code"] == "source_unavailable"
+            assert updated.status_detail["transient"] is True
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    async def test_plugin_fetch_transport_failure_releases_context(
+        self, async_session_factory, mock_settings
+    ):
+        """A transient agent-server plugin fetch error must not leak a sandbox."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.release_context = AsyncMock()
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+
+        def fail_connect(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("agent server down", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(fail_connect))
+        payload = (
+            b"tarball",
+            {},
+            {"kind": "plugin_spec", "entrypoint": "python main.py", "manifest": {}},
+            [{"source": "github:org/plugin"}],
+        )
+
+        try:
+            with (
+                patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ),
+                patch(
+                    "openhands.automation.dispatcher.build_execution_payload",
+                    return_value=payload,
+                ),
+            ):
+                await _execute_run(run, mock_settings, async_session_factory, client)
+        finally:
+            await client.aclose()
+
+        backend.release_context.assert_awaited_once_with(client, ctx)
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "fetch_plugin"
+            assert updated.status_detail["transient"] is True
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
 
 
 class TestExecuteRunDerivedConversationId:

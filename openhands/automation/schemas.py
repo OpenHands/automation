@@ -620,11 +620,40 @@ class CreateAutomationRequest(BaseModel):
         return self
 
 
+class UpdateAutomationPluginSource(BaseModel):
+    """Plugin source accepted by the generic automation PATCH endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., min_length=1)
+    ref: str | None = Field(default=None, min_length=1)
+    repo_path: str | None = Field(default=None, min_length=1)
+
+    @field_validator("repo_path")
+    @classmethod
+    def validate_repo_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.startswith("/") or "\\" in value:
+            raise ValueError("repo_path must be a relative POSIX path")
+        if ".." in value.split("/"):
+            raise ValueError("repo_path cannot contain '..'")
+        return value
+
+
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
 
+    plugin: UpdateAutomationPluginSource | None = Field(
+        default=None,
+        description=(
+            "Plugin source update for plugin-spec automations. The plugin manifest "
+            "owns runtime fields such as entrypoint, setup script, agent profile, "
+            "and LLM profile."
+        ),
+    )
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description="Agent profile selected for this automation.",
@@ -1042,6 +1071,7 @@ class AutomationResponse(BaseModel):
     name: str
     prompt: str | None
     preset_metadata: dict | None = None
+    plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tarball_path: str
@@ -1191,6 +1221,7 @@ class AutomationRunResponse(BaseModel):
     bash_command_id: str | None = None
     observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
+    resolved_runtime: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
