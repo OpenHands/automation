@@ -50,6 +50,7 @@ from openhands.automation.schemas import (
     AutomationRunListResponse,
     AutomationRunResponse,
     CreateAutomationRequest,
+    DispatchAutomationRequest,
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
@@ -643,6 +644,7 @@ async def download_automation_tarball(
 async def dispatch_automation(
     automation_id: uuid.UUID,
     request: Request,
+    body: DispatchAutomationRequest = DispatchAutomationRequest(),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationRunResponse:
@@ -650,6 +652,9 @@ async def dispatch_automation(
 
     Creates a PENDING run for the specified automation, which will be
     picked up by the dispatcher and executed.
+    
+    Optionally accepts a sandbox_id to reuse an existing sandbox instead
+    of creating a new one.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
@@ -670,6 +675,7 @@ async def dispatch_automation(
             telemetry_distinct_id=telemetry_context.frontend_distinct_id,
             trigger_source="manual",
             observability_parent_span_context=current_span_context(),
+            sandbox_id=body.sandbox_id,
         )
         run_created_attributes = automation_attributes(auto, run)
         with span("automation.route.run_created", run_created_attributes):
