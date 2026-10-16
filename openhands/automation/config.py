@@ -451,6 +451,9 @@ class SlackAppSettings(BaseModel):
     bot_token: str
     team_id: str
     bot_user_id: str
+    # Oldest messages are dropped first when a thread exceeds these bounds.
+    thread_context_max_messages: int = Field(default=50, ge=1, le=500)
+    thread_context_max_chars: int = Field(default=12_000, ge=100, le=100_000)
 
 
 class StreamSettings(BaseSettings):
