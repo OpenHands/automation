@@ -166,12 +166,15 @@ class AgentProfilesApi:
         self.response = httpx.Response(
             200, json={"profiles": [{"id": self.profile_id}]}
         )
+        self.raise_timeout = False
         self.requests: list[httpx.Request] = []
 
     def respond(self, request: httpx.Request) -> httpx.Response:
         if request.method != "GET" or request.url.path != "/api/agent-profiles":
             return httpx.Response(404)
         self.requests.append(request)
+        if self.raise_timeout:
+            raise httpx.ReadTimeout("simulated profile lookup timeout", request=request)
         return self.response
 
 

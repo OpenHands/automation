@@ -64,6 +64,7 @@ async def test_create_incomplete_draft_saves_partial_body(async_client, async_se
 
     draft = await async_session.get(AutomationDraft, uuid.UUID(data["id"]))
     assert draft is not None
+    assert draft.validation_errors == data["validation_errors"]
     assert draft.materialized_automation_id is None
 
 
