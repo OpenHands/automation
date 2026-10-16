@@ -248,7 +248,7 @@ Preconditions:
   control-automation api POST "/v1/drafts/$TD/dispatch" --expect 201 --quiet
   TMA=$(control-automation api GET "/v1/drafts/$TD" --expect 200 --field materialized_automation_id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT
-  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"  # bug
+  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"  # bug: status eq 200 && response.body.state eq DRAFT
   ```
   Observed: `200` with `id` equal to the DRAFT artifact (`state=DRAFT`,
   `enabled=false`), which the normal API then refuses to activate (409), so

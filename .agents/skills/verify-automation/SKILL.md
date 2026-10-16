@@ -6,7 +6,7 @@ description: >
   "check an automation change against a real service", "create or update the
   automation feature map", or "run the weekly automation API audit". Ships
   control-automation (launch, doctor, api, llm, run wait, fixtures, signed
-  events, KV tokens, state, evidence, map) and the maintained map of every
+  events, KV tokens, state, assert, evidence, map) and the maintained map of every
   agent-facing feature.
 triggers:
 - /verify-automation
@@ -120,9 +120,11 @@ control-automation stop                       # stops only this run; evidence st
   `--delivery-id` for the refusal and dedupe cases), `kv token` (the JWT a run
   receives), `state sql|ls|cat` (read-only views of the database, the run's
   workspaces and fixtures), `conversation events` (what a run's agent did),
-  `sink read`, `logs --grep`, and `exec -- <program>` (a client program with
+  `sink read`, `logs --grep`, `exec -- <program>` (a client program with
   `AUTOMATION_URL`, `AUTOMATION_API_URL`, `AUTOMATION_API_KEY` and
-  `AGENT_SERVER_URL` injected).
+  `AGENT_SERVER_URL` injected), and `assert --value|--json --check ...` (a
+  value the recipe computed, checked like `api --check`, so a `# bug:` line
+  can name the value the bug produces).
 - **Arrange, don't fake.** `fixture tarball` and `fixture automation` build
   stdlib-only automations (entrypoint `bash run.sh`) that really run on the
   Agent Server: `callback` reports a phase, dumps its environment to
@@ -184,7 +186,11 @@ a pass.
   flags and fixtures:
   `control-automation map run --file Fnn --only Fnn.x --fresh --repeat 2 --checkout <base worktree>`
   must report the bullet `xfail` in both attempts, and the same command
-  without `--checkout` `xpass` in both. Then drop the marker in the same PR.
+  without `--checkout` `xpass` in both. `xfail` means the marked command
+  failed with the failure its `# bug: PREDICATE` documents (see
+  [the known-bug contract](references/mapping.md)); any other failure on the
+  baseline is a `fail`, so the proof cannot rest on an unrelated error. Then
+  drop the marker in the same PR.
 - **Create or extend the map**: follow [references/mapping.md](references/mapping.md).
   `control-automation map coverage` measures which routes no family owns or
   drives.

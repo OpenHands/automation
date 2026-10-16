@@ -227,7 +227,7 @@ Preconditions:
 - **Explicit null on required fields (`F05.patch-null`), known bug.** The schema accepts `null`, the database refuses it, and the client gets a 500.
   ```sh
   NID=$(control-automation api POST /v1 --json '{"name":"qa-null","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --save F05.patch-null/name  # bug
+  control-automation api PATCH "/v1/$NID" --json '{"name":null}' --expect 422 --save F05.patch-null/name  # bug: status eq 500
   ```
   Correct behavior is a 422 that names the field. Today `name`,
   `entrypoint`, `tarball_path`, `trigger` and `enabled` set to `null` each
