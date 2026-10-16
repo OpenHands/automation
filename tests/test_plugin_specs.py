@@ -397,7 +397,9 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     assert "Conversation(**conversation_kwargs)" not in main_source
     assert "clone_repos" not in main_source
     assert "repos_config.json" not in main_source
-    assert "AUTOMATION_LLM_PROFILE_NAME" in main_source
+    assert "AUTOMATION_LLM_PROFILE_NAME" not in main_source
+    assert "AgentLaunchAdditions" not in main_source
+    assert "agent_launch_additions" not in main_source
     assert "experiment_config.json" not in main_source
     assert "threading" not in main_source
     assert "conversation_title" not in main_source

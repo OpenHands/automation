@@ -36,7 +36,6 @@ Common env vars:
   AUTOMATION_ORG_ID           - owner org ID for observability context (optional)
   AUTOMATION_TRIGGER_SOURCE   - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD    - JSON with trigger info and event payload (optional)
-  AUTOMATION_LLM_PROFILE_NAME - optional LLM profile override for the Agent Profile
   AUTOMATION_AGENT_PROFILE_ID - required selected Agent Profile id
   AUTOMATION_AGENT_PROFILE_NAME - selected Agent Profile name
 
@@ -67,11 +66,6 @@ sandbox_id = os.environ.get("SANDBOX_ID", "")
 # deployments and older agent-server versions that only set the bare name.
 session_key = os.environ.get("OH_SESSION_API_KEYS_0") or os.environ.get(
     "SESSION_API_KEY", ""
-)
-model_profile = (
-    os.environ.get("AUTOMATION_LLM_PROFILE_NAME")
-    or os.environ.get("AUTOMATION_MODEL")
-    or None
 )
 agent_profile_id = os.environ.get("AUTOMATION_AGENT_PROFILE_ID") or None
 agent_profile_name = os.environ.get("AUTOMATION_AGENT_PROFILE_NAME") or None
@@ -105,7 +99,6 @@ else:
 print(
     f"  AUTOMATION_CALLBACK_URL: {os.environ.get('AUTOMATION_CALLBACK_URL') or 'NONE'}"
 )
-print(f"  AUTOMATION_MODEL: {model_profile or 'DEFAULT'}")
 print(f"  AUTOMATION_USER_ID: {'OK' if automation_user_id else 'NONE'}")
 print(f"  AUTOMATION_ORG_ID: {'OK' if os.environ.get('AUTOMATION_ORG_ID') else 'NONE'}")
 print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
@@ -113,10 +106,7 @@ print(f"  AUTOMATION_RUN_ID: {os.environ.get('AUTOMATION_RUN_ID') or 'NONE'}")
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from openhands.sdk.automation import automation_conversation_kwargs
-from openhands.sdk.conversation.request import (
-    AgentLaunchAdditions,
-    StartConversationRequest,
-)
+from openhands.sdk.conversation.request import StartConversationRequest
 from openhands.sdk.workspace.local import LocalWorkspace
 
 from openhands.sdk.plugin import PluginSource
@@ -232,7 +222,6 @@ with workspace_ctx as workspace:
     print(f"  profile id: {agent_profile_id}")
     print(f"  profile name: {agent_profile_name or 'UNKNOWN'}")
     print(f"  profile kind: {agent_profile_kind or 'UNKNOWN'}")
-    print(f"  llm override: {model_profile or 'PROFILE_DEFAULT'}")
 
     # Create conversation with plugins
     print("\n=== CONVERSATION ===")
@@ -255,10 +244,6 @@ with workspace_ctx as workspace:
         "workspace": LocalWorkspace(working_dir=workspace.working_dir),
         "agent_profile_id": uuid.UUID(agent_profile_id),
     }
-    if model_profile:
-        request_kwargs["agent_launch_additions"] = AgentLaunchAdditions(
-            llm_profile_ref=model_profile
-        )
     conversation = RemoteConversation.create(
         workspace, StartConversationRequest(**request_kwargs)
     )
