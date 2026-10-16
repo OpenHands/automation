@@ -278,19 +278,10 @@ with workspace_ctx as workspace:
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 
-    cost = None
     try:
-        print(f"  sending prompt: {USER_PROMPT[:80]}...")
+        print("  sending prompt")
         conversation.send_message(USER_PROMPT)
         conversation.run()
-
-        try:
-            cost = (
-                conversation.conversation_stats.get_combined_metrics().accumulated_cost
-            )
-        except Exception as e:
-            print(f"  WARNING: post-run stats fetch failed (non-fatal): {e}")
-        print(f"  cost: {cost}")
     finally:
         try:
             conversation.close()

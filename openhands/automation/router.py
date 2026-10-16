@@ -66,7 +66,6 @@ from openhands.automation.schemas import (
     RunCompleteRequest,
     RunPhaseRequest,
     UpdateAutomationRequest,
-    normalize_keep_alive_for_trigger,
 )
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.telemetry import (
@@ -348,10 +347,21 @@ async def create_automation_from_plugin_spec(
         session=session,
     )
 
-    try:
-        keep_alive = normalize_keep_alive_for_trigger(body.keep_alive, trigger)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    keep_alive = body.keep_alive
+    if (
+        isinstance(trigger, EventTrigger)
+        and trigger.destination == "continue_conversation"
+    ):
+        if keep_alive is False:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "keep_alive cannot be false when destination is "
+                    "'continue_conversation': deleting the sandbox would destroy "
+                    "the conversation the next event continues"
+                ),
+            )
+        keep_alive = True
 
     state = model_automation_state(body.state, body.enabled)
     preset_metadata: dict[str, Any] = {"preset_type": "plugin_spec"}

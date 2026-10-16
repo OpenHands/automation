@@ -36,7 +36,6 @@ from openhands.automation.models import (
 from openhands.automation.schemas import (
     CreateAutomationRequest,
     EventTrigger,
-    normalize_keep_alive_for_trigger,
 )
 from openhands.automation.subjects import (
     conversation_id_for,
@@ -1444,23 +1443,6 @@ def _create_body(**overrides: Any) -> dict:
     }
     body.update(overrides)
     return body
-
-
-def test_keep_alive_normalizer_matches_create_request_rule():
-    trigger = EventTrigger.model_validate(continuing_trigger())
-
-    assert normalize_keep_alive_for_trigger(None, trigger) is True
-    with pytest.raises(ValueError, match="continue_conversation"):
-        normalize_keep_alive_for_trigger(False, trigger)
-
-
-def test_keep_alive_normalizer_leaves_dispatch_run_triggers_unchanged():
-    trigger = EventTrigger.model_validate(
-        {"type": "event", "source": "slack", "on": "app_mention"}
-    )
-
-    assert normalize_keep_alive_for_trigger(None, trigger) is None
-    assert normalize_keep_alive_for_trigger(False, trigger) is False
 
 
 def test_a_continuing_automation_cannot_opt_out_of_keep_alive():

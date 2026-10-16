@@ -347,26 +347,6 @@ class RunStatus(StrEnum):
 type PublicAutomationState = Literal[AutomationState.ACTIVE, AutomationState.INACTIVE]
 
 
-CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR = (
-    "keep_alive cannot be false when destination is "
-    "'continue_conversation': deleting the sandbox would destroy "
-    "the conversation the next event continues"
-)
-
-
-def normalize_keep_alive_for_trigger(
-    keep_alive: bool | None, trigger: Trigger
-) -> bool | None:
-    """Return the keep_alive value required by a trigger's lifecycle semantics."""
-    if not isinstance(trigger, EventTrigger):
-        return keep_alive
-    if trigger.destination != "continue_conversation":
-        return keep_alive
-    if keep_alive is False:
-        raise ValueError(CONTINUE_CONVERSATION_KEEP_ALIVE_ERROR)
-    return True
-
-
 DraftEndpoint = Literal["/v1", "/v1/preset/prompt", "/v1/preset/plugin"]
 
 
@@ -625,9 +605,18 @@ class CreateAutomationRequest(BaseModel):
         alone, rather than every deletion site re-deriving that a run holding a
         subject is implicitly kept.
         """
-        self.keep_alive = normalize_keep_alive_for_trigger(
-            self.keep_alive, self.trigger
-        )
+        trigger = self.trigger
+        if not isinstance(trigger, EventTrigger):
+            return self
+        if trigger.destination != "continue_conversation":
+            return self
+        if self.keep_alive is False:
+            raise ValueError(
+                "keep_alive cannot be false when destination is "
+                "'continue_conversation': deleting the sandbox would destroy "
+                "the conversation the next event continues"
+            )
+        self.keep_alive = True
         return self
 
 
