@@ -20,7 +20,10 @@ from openhands.automation.models import (
     IntegrationEvent,
 )
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.agent_server import VerificationResult
+from openhands.automation.utils.agent_server import (
+    VerificationOutcome,
+    VerificationResult,
+)
 from openhands.automation.watchdog import (
     PRUNE_BATCH_SIZE,
     _should_cleanup_sandbox_after_terminal,
@@ -101,6 +104,8 @@ class TestVerifyAndMarkRunExitCodes:
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
+                run.bash_command_id = "command-123"
+                await session.flush()
                 result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
@@ -380,6 +385,8 @@ class TestVerifyAndMarkRunVerificationFailed:
         ):
             async with async_session_factory() as session:
                 run = await session.get(AutomationRun, run_id)
+                run.bash_command_id = "command-123"
+                await session.flush()
                 result = await _verify_and_mark_run(session, run, mock_settings)
                 await session.commit()
 
@@ -468,6 +475,8 @@ class TestVerifyAndMarkRunVerificationFailed:
         run = MagicMock()
         run.id = uuid.uuid4()
         run.sandbox_id = "sandbox-123"
+        run.bash_command_id = None
+        run.timeout_at = utcnow() + timedelta(minutes=10)
         run.status_detail = None
         session = MagicMock()
         session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
@@ -486,6 +495,91 @@ class TestVerifyAndMarkRunVerificationFailed:
         assert params["status_detail"]["transient"] is True
         assert params["status_detail"]["detail"] == verification.detail
         mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_verification_exception_leaves_run_running(self, mock_settings):
+        """A verifier exception before the deadline is retried, not terminal."""
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(outcome=VerificationOutcome.TRANSIENT_ERROR)
+        )
+        mock_backend.verify_run.side_effect = RuntimeError("temporary lookup failure")
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        stmt = session.execute.await_args.args[0]
+        params = stmt.compile().params
+        assert params["status_detail"]["phase"] == "verification"
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_environment_unavailable_leaves_run_running(
+        self, mock_settings
+    ):
+        """A missing environment is terminal only once timeout_at passes."""
+        verification = VerificationResult(
+            outcome=VerificationOutcome.ENVIRONMENT_UNAVAILABLE,
+            detail="sandbox lookup returned no environment",
+        )
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        stmt = session.execute.await_args.args[0]
+        params = stmt.compile().params
+        assert params["status_detail"]["kind"] == "environment_unavailable"
+        assert params["status_detail"]["transient"] is True
+        mock_backend.cleanup_after_verification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_early_still_running_keeps_dispatcher_deadline(self, mock_settings):
+        """Early liveness checks do not rewrite the phase-two timeout_at."""
+        verification = VerificationResult(outcome=VerificationOutcome.STILL_RUNNING)
+        run = MagicMock()
+        run.id = uuid.uuid4()
+        run.sandbox_id = "sandbox-123"
+        run.bash_command_id = "command-123"
+        run.timeout_at = utcnow() + timedelta(minutes=10)
+        run.status_detail = None
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        defer = AsyncMock()
+
+        mock_backend = _create_mock_backend(verification)
+        with (
+            patch(
+                "openhands.automation.watchdog.get_backend", return_value=mock_backend
+            ),
+            patch("openhands.automation.watchdog._defer_still_running", new=defer),
+        ):
+            result = await _verify_and_mark_run(session, run, mock_settings)
+
+        assert result is False
+        defer.assert_not_awaited()
+        session.execute.assert_not_awaited()
 
 
 class TestVerifyAndMarkRunStillRunning:
@@ -601,6 +695,99 @@ class TestVerifyAndMarkRunStillRunning:
             run = await session.get(AutomationRun, run_id)
             assert run.status == AutomationRunStatus.COMPLETED
             assert run.timeout_at == stale_timeout_at
+
+
+class TestWatchdogCandidateSelection:
+    """The watchdog polls detached commands before their timeout deadline."""
+
+    @pytest.mark.asyncio
+    async def test_command_id_is_verified_before_timeout(
+        self, async_session_factory, mock_settings
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Detached command",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=600,
+            )
+            session.add(automation)
+            await session.flush()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                bash_command_id="command-123",
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(minutes=10),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        verification = VerificationResult(
+            verified=True,
+            success=True,
+            exit_code=0,
+            stdout="done",
+            stderr="",
+        )
+        mock_backend = _create_mock_backend(verification)
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 1
+        mock_backend.verify_run.assert_awaited_once_with(str(run_id))
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_pre_command_run_waits_for_timeout(
+        self, async_session_factory, mock_settings
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Provisioning run",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+                timeout=600,
+            )
+            session.add(automation)
+            await session.flush()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                bash_command_id=None,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(minutes=10),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        mock_backend = _create_mock_backend(
+            VerificationResult(verified=True, success=True, exit_code=0)
+        )
+        with patch(
+            "openhands.automation.watchdog.get_backend", return_value=mock_backend
+        ):
+            marked = await mark_stale_runs(async_session_factory, mock_settings)
+
+        assert marked == 0
+        mock_backend.verify_run.assert_not_awaited()
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run.status == AutomationRunStatus.RUNNING
 
 
 def _make_event(age: timedelta, index: int = 0) -> IntegrationEvent:
