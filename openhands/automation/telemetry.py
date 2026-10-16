@@ -3,6 +3,8 @@
 import json
 import logging
 import uuid
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
 from typing import Any
 
 import httpx
@@ -10,6 +12,7 @@ from fastapi import Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation import __version__
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import get_config
 from openhands.automation.middleware import (
@@ -22,7 +25,11 @@ from openhands.automation.utils.service_metadata import (
     set_service_metadata,
 )
 from openhands.automation.utils.time import ensure_utc
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    ServerVersionInfo,
+    get_sdk_version,
+    get_server_version_info,
+)
 
 
 logger = logging.getLogger("automation.telemetry")
@@ -238,6 +245,20 @@ def _resolve_distinct_id(
     )
 
 
+@lru_cache(maxsize=1)
+def _installed_sdk_version() -> str:
+    # Only successful lookups are cached: lru_cache does not memoize exceptions.
+    return get_sdk_version()
+
+
+def _server_version_properties() -> ServerVersionInfo:
+    try:
+        sdk_version = _installed_sdk_version()
+    except PackageNotFoundError:
+        return get_server_version_info(missing_sdk_version="unknown")
+    return {"package_version": __version__, "sdk_version": sdk_version}
+
+
 def _base_properties(
     *,
     request_context: TelemetryRequestContext,
@@ -251,7 +272,7 @@ def _base_properties(
         "deployment_mode": "local" if settings.is_local_mode else "cloud",
         "deployment_kind": "local" if settings.is_local_mode else "remote",
         "automation_service": "openhands_automation",
-        **get_server_version_info(missing_sdk_version="unknown"),
+        **_server_version_properties(),
     }
 
     properties[AUTOMATION_BACKEND_ID_PROPERTY] = backend_distinct_id

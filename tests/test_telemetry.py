@@ -1,3 +1,4 @@
+import importlib.metadata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
@@ -24,7 +25,10 @@ from openhands.automation.models import (
 from openhands.automation.schemas import TelemetryConsentRequest
 from openhands.automation.telemetry_router import set_telemetry_consent
 from openhands.automation.utils.run import create_pending_run
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    SDK_PACKAGE_NAME,
+    get_server_version_info,
+)
 from openhands.automation.utils.webhook import create_automation_run
 
 
@@ -613,3 +617,37 @@ async def test_backend_distinct_id_is_db_backed_and_stable():
         assert stored == first
     finally:
         await engine.dispose()
+
+
+def test_server_version_properties_cache_package_metadata_lookup(monkeypatch):
+    calls = 0
+
+    def package_version(name: str) -> str:
+        nonlocal calls
+        calls += 1
+        assert name == SDK_PACKAGE_NAME
+        return "1.2.3"
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+        assert calls == 1
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
+
+
+def test_server_version_properties_do_not_cache_missing_sdk(monkeypatch):
+    def missing_package_version(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_package_version)
+    telemetry._installed_sdk_version.cache_clear()
+    try:
+        assert telemetry._server_version_properties()["sdk_version"] == "unknown"
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.2.3")
+        assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
+    finally:
+        telemetry._installed_sdk_version.cache_clear()
