@@ -496,7 +496,7 @@ async def create_automation_from_prompt(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
     """Create an automation from a prompt.
@@ -930,7 +930,7 @@ async def create_automation_from_plugin(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
     """Create an automation using plugins.

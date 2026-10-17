@@ -252,7 +252,16 @@ def using_sqlite() -> bool:
 
 
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that yields a database session from app.state."""
+    """FastAPI dependency that yields a database session from app.state.
+
+    Declare it as ``Depends(get_session, scope="function")``. Function scope
+    commits when the handler returns, before the response is sent and before
+    its background tasks run. With the default request scope the commit lands
+    after the client already has the response: on SQLite in WAL mode a
+    dependent request sent at once reads the pre-commit snapshot (an upload
+    that is then "not found"), and a deferred side effect such as a tarball
+    delete would run before the commit that justifies it.
+    """
     session_factory: async_sessionmaker[AsyncSession] = (
         request.app.state.session_factory
     )

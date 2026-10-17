@@ -118,7 +118,7 @@ async def create_upload(
     name: str = Query(..., min_length=1, max_length=255),
     description: str | None = Query(default=None, max_length=2000),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> UploadResponse:
     """Upload a tarball for use in automations.
@@ -227,7 +227,7 @@ async def list_uploads(
     offset: int = Query(default=0, ge=0),
     status_filter: UploadStatus | None = Query(default=None, alias="status"),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> UploadListResponse:
     """List uploads for the authenticated user.
 
@@ -264,7 +264,7 @@ async def list_uploads(
 async def get_upload(
     upload_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> UploadResponse:
     """Get a single upload by ID."""
     upload = await _get_user_upload(session, upload_id, user.user_id, user.org_id)
@@ -275,7 +275,7 @@ async def get_upload(
 async def delete_upload(
     upload_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> None:
     """Delete an upload.

@@ -80,7 +80,7 @@ _TRIGGER_TAGS = frozenset({"cron", "event"})
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
 
@@ -144,7 +144,7 @@ async def validate_draft(
     body: ValidateDraftRequest,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ValidateDraftResponse:
     """Validate a draft automation without creating it.
 

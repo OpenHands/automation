@@ -2278,7 +2278,7 @@ requires-dist = [
     { name = "cachetools", specifier = ">=7.0.5" },
     { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.16" },
     { name = "croniter", specifier = ">=2" },
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastapi", specifier = ">=0.121" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
