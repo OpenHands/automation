@@ -119,7 +119,9 @@ async def lifespan(app: FastAPI):
             logger.info("SQLite database migrations applied successfully")
         except Exception as e:
             logger.error(f"Failed to apply SQLite migrations: {e}")
-            msg = f"SQLite migration failed. Database may be inconsistent: {e}"
+            # Migrations run in one transaction (migrations/env.py), so a
+            # failure leaves the database exactly as it was before startup.
+            msg = f"SQLite migration failed; the database was left unchanged: {e}"
             raise RuntimeError(msg) from e
 
     # Start the background scheduler and dispatcher
