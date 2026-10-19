@@ -123,7 +123,7 @@ async def get_capabilities(
     # conversation server resolves it - the Agent Server locally, the OpenHands
     # app server in cloud, which has to be a version that serves
     # /api/agent-profiles.
-    features = [*_STATIC_FEATURES, "agentProfiles"]
+    features = [*_STATIC_FEATURES, "agentProfiles", "pluginSpecAgentProfiles"]
     if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
