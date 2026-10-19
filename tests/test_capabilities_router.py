@@ -1,6 +1,7 @@
 """Tests for the capabilities and preflight validation endpoints."""
 
 import dataclasses
+import json
 import uuid
 
 import httpx
@@ -37,6 +38,38 @@ EVENT_DRAFT = {
         "filter": "icontains(comment.body, '@openhands')",
     },
 }
+
+SLACK_TEAM_ID = "T12345678"
+SLACK_BOT_USER_ID = "U87654321"
+
+
+def slack_apps_env(org_id: uuid.UUID = TEST_ORG_ID) -> str:
+    return json.dumps(
+        [
+            {
+                "org_id": str(org_id),
+                "app_token": "xapp-1",
+                "bot_token": "xoxb-1",
+                "team_id": SLACK_TEAM_ID,
+                "bot_user_id": SLACK_BOT_USER_ID,
+            }
+        ]
+    )
+
+
+def slack_mention_event(text: str = "<@U87654321> hello") -> dict:
+    return {
+        "team_id": SLACK_TEAM_ID,
+        "event_id": "Ev123",
+        "event": {
+            "type": "app_mention",
+            "user": "U111",
+            "channel": "C222",
+            "ts": "1700000000.000100",
+            "text": text,
+        },
+    }
+
 
 BUNDLE_DRAFT = {
     "name": "PR reviewer",
@@ -162,6 +195,43 @@ class TestGetCapabilities:
 
         assert response.status_code == 200
         assert response.json()["maxAutomationTimeoutSeconds"] == 900
+
+    async def test_configured_stream_source_advertises_event_support(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """A Slack Socket Mode app can deliver events without webhook config."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        body = response.json()
+        assert body["triggerKinds"] == ["cron", "event"]
+        assert body["eventSources"] == ["slack"]
+
+    async def test_validate_accepts_configured_stream_source(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """Preflight uses the stream event key shape for Slack Socket Mode."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+        draft = with_trigger(
+            EVENT_DRAFT,
+            source="slack",
+            on="app_mention",
+            filter=f"team_id == '{SLACK_TEAM_ID}'",
+        )
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, sampleEvent=slack_mention_event()),
+        )
+
+        body = response.json()
+        assert body["valid"] is True
+        assert body["sampleEventMatched"] is True
 
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch

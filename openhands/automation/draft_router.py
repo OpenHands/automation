@@ -77,6 +77,7 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.event_sources import get_event_source_delivery
 from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
@@ -91,7 +92,6 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
-from openhands.automation.utils.webhook import get_webhook_config
 
 
 logger = logging.getLogger(__name__)
@@ -246,15 +246,17 @@ async def _validate_draft_body(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
+        delivery = await get_event_source_delivery(
+            trigger.source, user.org_id, session
+        )
+        if delivery is None:
             errors.append(
                 DraftValidationError(
                     field="trigger.source",
                     code="event_source_not_configured",
                     message=(
-                        f"No webhook is configured to deliver '{trigger.source}' "
-                        "events to this deployment."
+                        f"No event delivery is configured for '{trigger.source}' "
+                        "events in this deployment."
                     ),
                 )
             )
