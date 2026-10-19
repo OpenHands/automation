@@ -300,12 +300,18 @@ async def test_run_migrations_creates_a_missing_database(
     _assert_at_head_and_released(postgres_server, missing_database)
 
 
+@pytest.mark.parametrize(
+    ("driver", "query"),
+    [("postgresql+pg8000", ""), ("postgresql+asyncpg", "?ssl=disable")],
+)
 async def test_run_migrations_creates_the_database_named_in_the_db_url(
-    monkeypatch, point_migrations_at, missing_database, postgres_server
+    monkeypatch, point_migrations_at, missing_database, postgres_server, driver, query
 ):
     point_migrations_at("unused")
-    url = _url(postgres_server, missing_database)
-    monkeypatch.setenv("AUTOMATION_DB_URL", url.render_as_string(hide_password=False))
+    url = _url(postgres_server, missing_database, driver)
+    monkeypatch.setenv(
+        "AUTOMATION_DB_URL", url.render_as_string(hide_password=False) + query
+    )
     monkeypatch.setenv("AUTOMATION_CREATE_DATABASE_IF_MISSING", "true")
 
     await app_module.run_migrations(get_config().service)
