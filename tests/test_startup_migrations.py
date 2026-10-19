@@ -87,8 +87,8 @@ def postgres_server(postgres_container):
     }
 
 
-def _url(server: dict, database: str) -> URL:
-    return URL.create("postgresql+pg8000", database=database, **server)
+def _url(server: dict, database: str, driver: str = "postgresql+pg8000") -> URL:
+    return URL.create(driver, database=database, **server)
 
 
 def _run_admin_sql(server: dict, statement: str, database: str = "postgres") -> None:
@@ -248,6 +248,21 @@ async def test_a_failed_migration_reports_its_own_error(
 
     with pytest.raises(RuntimeError, match='relation "automations" already exists'):
         await app_module.run_migrations(get_config().service)
+
+
+@pytest.mark.parametrize("query", ["", "?ssl=disable"])
+async def test_run_migrations_accepts_the_async_db_url_the_service_uses(
+    monkeypatch, point_migrations_at, empty_database, postgres_server, query
+):
+    point_migrations_at("unused")
+    url = _url(postgres_server, empty_database, "postgresql+asyncpg")
+    monkeypatch.setenv(
+        "AUTOMATION_DB_URL", url.render_as_string(hide_password=False) + query
+    )
+
+    await app_module.run_migrations(get_config().service)
+
+    _assert_at_head_and_released(postgres_server, empty_database)
 
 
 async def test_run_migrations_raises_the_database_error(point_migrations_at):
