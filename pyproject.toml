@@ -75,7 +75,7 @@ dev = [
     "testcontainers[postgres,minio]>=4.10.0",
 ]
 production = [
-    "ddtrace>=4.16.0",
+    "ddtrace==4.15.6",
 ]
 
 # Ruff configuration
