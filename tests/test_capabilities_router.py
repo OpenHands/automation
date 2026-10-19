@@ -124,6 +124,7 @@ class TestGetCapabilities:
         response = await async_client.get(CAPABILITIES_URL)
 
         assert "agentProfiles" in response.json()["features"]
+        assert "pluginSpecAgentProfiles" in response.json()["features"]
 
     async def test_configured_deployment_advertises_event_support(
         self, async_client, configured_deployment

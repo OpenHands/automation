@@ -468,3 +468,49 @@ def test_fetch_manifest_rejects_invalid_suggested_cron(tmp_path):
 
     with pytest.raises(PluginSpecError, match="Invalid automation plugin manifest"):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+
+def _write_templated_arguments(plugin: Path, arguments: str) -> None:
+    metadata = json.loads((plugin / ".plugin" / "plugin.json").read_text())
+    metadata["automation"]["entrypoint"]["arguments"] = arguments
+    metadata["automation"]["config_schema"] = {
+        "type": "object",
+        "properties": {"prompt": {"type": "string"}},
+    }
+    (plugin / ".plugin" / "plugin.json").write_text(json.dumps(metadata))
+    (plugin / "automation-plugin.json").write_text(
+        json.dumps({"name": metadata["name"], **metadata["automation"]})
+    )
+
+
+def test_conversation_runner_renders_arguments_from_config(tmp_path):
+    plugin = write_conversation_plugin(tmp_path)
+    _write_templated_arguments(plugin, "{{ config.prompt }}")
+
+    tarball, _env, _runtime, _fetches = build_execution_payload(
+        plugin_spec={
+            "plugin": {"source": str(plugin)},
+            "config": {"prompt": "Summarize {{ open }} issues\nby label"},
+        },
+        agent_profile_id="profile-id",
+        agent_profile_name="agent-default",
+        llm_profile_name=None,
+        work_dir="/tmp/automation-run",
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        prompt_file = tar.extractfile("prompt.txt")
+        assert prompt_file is not None
+        prompt = prompt_file.read().decode()
+    assert prompt == (
+        "/hello-world-automation:hello Summarize {{ open }} issues\nby label"
+    )
+
+
+def test_conversation_runner_arguments_need_their_config(tmp_path):
+    plugin = write_conversation_plugin(tmp_path)
+    _write_templated_arguments(plugin, "{{ config.prompt }}")
+    _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+    with pytest.raises(PluginSpecError, match="missing config value: config.prompt"):
+        validate_plugin_config(manifest, {})

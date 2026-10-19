@@ -109,8 +109,9 @@ async def get_capabilities(
     # Not a packaged-code feature: the id is passed through to the run, whose
     # conversation server resolves it - the Agent Server locally, the OpenHands
     # app server in cloud, which has to be a version that serves
-    # /api/agent-profiles.
-    features = [*_STATIC_FEATURES, "agentProfiles"]
+    # /api/agent-profiles. Plugin-spec conversation runs start from the
+    # automation's profile through that same server.
+    features = [*_STATIC_FEATURES, "agentProfiles", "pluginSpecAgentProfiles"]
     if event_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
