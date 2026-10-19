@@ -30,7 +30,10 @@ from openhands.automation.dispatcher import (
     dispatch_pending_runs,
     dispatcher_loop,
 )
-from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
+)
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -1413,8 +1416,7 @@ class TestBuildEventPayload:
 
 
 class TestExecuteRunConcurrencyLimit:
-    """When the org/workspace is at its concurrent-sandbox limit, the run is
-    marked SKIPPED (not FAILED) and the automation is left enabled."""
+    """Quota-limited runs are skipped without disabling their automation."""
 
     async def _make_running_run(self, async_session_factory):
         """Create an automation + a RUNNING run (as the dispatcher leaves it
@@ -1457,24 +1459,33 @@ class TestExecuteRunConcurrencyLimit:
             )
         return run, run_id, automation_id
 
-    async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
-        self, async_session_factory, mock_settings, mock_client
+    @pytest.mark.parametrize(
+        ("error_type", "kind"),
+        [
+            (ConcurrencyLimitReachedError, "concurrency_limit"),
+            (DailySandboxLimitReachedError, "daily_sandbox_limit"),
+        ],
+    )
+    async def test_quota_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client, error_type, kind
     ):
-        """A ConcurrencyLimitReachedError from get_execution_context marks the
-        run SKIPPED (with completed_at, no error_detail) and does NOT disable
-        the automation."""
+        """Persist the quota skip and emit its reason without disabling the job."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
         backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
-            side_effect=ConcurrencyLimitReachedError(
-                "You have reached your limit of 3 concurrent conversations."
-            )
+            side_effect=error_type("Sandbox quota reached.")
         )
         backend.release_context = AsyncMock()
 
-        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         async with async_session_factory() as session:
@@ -1491,8 +1502,11 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.completed_at is not None
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
-            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["kind"] == kind
             assert updated.status_detail["transient"] is True
+            assert updated.status_detail["detail"] == "Sandbox quota reached."
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
@@ -1505,6 +1519,14 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert auto.enabled is True  # transient org-level condition: not disabled
+
+        capture_event.assert_awaited_once_with(
+            "automation_run_skipped",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={"trigger_source": "dispatcher", "skip_reason": kind},
+        )
 
         # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
