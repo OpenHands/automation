@@ -167,7 +167,7 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 ## PR-Specific Documents
 
-When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should not remain on `main`, store them in a `.pr/` directory at the repository root.
 
 ```bash
 mkdir -p .pr
@@ -178,12 +178,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR. After a PR merges to `main`, the workflow opens or updates a cleanup PR to remove the directory, for both same-repository and fork PRs. Approval does not modify the source PR or rerun its CI just to remove temporary artifacts.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Merge the cleanup PR and let release-please update the release PR before merging it.
 - Cleanup PRs follow the normal review and required-check protections for `main`.
 
 

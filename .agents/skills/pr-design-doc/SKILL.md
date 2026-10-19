@@ -41,16 +41,16 @@ non-trivial PR easy to review.
 
 Use the temporary **`.pr/`** directory for PR-only artifacts. Before relying on automatic
 cleanup, verify that the target repository has an enabled
-`.github/workflows/pr-artifacts.yml` workflow that removes `.pr/` after approval.
+`.github/workflows/pr-artifacts.yml` workflow that opens or updates a cleanup PR to remove
+`.pr/` after merge to `main`.
 
-- Same-repository PR with verified cleanup workflow: the workflow removes `.pr/` after
-  approval.
-- Fork PR, or repository without a verified cleanup workflow: remove `.pr/` manually before
-  merge.
+- Same-repository or fork PR with verified cleanup workflow: leave `.pr/` for review;
+  the workflow opens or updates a cleanup PR after merge to `main`.
+- Repository without a verified cleanup workflow: remove `.pr/` manually before merge.
 
-The design doc is a temporary review aid and must not ship in the merged tree. Automated
-approval can trigger cleanup before human review. Keep the essential design summary in the
-PR description: intent, important before/after behavior or API shape, compatibility, risk,
+The design doc is a temporary review aid and must not remain on `main` after cleanup.
+Keep the essential design summary in the PR description: intent, important before/after
+behavior or API shape, compatibility, risk,
 and code references. Use commit-pinned document links so cleanup does not break access.
 
 ## Workflow
@@ -107,8 +107,8 @@ and code references. Use commit-pinned document links so cleanup does not break 
    git rev-parse HEAD
    ```
    Use the resulting full SHA as `<doc-commit-sha>` in document links. Refresh the document
-   and its link when substantive changes affect the design; a cleanup-only commit does not
-   need a new link. Query the base repository's visibility before choosing the link:
+   and its link when substantive changes affect the design. Query the base repository's
+   visibility before choosing the link:
    ```bash
    gh repo view <base-owner>/<base-repo> --json visibility,url
    ```
@@ -156,9 +156,10 @@ and code references. Use commit-pinned document links so cleanup does not break 
 5. **Self-contained & offline.** One HTML file, inline CSS/SVG, no external scripts or
    assets, opens by double-click, and survives being copied to another machine.
 6. **`.pr/` only, and temporary.** The doc is a review aid, not project docs. Keep it in
-   `.pr/` and ensure it is removed before merge. Rely on automatic cleanup only when the
-   repository's workflow has been verified; otherwise remove it manually. Do not move design
-   HTML into `docs/` or ship it in the merged tree.
+   `.pr/` for review. With a verified repository cleanup workflow, leave it in place until
+   the PR merges to `main`; the workflow opens or updates a cleanup PR. Without a verified
+   cleanup workflow, remove it manually before merge. Do not move design HTML into `docs/`
+   or leave it on `main` after cleanup.
 
 ## Anti-patterns
 
@@ -168,7 +169,8 @@ and code references. Use commit-pinned document links so cleanup does not break 
   location.
 - ❌ Only the after-state when something changed - reviewers want the *contrast*.
 - ❌ A design doc on a trivial PR - noise. Skip it.
-- ❌ Committing the HTML outside `.pr/` (e.g. `docs/`), where it would merge into `main`.
+- ❌ Committing the HTML outside `.pr/` (e.g. `docs/`), where artifact cleanup will not
+  remove it.
 - ❌ Publishing a private-repository design doc through htmlpreview, GitHub Pages, or another
   public host. Use the private/local preview path in the craft reference. Use GitHub Pages
   only with explicit user authorization after verifying private Pages access control.
