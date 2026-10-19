@@ -2,6 +2,7 @@
 
 import httpx
 import pytest
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_none
 
 from openhands.automation.backends.cloud import (
     CloudSandboxBackend,
@@ -37,8 +38,6 @@ def test_daily_sandbox_limit_detail_ignores_other_429s():
 async def test_create_sandbox_raises_daily_limit_without_retry():
     backend = CloudSandboxBackend.__new__(CloudSandboxBackend)
     # Rebuild the retry decorator the way __init__ does, with 3 attempts.
-    from tenacity import retry, retry_if_exception, stop_after_attempt, wait_none
-
     backend._retry = retry(
         retry=retry_if_exception(_is_rate_limit_error),
         stop=stop_after_attempt(3),
@@ -51,20 +50,23 @@ async def test_create_sandbox_raises_daily_limit_without_retry():
 
     calls = 0
 
-    class FakeClient:
-        async def post(self, url, headers=None):
-            nonlocal calls
-            calls += 1
-            return _response(
-                429,
-                {
-                    "detail": {
-                        "error": "DAILY_SANDBOX_LIMIT_REACHED",
-                        "message": "Daily sandbox limit of 20 reached.",
-                    }
-                },
-            )
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            429,
+            request=request,
+            json={
+                "detail": {
+                    "error": "DAILY_SANDBOX_LIMIT_REACHED",
+                    "message": "Daily sandbox limit of 20 reached.",
+                }
+            },
+        )
 
-    with pytest.raises(DailySandboxLimitReachedError, match="Daily sandbox limit"):
-        await backend._create_sandbox(FakeClient(), headers={})
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle_request)
+    ) as client:
+        with pytest.raises(DailySandboxLimitReachedError, match="Daily sandbox limit"):
+            await backend._create_sandbox(client, headers={})
     assert calls == 1
