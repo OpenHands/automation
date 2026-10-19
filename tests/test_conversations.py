@@ -33,7 +33,10 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
 )
-from openhands.automation.schemas import CreateAutomationRequest, EventTrigger
+from openhands.automation.schemas import (
+    CreateAutomationRequest,
+    EventTrigger,
+)
 from openhands.automation.subjects import (
     conversation_id_for,
 )
