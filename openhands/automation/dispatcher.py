@@ -34,6 +34,7 @@ from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
     PermanentDispatchError,
     TarballNotFoundError,
 )
@@ -559,6 +560,37 @@ async def _execute_run(
             properties={
                 "trigger_source": "dispatcher",
                 "skip_reason": "concurrency_limit",
+            },
+        )
+        return
+    except DailySandboxLimitReachedError as exc:
+        logger.warning(
+            "Run skipped — daily sandbox limit reached: %s",
+            exc,
+            extra=_log_ctx(),
+        )
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "daily_sandbox_limit",
             },
         )
         return
