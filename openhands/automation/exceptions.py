@@ -40,6 +40,17 @@ class ConcurrencyLimitReachedError(Exception):
     pass
 
 
+class DailySandboxLimitReachedError(Exception):
+    """The user has reached their daily sandbox quota.
+
+    Like the concurrency limit this is not a misconfiguration: retrying within
+    the same UTC day cannot succeed (the quota resets at UTC midnight), so the
+    run is marked SKIPPED (not FAILED) and the automation is left enabled.
+    """
+
+    pass
+
+
 class SandboxProvisioningError(Exception):
     """A sandbox never became ready, so no automation code ran in it.
 

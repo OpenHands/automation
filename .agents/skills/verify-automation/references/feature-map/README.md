@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **257 sub-features**.
+The map has **258 sub-features**.
 
 ## Baseline preconditions
 
@@ -81,7 +81,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F03 | [Capabilities and preflight validation](F03-capabilities-and-validate.md) | capabilities by configuration and readiness, schedule, trigger, sample-event and profile validation | `GET /v1/capabilities`, `POST /v1/validate` | baseline | 17 |
 | F04 | [Tarball uploads](F04-uploads.md) | upload, size and type limits, list, get, delete, use by an automation | `/v1/uploads` | baseline | 13 |
 | F05 | [Automation CRUD and tarball download](F05-automation-crud.md) | create, list and filters, get, patch, delete, tarball download, template reuse | `/v1`, `/v1/{id}`, `/v1/{id}/tarball` | baseline | 21 |
-| F06 | [Prompt and plugin presets](F06-presets.md) | prompt and plugin presets, generated tarball, repos, shared templates, continue-conversation rules | `/v1/preset/prompt`, `/v1/preset/plugin` | baseline | 11 |
+| F06 | [Prompt and plugin presets](F06-presets.md) | prompt, plugin and plugin-spec presets, generated tarball, repos, shared templates, continue-conversation rules | `/v1/preset/prompt`, `/v1/preset/plugin`, `/v1/plugin-spec` | baseline | 12 |
 | F07 | [Dispatch and run lifecycle](F07-dispatch-and-runs.md) | dispatch, run environment, phases, callbacks, cancel, runs list, a real preset run | `/v1/{id}/dispatch`, `/v1/{id}/runs`, `/v1/runs/{run_id}/...` | baseline; `llm`, `pypi` for the preset run | 16 |
 | F08 | [Cron scheduling](F08-cron-scheduling.md) | scheduler fires, run environment, timezones, no catch-up, poll floor, disabled automations | the scheduler loop (no route) | baseline; `map run --timeout 400` | 7 |
 | F09 | [Drafts](F09-drafts.md) | draft create from prompt, raw or plugin, validation, patch, test dispatch, delete | `/v1/drafts` | baseline | 19 |

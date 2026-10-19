@@ -30,14 +30,14 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 COPY README.md ./
 COPY openhands/ openhands/
 COPY migrations/ migrations/
 COPY alembic.ini .
 
-RUN uv venv /opt/venv --python /usr/local/bin/python --no-python-downloads && \
-    uv pip install --python /opt/venv/bin/python . ddtrace
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --locked --no-dev --group production \
+    --no-editable --python /usr/local/bin/python --no-python-downloads
 
 FROM snapshot-base AS runtime
 

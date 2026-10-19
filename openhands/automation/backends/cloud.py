@@ -24,6 +24,7 @@ from openhands.automation.backends.base import ExecutionBackend, ExecutionContex
 from openhands.automation.config import get_config
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
     SandboxProvisioningError,
 )
 from openhands.automation.models import AutomationRun
@@ -66,6 +67,20 @@ def _concurrency_limit_detail(resp: httpx.Response) -> dict | None:
     a flat ``{"error": ...}`` shape. This is distinct from a transient
     rate-limit 429, which should still be retried (see ``_is_rate_limit_error``).
     """
+    return _quota_limit_detail(resp, "CONCURRENCY_LIMIT_REACHED")
+
+
+def _daily_sandbox_limit_detail(resp: httpx.Response) -> dict | None:
+    """Return the DAILY_SANDBOX_LIMIT_REACHED detail dict if the response is
+    the per-user daily sandbox quota 429, else None.
+
+    Like the concurrency limit this must not be retried (see
+    ``_is_rate_limit_error``): the quota only resets at UTC midnight.
+    """
+    return _quota_limit_detail(resp, "DAILY_SANDBOX_LIMIT_REACHED")
+
+
+def _quota_limit_detail(resp: httpx.Response, error_code: str) -> dict | None:
     if resp.status_code != 429:
         return None
     try:
@@ -73,7 +88,7 @@ def _concurrency_limit_detail(resp: httpx.Response) -> dict | None:
     except Exception:
         return None
     detail = body.get("detail", body) if isinstance(body, dict) else None
-    if isinstance(detail, dict) and detail.get("error") == "CONCURRENCY_LIMIT_REACHED":
+    if isinstance(detail, dict) and detail.get("error") == error_code:
         return detail
     return None
 
@@ -384,6 +399,13 @@ class CloudSandboxBackend(ExecutionBackend):
             if detail is not None:
                 raise ConcurrencyLimitReachedError(
                     detail.get("message") or "Concurrency limit reached"
+                )
+            # Same for the daily sandbox quota: it only resets at UTC
+            # midnight, so retrying now cannot succeed.
+            detail = _daily_sandbox_limit_detail(resp)
+            if detail is not None:
+                raise DailySandboxLimitReachedError(
+                    detail.get("message") or "Daily sandbox limit reached"
                 )
             resp.raise_for_status()
             return resp.json()["id"]

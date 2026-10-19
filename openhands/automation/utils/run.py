@@ -340,6 +340,24 @@ async def update_bash_command_id(
         logger.exception("Failed to update bash_command_id for run %s", run_id)
 
 
+async def update_run_resolved_runtime(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    resolved_runtime: dict[str, Any],
+) -> None:
+    """Persist runtime attributes resolved during dispatch."""
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(resolved_runtime=resolved_runtime)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update resolved_runtime for run %s", run_id)
+
+
 async def update_run_timeout_at(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: uuid.UUID,
