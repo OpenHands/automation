@@ -567,6 +567,12 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_SERVICE_KEY: Service key for SaaS API (required in cloud mode)
         AUTOMATION_WEBHOOK_SECRET: Webhook signature secret (optional)
         AUTOMATION_OPENHANDS_API_BASE_URL: OpenHands API URL (default: https://app.all-hands.dev)
+        AUTOMATION_SANDBOX_OPENHANDS_API_BASE_URL: Optional override for the
+            OPENHANDS_CLOUD_API_URL exported into cloud-mode run sandboxes.
+            Defaults to AUTOMATION_OPENHANDS_API_BASE_URL when empty. Use this
+            when the service reaches OpenHands at a URL that sandboxes cannot
+            resolve (e.g. Docker Compose, where the service uses `http://app:3000`
+            and sandboxes need `http://host.docker.internal:<port>`).
 
         # Product telemetry (optional)
         AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
@@ -629,6 +635,12 @@ class ServiceSettings(BaseSettings):
 
     # OpenHands SaaS API
     openhands_api_base_url: str = "https://app.all-hands.dev"
+    # Optional override for the OPENHANDS_CLOUD_API_URL env var exported into
+    # cloud-mode run sandboxes by CloudSandboxBackend.build_env_vars. When
+    # empty, defaults to openhands_api_base_url. Needed when the service
+    # reaches OpenHands at an address sandboxes cannot resolve, such as a
+    # Docker Compose service name.
+    sandbox_openhands_api_base_url: str = ""
 
     # Background workers
     scheduler_interval_seconds: int = 60

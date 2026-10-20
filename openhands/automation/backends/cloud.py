@@ -102,14 +102,24 @@ class CloudSandboxBackend(ExecutionBackend):
     error occurs (401/403), the key is refreshed and the operation retried.
     """
 
-    def __init__(self, api_url: str, run: AutomationRun):
+    def __init__(
+        self,
+        api_url: str,
+        run: AutomationRun,
+        sandbox_api_url: str | None = None,
+    ):
         """Initialize the Cloud sandbox backend for a specific run.
 
         Args:
             api_url: OpenHands Cloud API URL (e.g., "https://app.all-hands.dev")
             run: The automation run (used to extract user info for API key)
+            sandbox_api_url: Optional override for the OPENHANDS_CLOUD_API_URL
+                env var exported into the sandbox. Defaults to ``api_url`` when
+                None. Useful when the backend reaches OpenHands at an address
+                the sandbox cannot resolve (e.g. a Docker Compose service name).
         """
         self.api_url = api_url.rstrip("/")
+        self.sandbox_api_url = sandbox_api_url.rstrip("/") if sandbox_api_url else None
         self._run = run
         self._api_key: str | None = None  # Lazily minted
 
@@ -214,7 +224,7 @@ class CloudSandboxBackend(ExecutionBackend):
             )
         return {
             "OPENHANDS_API_KEY": self._api_key,
-            "OPENHANDS_CLOUD_API_URL": self.api_url,
+            "OPENHANDS_CLOUD_API_URL": self.sandbox_api_url or self.api_url,
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:

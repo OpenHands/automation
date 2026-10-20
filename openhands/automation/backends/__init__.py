@@ -56,6 +56,7 @@ def get_backend(run: AutomationRun) -> ExecutionBackend:
         return CloudSandboxBackend(
             api_url=settings.openhands_api_base_url,
             run=run,
+            sandbox_api_url=settings.sandbox_openhands_api_base_url or None,
         )
 
 

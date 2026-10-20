@@ -374,6 +374,30 @@ class TestCloudSandboxBackend:
                 "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",
             }
 
+    @pytest.mark.asyncio
+    async def test_build_env_vars_sandbox_url_override(self, mock_run):
+        """sandbox_api_url overrides OPENHANDS_CLOUD_API_URL only in the
+        sandbox export — the backend itself still uses api_url."""
+        backend = CloudSandboxBackend(
+            api_url="http://app:3000",
+            run=mock_run,
+            sandbox_api_url="http://host.docker.internal:3100/",
+        )
+
+        with patch(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="sk-user",
+        ):
+            await backend.get_api_key()
+
+            env_vars = backend.build_env_vars()
+            assert (
+                env_vars["OPENHANDS_CLOUD_API_URL"]
+                == "http://host.docker.internal:3100"
+            )
+            assert backend.api_url == "http://app:3000"
+
     def test_build_env_vars_raises_without_api_key(self, mock_run):
         """build_env_vars() raises if API key not initialized."""
         backend = CloudSandboxBackend(api_url="https://app.all-hands.dev", run=mock_run)
