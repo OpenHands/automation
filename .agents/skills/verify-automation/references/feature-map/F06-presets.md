@@ -26,7 +26,7 @@ Routes: `POST /api/automation/v1/preset/prompt`, `POST /api/automation/v1/preset
 - `F06.plugin-create`: a plugin preset answers 201 with `preset_metadata {preset_type: plugin, prompt, plugins}` and a tarball that adds `plugins_config.json`; a single plugin object is normalized to a list.
 - `F06.plugin-validation`: an empty `plugins` list, both or neither of `plugins`/`variants`, variants without `experiment_id`, one variant, duplicate variant names, `experiment_id` with `plugins`, a zero weight and an absolute or `..` `repo_path` each answer 422 with their own message.
 - `F06.plugin-variants`: valid A/B variants produce `experiment_config.json` (each variant's model falling back to the automation `model`) and no `plugins_config.json`; `preset_metadata` has no `plugins` key.
-- `F06.plugin-spec-create`: a plugin-spec create reads an executable plugin manifest, resolves defaults from its config schema, stores `preset_metadata.preset_type: plugin_spec`, stores `plugin_spec.plugin` and `plugin_spec.config`, uses `tarball_path: plugin-spec://runtime`, and rejects custom event sources that have no webhook configured.
+- `F06.plugin-spec-create`: a plugin-spec create reads an executable plugin manifest, resolves defaults from its config schema, stores `preset_metadata.preset_type: plugin_spec`, stores `plugin_spec.plugin` and `plugin_spec.config`, uses `tarball_path: plugin-spec://runtime`, and rejects custom event sources that have no webhook configured. An optional `agent_profile_id` replaces the manifest's `default_name` and is checked against its allowlists; a manifest without `runtime.agent_profile` answers 422 `This plugin does not run on an agent profile`. A conversation runner's `entrypoint.arguments` may use `{{ config.* }}` templates, and one naming a missing value answers 422 `Template references missing config value: config.<path>`.
 - `F06.continue-keep-alive`, known bug: a preset with an event trigger whose `destination` is `continue_conversation` should store `keep_alive: true` as `POST /v1` does; it stores `null`.
 - `F06.continue-keep-alive-false`, known bug: a preset with `continue_conversation` and `keep_alive: false` should answer 422 as `POST /v1` does; it answers 201.
 - `F06.continue-patch-enforced`: any later PATCH of such a preset forces `keep_alive: true`, and PATCH `keep_alive: false` answers 400.
@@ -215,8 +215,9 @@ Preconditions:
 
 - Preset tarballs are gzip (`w:gz`) although the download says
   `application/x-tar` and names the file `.tar`; list them with `tar tzf`.
-- Presets have no `agent_profile_id`, `tarball_path`, `entrypoint` or
-  `setup_script_path` fields; sending any is a 422 `extra_forbidden`.
+- Prompt and plugin presets have no `agent_profile_id`, `tarball_path`,
+  `entrypoint` or `setup_script_path` fields; sending any is a 422
+  `extra_forbidden`. `POST /v1/plugin-spec` takes an `agent_profile_id`.
 - The template lookup is shared with `POST /v1` and runs before model
   resolution and tarball generation: a repeat returns whatever automation
   first used that `template.id` in the org, raw or preset, with HTTP 200.
