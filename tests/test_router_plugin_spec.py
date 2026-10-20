@@ -709,3 +709,65 @@ async def test_create_plugin_spec_rejects_arguments_missing_their_config(
 
     assert response.status_code == 422
     assert "Template references missing config value: config.prompt" in response.text
+
+
+@pytest.mark.parametrize("default_name", ["agent-default", None])
+@pytest.mark.asyncio
+async def test_patch_plugin_source_keeps_the_chosen_agent_profile(
+    async_client, tmp_path, agent_profiles_api, default_name
+):
+    _serve_two_profiles(agent_profiles_api)
+    plugin_v1 = write_prompt_plugin(tmp_path / "v1", default_name=default_name)
+    plugin_v2 = write_prompt_plugin(tmp_path / "v2", default_name=default_name)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Prompt",
+            "plugin": {"source": str(plugin_v1)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "config": {"prompt": "Summarize open issues"},
+            "agent_profile_id": CHOSEN_PROFILE_ID,
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin_v2)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"] == {"source": str(plugin_v2)}
+    assert response.json()["agent_profile_id"] == CHOSEN_PROFILE_ID
+
+
+@pytest.mark.asyncio
+async def test_patch_plugin_source_drops_the_profile_for_a_profileless_plugin(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin_v1 = write_plugin(tmp_path / "v1")
+    plugin_v2 = write_plugin(tmp_path / "v2")
+    manifest = json.loads((plugin_v2 / "automation-plugin.json").read_text())
+    manifest["runtime"] = {}
+    _write_plugin_automation(plugin_v2, manifest)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Hello Plugin",
+            "plugin": {"source": str(plugin_v1)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.json()["agent_profile_id"] == agent_profiles_api.profile_id
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin_v2)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["agent_profile_id"] is None
