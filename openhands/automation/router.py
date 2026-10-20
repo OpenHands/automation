@@ -580,6 +580,7 @@ async def _resolve_plugin_spec_runtime_fields(
     run_as_user_id: uuid.UUID,
     pin_ref: bool = False,
     agent_profile_id: uuid.UUID | None = None,
+    current_agent_profile_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it.
 
@@ -603,20 +604,24 @@ async def _resolve_plugin_spec_runtime_fields(
         _plugin_secrets_for(request, run_as_user_id, user.org_id),
     )
 
-    if agent_profile_id is not None and manifest.runtime.agent_profile is None:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "This plugin does not run on an agent profile",
-        )
+    agent_profile_requirement = manifest.runtime.agent_profile
+    if agent_profile_requirement is None:
+        if agent_profile_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "This plugin does not run on an agent profile",
+            )
+    elif agent_profile_id is None:
+        agent_profile_id = current_agent_profile_id
     agent_profile_name = (
-        manifest.runtime.agent_profile.default_name
-        if manifest.runtime.agent_profile is not None and agent_profile_id is None
+        agent_profile_requirement.default_name
+        if agent_profile_requirement is not None and agent_profile_id is None
         else None
     )
     has_agent_profile = agent_profile_id is not None or bool(agent_profile_name)
     if (
-        manifest.runtime.agent_profile is not None
-        and manifest.runtime.agent_profile.required
+        agent_profile_requirement is not None
+        and agent_profile_requirement.required
         and not has_agent_profile
     ):
         raise HTTPException(
@@ -643,7 +648,6 @@ async def _resolve_plugin_spec_runtime_fields(
             resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
-    agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
         agent_profile_id,
         agent_profile_name,
@@ -913,6 +917,7 @@ async def update_automation(
                 user=user,
                 run_as_user_id=auto.user_id,
                 pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
+                current_agent_profile_id=auto.agent_profile_id,
             )
         except HTTPException as exc:
             if (
