@@ -98,8 +98,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/drafts", tags=["Automation Drafts"])
 
+# As with creating an automation, any org member may work with their own
+# drafts: a draft belongs to whoever saved it, and edit, dispatch and delete
+# check that the caller is its creator.
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 
 async def _assert_org_automation_exists(
@@ -492,7 +494,7 @@ async def _materialize_draft(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_draft(
     body: CreateAutomationDraftRequest,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     if body.source_automation_id is not None:
@@ -557,7 +559,7 @@ async def get_draft(
 async def update_draft(
     draft_id: uuid.UUID,
     body: UpdateAutomationDraftRequest,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
@@ -580,7 +582,7 @@ async def update_draft(
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_draft(
     draft_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
@@ -610,7 +612,7 @@ async def dispatch_draft(
     request: Request,
     background_tasks: BackgroundTasks,
     body: DraftDispatchRequest | None = None,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationRunResponse:

@@ -286,7 +286,7 @@ Preconditions:
 - Deleting a draft skips pending runs with `error_detail` `Automation
   disabled`; the draft-specific reason is only in `status_detail.detail`.
 - Creator-only checks (403 `Only the draft creator can modify or dispatch
-  it`) and the `manage_automations` permission (403) cannot be reached in
-  local mode, where one user holds every permission.
+  it`) cannot be reached in local mode, where one user owns every draft.
+  Draft routes need only `view_automations`, like the create routes.
 - `agent_profile_id` and `observability_associations` are accepted by `POST
   /v1` but not by a `/v1` draft (shape 422).

@@ -21,6 +21,8 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 
+OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
 
 @pytest.fixture
 async def draft_file_store():
@@ -494,3 +496,75 @@ async def test_delete_draft_does_not_delete_linked_non_draft_automation(
     assert active.deleted_at is None
     assert active.enabled is True
     assert active.state == AutomationState.ACTIVE
+
+
+async def test_member_can_save_edit_test_and_delete_own_draft(
+    readonly_client, async_session, draft_file_store
+):
+    """Members can create automations, so they can use drafts of their own."""
+    created = await readonly_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Member draft",
+                "prompt": "Summarize open PRs.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["user_id"] == str(TEST_USER_ID)
+    draft_id = created.json()["id"]
+
+    updated = await readonly_client.patch(
+        f"/api/automation/v1/drafts/{draft_id}", json={"name": "Renamed draft"}
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "Renamed draft"
+
+    dispatched = await readonly_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch"
+    )
+    assert dispatched.status_code == 201, dispatched.text
+    automation = await async_session.get(
+        Automation, uuid.UUID(dispatched.json()["automation_id"])
+    )
+    assert automation is not None
+    assert automation.user_id == TEST_USER_ID
+    assert automation.state == AutomationState.DRAFT
+
+    deleted = await readonly_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+    assert deleted.status_code == 204, deleted.text
+    draft = await async_session.get(AutomationDraft, uuid.UUID(draft_id))
+    assert draft is not None
+    assert draft.deleted_at is not None
+
+
+async def test_member_cannot_change_another_users_draft(readonly_client, async_session):
+    draft = AutomationDraft(
+        user_id=OTHER_USER_ID,
+        org_id=TEST_ORG_ID,
+        endpoint="/v1/preset/prompt",
+        name="Another user's draft",
+        draft_body={"name": "Another user's draft"},
+    )
+    async_session.add(draft)
+    await async_session.commit()
+    path = f"/api/automation/v1/drafts/{draft.id}"
+
+    responses = [
+        await readonly_client.patch(path, json={"name": "Taken over"}),
+        await readonly_client.post(f"{path}/dispatch"),
+        await readonly_client.delete(path),
+    ]
+
+    for response in responses:
+        assert response.status_code == 403, response.text
+        assert (
+            response.json()["detail"]
+            == "Only the draft creator can modify or dispatch it"
+        )
+    await async_session.refresh(draft)
+    assert draft.name == "Another user's draft"
+    assert draft.deleted_at is None
