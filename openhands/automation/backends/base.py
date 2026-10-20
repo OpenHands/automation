@@ -78,6 +78,15 @@ class ExecutionBackend(ABC):
             ctx: The execution context to release
         """
 
+    async def seed_agent_profile(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        ctx: ExecutionContext,  # noqa: ARG002
+        agent_profile_id: str,
+    ) -> str:
+        """Make a profile launchable on ctx's agent server; return its id there."""
+        return agent_profile_id
+
     @abstractmethod
     async def get_api_key(self) -> str:
         """Get the API key for executing an automation run.

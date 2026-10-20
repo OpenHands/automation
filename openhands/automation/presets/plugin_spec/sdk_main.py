@@ -239,10 +239,13 @@ with workspace_ctx as workspace:
     if automation_conversation_id:
         conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
 
+    # Secrets go in the start request: the agent server drops those the
+    # profile's secret_refs don't allow only there.
     request_kwargs = {
         **conversation_kwargs,
         "workspace": LocalWorkspace(working_dir=workspace.working_dir),
         "agent_profile_id": uuid.UUID(agent_profile_id),
+        "secrets": secrets,
     }
     conversation = RemoteConversation.create(
         workspace, StartConversationRequest(**request_kwargs)
@@ -250,11 +253,7 @@ with workspace_ctx as workspace:
     assert isinstance(conversation, RemoteConversation)
     print(f"  conversation created: {type(conversation).__name__}")
     print(f"  plugins loaded: {len(plugin_sources)}")
-
-    # Inject secrets into the conversation (auto-exported as env vars in bash)
-    if secrets:
-        conversation.update_secrets(secrets)
-        print(f"  injected {len(secrets)} secrets into conversation")
+    print(f"  secrets offered: {len(secrets)}")
 
     # Build session URL from conversation ID and inject as a secret so
     # the agent can use $AUTOMATION_SESSION_URL in bash commands.

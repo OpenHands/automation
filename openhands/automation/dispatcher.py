@@ -874,7 +874,32 @@ async def _execute_run(
         )
         return
 
-    # 6. Execute in context
+    # 6. Make the run's agent profile launchable on its agent server.
+    if agent_profile_id := env_vars.get("AUTOMATION_AGENT_PROFILE_ID"):
+        try:
+            env_vars["AUTOMATION_AGENT_PROFILE_ID"] = await backend.seed_agent_profile(
+                client, ctx, agent_profile_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to copy the agent profile into the sandbox: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            await backend.release_context(client, ctx)
+            await _fail(
+                str(exc),
+                status_detail=run_status_detail_from_exception(
+                    exc,
+                    phase=RunStatusPhase.DISPATCH,
+                    source="openhands_api",
+                    operation="seed_agent_profile",
+                ),
+            )
+            return
+
+    # 7. Execute in context
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
@@ -926,7 +951,7 @@ async def _execute_run(
         )
         return
 
-    # 7. Handle result
+    # 8. Handle result
     if result.success:
         add_event(
             "automation.entrypoint.start",
