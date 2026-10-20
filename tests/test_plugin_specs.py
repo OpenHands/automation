@@ -393,6 +393,7 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     assert plugins_config == [{"source": str(plugin)}]
     assert "StartConversationRequest" in main_source
     assert "RemoteConversation.create" in main_source
+    assert '"agent_definitions": discover_builtin_agents()' in main_source
     assert "get_default_agent" not in main_source
     assert "Conversation(**conversation_kwargs)" not in main_source
     assert "clone_repos" not in main_source
