@@ -9,12 +9,12 @@ from openhands.automation.auth import require_permission
 
 
 # Members hold view_automations but not manage_automations, so they cannot call
-# any of these routes. A member's own automations and drafts need only
-# view_automations plus a creator check in the handler. The draft routes once
-# required manage_automations, which let members create automations but not save
-# a draft. Add a route here only when members must not use it at all.
+# any of these routes. A member's own automations, drafts and uploads need only
+# view_automations plus an ownership check in the handler. Draft routes and
+# upload deletion once required manage_automations, so members could create
+# automations but not save a draft or delete their own upload. Add a route here
+# only when members must not use it at all.
 MANAGE_ONLY_ROUTES = {
-    ("DELETE", "/api/automation/v1/uploads/{upload_id}"),
     ("POST", "/api/automation/v1/webhooks"),
     ("PATCH", "/api/automation/v1/webhooks/{webhook_id}"),
     ("DELETE", "/api/automation/v1/webhooks/{webhook_id}"),

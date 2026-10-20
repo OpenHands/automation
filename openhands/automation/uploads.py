@@ -24,8 +24,9 @@ from openhands.automation.utils import utcnow
 
 router = APIRouter(prefix="/v1/uploads", tags=["Uploads"])
 
+# Any org member may upload and delete their own tarballs; every lookup is
+# scoped to the caller's own uploads.
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 # Maximum upload size: 1MB
 MAX_UPLOAD_SIZE = 1 * 1024 * 1024
@@ -274,7 +275,7 @@ async def get_upload(
 @router.delete("/{upload_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_upload(
     upload_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session),
     file_store: FileStore = Depends(get_file_store),
 ) -> None:
