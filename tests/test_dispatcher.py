@@ -1721,7 +1721,10 @@ class TestExecuteRunDerivedConversationId:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            agent_server_port=8000,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -1774,6 +1777,22 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert "AUTOMATION_CONVERSATION_ID" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_gets_the_agent_server_port(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """The script finds its sandbox's agent server, whatever its port."""
+        env_vars, _, _ = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            subject_key=None,
+        )
+
+        assert env_vars["AGENT_SERVER_PORT"] == "8000"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_dispatch_propagates_generic_observability_context(

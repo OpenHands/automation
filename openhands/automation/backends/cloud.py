@@ -188,10 +188,15 @@ class CloudSandboxBackend(ExecutionBackend):
     ) -> ExecutionContext:
         """Create a sandbox and wait for it to be ready."""
 
-        async def _do_acquire() -> tuple[str, str, str]:
+        async def _do_acquire() -> tuple[str, str, str, int | None]:
             return await self._create_and_wait(client, await self._ensure_api_key())
 
-        sandbox_id, session_key, agent_url = await self._with_auth_retry(_do_acquire)
+        (
+            sandbox_id,
+            session_key,
+            agent_url,
+            agent_server_port,
+        ) = await self._with_auth_retry(_do_acquire)
 
         return ExecutionContext(
             agent_url=agent_url,
@@ -199,6 +204,7 @@ class CloudSandboxBackend(ExecutionBackend):
             sandbox_id=sandbox_id,
             api_url=self.api_url,
             api_key=await self._ensure_api_key(),
+            agent_server_port=agent_server_port,
         )
 
     async def release_context(
@@ -272,10 +278,10 @@ class CloudSandboxBackend(ExecutionBackend):
         client: httpx.AsyncClient,
         api_key: str,
         ready_timeout: float | None = None,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, int | None]:
         """Create a sandbox and poll until RUNNING.
 
-        Returns (sandbox_id, session_api_key, agent_server_url).
+        Returns (sandbox_id, session_api_key, agent_server_url, agent_server_port).
         """
         if ready_timeout is None:
             ready_timeout = self._ready_timeout
@@ -293,7 +299,12 @@ class CloudSandboxBackend(ExecutionBackend):
                 if result is None:
                     raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
                 agent_url, session_key = result
-                return sandbox_id, session_key, agent_url
+                return (
+                    sandbox_id,
+                    session_key,
+                    agent_url,
+                    self._find_agent_server_port(sb),
+                )
 
             if status in ("ERROR", "MISSING"):
                 error_code = sb.get("error_code", "")
@@ -366,4 +377,12 @@ class CloudSandboxBackend(ExecutionBackend):
         for url_info in sandbox.get("exposed_urls") or []:
             if url_info.get("name") == "AGENT_SERVER":
                 return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
+        return None
+
+    @staticmethod
+    def _find_agent_server_port(sandbox: dict) -> int | None:
+        """Extract the agent server's in-sandbox port from sandbox response."""
+        for url_info in sandbox.get("exposed_urls") or []:
+            if url_info.get("name") == "AGENT_SERVER":
+                return url_info.get("port")
         return None

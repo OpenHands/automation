@@ -649,6 +649,10 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
+    # The SDK's local agent-server mode connects to localhost:AGENT_SERVER_PORT
+    # and otherwise assumes the remote runtime's port.
+    if ctx.agent_server_port:
+        env_vars["AGENT_SERVER_PORT"] = str(ctx.agent_server_port)
 
     # Inject a KV token whenever the service has a KV secret configured.
     # The KV store is always available to automations — there is no per-

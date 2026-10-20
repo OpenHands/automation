@@ -341,6 +341,25 @@ class TestCloudSandboxBackend:
         result = CloudSandboxBackend._find_agent_server_url(sandbox)
         assert result is None
 
+    def test_find_agent_server_port_found(self):
+        """_find_agent_server_port returns the AGENT_SERVER in-sandbox port."""
+        sandbox = {
+            "exposed_urls": [
+                {"name": "VSCODE", "url": "http://vscode.example.com", "port": 8001},
+                {
+                    "name": "AGENT_SERVER",
+                    "url": "http://agent.example.com",
+                    "port": 8000,
+                },
+            ],
+        }
+        assert CloudSandboxBackend._find_agent_server_port(sandbox) == 8000
+
+    def test_find_agent_server_port_not_found(self):
+        """_find_agent_server_port returns None without an AGENT_SERVER port."""
+        sandbox = {"exposed_urls": [{"name": "AGENT_SERVER", "url": "http://a"}]}
+        assert CloudSandboxBackend._find_agent_server_port(sandbox) is None
+
     @pytest.mark.asyncio
     async def test_get_api_key_mints_per_user_key(self, mock_run):
         """get_api_key() mints a per-user key via service key."""

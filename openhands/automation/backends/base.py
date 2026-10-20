@@ -21,6 +21,8 @@ class ExecutionContext:
         sandbox_id: Sandbox ID (Cloud mode only, None for local mode)
         api_url: Cloud API URL (Cloud mode only, needed for sandbox cleanup)
         api_key: Cloud API key (Cloud mode only, needed for sandbox cleanup)
+        agent_server_port: Port the agent server listens on inside the sandbox
+            (Cloud mode only). Differs by sandbox backend.
     """
 
     agent_url: str
@@ -28,6 +30,7 @@ class ExecutionContext:
     sandbox_id: str | None = None
     api_url: str | None = None
     api_key: str | None = None
+    agent_server_port: int | None = None
 
 
 class ExecutionBackend(ABC):
