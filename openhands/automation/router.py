@@ -338,6 +338,7 @@ async def create_automation_from_plugin_spec(
         plugin_config=body.config,
         request=request,
         user=user,
+        agent_profile_id=body.agent_profile_id,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -497,20 +498,31 @@ async def _resolve_plugin_spec_runtime_fields(
     plugin_config: dict[str, Any] | None,
     request: Request,
     user: AuthenticatedUser,
+    agent_profile_id: uuid.UUID | None = None,
+    current_agent_profile_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it."""
     plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, plugin_config)
 
+    agent_profile_requirement = manifest.runtime.agent_profile
+    if agent_profile_requirement is None:
+        if agent_profile_id is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "This plugin does not run on an agent profile",
+            )
+    elif agent_profile_id is None:
+        agent_profile_id = current_agent_profile_id
     agent_profile_name = (
-        manifest.runtime.agent_profile.default_name
-        if manifest.runtime.agent_profile is not None
+        agent_profile_requirement.default_name
+        if agent_profile_requirement is not None and agent_profile_id is None
         else None
     )
-    has_agent_profile = bool(agent_profile_name)
+    has_agent_profile = agent_profile_id is not None or bool(agent_profile_name)
     if (
-        manifest.runtime.agent_profile is not None
-        and manifest.runtime.agent_profile.required
-        and not agent_profile_name
+        agent_profile_requirement is not None
+        and agent_profile_requirement.required
+        and not has_agent_profile
     ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -536,9 +548,8 @@ async def _resolve_plugin_spec_runtime_fields(
             resolve_model_profile_for_user(llm_default, user) if llm_default else None
         )
 
-    agent_profile_requirement = manifest.runtime.agent_profile
     agent_profile_id = await validate_agent_profile_allowlists(
-        None,
+        agent_profile_id,
         agent_profile_name,
         agent_profile_requirement.allowed_tools
         if agent_profile_requirement is not None
@@ -725,6 +736,7 @@ async def update_automation(
                 else None,
                 request=request,
                 user=user,
+                current_agent_profile_id=auto.agent_profile_id,
             )
         except HTTPException as exc:
             if (
