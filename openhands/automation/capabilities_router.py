@@ -205,9 +205,7 @@ async def validate_draft(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
-        delivery = await get_event_source_delivery(
-            trigger.source, user.org_id, session
-        )
+        delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
         if delivery is None:
             errors.append(
                 DraftValidationError(
