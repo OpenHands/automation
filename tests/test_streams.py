@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from openhands.automation.config import (
+    SlackAppSettings,
     StreamSettings,
     clear_config_cache,
     get_config,
@@ -198,21 +199,24 @@ def test_configured_stream_sources_are_org_scoped_and_respect_switch():
     other_org_id = uuid.uuid4()
     settings = StreamSettings(
         slack_apps=[
-            {
-                "org_id": str(org_id),
-                "app_token": "xapp-1",
-                "bot_token": "xoxb-1",
-                "team_id": TEAM_ID,
-                "bot_user_id": BOT_USER_ID,
-            }
+            SlackAppSettings(
+                org_id=org_id,
+                app_token="xapp-1",
+                bot_token="xoxb-1",
+                team_id=TEAM_ID,
+                bot_user_id=BOT_USER_ID,
+            )
         ]
     )
 
     assert configured_stream_sources(org_id, settings) == ["slack"]
     assert configured_stream_sources(other_org_id, settings) == []
-    assert configured_stream_sources(
-        org_id, settings.model_copy(update={"streams_enabled": False})
-    ) == []
+    assert (
+        configured_stream_sources(
+            org_id, settings.model_copy(update={"streams_enabled": False})
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------
