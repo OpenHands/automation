@@ -209,6 +209,7 @@ class TestGetCapabilities:
         body = response.json()
         assert body["triggerKinds"] == ["cron", "event"]
         assert body["eventSources"] == ["slack"]
+        assert "webhookDelivery" not in body["features"]
 
     async def test_validate_accepts_configured_stream_source(
         self, async_client, ready_deployment, monkeypatch
@@ -279,6 +280,7 @@ class TestGetCapabilities:
         body = response.json()
         assert body["eventSources"] == ["linear"]
         assert body["triggerKinds"] == ["cron", "event"]
+        assert "webhookDelivery" in body["features"]
 
     async def test_cloud_deployment_without_service_key_is_not_ready(
         self, async_client, monkeypatch

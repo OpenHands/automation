@@ -27,6 +27,7 @@ from openhands.automation.event_schemas.github import (
     get_supported_event_types,
 )
 from openhands.automation.filter_eval import FilterFunctions
+from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
     CapabilitiesResponse,
@@ -43,7 +44,8 @@ from openhands.automation.schemas import (
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
 from openhands.automation.utils.event_sources import (
-    configured_event_sources,
+    configured_stream_sources,
+    custom_event_sources,
     get_event_source_delivery,
 )
 from openhands.automation.utils.model_profiles import (
@@ -102,14 +104,18 @@ async def get_capabilities(
             features=[],
         )
 
-    event_sources = await configured_event_sources(user.org_id, session)
+    webhook_sources = {
+        *(builtin_sources() if config.service.webhook_secret else []),
+        *await custom_event_sources(user.org_id, session),
+    }
+    event_sources = sorted({*webhook_sources, *configured_stream_sources(user.org_id)})
 
     # Not a packaged-code feature: the id is passed through to the run, whose
     # conversation server resolves it - the Agent Server locally, the OpenHands
     # app server in cloud, which has to be a version that serves
     # /api/agent-profiles.
     features = [*_STATIC_FEATURES, "agentProfiles"]
-    if event_sources:
+    if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
         features.append("kvStore")

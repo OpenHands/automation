@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.config import StreamSettings, get_config
 from openhands.automation.models import CustomWebhook
-from openhands.automation.providers import builtin_sources
 from openhands.automation.streams.supervisor import build_stream_providers
 from openhands.automation.utils.webhook import get_webhook_config
 
@@ -60,22 +59,6 @@ async def is_event_source_configured(
 ) -> bool:
     """Whether a source can deliver events to this organization."""
     return await get_event_source_delivery(source, org_id, session) is not None
-
-
-async def configured_event_sources(
-    org_id: uuid.UUID,
-    session: AsyncSession,
-) -> list[str]:
-    """All configured event source names for an organization."""
-    config = get_config()
-    builtin = builtin_sources() if config.service.webhook_secret else []
-    return sorted(
-        {
-            *builtin,
-            *await custom_event_sources(org_id, session),
-            *configured_stream_sources(org_id, config.streams),
-        }
-    )
 
 
 async def custom_event_sources(
