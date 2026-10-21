@@ -156,6 +156,9 @@ def _automation_yaml_fields(
     # already-synced automation.yaml just to add an empty list.
     if tarball_executables:
         fields["tarball_executables"] = tarball_executables
+    # Omitted when empty for the same reason.
+    if automation.tags:
+        fields["tags"] = automation.tags
     return fields
 
 

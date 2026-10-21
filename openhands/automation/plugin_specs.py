@@ -30,6 +30,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    TAGS_DESCRIPTION,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -37,6 +38,7 @@ from openhands.automation.schemas import (
     reject_public_draft_state,
     validate_command_string,
 )
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.extensions.fetch import SourceType, parse_extension_source
 from openhands.sdk.plugin import PluginSource, PluginSourceError, preflight_plugin
@@ -290,6 +292,7 @@ class CreatePluginSpecAutomationRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     trigger: Trigger | None = None
     observability_associations: dict[str, str] | None = None
+    tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     timeout: int | None = None
     keep_alive: bool | None = None
     template: TemplateProvenance | None = None
@@ -312,6 +315,11 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         cls, value: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(value)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, value: list[str]) -> list[str]:
+        return normalize_tags(value)
 
     @field_validator("timeout")
     @classmethod

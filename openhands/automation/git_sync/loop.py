@@ -71,6 +71,7 @@ from openhands.automation.observability_associations import (
 )
 from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
@@ -513,6 +514,11 @@ async def _validate_and_resolve_fields(
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
+    # Export omits an empty list, so a missing key means no tags.
+    raw_tags = fields.get("tags") or []
+    if not isinstance(raw_tags, list):
+        raise ValueError("automation.yaml 'tags' must be a list")
+    tags = normalize_tags(raw_tags)
     entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
@@ -556,6 +562,7 @@ async def _validate_and_resolve_fields(
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "observability_associations": observability_associations,
+        "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
