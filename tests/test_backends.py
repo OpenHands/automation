@@ -1,5 +1,6 @@
 """Tests for execution backends."""
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from openhands.automation.backends import (
     get_backend,
 )
 from openhands.automation.backends.cloud import (
+    AgentProfileSeedError,
     _concurrency_limit_detail,
     summarize_status_detail,
 )
@@ -727,3 +729,157 @@ class TestSummarizeStatusDetail:
     )
     def test_summary(self, detail, expected):
         assert summarize_status_detail(detail) == expected
+
+
+class TestCloudSeedAgentProfile:
+    """The run's agent profile is copied from the app server into the sandbox."""
+
+    API = "https://app.example.com"
+    AGENT = "https://sandbox.example.com"
+    PROFILE_ID = "3d9a7654-c1e0-46a3-98ef-7795f2d466fc"
+
+    def _profile(self, **overrides):
+        return {
+            "id": self.PROFILE_ID,
+            "name": "subagents",
+            "agent_kind": "openhands",
+            "llm_profile_ref": "fast",
+            "mcp_server_refs": ["github"],
+            "tools": [{"name": "task_tool_set"}],
+            **overrides,
+        }
+
+    async def _seed(self, profile, *, app_profiles=None, llm_profiles=None):
+        run = MagicMock()
+        run.automation.org_id = "org-1"
+        backend = CloudSandboxBackend(api_url=self.API, run=run)
+        ctx = ExecutionContext(
+            agent_url=self.AGENT, session_key="session-1", sandbox_id="sbx-1"
+        )
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            url = str(request.url)
+            if url == f"{self.API}/api/agent-profiles":
+                listed = app_profiles or [{"id": self.PROFILE_ID, "name": "subagents"}]
+                return httpx.Response(200, json={"profiles": listed})
+            if url == f"{self.API}/api/agent-profiles/subagents":
+                return httpx.Response(
+                    200, json={"name": "subagents", "profile": profile}
+                )
+            if url.startswith(f"{self.API}/api/v1/users/me"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "llm_profiles": {
+                            "profiles": llm_profiles
+                            if llm_profiles is not None
+                            else {"fast": {"model": "m", "api_key": "k"}}
+                        },
+                        "agent_settings": {
+                            "mcp_config": {
+                                "github": {"url": "https://gh.example/mcp"},
+                                "slack": {"url": "https://slack.example/mcp"},
+                            }
+                        },
+                    },
+                )
+            if url == f"{self.AGENT}/api/agent-profiles" and request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "profiles": [
+                            {"id": "default-id", "name": "default"},
+                            {"id": "sandbox-id", "name": "subagents"},
+                        ]
+                    },
+                )
+            if url.startswith(self.AGENT):
+                return httpx.Response(200, json={})
+            return httpx.Response(404)
+
+        with patch(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="sk-user",
+        ):
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                try:
+                    result = await backend.seed_agent_profile(
+                        client, ctx, self.PROFILE_ID
+                    )
+                except AgentProfileSeedError as exc:
+                    result = exc
+        return result, seen
+
+    @staticmethod
+    def _sandbox_writes(seen):
+        return {
+            (r.method, r.url.path): json.loads(r.content)
+            for r in seen
+            if r.url.host == "sandbox.example.com" and r.method != "GET"
+        }
+
+    async def test_copies_the_profile_and_what_it_references(self):
+        profile = self._profile()
+        result, seen = await self._seed(profile)
+
+        assert result == "sandbox-id"
+        writes = self._sandbox_writes(seen)
+        assert writes == {
+            ("POST", "/api/profiles/fast"): {
+                "include_secrets": True,
+                "llm": {"model": "m", "api_key": "k"},
+            },
+            ("PATCH", "/api/settings"): {
+                "agent_settings_diff": {
+                    "mcp_config": {"github": {"url": "https://gh.example/mcp"}}
+                }
+            },
+            ("POST", "/api/agent-profiles/subagents"): profile,
+        }
+        for request in seen:
+            if request.url.host == "sandbox.example.com":
+                assert request.headers["X-Session-API-Key"] == "session-1"
+            else:
+                assert request.headers["Authorization"] == "Bearer sk-user"
+                assert request.headers["X-Org-Id"] == "org-1"
+        users_me = next(r for r in seen if r.url.path == "/api/v1/users/me")
+        assert users_me.url.params["expose_secrets"] == "true"
+        assert users_me.headers["X-Session-API-Key"] == "session-1"
+
+    async def test_profile_without_mcp_refs_gets_every_server(self):
+        _result, seen = await self._seed(self._profile(mcp_server_refs=None))
+
+        mcp = self._sandbox_writes(seen)[("PATCH", "/api/settings")]
+        assert set(mcp["agent_settings_diff"]["mcp_config"]) == {"github", "slack"}
+
+    async def test_unknown_profile_writes_nothing_to_the_sandbox(self):
+        result, seen = await self._seed(
+            self._profile(), app_profiles=[{"id": "other", "name": "other"}]
+        )
+
+        assert isinstance(result, AgentProfileSeedError)
+        assert str(result) == f"Agent profile `{self.PROFILE_ID}` not found"
+        assert not [r for r in seen if r.url.host == "sandbox.example.com"]
+
+    async def test_missing_llm_profile_writes_nothing_to_the_sandbox(self):
+        result, seen = await self._seed(self._profile(), llm_profiles={})
+
+        assert isinstance(result, AgentProfileSeedError)
+        assert "LLM profile `fast`" in str(result)
+        assert not [r for r in seen if r.url.host == "sandbox.example.com"]
+
+    async def test_local_backend_launches_the_profile_it_already_has(self):
+        backend = LocalAgentServerBackend(
+            agent_server_url="http://localhost:8000", api_key="k", run=MagicMock()
+        )
+        ctx = ExecutionContext(agent_url="http://localhost:8000", session_key="k")
+
+        assert (
+            await backend.seed_agent_profile(MagicMock(), ctx, self.PROFILE_ID)
+            == self.PROFILE_ID
+        )

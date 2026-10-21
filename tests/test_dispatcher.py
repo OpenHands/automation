@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from openhands.automation.backends.cloud import AgentProfileSeedError
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
@@ -1987,6 +1988,9 @@ class TestExecuteRunDerivedConversationId:
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
         backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.seed_agent_profile = AsyncMock(
+            side_effect=lambda _client, _ctx, profile_id: profile_id
+        )
         mock_execute.return_value = MagicMock(
             success=True, bash_command_id="cmd-1", error=None
         )
@@ -2081,3 +2085,135 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert env_vars["AUTOMATION_AGENT_PROFILE_ID"] == str(selected)
+
+
+class TestExecuteRunSeedsAgentProfile:
+    """The run's agent profile is copied into its agent server before it starts."""
+
+    async def _dispatch(
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        *,
+        agent_profile_id: uuid.UUID | None,
+        seed: AsyncMock,
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Profile Script",
+                agent_profile_id=agent_profile_id,
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.release_context = AsyncMock()
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace/project")
+        backend.seed_agent_profile = seed
+        execute = AsyncMock(
+            return_value=MagicMock(success=True, bash_command_id="cmd-1", error=None)
+        )
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch("openhands.automation.dispatcher.execute_in_context", new=execute),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            stored = (
+                await session.execute(
+                    select(AutomationRun).where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+        return backend, ctx, execute, stored
+
+    async def test_command_gets_the_id_the_agent_server_assigned(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        selected = uuid.uuid4()
+        seed = AsyncMock(return_value="sandbox-profile-id")
+
+        _backend, ctx, execute, _run = await self._dispatch(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            agent_profile_id=selected,
+            seed=seed,
+        )
+
+        seed.assert_awaited_once_with(mock_client, ctx, str(selected))
+        assert execute.await_args is not None
+        env_vars = execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_AGENT_PROFILE_ID"] == "sandbox-profile-id"
+
+    async def test_failed_copy_fails_the_run_before_any_command(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        seed = AsyncMock(
+            side_effect=AgentProfileSeedError("Agent profile `abc` not found")
+        )
+
+        backend, ctx, execute, run = await self._dispatch(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            agent_profile_id=uuid.uuid4(),
+            seed=seed,
+        )
+
+        execute.assert_not_awaited()
+        backend.release_context.assert_awaited_once_with(mock_client, ctx)
+        assert run.status == AutomationRunStatus.FAILED
+        assert run.bash_command_id is None
+        assert run.status_detail["phase"] == "dispatch"
+        assert run.status_detail["operation"] == "seed_agent_profile"
+        assert run.status_detail["detail"] == "Agent profile `abc` not found"
+
+    async def test_run_without_a_profile_copies_nothing(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        seed = AsyncMock()
+
+        _backend, _ctx, execute, _run = await self._dispatch(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            agent_profile_id=None,
+            seed=seed,
+        )
+
+        seed.assert_not_awaited()
+        assert execute.await_args is not None
+        assert (
+            "AUTOMATION_AGENT_PROFILE_ID" not in execute.await_args.kwargs["env_vars"]
+        )

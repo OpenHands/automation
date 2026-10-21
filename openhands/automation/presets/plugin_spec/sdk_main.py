@@ -112,6 +112,7 @@ from openhands.sdk.workspace.local import LocalWorkspace
 from openhands.sdk.plugin import PluginSource
 from prompt_builder import build_user_prompt
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
+from openhands.tools.preset.default import discover_builtin_agents
 from openhands.workspace import OpenHandsCloudWorkspace
 
 
@@ -243,6 +244,9 @@ with workspace_ctx as workspace:
         **conversation_kwargs,
         "workspace": LocalWorkspace(working_dir=workspace.working_dir),
         "agent_profile_id": uuid.UUID(agent_profile_id),
+        # Agent-server images ship without the built-in sub-agents
+        # (OpenHands/software-agent-sdk#5380).
+        "agent_definitions": discover_builtin_agents(),
     }
     conversation = RemoteConversation.create(
         workspace, StartConversationRequest(**request_kwargs)
