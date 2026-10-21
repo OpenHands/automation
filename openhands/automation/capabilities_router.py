@@ -71,6 +71,8 @@ _STATIC_FEATURES = (
     "presetPlugin",
     "presetPrompt",
     "repoClone",
+    # A preset's repositories can be changed with PATCH after creation.
+    "repoUpdate",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.

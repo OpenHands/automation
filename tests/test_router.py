@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import re
 import tarfile
 import uuid
@@ -21,13 +22,19 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
-from openhands.automation.preset_router import _build_storage_path, _generate_tarball
+from openhands.automation.preset_router import (
+    _build_storage_path,
+    _generate_plugin_tarball,
+    _generate_tarball,
+)
 from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
 )
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -99,11 +106,13 @@ def preset_store(monkeypatch):
     return store
 
 
-async def _seed_prompt_preset_automation(async_session, store, prompt):
+async def _seed_prompt_preset_automation(
+    async_session, store, prompt, *, tarball=None, preset_metadata=None
+):
     """Insert a prompt-preset automation whose internal tarball bakes ``prompt``."""
     upload_id = uuid.uuid4()
     storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
-    store._storage[storage_path] = _generate_tarball(prompt)
+    store._storage[storage_path] = tarball or _generate_tarball(prompt)
 
     async_session.add(
         TarballUpload(
@@ -124,10 +133,27 @@ async def _seed_prompt_preset_automation(async_session, store, prompt):
         tarball_path=build_internal_url(upload_id),
         setup_script_path="setup.sh",
         entrypoint=".venv/bin/python main.py",
+        preset_metadata=preset_metadata,
     )
     async_session.add(automation)
     await async_session.commit()
     return automation
+
+
+def _tarball_files(store, tarball_path):
+    """Read every file of an internal tarball the preset store holds."""
+    upload_id = parse_internal_upload_id(tarball_path)
+    assert upload_id is not None
+    storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
+    files = {}
+    with tarfile.open(
+        fileobj=io.BytesIO(store._storage[storage_path]), mode="r:gz"
+    ) as tar:
+        for member in tar.getmembers():
+            extracted = tar.extractfile(member)
+            if extracted is not None:
+                files[member.name] = extracted.read()
+    return files
 
 
 @pytest.fixture
@@ -1924,6 +1950,323 @@ class TestUpdateAutomation:
             "prompt": "Updated prompt",
             "repos": [{"url": "owner/repo"}],
         }
+
+    async def test_update_repos_rebuilds_preset_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing repos rewrites repos_config.json and the recorded repos."""
+        # Arrange — a prompt preset that clones one repository.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/old", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/old", "provider": "github"}],
+            },
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act — replace the repository and pin a branch.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/new", "provider": "github", "ref": "dev"}]},
+        )
+
+        # Assert — the record and the executable tarball both carry the new list.
+        assert response.status_code == 200
+        data = response.json()
+        new_repos = [{"url": "owner/new", "ref": "dev", "provider": "github"}]
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+            "repos": new_repos,
+        }
+        assert data["tarball_path"] != original_tarball_path
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == new_repos
+        assert files["prompt.txt"].decode() == "Same prompt"
+
+    async def test_update_repos_accepts_a_single_repository(
+        self, async_client, async_session, preset_store
+    ):
+        """A single repository object is accepted as a one-item list."""
+        # Arrange — a prompt preset created without repositories.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": {"url": "owner/repo", "provider": "github"}},
+        )
+
+        # Assert — the missing repos_config.json is added.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["preset_metadata"]["repos"] == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+
+    async def test_update_repos_empty_list_removes_them(
+        self, async_client, async_session, preset_store
+    ):
+        """An empty list removes the repositories from the record and tarball."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/old", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/old", "provider": "github"}],
+            },
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"repos": []}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+        }
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert "repos_config.json" not in files
+        assert files["prompt.txt"].decode() == "Same prompt"
+
+    async def test_update_prompt_and_repos_rebuilds_tarball_once(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing the prompt and repos together writes one new tarball."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Original prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Original prompt"},
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={
+                "prompt": "Updated prompt",
+                "repos": [{"url": "owner/repo", "provider": "github"}],
+            },
+        )
+
+        # Assert — one upload carries both edits.
+        assert response.status_code == 200
+        assert preset_store.write_stream.await_count == 1
+        data = response.json()
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Updated prompt",
+            "repos": [{"url": "owner/repo", "provider": "github"}],
+        }
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert files["prompt.txt"].decode() == "Updated prompt"
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+
+    async def test_update_unchanged_repos_does_not_regenerate_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Re-sending the current repositories is a no-op."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/repo", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/repo", "provider": "github"}],
+            },
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == original_tarball_path
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_repos_on_plugin_preset_keeps_plugins(
+        self, async_client, async_session, preset_store
+    ):
+        """A plugin preset's repositories change without touching its plugins."""
+        # Arrange
+        original = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/plugin")], "Run the plugin"
+        )
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Run the plugin",
+            tarball=original,
+            preset_metadata={
+                "preset_type": "plugin",
+                "prompt": "Run the plugin",
+                "plugins": [{"source": "github:owner/plugin"}],
+            },
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        files = _tarball_files(preset_store, response.json()["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as tar:
+            plugins_file = tar.extractfile("plugins_config.json")
+            assert plugins_file is not None
+            assert files["plugins_config.json"] == plugins_file.read()
+
+    @pytest.mark.parametrize(
+        "preset_metadata",
+        [None, {"template": {"id": "bundle"}}, {"preset_type": "plugin_spec"}],
+    )
+    async def test_update_repos_on_other_automations_returns_422(
+        self, async_client, async_session, preset_metadata
+    ):
+        """Only prompt and plugin presets clone repositories they own."""
+        # Arrange — a custom bundle, a template bundle and a plugin spec.
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Not A Preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            preset_metadata=preset_metadata,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "Only prompt and plugin preset automations can update repos"
+        )
+
+    async def test_update_repos_rejects_an_invalid_repository(
+        self, async_client, async_session, preset_store
+    ):
+        """Repositories are validated as on creation."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+
+        # Act — a path with spaces is neither owner/repo nor a git URL.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "org/Web Apps/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 422
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_repos_fails_when_tarball_cannot_be_rebuilt(
+        self, async_client, async_session, preset_store
+    ):
+        """Repositories are not recorded unless the tarball will clone them."""
+        # Arrange — the current tarball object is confirmed absent.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+        original_tarball_path = automation.tarball_path
+        preset_store.read = MagicMock(side_effect=ObjectNotFoundError("File not found"))
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert — nothing changed.
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.tarball_path == original_tarball_path
+        assert automation.preset_metadata == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+        }
+
+    async def test_update_repos_as_non_creator_returns_403(
+        self, async_client, async_session
+    ):
+        """Changing repositories edits the definition, so only the creator may."""
+        # Arrange — a teammate's preset in the same organization.
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint=".venv/bin/python main.py",
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"repos": []}
+        )
+
+        # Assert
+        assert response.status_code == 403
 
     async def test_update_name_does_not_regenerate_preset_tarball(
         self, async_client, async_session, preset_store

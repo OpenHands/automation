@@ -15,7 +15,7 @@ import logging
 import os
 import tarfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -305,31 +305,43 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
 
         # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
-            repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
-                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+                tar, "repos_config.json", repos_config_json(dump_repos(repos))
             )
 
     tarball_buffer.seek(0)
     return tarball_buffer.read()
 
 
+def dump_repos(repos: list[RepoSource] | None) -> list[dict[str, Any]]:
+    """Repositories as presets record them in ``preset_metadata.repos``."""
+    return [r.model_dump(exclude_none=True) for r in repos or []]
+
+
+def repos_config_json(repos: list[dict[str, Any]]) -> str:
+    """The ``repos_config.json`` a preset tarball carries, from ``dump_repos``."""
+    return json.dumps(repos, indent=2)
+
+
 # Alias kept for existing call sites; canonical impl now in tarball_validation.
 _build_storage_path = build_upload_storage_path
 
 
-def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes | None:
-    """Return a copy of a preset tarball with ``prompt.txt`` swapped for ``new_prompt``.
+def _replace_files_in_tarball(
+    tarball_bytes: bytes, files: Mapping[str, str | None]
+) -> bytes | None:
+    """Return a copy of a preset tarball with the named files replaced.
 
-    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``,
-    ``repos_config.json``, ...) is copied through unchanged, so plugin and repo
-    configuration are preserved and the working template is untouched.
+    A ``None`` value removes that file, and a name the archive lacks is added.
+    Every other member (``main.py``, ``setup.sh``, ``plugins_config.json``, ...)
+    is copied through unchanged, so the working template is untouched.
 
     Returns ``None`` if the archive has no ``prompt.txt`` member — i.e. it is not a
     regenerable preset tarball — so the caller can leave the tarball as-is.
     """
     out_buffer = io.BytesIO()
     found = False
+    replaced: set[str] = set()
     with (
         tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as src,
         tarfile.open(fileobj=out_buffer, mode="w:gz") as dst,
@@ -337,9 +349,13 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
         for member in src.getmembers():
             if member.name == "prompt.txt":
                 found = True
-                _add_file_to_tar(
-                    dst, "prompt.txt", new_prompt, mode=member.mode or 0o644
-                )
+            if member.name in files:
+                replaced.add(member.name)
+                content = files[member.name]
+                if content is not None:
+                    _add_file_to_tar(
+                        dst, member.name, content, mode=member.mode or 0o644
+                    )
                 continue
             if member.isfile():
                 extracted = src.extractfile(member)
@@ -351,6 +367,9 @@ def _replace_prompt_in_tarball(tarball_bytes: bytes, new_prompt: str) -> bytes |
                 dst.addfile(info, io.BytesIO(data))
             else:
                 dst.addfile(member)
+        for name, content in files.items():
+            if name not in replaced and content is not None:
+                _add_file_to_tar(dst, name, content)
 
     if not found:
         return None
@@ -371,22 +390,27 @@ def _delete_storage_object_best_effort(
         logger.exception("Failed to delete superseded tarball at %s", storage_path)
 
 
-async def regenerate_preset_prompt_tarball(
+_PRESET_FILE_LABELS = {"prompt.txt": "Prompt", "repos_config.json": "Repositories"}
+
+
+async def regenerate_preset_tarball(
     automation: Automation,
-    new_prompt: str,
+    files: Mapping[str, str | None],
     session: AsyncSession,
     background_tasks: BackgroundTasks,
 ) -> str | None:
-    """Rebuild a preset automation's tarball with an updated prompt.
+    """Rebuild a preset automation's tarball with updated files.
 
-    Preset automations bake the prompt into ``prompt.txt`` inside the tarball the
-    dispatcher executes; the stored ``prompt`` column is metadata only. When the
-    prompt is edited the tarball must be rewritten too, otherwise dispatching keeps
-    running the original prompt.
+    Preset automations bake the prompt into ``prompt.txt`` and their repositories
+    into ``repos_config.json`` inside the tarball the dispatcher executes; the
+    stored ``prompt`` column and ``preset_metadata`` are a record only. When either
+    is edited the tarball must be rewritten too, otherwise dispatching keeps running
+    the original files.
 
-    Reads the automation's current internal-upload tarball, swaps in ``new_prompt``
-    (leaving all other files untouched), uploads the result as a new internal upload,
-    and returns its ``oh-internal://`` URL for the caller to store on ``tarball_path``.
+    Reads the automation's current internal-upload tarball, replaces ``files``
+    (``None`` removes a file; all other files are untouched), uploads the result as
+    a new internal upload, and returns its ``oh-internal://`` URL for the caller to
+    store on ``tarball_path``.
     The superseded upload is soft-deleted in the current transaction; its storage
     object is removed via ``background_tasks`` only after the transaction commits.
 
@@ -412,10 +436,10 @@ async def regenerate_preset_prompt_tarball(
     except ObjectNotFoundError:
         # Only confirmed absence means "not regenerable"; a transient storage
         # error must propagate (rolling back the edit) rather than silently
-        # leaving the old prompt baked into the tarball.
+        # leaving the old files baked into the tarball.
         return None
 
-    new_tarball = _replace_prompt_in_tarball(current_tarball, new_prompt)
+    new_tarball = _replace_files_in_tarball(current_tarball, files)
     if new_tarball is None:
         return None
 
@@ -423,12 +447,15 @@ async def regenerate_preset_prompt_tarball(
     storage_path = _build_storage_path(
         automation.org_id, automation.user_id, new_upload_id
     )
+    changed = " and ".join(
+        _PRESET_FILE_LABELS.get(name, name) for name in sorted(files)
+    )
     upload = TarballUpload(
         id=new_upload_id,
         user_id=automation.user_id,
         org_id=automation.org_id,
         name=f"prompt-automation-{_safe_truncate(automation.name, 50)}-edit",
-        description=f"Prompt updated for: {_safe_truncate(automation.name, 100)}",
+        description=f"{changed} updated for: {_safe_truncate(automation.name, 100)}",
         status=UploadStatus.UPLOADING,
         storage_path=storage_path,
     )
@@ -481,6 +508,7 @@ async def regenerate_preset_prompt_tarball(
             "old_storage_path": source_upload.storage_path,
             "new_upload_id": str(new_upload_id),
             "new_storage_path": storage_path,
+            "files": sorted(files),
         },
     )
 
@@ -576,7 +604,7 @@ async def create_automation_from_prompt(
         "prompt": body.prompt,
     }
     if body.repos:
-        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+        preset_metadata["repos"] = dump_repos(body.repos)
     if body.template is not None:
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
@@ -908,9 +936,8 @@ def _generate_plugin_tarball(
             )
 
         if repos:
-            repos_config = [r.model_dump(exclude_none=True) for r in repos]
             _add_file_to_tar(
-                tar, "repos_config.json", json.dumps(repos_config, indent=2)
+                tar, "repos_config.json", repos_config_json(dump_repos(repos))
             )
 
     tarball_buffer.seek(0)
@@ -1040,7 +1067,7 @@ async def create_automation_from_plugin(
             p.model_dump(exclude_none=True) for p in body.plugins
         ]
     if body.repos:
-        preset_metadata["repos"] = [r.model_dump(exclude_none=True) for r in body.repos]
+        preset_metadata["repos"] = dump_repos(body.repos)
     if body.template is not None:
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 

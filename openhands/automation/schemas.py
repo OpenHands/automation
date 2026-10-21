@@ -44,6 +44,7 @@ from openhands.automation.utils.timeout import (
     validate_automation_timeout,
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.workspace import RepoSource
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -672,6 +673,14 @@ class UpdateAutomationRequest(BaseModel):
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repositories a prompt or plugin preset clones before it runs. Replaces "
+            "the whole list; an empty list or null removes them. Other automations "
+            "answer 422."
+        ),
+    )
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
@@ -718,6 +727,12 @@ class UpdateAutomationRequest(BaseModel):
                 "tarball_path must start with s3://, gs://, http://, or https://"
             )
         return v
+
+    @field_validator("repos", mode="before")
+    @classmethod
+    def normalize_repos(cls, v: Any) -> Any:
+        """Accept a single repository as well as a list, as the presets do."""
+        return [v] if isinstance(v, (str, dict)) else v
 
     @field_validator("setup_script_path")
     @classmethod

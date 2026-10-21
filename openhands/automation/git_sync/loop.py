@@ -409,7 +409,7 @@ async def _delete_superseded_upload(
     Without this, every git-side edit left the previous upload row and file
     referenced by nothing, so routine PR edits accumulated a tarball copy per
     merge with no reaper to collect them. Mirrors the cleanup
-    `regenerate_preset_prompt_tarball` does for prompt edits.
+    `regenerate_preset_tarball` does for prompt and repository edits.
 
     Soft-deletes the record in the current transaction; the storage object is
     only queued on `pending_storage_deletes` and removed after the cycle's
