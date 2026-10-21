@@ -32,3 +32,12 @@ def test_runtime_contract_is_preserved() -> None:
         'CMD ["ddtrace-run", "uvicorn", "openhands.automation.app:app", '
         '"--host", "0.0.0.0", "--port", "8000"]'
     ) in dockerfile
+
+
+def test_runtime_data_dir_is_owned_by_service_user() -> None:
+    dockerfile = _dockerfile()
+    data_dir = "mkdir /data && chown automation:automation /data"
+
+    assert data_dir in dockerfile
+    assert dockerfile.index(data_dir) < dockerfile.index("USER automation")
+    assert not any(line.startswith("VOLUME") for line in dockerfile.splitlines())

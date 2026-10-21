@@ -52,7 +52,8 @@ COPY --from=builder /app/migrations /app/migrations
 COPY --from=builder /app/alembic.ini /app/alembic.ini
 
 RUN /usr/local/bin/python -m pip uninstall --yes pip && \
-    groupadd -r automation && useradd -r -g automation -u 42420 automation
+    groupadd -r automation && useradd -r -g automation -u 42420 automation && \
+    mkdir /data && chown automation:automation /data
 USER automation
 
 EXPOSE 8000
