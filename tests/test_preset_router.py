@@ -407,6 +407,37 @@ _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
             "automation#274",
         ),
         ({"repository": {"full_name": "org/repo"}, "number": 7}, "repo#7"),
+        (
+            {
+                "event_type": "git.pullrequest.created",
+                "payload": {
+                    "eventType": "git.pullrequest.created",
+                    "resource": {
+                        "repository": {"name": "fabrikam-web"},
+                        "pullRequestId": 42,
+                    },
+                },
+                "event_key": "git.pullrequest.created",
+            },
+            "fabrikam-web#42",
+        ),
+        (
+            {
+                "event_type": "ms.vss-code.git-pullrequest-comment-event",
+                "payload": {
+                    "eventType": "ms.vss-code.git-pullrequest-comment-event",
+                    "resource": {
+                        "comment": {"content": "please review"},
+                        "pullRequest": {
+                            "repository": {"name": "fabrikam-web"},
+                            "pullRequestId": 42,
+                        },
+                    },
+                },
+                "event_key": "ms.vss-code.git-pullrequest-comment-event",
+            },
+            "fabrikam-web#42",
+        ),
     ],
 )
 def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
@@ -436,6 +467,16 @@ def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
         {
             "automation_name": "Issue triage",
             "event": {"number": True, "repository": "junk", "pull_request": [1]},
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_type": "git.push",
+                "payload": {
+                    "eventType": "git.push",
+                    "resource": {"repository": {"name": "fabrikam-web"}},
+                },
+            },
         },
     ],
 )

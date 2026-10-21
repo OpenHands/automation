@@ -211,7 +211,10 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description="Event source: 'github' or custom webhook source name",
+        description=(
+            "Event source: a built-in source such as 'github' or 'azure_devops', "
+            "or a custom webhook source name"
+        ),
     )
     on: str | list[str] = Field(
         ...,

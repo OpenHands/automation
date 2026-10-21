@@ -52,7 +52,9 @@ from openhands.automation.schemas import (
 from openhands.automation.utils.webhook import get_webhook_config
 
 
-BUILTIN_PROVIDER_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+BUILTIN_PROVIDER_SOURCES = frozenset(
+    {"azure_devops", "bitbucket_data_center", "github", "jira_dc"}
+)
 
 # Header bytes reach an app latin-1 decoded, so a signature header can carry a
 # non-ASCII str. `hmac.compare_digest` raises on those rather than returning

@@ -5,6 +5,7 @@ import pytest
 from openhands.automation.event_schemas import (
     parse_event,
 )
+from openhands.automation.event_schemas.azure_devops import AzureDevOpsEvent
 from openhands.automation.event_schemas.bitbucket_data_center import (
     BitbucketDataCenterEvent,
 )
@@ -607,6 +608,89 @@ class TestCustomWebhookEvent:
         )
         result = matches_trigger(trigger, "stripe", "payment.completed", payload)
         assert result is False
+
+
+def _azure_devops_pull_request_payload(event_type: str) -> dict:
+    """A trimmed Azure DevOps Service Hook payload for a pull request event."""
+    return {
+        "id": "2ab4e3d3-b7a6-425e-92b1-5a9982c1269e",
+        "eventType": event_type,
+        "publisherId": "tfs",
+        "resource": {
+            "repository": {
+                "name": "fabrikam-web",
+                "project": {"name": "Fabrikam Fiber"},
+            },
+            "pullRequestId": 42,
+            "status": "active",
+            "reviewers": [{"displayName": "Reviewer", "vote": 10}],
+        },
+        "resourceContainers": {
+            "account": {"baseUrl": "https://dev.azure.com/fabrikam/"},
+        },
+    }
+
+
+class TestAzureDevOpsEvent:
+    """Tests for Azure DevOps Service Hook events."""
+
+    def test_parse_azure_devops_pull_request_created(self):
+        """Azure DevOps event keys come from eventType."""
+        payload = _azure_devops_pull_request_payload("git.pullrequest.created")
+
+        event = parse_event("azure_devops", payload)
+
+        assert isinstance(event, AzureDevOpsEvent)
+        assert event.source == "azure_devops"
+        assert event.event_key == "git.pullrequest.created"
+        assert event.payload == payload
+
+    def test_parse_azure_devops_pull_request_comment(self):
+        """Pull request comments keep the Service Hook's own event type."""
+        payload = {
+            "eventType": "ms.vss-code.git-pullrequest-comment-event",
+            "resource": {
+                "comment": {"content": "please review"},
+                "pullRequest": {"pullRequestId": 42},
+            },
+        }
+
+        event = parse_event("azure_devops", payload)
+
+        assert event.event_key == "ms.vss-code.git-pullrequest-comment-event"
+
+    def test_azure_devops_trigger_matching_with_filter(self):
+        """Azure DevOps events support wildcards and filters on the raw payload."""
+        payload = _azure_devops_pull_request_payload("git.pullrequest.updated")
+        trigger = EventTrigger(
+            source="azure_devops",
+            on="git.pullrequest.*",
+            filter=(
+                "resource.repository.project.name == 'Fabrikam Fiber' && "
+                "length(resource.reviewers[?vote == `10`]) > `0`"
+            ),
+        )
+        other_repo = EventTrigger(
+            source="azure_devops",
+            on="git.pullrequest.*",
+            filter="resource.repository.name == 'other-repo'",
+        )
+
+        assert (
+            matches_trigger(trigger, "azure_devops", "git.pullrequest.updated", payload)
+            is True
+        )
+        assert (
+            matches_trigger(
+                other_repo, "azure_devops", "git.pullrequest.updated", payload
+            )
+            is False
+        )
+
+    def test_azure_devops_missing_event_type(self):
+        """Azure DevOps events require eventType."""
+        with pytest.raises(ValueError, match="Cannot detect azure_devops event type"):
+            parse_event("azure_devops", {"resource": {"pullRequestId": 42}})
 
 
 class TestJiraDcEvent:

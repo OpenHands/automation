@@ -135,7 +135,12 @@ class TestGetCapabilities:
         body = response.json()
         assert body["ready"] is True
         assert body["triggerKinds"] == ["cron", "event"]
-        assert body["eventSources"] == ["bitbucket_data_center", "github", "jira_dc"]
+        assert body["eventSources"] == [
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        ]
         assert body["eventTypes"] == [
             "issue_comment.*",
             "issues.*",
