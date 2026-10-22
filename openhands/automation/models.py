@@ -67,6 +67,7 @@ class Automation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     telemetry_distinct_id: Mapped[str | None] = mapped_column(
         String(256), nullable=True
     )
