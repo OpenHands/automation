@@ -22,7 +22,8 @@ The Automation Service owns automation definitions, cron scheduling, webhooks, r
 ### Prerequisites
 
 - Python 3.12+
-- [uv](https://github.com/astral-sh/uv) for dependency management
+- [uv](https://github.com/astral-sh/uv) >= 0.9.25 for dependency management
+  (required for the seven-day cutoff and named first-party exemptions)
 - PostgreSQL (or use testcontainers for testing)
 
 ### Setup

@@ -145,6 +145,7 @@ useLibraryCodeForTypes = true
 typeCheckingMode = "standard"
 
 [tool.uv]
+required-version = ">=0.9.25"
 exclude-newer = "7 days"
 # First-party releases may update immediately; their dependencies still wait.
 exclude-newer-package = { openhands-sdk = false, openhands-workspace = false }

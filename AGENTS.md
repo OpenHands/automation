@@ -580,3 +580,7 @@ When bumping `openhands-sdk` / `openhands-workspace` pins:
   `uv tool install` consumers, and do not retroactively validate existing locks.
   Use the committed lock for reproducible installs; review newly resolved
   artifacts before committing a lock update.
+
+Use uv >= 0.9.25 for this policy; older versions cannot enforce all of
+the configured release-age settings. `tool.uv.required-version` also guards
+direct `uv sync` and `uv lock` use outside Make.
