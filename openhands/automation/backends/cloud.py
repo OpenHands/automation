@@ -10,6 +10,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 import httpx
 from tenacity import (
@@ -20,6 +21,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from openhands.automation.auth import X_ORG_ID_HEADER
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
 from openhands.automation.config import get_config
 from openhands.automation.exceptions import (
@@ -131,6 +133,18 @@ def summarize_status_detail(detail: Any) -> str | None:
     return "unclassified"
 
 
+class AgentProfileSeedError(RuntimeError):
+    """Raised when a run's agent profile can't be copied into its sandbox."""
+
+
+def _referenced_mcp_servers(
+    mcp_config: dict[str, Any], refs: list[str] | None
+) -> dict[str, Any]:
+    if refs is None:
+        return dict(mcp_config)
+    return {name: mcp_config[name] for name in refs if name in mcp_config}
+
+
 class CloudSandboxBackend(ExecutionBackend):
     """Execution backend that creates Cloud sandboxes per run.
 
@@ -237,6 +251,104 @@ class CloudSandboxBackend(ExecutionBackend):
         """Delete the sandbox."""
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
+
+    async def seed_agent_profile(
+        self,
+        client: httpx.AsyncClient,
+        ctx: ExecutionContext,
+        agent_profile_id: str,
+    ) -> str:
+        """Copy an app-server agent profile and what it references into the sandbox."""
+        listed = await self._app_server_get(client, "/api/agent-profiles")
+        name = next(
+            (
+                p.get("name")
+                for p in listed.get("profiles") or []
+                if str(p.get("id")) == agent_profile_id
+            ),
+            None,
+        )
+        if not name:
+            raise AgentProfileSeedError(f"Agent profile `{agent_profile_id}` not found")
+        detail = await self._app_server_get(
+            client, f"/api/agent-profiles/{quote(name, safe='')}"
+        )
+        profile = detail.get("profile")
+        if not isinstance(profile, dict):
+            raise AgentProfileSeedError(f"Agent profile `{name}` has no body")
+        # Resolved LLM keys are only exposed to a caller holding one of the
+        # user's sandbox session keys.
+        user = await self._app_server_get(
+            client,
+            "/api/v1/users/me",
+            params={"expose_secrets": "true"},
+            headers={"X-Session-API-Key": ctx.session_key},
+        )
+
+        agent_headers = {"X-Session-API-Key": ctx.session_key}
+        if llm_ref := profile.get("llm_profile_ref"):
+            llm = ((user.get("llm_profiles") or {}).get("profiles") or {}).get(llm_ref)
+            if not isinstance(llm, dict):
+                raise AgentProfileSeedError(
+                    f"LLM profile `{llm_ref}` of agent profile `{name}` not found"
+                )
+            resp = await client.post(
+                f"{ctx.agent_url}/api/profiles/{quote(llm_ref, safe='')}",
+                json={"include_secrets": True, "llm": llm},
+                headers=agent_headers,
+            )
+            resp.raise_for_status()
+        mcp_servers = _referenced_mcp_servers(
+            (user.get("agent_settings") or {}).get("mcp_config") or {},
+            profile.get("mcp_server_refs"),
+        )
+        if mcp_servers:
+            resp = await client.patch(
+                f"{ctx.agent_url}/api/settings",
+                json={"agent_settings_diff": {"mcp_config": mcp_servers}},
+                headers=agent_headers,
+            )
+            resp.raise_for_status()
+        resp = await client.post(
+            f"{ctx.agent_url}/api/agent-profiles/{quote(name, safe='')}",
+            json=profile,
+            headers=agent_headers,
+        )
+        resp.raise_for_status()
+
+        # The agent server assigns its own id to a profile it creates.
+        resp = await client.get(
+            f"{ctx.agent_url}/api/agent-profiles", headers=agent_headers
+        )
+        resp.raise_for_status()
+        for summary in resp.json().get("profiles") or []:
+            if summary.get("name") == name and summary.get("id"):
+                return str(summary["id"])
+        raise AgentProfileSeedError(f"Agent profile `{name}` missing after the copy")
+
+    async def _app_server_get(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        @self._retry
+        async def _do_get() -> dict[str, Any]:
+            resp = await client.get(
+                f"{self.api_url}{path}",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {await self._ensure_api_key()}",
+                    X_ORG_ID_HEADER: str(self._run.automation.org_id),
+                    **(headers or {}),
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return await self._with_auth_retry(_do_get)
 
     async def get_api_key(self) -> str:
         """Return the per-user API key (minting if needed)."""
