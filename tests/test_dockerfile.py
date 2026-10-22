@@ -20,6 +20,14 @@ def test_runtime_uses_snapshot_base_without_package_managers() -> None:
     assert 'PATH="/opt/venv/bin:${PATH}"' in dockerfile
 
 
+def test_builder_uses_fixed_uv_version() -> None:
+    dockerfile = _dockerfile()
+
+    # eMudhra CA distrust: uv >= 0.13.4 (GHSA-6q48-6c7w-9gw2)
+    assert "ARG UV_VERSION=0.13.5" in dockerfile
+    assert 'RUN pip install --no-cache-dir "uv==${UV_VERSION}"' in dockerfile
+
+
 def test_runtime_contract_is_preserved() -> None:
     dockerfile = _dockerfile()
 
