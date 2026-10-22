@@ -565,9 +565,14 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
 async def test_preflight_plugin_spec_returns_manifest_and_suggested_trigger(
     async_client, tmp_path
 ):
-    plugin = write_suggested_trigger_plugin(
-        tmp_path, {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"}
-    )
+    plugin = write_plugin(tmp_path)
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["suggested_trigger"] = {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+    _write_plugin_automation(plugin, manifest)
 
     response = await async_client.get(
         "/api/automation/v1/plugin-spec/preflight",
