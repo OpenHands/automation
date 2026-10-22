@@ -1641,7 +1641,9 @@ class TestUpdateAutomation:
         assert data["name"] == "Updated Name"
         assert data["entrypoint"] == "uv run script.py"
 
-    async def test_update_automation_description_clear(self, async_client, async_session):
+    async def test_update_automation_description_clear(
+        self, async_client, async_session
+    ):
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
