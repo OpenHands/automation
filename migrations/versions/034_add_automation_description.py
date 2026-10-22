@@ -1,7 +1,7 @@
 """Add an optional human-readable automation description.
 
-Revision ID: 033
-Revises: 032
+Revision ID: 034
+Revises: 033
 Create Date: 2026-09-28
 """
 
@@ -11,8 +11,8 @@ from alembic import op
 from sqlalchemy import Column, Text
 
 
-revision: str = "033"
-down_revision: str = "032"
+revision: str = "034"
+down_revision: str = "033"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

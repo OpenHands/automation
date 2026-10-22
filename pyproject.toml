@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.19.0"
+version = "1.24.0"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -21,12 +21,12 @@ dependencies = [
   "cachetools>=7.0.5",
   "cloud-sql-python-connector[asyncpg]>=1.16",
   "croniter>=2",
-  "fastapi>=0.115",
+  "fastapi>=0.121",
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.53.0",
-  "openhands-workspace==1.53.0",
+  "openhands-sdk==1.57.0",
+  "openhands-workspace==1.57.0",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
   "pydantic>=2",
@@ -74,12 +74,15 @@ dev = [
     "pytest-timeout>=2.4.0",
     "testcontainers[postgres,minio]>=4.10.0",
 ]
+production = [
+    "ddtrace==4.15.6",
+]
 
 # Ruff configuration
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["openhands/automation/presets"]
+extend-exclude = ["openhands/automation/presets", ".pr"]
 
 [tool.ruff.format]
 quote-style = "double"

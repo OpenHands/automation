@@ -1,14 +1,7 @@
-FROM python:3.12-slim-trixie
+FROM python:3.12-slim-trixie AS snapshot-base
 
-ARG DEBIAN_SNAPSHOT=20260921T000000Z
+ARG DEBIAN_SNAPSHOT=20260930T000000Z
 
-WORKDIR /app
-ENV PYTHONPATH='/app'
-
-# Datadog labels
-LABEL com.datadoghq.tags.service="automation"
-
-# Install uv + git (for SDK git dependencies)
 RUN printf '%s\n' \
         'Types: deb' \
         "URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" \
@@ -27,20 +20,40 @@ RUN printf '%s\n' \
     apt-get update && \
     apt-get install -y --no-install-recommends git && \
     apt-get upgrade -y --no-install-recommends && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    pip install --no-cache-dir uv ddtrace
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy everything and install
-COPY pyproject.toml ./
+FROM snapshot-base AS builder
+
+ARG UV_VERSION=0.12.23
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+COPY pyproject.toml uv.lock ./
 COPY README.md ./
 COPY openhands/ openhands/
 COPY migrations/ migrations/
 COPY alembic.ini .
 
-RUN uv pip install --system .
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --locked --no-dev --group production \
+    --no-editable --python /usr/local/bin/python --no-python-downloads
 
-# Security: run as non-root (UID 42420 chosen arbitrarily)
-RUN groupadd -r automation && useradd -r -g automation -u 42420 automation
+FROM snapshot-base AS runtime
+
+WORKDIR /app
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH="/app"
+
+LABEL com.datadoghq.tags.service="automation"
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+
+RUN /usr/local/bin/python -m pip uninstall --yes pip && \
+    groupadd -r automation && useradd -r -g automation -u 42420 automation && \
+    mkdir /data && chown automation:automation /data
 USER automation
 
 EXPOSE 8000

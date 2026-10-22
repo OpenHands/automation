@@ -167,7 +167,7 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 ## PR-Specific Documents
 
-When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should not remain on `main`, store them in a `.pr/` directory at the repository root.
 
 ```bash
 mkdir -p .pr
@@ -178,12 +178,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR. After a PR merges to `main`, the workflow opens or updates a cleanup PR to remove the directory, for both same-repository and fork PRs. Approval does not modify the source PR or rerun its CI just to remove temporary artifacts.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Merge the cleanup PR and let release-please update the release PR before merging it.
 - Cleanup PRs follow the normal review and required-check protections for `main`.
 
 
@@ -234,7 +235,7 @@ Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
 | Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
 | Driver | asyncpg | aiosqlite |
 | Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
-| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+| Migrations | `alembic upgrade head`, or on startup with `AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` | Auto-run on startup |
 
 ### Writing Migrations
 
@@ -432,7 +433,11 @@ exactly one org, the deterministic local org from `auth.py`'s
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're
   committed. Reading a repo written before encryption was turned on still
-  works — plaintext files pass through unchanged.
+  works — plaintext files pass through unchanged. Setting, changing or
+  clearing the key via `PUT /v1/git-sync/config` marks every synced
+  automation dirty (`apply_git_sync_config_override`), and the export treats
+  a plaintext file as stale while a key is set, so the next cycle rewrites
+  them all in one commit instead of leaving HEAD readable.
 - **Runtime config**: `PUT /v1/git-sync/config` configures, reconfigures or
   pauses/resumes the org's sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as

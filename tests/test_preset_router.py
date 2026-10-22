@@ -22,7 +22,7 @@ from openhands.automation.preset_router import (
     _generate_plugin_tarball,
     _generate_tarball,
     _get_preset_entrypoint,
-    _replace_prompt_in_tarball,
+    _replace_files_in_tarball,
     _resolve_experiment_variant_models,
 )
 from openhands.sdk.mcp.config import coerce_mcp_config, dump_mcp_config
@@ -407,6 +407,37 @@ _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
             "automation#274",
         ),
         ({"repository": {"full_name": "org/repo"}, "number": 7}, "repo#7"),
+        (
+            {
+                "event_type": "git.pullrequest.created",
+                "payload": {
+                    "eventType": "git.pullrequest.created",
+                    "resource": {
+                        "repository": {"name": "fabrikam-web"},
+                        "pullRequestId": 42,
+                    },
+                },
+                "event_key": "git.pullrequest.created",
+            },
+            "fabrikam-web#42",
+        ),
+        (
+            {
+                "event_type": "ms.vss-code.git-pullrequest-comment-event",
+                "payload": {
+                    "eventType": "ms.vss-code.git-pullrequest-comment-event",
+                    "resource": {
+                        "comment": {"content": "please review"},
+                        "pullRequest": {
+                            "repository": {"name": "fabrikam-web"},
+                            "pullRequestId": 42,
+                        },
+                    },
+                },
+                "event_key": "ms.vss-code.git-pullrequest-comment-event",
+            },
+            "fabrikam-web#42",
+        ),
     ],
 )
 def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
@@ -436,6 +467,16 @@ def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
         {
             "automation_name": "Issue triage",
             "event": {"number": True, "repository": "junk", "pull_request": [1]},
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_type": "git.push",
+                "payload": {
+                    "eventType": "git.push",
+                    "resource": {"repository": {"name": "fabrikam-web"}},
+                },
+            },
         },
     ],
 )
@@ -585,8 +626,8 @@ class TestGenerateTarball:
             assert repos_config[1]["ref"] == "main"
 
 
-class TestReplacePromptInTarball:
-    """Tests for swapping prompt.txt inside an existing preset tarball."""
+class TestReplaceFilesInTarball:
+    """Tests for swapping files inside an existing preset tarball."""
 
     def test_replaces_prompt_and_preserves_sibling_files(self):
         """The prompt is swapped while every other file is left byte-for-byte intact."""
@@ -599,7 +640,7 @@ class TestReplacePromptInTarball:
         )
 
         # Act
-        updated = _replace_prompt_in_tarball(original, "New prompt")
+        updated = _replace_files_in_tarball(original, {"prompt.txt": "New prompt"})
 
         # Assert
         assert updated is not None
@@ -640,7 +681,53 @@ class TestReplacePromptInTarball:
             tar.addfile(info, io.BytesIO(data))
 
         # Act / Assert
-        assert _replace_prompt_in_tarball(buffer.getvalue(), "New prompt") is None
+        assert (
+            _replace_files_in_tarball(buffer.getvalue(), {"prompt.txt": "New prompt"})
+            is None
+        )
+
+    def test_adds_missing_file_and_preserves_others(self):
+        """A replacement the archive lacks is added; existing files are kept."""
+        # Arrange — a prompt preset created without repositories.
+        original = _generate_tarball("Same prompt")
+
+        # Act
+        updated = _replace_files_in_tarball(
+            original, {"repos_config.json": '[{"url": "owner/repo"}]'}
+        )
+
+        # Assert
+        assert updated is not None
+        with tarfile.open(fileobj=io.BytesIO(updated), mode="r:gz") as tar:
+            names = sorted(tar.getnames())
+            repos_file = tar.extractfile("repos_config.json")
+            prompt_file = tar.extractfile("prompt.txt")
+            assert repos_file is not None and prompt_file is not None
+            assert json.loads(repos_file.read()) == [{"url": "owner/repo"}]
+            assert prompt_file.read().decode() == "Same prompt"
+        assert names == [
+            "finish_tool_hook.py",
+            "main.py",
+            "prompt.txt",
+            "repos_config.json",
+            "setup.sh",
+        ]
+
+    def test_none_removes_file(self):
+        """A ``None`` replacement drops that file from the archive."""
+        # Arrange — a prompt preset that clones a repository.
+        original = _generate_tarball(
+            "Same prompt", repos=[RepoSource(url="owner/repo", provider="github")]
+        )
+
+        # Act
+        updated = _replace_files_in_tarball(original, {"repos_config.json": None})
+
+        # Assert
+        assert updated is not None
+        with tarfile.open(fileobj=io.BytesIO(updated), mode="r:gz") as tar:
+            assert "repos_config.json" not in tar.getnames()
+            assert "prompt.txt" in tar.getnames()
 
 
 class TestRepoSource:

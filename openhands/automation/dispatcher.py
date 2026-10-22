@@ -17,22 +17,31 @@ in the ExecutionBackend (see automation/backends/).
 import asyncio
 import json
 import logging
+import random
 import uuid
 from datetime import timedelta
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.backends import get_backend
+from openhands.automation.auth import X_ORG_ID_HEADER
+from openhands.automation.backends import (
+    ExecutionBackend,
+    ExecutionContext,
+    get_backend,
+)
 from openhands.automation.config import ServiceSettings, get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
     PermanentDispatchError,
+    SandboxProvisioningError,
     TarballNotFoundError,
 )
 from openhands.automation.execution import execute_in_context
@@ -50,17 +59,23 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
+from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
 from openhands.automation.utils.kv import create_kv_token
+from openhands.automation.utils.model_profiles import (
+    validate_agent_profile_allowlists_with_client,
+)
 from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    run_is_running,
     update_bash_command_id,
     update_run_current_phase,
+    update_run_resolved_runtime,
     update_run_timeout_at,
     update_sandbox_id,
 )
@@ -82,6 +97,146 @@ from openhands.automation.utils.unhealthy import (
 
 
 logger = logging.getLogger("automation.dispatcher")
+
+
+_RETRYABLE_HTTP_STATUS_CODES = {408, 429}
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_HTTP_STATUS_CODES or status_code >= 500
+
+
+def _run_status_kind_for_http_status(status_code: int) -> RunStatusDetailKind:
+    if status_code == 429:
+        return RunStatusDetailKind.RATE_LIMITED
+    if status_code in {408, 504}:
+        return RunStatusDetailKind.TIMEOUT
+    if status_code >= 500:
+        return RunStatusDetailKind.SERVER_ERROR
+    return RunStatusDetailKind.UNKNOWN
+
+
+def _http_exception_status_detail(
+    exc: HTTPException,
+    *,
+    phase: RunStatusPhase,
+    source: str,
+    operation: str,
+) -> dict[str, Any]:
+    status_code = exc.status_code
+    return make_run_status_detail(
+        phase=phase,
+        kind=_run_status_kind_for_http_status(status_code),
+        detail=str(exc.detail),
+        transient=_is_retryable_http_status(status_code),
+        source=source,
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
+def _plugin_agent_profile_requirement(
+    resolved_runtime: dict[str, Any],
+) -> dict[str, Any] | None:
+    manifest = resolved_runtime.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    runtime = manifest.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    requirement = runtime.get("agent_profile")
+    return requirement if isinstance(requirement, dict) else None
+
+
+async def _validate_plugin_run_agent_profile(
+    *,
+    client: httpx.AsyncClient,
+    backend: Any,
+    automation: Automation,
+    resolved_runtime: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    requirement = _plugin_agent_profile_requirement(resolved_runtime)
+    if requirement is None:
+        return None, None
+    if automation.agent_profile_id is None:
+        if requirement.get("required", True):
+            raise PluginSpecError(
+                "Plugin automation requires an agent profile selection"
+            )
+        return None, None
+
+    settings = get_config().service
+    api_key = await backend.get_api_key()
+    if backend.is_local_mode:
+        base_url = settings.agent_server_url.rstrip("/")
+        headers = {"X-Session-API-Key": api_key}
+    else:
+        base_url = settings.openhands_api_base_url.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            X_ORG_ID_HEADER: str(automation.org_id),
+        }
+
+    try:
+        resolved_id, profile = await validate_agent_profile_allowlists_with_client(
+            automation.agent_profile_id,
+            None,
+            requirement.get("allowed_tools"),
+            client,
+            base_url=base_url,
+            headers=headers,
+            allowed_mcp_server_refs=requirement.get("allowed_mcp_server_refs"),
+            allowed_secret_refs=requirement.get("allowed_secret_refs"),
+            fetch_profile_detail=True,
+        )
+    except HTTPException as exc:
+        if _is_retryable_http_status(exc.status_code):
+            raise
+        raise PluginSpecError(str(exc.detail)) from exc
+    if resolved_id is None:
+        raise PluginSpecError("Plugin automation requires an agent profile selection")
+    return str(resolved_id), getattr(profile, "agent_kind", None) if profile else None
+
+
+async def _fetch_plugins_on_agent_server(
+    *,
+    client: httpx.AsyncClient,
+    agent_url: str,
+    session_key: str,
+    plugin_fetches: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fetch already-preflighted plugins on the target agent server."""
+    fetched: list[dict[str, Any]] = []
+    headers = {"X-Session-API-Key": session_key} if session_key else {}
+    for plugin in plugin_fetches:
+        request = {
+            key: value
+            for key, value in plugin.items()
+            if key in {"source", "ref", "repo_path"}
+        }
+        response = await client.post(
+            f"{agent_url.rstrip('/')}/api/plugins/fetch",
+            json=request,
+            headers=headers,
+            timeout=get_config().http.http_timeout,
+        )
+        if response.status_code >= 400:
+            try:
+                detail: Any = response.json().get("detail")
+            except Exception:
+                detail = response.text
+            message = (
+                f"Agent server failed to fetch plugin {request.get('source')!r}: "
+                f"{detail}"
+            )
+            if _is_retryable_http_status(response.status_code):
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            raise PluginSpecError(message)
+        fetched.append(response.json())
+    return fetched
 
 
 async def _download_internal_tarball(
@@ -206,6 +361,77 @@ def _build_event_payload(
     return payload
 
 
+def _provisioning_deadline_seconds(run_timeout_seconds: int) -> int:
+    """Watchdog budget for a run whose entrypoint has not started yet."""
+    sandbox_cfg = get_config().sandbox
+    return (
+        sandbox_cfg.sandbox_ready_timeout
+        + run_timeout_seconds
+        + sandbox_cfg.run_timeout_margin
+    )
+
+
+async def _acquire_execution_context(
+    run: AutomationRun,
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_timeout_seconds: int,
+    log_ctx: dict[str, Any],
+) -> ExecutionContext | None:
+    """Get an execution context, retrying sandboxes that fail to start.
+
+    Only ``SandboxProvisioningError`` is retried: no automation code has run
+    and the failed sandbox is already deleted. Before each retry the run must
+    still be RUNNING; the same guarded write moves the watchdog deadline past
+    the next attempt. Returns None if the run was cancelled or reaped while
+    provisioning, after releasing any sandbox it got.
+    """
+    sandbox_cfg = get_config().sandbox
+    max_attempts = sandbox_cfg.sandbox_provision_max_attempts
+    attempt = 1
+    while True:
+        try:
+            ctx = await backend.get_execution_context(client)
+            break
+        except SandboxProvisioningError as exc:
+            exc.attempts = attempt
+            if attempt >= max_attempts:
+                raise
+            delay = (
+                sandbox_cfg.sandbox_provision_retry_delay
+                * 2 ** (attempt - 1)
+                * random.uniform(0.5, 1.5)
+            )
+            deadline = utcnow() + timedelta(
+                seconds=delay + _provisioning_deadline_seconds(run_timeout_seconds)
+            )
+            if not await update_run_timeout_at(session_factory, run.id, deadline):
+                logger.info(
+                    "Run no longer RUNNING; not retrying sandbox", extra=log_ctx
+                )
+                return None
+            logger.warning(
+                "Sandbox failed to start (attempt %d/%d), retrying in %.0fs: %s",
+                attempt,
+                max_attempts,
+                delay,
+                exc,
+                extra=log_ctx,
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+    if not await run_is_running(session_factory, run.id):
+        logger.info(
+            "Run no longer RUNNING after provisioning; releasing sandbox",
+            extra=log_ctx,
+        )
+        await backend.release_context(client, ctx)
+        return None
+    return ctx
+
+
 async def _execute_run(
     run: AutomationRun,
     settings: ServiceSettings,
@@ -282,10 +508,110 @@ async def _execute_run(
     # drives both the bash command timeout and the watchdog cleanup deadline.
     effective_timeout = resolve_automation_timeout_seconds(automation.timeout)
 
-    # 2. Get execution context - if this fails, nothing to clean up
+    # 2. Preflight plugin automations before creating a sandbox. The agent server
+    # performs the real fetch after it is ready, but this catches bad sources,
+    # refs, manifests, and required plugins without consuming sandbox capacity.
+    work_dir = backend.get_work_dir(run_id)
+    entrypoint = automation.entrypoint
+    plugin_env: dict[str, str] = {}
+    resolved_runtime: dict[str, Any] | None = None
+    plugin_fetches: list[dict[str, Any]] = []
+    tarball_source: bytes | str | None = None
+    try:
+        if automation.plugin_spec:
+            tarball_source, plugin_env, resolved_runtime, plugin_fetches = (
+                build_execution_payload(
+                    plugin_spec=automation.plugin_spec,
+                    agent_profile_id=str(automation.agent_profile_id)
+                    if automation.agent_profile_id
+                    else None,
+                    agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                    llm_profile_name=automation.model,
+                    work_dir=work_dir,
+                    allow_local_sources=backend.is_local_mode,
+                )
+            )
+            profile_id, profile_kind = await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=automation,
+                resolved_runtime=resolved_runtime,
+            )
+            if profile_id:
+                plugin_env["AUTOMATION_AGENT_PROFILE_ID"] = profile_id
+                resolved_runtime["agent_profile_id"] = profile_id
+            if profile_kind:
+                plugin_env["AUTOMATION_AGENT_PROFILE_KIND"] = profile_kind
+                resolved_runtime["agent_profile_kind"] = profile_kind
+            entrypoint = resolved_runtime.get("entrypoint") or automation.entrypoint
+    except HTTPException as exc:
+        logger.warning(
+            "Transient plugin preflight error: %s",
+            exc.detail,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc.detail),
+            status_detail=_http_exception_status_detail(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="openhands_api",
+                operation="validate_agent_profile",
+            ),
+        )
+        return
+    except PluginSpecError as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None and _is_retryable_http_status(status_code):
+            logger.warning(
+                "Transient plugin preflight error: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(),
+            )
+            await _fail(
+                str(exc),
+                status_detail=make_run_status_detail(
+                    phase=RunStatusPhase.DISPATCH,
+                    kind=_run_status_kind_for_http_status(status_code),
+                    detail=str(exc),
+                    transient=True,
+                    source="automation_service",
+                    operation="preflight_plugin",
+                    code=getattr(exc, "code", None) or type(exc).__name__,
+                    status_code=status_code,
+                ),
+            )
+            return
+        logger.error(
+            "Permanent dispatch error, disabling automation: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        await _fail(
+            str(exc),
+            disable=True,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=False,
+                source="automation_service",
+                operation="preflight_plugin",
+                code=getattr(exc, "code", None) or type(exc).__name__,
+                status_code=status_code,
+            ),
+        )
+        return
+
+    # 3. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
-        ctx = await backend.get_execution_context(client)
+        ctx = await _acquire_execution_context(
+            run, backend, client, session_factory, effective_timeout, _log_ctx()
+        )
     except ConcurrencyLimitReachedError as exc:
         logger.warning(
             "Run skipped — organization concurrency limit reached: %s",
@@ -317,6 +643,62 @@ async def _execute_run(
             },
         )
         return
+    except DailySandboxLimitReachedError as exc:
+        logger.warning(
+            "Run skipped — daily sandbox limit reached: %s",
+            exc,
+            extra=_log_ctx(),
+        )
+        status_detail = make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=RunStatusDetailKind.DAILY_SANDBOX_LIMIT,
+            detail=str(exc),
+            transient=True,
+            source="sandbox_api",
+            operation="get_execution_context",
+        )
+        await mark_run_terminal(
+            session_factory,
+            run,
+            AutomationRunStatus.SKIPPED,
+            status_detail=status_detail,
+        )
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": "daily_sandbox_limit",
+            },
+        )
+        return
+    except SandboxProvisioningError as exc:
+        logger.warning(
+            "Sandbox failed to start after %d attempt(s): %s",
+            exc.attempts,
+            exc,
+            extra=_log_ctx(sandbox_id=exc.sandbox_id),
+        )
+        await _fail(
+            f"{exc} (attempts: {exc.attempts})",
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE,
+                detail=str(exc),
+                transient=True,
+                source="sandbox_api",
+                operation="get_execution_context",
+                code=exc.code,
+                extra={
+                    "sandbox_status": exc.status,
+                    "sandbox_status_detail": exc.reason,
+                    "attempts": exc.attempts,
+                },
+            ),
+        )
+        return
     except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
         source = "agent_server" if backend.is_local_mode else "sandbox_api"
@@ -330,6 +712,8 @@ async def _execute_run(
             ),
         )
         return
+    if ctx is None:
+        return
 
     logger.info(
         "Execution context ready: %s",
@@ -337,7 +721,7 @@ async def _execute_run(
         extra=_log_ctx(sandbox_id=ctx.sandbox_id),
     )
 
-    # 3. Build env vars (must be after get_execution_context for cloud mode API key)
+    # 4. Build env vars (must be after get_execution_context for cloud mode API key)
     callback_url = f"{settings.resolved_base_url.rstrip('/')}/v1/runs/{run_id}/complete"
     env_vars = backend.build_env_vars()
     env_vars.update(automation_env_metadata(automation, run))
@@ -385,10 +769,33 @@ async def _execute_run(
             run_id=run.id,
         )
 
-    # 4. Prepare tarball source
+    # 5. Prepare tarball source and fetch runtime plugins into agent-server cache.
     try:
-        tarball_source: bytes | str
-        if is_http_url(tarball_path):
+        if automation.plugin_spec:
+            assert isinstance(tarball_source, bytes)
+            env_vars.update(plugin_env)
+            fetched_plugins = await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url=ctx.agent_url,
+                session_key=ctx.session_key,
+                plugin_fetches=plugin_fetches,
+            )
+            if fetched_plugins:
+                env_vars["AUTOMATION_PLUGIN_ROOT"] = fetched_plugins[0]["path"]
+            if resolved_runtime is not None:
+                resolved_runtime["fetched_plugins"] = fetched_plugins
+                if fetched_plugins:
+                    resolved_runtime["plugin_path"] = fetched_plugins[0]["path"]
+                await update_run_resolved_runtime(
+                    session_factory, run.id, resolved_runtime
+                )
+            logger.info(
+                "Plugin automation payload built (%d bytes) and %d plugin(s) fetched",
+                len(tarball_source),
+                len(fetched_plugins),
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+        elif is_http_url(tarball_path):
             tarball_source = tarball_path
             logger.info(
                 "HTTP URL tarball, will download in environment",
@@ -405,7 +812,7 @@ async def _execute_run(
                 len(tarball_source),
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
-    except PermanentDispatchError as exc:
+    except (PermanentDispatchError, PluginSpecError) as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
             exc,
@@ -424,6 +831,24 @@ async def _execute_run(
                 source="automation_service",
                 operation="prepare_tarball",
                 code=type(exc).__name__,
+            ),
+        )
+        return
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Transient plugin fetch error: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            status_detail=run_status_detail_from_exception(
+                exc,
+                phase=RunStatusPhase.DISPATCH,
+                source="agent_server",
+                operation="fetch_plugin",
             ),
         )
         return
@@ -449,13 +874,12 @@ async def _execute_run(
         )
         return
 
-    # 5. Execute in context
-    work_dir = backend.get_work_dir(run_id)
+    # 6. Execute in context
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
             session_key=ctx.session_key,
-            entrypoint=automation.entrypoint,
+            entrypoint=entrypoint,
             tarball_source=tarball_source,
             work_dir=work_dir,
             env_vars=env_vars,
@@ -502,7 +926,7 @@ async def _execute_run(
         )
         return
 
-    # 6. Handle result
+    # 7. Handle result
     if result.success:
         add_event(
             "automation.entrypoint.start",
@@ -602,11 +1026,8 @@ async def dispatch_pending_runs(
                 # runs that die during provisioning. Once the bash command
                 # actually starts, _execute_run resets timeout_at to
                 # bash-start + run budget + margin (phase 2).
-                sandbox_cfg = get_config().sandbox
-                provisioning_deadline = (
-                    sandbox_cfg.sandbox_ready_timeout
-                    + run_timeout_seconds
-                    + sandbox_cfg.run_timeout_margin
+                provisioning_deadline = _provisioning_deadline_seconds(
+                    run_timeout_seconds
                 )
                 await mark_run_status(
                     session,

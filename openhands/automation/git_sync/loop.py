@@ -54,6 +54,7 @@ from openhands.automation.git_sync.serializer import (
     decrypt_file_tree,
     deserialize_automation,
     encrypt_file_tree,
+    is_encrypted,
     is_generated_path,
     serialize_automation,
 )
@@ -408,7 +409,7 @@ async def _delete_superseded_upload(
     Without this, every git-side edit left the previous upload row and file
     referenced by nothing, so routine PR edits accumulated a tarball copy per
     merge with no reaper to collect them. Mirrors the cleanup
-    `regenerate_preset_prompt_tarball` does for prompt edits.
+    `regenerate_preset_tarball` does for prompt and repository edits.
 
     Soft-deletes the record in the current transaction; the storage object is
     only queued on `pending_storage_deletes` and removed after the cycle's
@@ -935,6 +936,10 @@ def _exported_content_is_current(
     Compares decrypted plaintext, not the bytes on disk: Fernet uses a fresh IV
     per encryption, so identical content re-encrypts to different ciphertext
     and every cycle would look changed. Only serializer-owned paths count.
+
+    With a key set, a file still on disk as plaintext is stale too, though it
+    decrypts (passes through) to the same content: it was written before the
+    key was, and skipping it would leave it readable in the repo.
     """
     if not directory.is_dir():
         return False
@@ -945,6 +950,8 @@ def _exported_content_is_current(
             if is_generated_path(name)
         }
         if encryption_key:
+            if not all(is_encrypted(content) for content in on_disk.values()):
+                return False
             on_disk = decrypt_file_tree(on_disk, encryption_key)
     except Exception:
         # Unreadable or undecryptable (rotated key, corrupted commit): treat as

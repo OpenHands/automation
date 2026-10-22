@@ -44,6 +44,7 @@ from openhands.automation.utils.timeout import (
     validate_automation_timeout,
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.workspace import RepoSource
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -211,7 +212,10 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description="Event source: 'github' or custom webhook source name",
+        description=(
+            "Event source: a built-in source such as 'github' or 'azure_devops', "
+            "or a custom webhook source name"
+        ),
     )
     on: str | list[str] = Field(
         ...,
@@ -621,11 +625,40 @@ class CreateAutomationRequest(BaseModel):
         return self
 
 
+class UpdateAutomationPluginSource(BaseModel):
+    """Plugin source accepted by the generic automation PATCH endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., min_length=1)
+    ref: str | None = Field(default=None, min_length=1)
+    repo_path: str | None = Field(default=None, min_length=1)
+
+    @field_validator("repo_path")
+    @classmethod
+    def validate_repo_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.startswith("/") or "\\" in value:
+            raise ValueError("repo_path must be a relative POSIX path")
+        if ".." in value.split("/"):
+            raise ValueError("repo_path cannot contain '..'")
+        return value
+
+
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
 
+    plugin: UpdateAutomationPluginSource | None = Field(
+        default=None,
+        description=(
+            "Plugin source update for plugin-spec automations. The plugin manifest "
+            "owns runtime fields such as entrypoint, setup script, agent profile, "
+            "and LLM profile."
+        ),
+    )
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description="Agent profile selected for this automation.",
@@ -645,6 +678,14 @@ class UpdateAutomationRequest(BaseModel):
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repositories a prompt or plugin preset clones before it runs. Replaces "
+            "the whole list; an empty list or null removes them. Other automations "
+            "answer 422."
+        ),
+    )
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
@@ -691,6 +732,12 @@ class UpdateAutomationRequest(BaseModel):
                 "tarball_path must start with s3://, gs://, http://, or https://"
             )
         return v
+
+    @field_validator("repos", mode="before")
+    @classmethod
+    def normalize_repos(cls, v: Any) -> Any:
+        """Accept a single repository as well as a list, as the presets do."""
+        return [v] if isinstance(v, (str, dict)) else v
 
     @field_validator("setup_script_path")
     @classmethod
@@ -1045,6 +1092,7 @@ class AutomationResponse(BaseModel):
     description: str | None = None
     prompt: str | None
     preset_metadata: dict | None = None
+    plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
     tarball_path: str
@@ -1194,6 +1242,7 @@ class AutomationRunResponse(BaseModel):
     bash_command_id: str | None = None
     observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
+    resolved_runtime: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
@@ -1272,6 +1321,13 @@ class CapabilitiesResponse(_SetupContractModel):
     )
     triggers: TriggerCapabilities
     features: list[str]
+    repo_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Git providers whose repositories a run clones with the user's "
+            "token, as RepoSource provider names (github, gitlab, ...)."
+        ),
+    )
 
 
 class DraftValidationError(_SetupContractModel):

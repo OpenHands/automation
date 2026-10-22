@@ -279,6 +279,9 @@ VERIFIERS.update(
 
 def _register_builtin_providers() -> None:
     """Register the built-in providers. Called at module load."""
+    from openhands.automation.event_schemas.azure_devops import (
+        parse_azure_devops_event,
+    )
     from openhands.automation.event_schemas.bitbucket_data_center import (
         parse_bitbucket_data_center_event,
     )
@@ -287,8 +290,9 @@ def _register_builtin_providers() -> None:
 
     # All forwarded by the OpenHands server, which signs with the single shared
     # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
-    # deliveries; the other two are recorded without being deduplicated.
+    # deliveries; the others are recorded without being deduplicated.
     for source, parse, event_id_header in (
+        ("azure_devops", parse_azure_devops_event, None),
         ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
         ("github", parse_github_event_auto, "X-GitHub-Delivery"),
         ("jira_dc", parse_jira_dc_event, None),

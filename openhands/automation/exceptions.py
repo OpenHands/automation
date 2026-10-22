@@ -38,3 +38,50 @@ class ConcurrencyLimitReachedError(Exception):
     """
 
     pass
+
+
+class DailySandboxLimitReachedError(Exception):
+    """The user has reached their daily sandbox quota.
+
+    Like the concurrency limit this is not a misconfiguration: retrying within
+    the same UTC day cannot succeed (the quota resets at UTC midnight), so the
+    run is marked SKIPPED (not FAILED) and the automation is left enabled.
+    """
+
+    pass
+
+
+class SandboxProvisioningError(Exception):
+    """A sandbox never became ready, so no automation code ran in it.
+
+    The backend deletes the sandbox (best effort) before raising, so a retry
+    with a fresh sandbox cannot duplicate any side effect.
+
+    ``status`` is the last status the sandbox API reported, ``reason`` a
+    user-safe summary of the runtime's ``status_detail`` (raw pod text can leak
+    cluster internals), and ``timed_out`` whether the ready timeout expired
+    while the sandbox was still starting.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        sandbox_id: str,
+        status: str,
+        reason: str | None = None,
+        timed_out: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.sandbox_id = sandbox_id
+        self.status = status
+        self.reason = reason
+        self.timed_out = timed_out
+        # Set by the dispatcher to the number of sandboxes tried.
+        self.attempts = 1
+
+    @property
+    def code(self) -> str:
+        if self.timed_out:
+            return "sandbox_ready_timeout"
+        return f"sandbox_{self.status.lower()}"

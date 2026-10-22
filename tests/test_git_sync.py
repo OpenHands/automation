@@ -33,10 +33,14 @@ from openhands.automation.git_sync.client import (
 )
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
+    effective_settings_for,
     get_or_create_org_config,
 )
 from openhands.automation.git_sync.loop import _delete_superseded_upload
-from openhands.automation.git_sync.serializer import encrypt_file_tree
+from openhands.automation.git_sync.serializer import (
+    decrypt_file_tree,
+    encrypt_file_tree,
+)
 from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
@@ -1134,6 +1138,163 @@ class TestEncryption:
         async with sqlite_session_factory() as session:
             automations = (await session.execute(select(Automation))).scalars().all()
             assert automations == []
+
+
+class TestEncryptionKeyChangeReExports:
+    """Setting, clearing or rotating the key re-exports every automation.
+
+    The export only writes dirty automations, so without this a newly set key
+    left every already-synced automation readable in the repository.
+    """
+
+    _NAMES: tuple[str, ...] = ("First Automation", "Second Automation")
+    _SLUGS: tuple[str, ...] = ("first-automation", "second-automation")
+
+    @pytest.fixture(autouse=True)
+    def _wrapping_secret(self, monkeypatch, git_settings):
+        from openhands.automation.config import clear_config_cache
+
+        # Lets `apply_git_sync_config_override` wrap the key at rest.
+        monkeypatch.setenv("AUTOMATION_GIT_SYNC_SECRET", "test-wrapping-secret")
+        clear_config_cache()
+
+    @staticmethod
+    def _committed_files(origin: Path, slug: str) -> dict[str, bytes]:
+        """The generated files of `slug` at the remote's HEAD."""
+        names = [
+            f"automations/{slug}/automation.yaml",
+            f"automations/{slug}/tarball/main.py",
+        ]
+        return {
+            name: subprocess.run(
+                ["git", "--git-dir", str(origin), "show", f"main:{name}"],
+                check=True,
+                capture_output=True,
+            ).stdout
+            for name in names
+        }
+
+    async def _save_key(self, session_factory, key: str | None) -> GitSyncSettings:
+        """Save the key as `PUT /config` does; return the settings a cycle uses."""
+        async with session_factory() as session:
+            await _apply_override(session, {"git_sync_encryption_key": key})
+            await session.commit()
+            org_config = await get_or_create_org_config(session, LOCAL_ORG_ID)
+            return effective_settings_for(org_config)
+
+    async def _sync(self, session_factory, settings, service_settings):
+        return await run_sync_cycle(
+            session_factory, LOCAL_ORG_ID, settings, service_settings
+        )
+
+    async def _create_and_sync(
+        self, session_factory, file_store, service_settings, key: str | None
+    ) -> None:
+        for name in self._NAMES:
+            await _create_internal_automation(session_factory, file_store, name=name)
+        settings = await self._save_key(session_factory, key)
+        first = await self._sync(session_factory, settings, service_settings)
+        assert first.exported == len(self._NAMES)
+
+    async def _assert_no_dirty_states(self, session_factory) -> None:
+        async with session_factory() as session:
+            states = (
+                (await session.execute(select(AutomationGitSyncState))).scalars().all()
+            )
+            assert len(states) == len(self._NAMES)
+            assert not any(state.dirty for state in states)
+
+    async def _assert_automations_untouched(self, session_factory) -> None:
+        async with session_factory() as session:
+            automations = (await session.execute(select(Automation))).scalars().all()
+            assert len(automations) == len(self._NAMES)
+            assert all(a.deleted_at is None and a.enabled for a in automations)
+
+    async def test_setting_a_key_encrypts_already_synced_automations(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key=None
+        )
+        for slug in self._SLUGS:
+            for content in self._committed_files(origin, slug).values():
+                assert not content.startswith(b"gAAAAA")
+
+        encrypted = await self._save_key(sqlite_session_factory, "the-new-key")
+        result = await self._sync(sqlite_session_factory, encrypted, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            for name, content in self._committed_files(origin, slug).items():
+                assert content.startswith(b"gAAAAA"), f"{name} is still plaintext"
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+        # Unchanged content: no re-encrypt churn on the following cycle.
+        again = await self._sync(sqlite_session_factory, encrypted, service_settings)
+        assert again.pushed_commit is None
+        assert again.exported == 0
+
+    async def test_clearing_the_key_re_exports_plaintext(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-old-key"
+        )
+
+        plaintext = await self._save_key(sqlite_session_factory, None)
+        assert plaintext.git_sync_encryption_key == ""
+        result = await self._sync(sqlite_session_factory, plaintext, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            files = self._committed_files(origin, slug)
+            assert files[f"automations/{slug}/tarball/main.py"] == b"print(1)"
+            assert b"entrypoint" in files[f"automations/{slug}/automation.yaml"]
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+        again = await self._sync(sqlite_session_factory, plaintext, service_settings)
+        assert again.pushed_commit is None
+        assert again.exported == 0
+
+    async def test_rotating_the_key_re_encrypts_with_the_new_key(
+        self, sqlite_session_factory, file_store, service_settings, origin
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-old-key"
+        )
+
+        rotated = await self._save_key(sqlite_session_factory, "the-new-key")
+        result = await self._sync(sqlite_session_factory, rotated, service_settings)
+
+        assert result.pushed_commit is not None
+        assert result.exported == len(self._NAMES)
+        assert result.deleted_in_db == 0
+        for slug in self._SLUGS:
+            files = decrypt_file_tree(
+                self._committed_files(origin, slug), "the-new-key"
+            )
+            assert files[f"automations/{slug}/tarball/main.py"] == b"print(1)"
+        await self._assert_no_dirty_states(sqlite_session_factory)
+        await self._assert_automations_untouched(sqlite_session_factory)
+
+    async def test_saving_the_same_key_again_does_not_re_export(
+        self, sqlite_session_factory, file_store, service_settings
+    ):
+        await self._create_and_sync(
+            sqlite_session_factory, file_store, service_settings, key="the-key"
+        )
+
+        same = await self._save_key(sqlite_session_factory, "the-key")
+        result = await self._sync(sqlite_session_factory, same, service_settings)
+
+        assert result.exported == 0
+        assert result.pushed_commit is None
 
 
 class TestLastError:

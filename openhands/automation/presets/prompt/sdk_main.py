@@ -228,6 +228,7 @@ def _build_conversation_title(event_context) -> str | None:
     """Build a descriptive conversation title from the automation event context.
 
     Returns "{automation_name} — {repo}#{number}" for PR/issue events,
+    including Azure DevOps pull requests,
     "{automation_name} — {timestamp}" otherwise, or None when no automation
     name is available (keeps the agent-server's default autotitle behavior).
     """
@@ -257,6 +258,24 @@ def _build_conversation_title(event_context) -> str | None:
                 number = candidate
         if isinstance(repo_name, str) and repo_name and number is not None:
             context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
+        # Azure DevOps Service Hook events arrive wrapped. The pull request is
+        # the resource itself, or sits under it for a pull request comment.
+        raw = event.get("payload")
+        resource = raw.get("resource") if isinstance(raw, dict) else None
+        if context is None and isinstance(resource, dict):
+            pull_request = resource.get("pullRequest")
+            if not isinstance(pull_request, dict):
+                pull_request = resource
+            ado_repo = pull_request.get("repository")
+            ado_repo_name = ado_repo.get("name") if isinstance(ado_repo, dict) else None
+            ado_number = pull_request.get("pullRequestId")
+            if (
+                isinstance(ado_repo_name, str)
+                and ado_repo_name
+                and isinstance(ado_number, int)
+                and not isinstance(ado_number, bool)
+            ):
+                context = f"{ado_repo_name}#{ado_number}"
     if context is None:
         context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"{name} — {context}"[:200]

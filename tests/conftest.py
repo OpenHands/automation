@@ -163,8 +163,10 @@ class AgentProfilesApi:
         # set.
         self.caller_auth = {"Authorization": "Bearer caller-key"}
         # What the API answers the lookup with; a test replaces it to misbehave.
+        self.profile_name = "agent-default"
         self.response = httpx.Response(
-            200, json={"profiles": [{"id": self.profile_id}]}
+            200,
+            json={"profiles": [{"id": self.profile_id, "name": self.profile_name}]},
         )
         self.requests: list[httpx.Request] = []
 

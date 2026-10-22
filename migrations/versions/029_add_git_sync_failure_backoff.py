@@ -16,6 +16,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 
 revision: str = "029"
@@ -24,18 +25,30 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-def upgrade() -> None:
-    op.add_column(
-        "automation_git_sync_org_config",
-        sa.Column(
-            "consecutive_auth_failures",
-            sa.Integer,
-            nullable=False,
-            server_default="0",
-        ),
-    )
+def _has_column(table_name: str, column_name: str) -> bool:
+    bind = op.get_bind()
+    return column_name in {
+        column["name"] for column in inspect(bind).get_columns(table_name)
+    }
 
-    if op.get_bind().dialect.name == "sqlite":
+
+def upgrade() -> None:
+    bind = op.get_bind()
+    is_sqlite = bind.dialect.name == "sqlite"
+    column_name = "consecutive_auth_failures"
+
+    if not (is_sqlite and _has_column("automation_git_sync_org_config", column_name)):
+        op.add_column(
+            "automation_git_sync_org_config",
+            sa.Column(
+                column_name,
+                sa.Integer,
+                nullable=False,
+                server_default="0",
+            ),
+        )
+
+    if is_sqlite:
         return
 
     op.execute(

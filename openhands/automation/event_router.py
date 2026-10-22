@@ -97,7 +97,7 @@ def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
 async def requested_event_types(
     source: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> RequestedEventTypesResponse:
     """Return event types currently requested by enabled automations.
 
@@ -156,7 +156,7 @@ async def receive_event(
     org_id: uuid.UUID,
     source: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> EventResponse:
     """
     Receive a webhook event from a source.
