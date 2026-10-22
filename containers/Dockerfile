@@ -24,7 +24,7 @@ RUN printf '%s\n' \
 
 FROM snapshot-base AS builder
 
-ARG UV_VERSION=0.12.23
+ARG UV_VERSION=0.13.5
 
 WORKDIR /app
 
