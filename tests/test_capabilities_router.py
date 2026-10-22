@@ -155,6 +155,7 @@ class TestGetCapabilities:
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
+        assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
         assert body["repoProviders"] == ["bitbucket", "github", "gitlab"]
 
@@ -259,6 +260,18 @@ class TestValidateDraft:
             "errors": [],
             "sampleEventMatched": None,
         }
+
+    async def test_description_is_valid_in_preflight(self, async_client):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "description": "Summarizes weekly support trends."}
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
 
     @pytest.mark.parametrize(
         ("draft", "expected_error"),
