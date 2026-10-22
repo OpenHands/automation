@@ -2292,7 +2292,7 @@ wheels = [
 
 [[package]]
 name = "openhands-automation"
-version = "1.23.2"
+version = "1.24.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
