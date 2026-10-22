@@ -17,7 +17,7 @@ Routes: `GET /api/automation/v1/capabilities`, `POST /api/automation/v1/validate
 
 ## Sub-features
 
-- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles` and `kvStore`), and `repoProviders` sorted (`bitbucket`, `github`, `gitlab` with the pinned SDK).
+- `F03.caps-default`: on a default local run capabilities answer `ready:true`, `maxAutomationTimeoutSeconds:1800`, `triggerKinds:["cron"]`, no event sources or event types, no `triggers.event`, the sorted feature list (with `customTarball`, `agentProfiles` and `kvStore`), and `repoProviders` sorted: the pinned SDK's providers (`azure_devops`, `bitbucket`, `github`, `gitlab` from SDK 1.58.0 on; an older pin lacks `azure_devops`).
 - `F03.caps-cron`: `triggers.cron.minIntervalSeconds` is `max(60, scheduler interval)` (60 on a run), and `timezones` lists every IANA zone including `UTC`.
 - `F03.auth`: both routes need a key (401 without one).
 - `F03.caps-custom-webhook`: an enabled custom webhook of the caller's org adds its source, the `event` trigger kind, `webhookDelivery` and `triggers.event` (`filterLanguage:"jmespath"`, `filterFunctions`); `eventTypes` stays empty.
@@ -65,7 +65,7 @@ Preconditions:
 
 - **Default capabilities (`F03.caps-default`).** The full feature list of a local run, which always has a KV secret.
   ```sh
-  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "presetPlugin", "presetPrompt", "repoClone"]' --check repoProviders eq '["bitbucket", "github", "gitlab"]' --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
+  control-automation api GET /v1/capabilities --expect 200 --quiet --check ready eq true --check maxAutomationTimeoutSeconds eq 1800 --check triggerKinds eq '["cron"]' --check eventSources len-eq 0 --check eventTypes len-eq 0 --check triggers.event missing --check features eq '["agentProfiles", "automationDrafts", "conversationDispatch", "customTarball", "kvStore", "mcpTools", "presetPlugin", "presetPrompt", "repoClone"]' --check repoProviders eq '["azure_devops", "bitbucket", "github", "gitlab"]' --check max_automation_timeout_seconds missing --save F03.caps-default/capabilities
   ```
 - **Cron constraints (`F03.caps-cron`).** The run's scheduler polls every 5 s, but the floor never goes below 60.
   ```sh
