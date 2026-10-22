@@ -559,3 +559,42 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
 
     assert exc_info.value.status_code == 403
     assert "changes profile requirements" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_returns_manifest_and_suggested_trigger(
+    async_client, tmp_path
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path, {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"}
+    )
+
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": str(plugin)},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["manifest"]["name"] == "hello-world-automation"
+    assert data["manifest"]["description"] == "test plugin"
+    assert data["manifest"]["config_schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"message": {"type": "string"}},
+    }
+    assert data["suggested_trigger"] == {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_422_on_invalid_source(async_client, tmp_path):
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": "github:does/not-exist-no-such-branch-xyz"},
+    )
+
+    assert response.status_code == 422
