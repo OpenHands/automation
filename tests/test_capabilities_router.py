@@ -156,6 +156,7 @@ class TestGetCapabilities:
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
         assert "repoUpdate" in body["features"]
+        assert body["repoProviders"] == ["bitbucket", "github", "gitlab"]
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
@@ -230,6 +231,7 @@ class TestGetCapabilities:
         assert body["ready"] is False
         assert body["triggerKinds"] == []
         assert body["features"] == []
+        assert body["repoProviders"] == []
         assert body["triggers"] == {}
 
     async def test_advertised_cron_floor_follows_the_scheduler_interval(

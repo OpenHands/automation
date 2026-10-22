@@ -1318,6 +1318,13 @@ class CapabilitiesResponse(_SetupContractModel):
     )
     triggers: TriggerCapabilities
     features: list[str]
+    repo_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Git providers whose repositories a run clones with the user's "
+            "token, as RepoSource provider names (github, gitlab, ...)."
+        ),
+    )
 
 
 class DraftValidationError(_SetupContractModel):

@@ -52,6 +52,7 @@ from openhands.automation.utils.model_profiles import (
     validate_model_profile_for_user,
 )
 from openhands.automation.utils.webhook import get_webhook_config
+from openhands.workspace import GitProvider
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ async def get_capabilities(
             event_types=[],
             triggers=TriggerCapabilities(),
             features=[],
+            repo_providers=[],
         )
 
     builtin = builtin_sources() if config.service.webhook_secret else []
@@ -138,6 +140,9 @@ async def get_capabilities(
             ),
         ),
         features=sorted(features),
+        # The SDK packaged into a run decides which providers' tokens it can
+        # clone with, so a setup form can offer exactly those repositories.
+        repo_providers=sorted(provider.value for provider in GitProvider),
     )
 
 
