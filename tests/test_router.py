@@ -1615,6 +1615,35 @@ class TestUpdateAutomation:
         assert data["name"] == "Updated Name"
         assert data["entrypoint"] == "uv run script.py"
 
+    async def test_update_automation_description_clear(self, async_client, async_session):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Original Name",
+            description="Summarizes weekly support trends.",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+
+        renamed = await async_client.patch(url, json={"name": "Updated Name"})
+        assert renamed.status_code == 200
+        assert renamed.json()["description"] == "Summarizes weekly support trends."
+
+        cleared = await async_client.patch(url, json={"description": None})
+        assert cleared.status_code == 200
+        assert cleared.json()["name"] == "Updated Name"
+        assert cleared.json()["description"] is None
+
+        await async_session.refresh(automation)
+        assert automation.description is None
+        fetched = await async_client.get(url)
+        assert fetched.status_code == 200
+        assert fetched.json()["description"] is None
+
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""
         automation = Automation(
