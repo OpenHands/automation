@@ -231,7 +231,7 @@ async def create_automation(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create a new automation.
 
@@ -326,7 +326,7 @@ async def create_automation_from_plugin_spec(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
     if body.template is not None:
@@ -622,7 +622,7 @@ async def list_automations(
     offset: int = Query(default=0, ge=0),
     created_by: Literal["me", "others"] | None = Query(default=None),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
     """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
@@ -658,7 +658,7 @@ async def list_automations(
 async def get_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
@@ -672,11 +672,6 @@ async def update_automation(
     request: Request,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    # Function scope commits the session when the handler returns, BEFORE the
-    # response is sent and its background tasks run. With the default request
-    # scope the deferred tarball delete would run before the commit, and a
-    # commit failure would strand a live upload record pointing at an
-    # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation.
@@ -935,7 +930,7 @@ async def delete_automation(
     automation_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     """Soft delete an automation."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
@@ -980,7 +975,7 @@ async def delete_automation(
 async def download_automation_tarball(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> Response:
     """Download the tarball for an automation.
@@ -1067,7 +1062,7 @@ async def dispatch_automation(
     automation_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Manually dispatch an automation run.
 
@@ -1116,7 +1111,7 @@ async def list_automation_runs(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
@@ -1160,7 +1155,7 @@ async def complete_run(
     body: RunCompleteRequest,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
 
@@ -1394,7 +1389,7 @@ async def report_run_phase(
     run_id: uuid.UUID,
     body: RunPhaseRequest,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Record a live progress phase reported from inside the sandbox.
 
@@ -1447,7 +1442,7 @@ async def cancel_run(
     run_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Cancel a pending or running automation run.
 
