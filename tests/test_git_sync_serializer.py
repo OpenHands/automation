@@ -197,7 +197,7 @@ class TestDeserializeAutomation:
             description="Runs the weekly support report.",
             observability_associations={
                 "scm.repository.full_name": "repository.full_name",
-            }
+            },
         )
         tarball_bytes = _make_tarball({"main.py": b"print(1)"})
         files = serialize_automation(automation, tarball_bytes)
