@@ -143,3 +143,8 @@ venv = ".venv"
 pythonVersion = "3.12"
 useLibraryCodeForTypes = true
 typeCheckingMode = "standard"
+
+[tool.uv]
+exclude-newer = "7 days"
+# First-party releases may update immediately; their dependencies still wait.
+exclude-newer-package = { openhands-sdk = false, openhands-workspace = false }
