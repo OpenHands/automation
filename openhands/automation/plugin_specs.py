@@ -280,6 +280,22 @@ class AutomationPluginManifest(AutomationPluginDefinition):
     description: str | None = Field(default=None, max_length=500)
 
 
+class PluginSpecPreflightResponse(BaseModel):
+    """Read-only preflight data for a plugin spec, before any automation exists.
+
+    Everything a client needs to render and validate an install: the parsed
+    manifest, its config schema, the runtime profile requirements (allowlists
+    included so a UI can filter profile pickers), and the trigger the install
+    would default to. No side effects; safe to call repeatedly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: AutomationPluginManifest
+    resolved_ref: str | None = None
+    suggested_trigger: dict[str, Any] | None = None
+
+
 class CreatePluginSpecAutomationRequest(BaseModel):
     """Create an automation backed by an executable plugin manifest."""
 
