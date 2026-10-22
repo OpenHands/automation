@@ -10,6 +10,7 @@ from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import CustomWebhook
+from openhands.workspace import GitProvider, RepoSource
 
 
 # Test UUID matching mock_authenticated_user fixture
@@ -157,7 +158,14 @@ class TestGetCapabilities:
         assert "customTarball" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
-        assert body["repoProviders"] == ["bitbucket", "github", "gitlab"]
+        # The list follows the pinned SDK's providers, so an SDK bump that adds
+        # one (Azure DevOps in 1.58.0) is advertised without a change here.
+        assert body["repoProviders"] == sorted(p.value for p in GitProvider)
+        assert "github" in body["repoProviders"]
+        # A client sends an advertised name back as a repo's provider, so each
+        # one must be a value RepoSource accepts.
+        for name in body["repoProviders"]:
+            assert RepoSource(url="https://example.com/org/repo", provider=name)
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
