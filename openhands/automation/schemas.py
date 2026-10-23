@@ -22,6 +22,9 @@ from pydantic_core import PydanticCustomError
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.models import AutomationState
+from openhands.automation.observability_associations import (
+    validate_observability_associations as validate_observability_association_exprs,
+)
 from openhands.automation.providers import (
     DEFAULT_VERIFIER,
     is_builtin_source,
@@ -43,6 +46,7 @@ from openhands.automation.utils.timeout import (
     validate_automation_timeout,
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.workspace import RepoSource
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -222,7 +226,10 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description="Event source: 'github' or custom webhook source name",
+        description=(
+            "Event source: a built-in source such as 'github' or 'azure_devops', "
+            "or a custom webhook source name"
+        ),
     )
     on: str | list[str] = Field(
         ...,
@@ -497,6 +504,7 @@ class CreateAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -510,6 +518,14 @@ class CreateAutomationRequest(BaseModel):
 
     trigger: Trigger = Field(
         ..., description="Trigger configuration (cron or event-based)"
+    )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
     )
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
@@ -588,6 +604,13 @@ class CreateAutomationRequest(BaseModel):
         assert result is not None  # satisfy type checker
         return result
 
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -616,17 +639,47 @@ class CreateAutomationRequest(BaseModel):
         return self
 
 
+class UpdateAutomationPluginSource(BaseModel):
+    """Plugin source accepted by the generic automation PATCH endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., min_length=1)
+    ref: str | None = Field(default=None, min_length=1)
+    repo_path: str | None = Field(default=None, min_length=1)
+
+    @field_validator("repo_path")
+    @classmethod
+    def validate_repo_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.startswith("/") or "\\" in value:
+            raise ValueError("repo_path must be a relative POSIX path")
+        if ".." in value.split("/"):
+            raise ValueError("repo_path cannot contain '..'")
+        return value
+
+
 class UpdateAutomationRequest(BaseModel):
     """Request to partially update an automation."""
 
     model_config = ConfigDict(extra="forbid")
 
+    plugin: UpdateAutomationPluginSource | None = Field(
+        default=None,
+        description=(
+            "Plugin source update for plugin-spec automations. The plugin manifest "
+            "owns runtime fields such as entrypoint, setup script, agent profile, "
+            "and LLM profile."
+        ),
+    )
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
         description="Agent profile selected for this automation.",
     )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -639,8 +692,24 @@ class UpdateAutomationRequest(BaseModel):
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repositories a prompt or plugin preset clones before it runs. Replaces "
+            "the whole list; an empty list or null removes them. Other automations "
+            "answer 422."
+        ),
+    )
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
+    )
+    observability_associations: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "High-cardinality observability metadata to attach to event run "
+            "traces. Keys are metadata names and values are JMESPath expressions "
+            "evaluated against the incoming event payload."
+        ),
     )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
@@ -678,6 +747,12 @@ class UpdateAutomationRequest(BaseModel):
             )
         return v
 
+    @field_validator("repos", mode="before")
+    @classmethod
+    def normalize_repos(cls, v: Any) -> Any:
+        """Accept a single repository as well as a list, as the presets do."""
+        return [v] if isinstance(v, (str, dict)) else v
+
     @field_validator("setup_script_path")
     @classmethod
     def validate_setup_script_path(cls, v: str | None) -> str | None:
@@ -687,6 +762,13 @@ class UpdateAutomationRequest(BaseModel):
     @classmethod
     def validate_entrypoint(cls, v: str | None) -> str | None:
         return validate_command_string(v, "entrypoint")
+
+    @field_validator("observability_associations")
+    @classmethod
+    def validate_observability_associations(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return validate_observability_association_exprs(v)
 
     @field_validator("timeout")
     @classmethod
@@ -707,6 +789,10 @@ class WebhookConfig(BaseModel):
     event_key_expr: str = "type"  # JMESPath expression for extracting event key
     signature_header: str = "X-Hub-Signature-256"  # HTTP header for signature
     signature_scheme: str = DEFAULT_VERIFIER  # a verifier in providers.VERIFIERS
+    # HTTP header carrying the provider's own delivery id, or None when the
+    # source does not identify its deliveries. Built-in providers take it from
+    # their descriptor; a custom webhook takes it from its row.
+    event_id_header: str | None = None
 
 
 class EventResponse(BaseModel):
@@ -753,6 +839,16 @@ def _validate_signature_scheme(v: str) -> str:
         raise ValueError(
             f"Invalid signature_scheme '{v}'. Must be one of: "
             f"{', '.join(sorted(schemes))}"
+        )
+    return v
+
+
+def _validate_header_name(v: str) -> str:
+    """Validate an HTTP header name, shared by every configurable header."""
+    if not _HEADER_NAME_RE.match(v):
+        raise ValueError(
+            "Header must be alphanumeric with hyphens, 1-100 chars, "
+            "starting with a letter"
         )
     return v
 
@@ -807,6 +903,16 @@ class CustomWebhookCreate(BaseModel):
             "deliveries outside a 5-minute replay window."
         ),
     )
+    event_id_header: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Optional HTTP header name carrying the provider's own delivery id, "
+            "used to drop redelivered events (e.g. 'X-GitHub-Delivery'). "
+            "Omit it for a source that does not identify its deliveries: its "
+            "events are recorded and routed, but never deduplicated."
+        ),
+    )
     webhook_secret: str | None = Field(
         default=None,
         min_length=8,
@@ -857,12 +963,15 @@ class CustomWebhookCreate(BaseModel):
     @classmethod
     def validate_signature_header(cls, v: str) -> str:
         """Validate HTTP header name format."""
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookUpdate(BaseModel):
@@ -874,6 +983,7 @@ class CustomWebhookUpdate(BaseModel):
     event_key_expr: str | None = Field(default=None, max_length=500)
     signature_header: str | None = Field(default=None, max_length=100)
     signature_scheme: str | None = Field(default=None, max_length=50)
+    event_id_header: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
 
     @field_validator("signature_scheme")
@@ -905,12 +1015,15 @@ class CustomWebhookUpdate(BaseModel):
         """Validate HTTP header name format if provided."""
         if v is None:
             return v
-        if not _HEADER_NAME_RE.match(v):
-            raise ValueError(
-                "Header must be alphanumeric with hyphens, 1-100 chars, "
-                "starting with a letter"
-            )
-        return v
+        return _validate_header_name(v)
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, v: str | None) -> str | None:
+        """Validate HTTP header name format if provided."""
+        if v is None:
+            return v
+        return _validate_header_name(v)
 
 
 class CustomWebhookResponse(BaseModel):
@@ -924,6 +1037,7 @@ class CustomWebhookResponse(BaseModel):
     event_key_expr: str
     signature_header: str
     signature_scheme: str
+    event_id_header: str | None = None
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
@@ -989,9 +1103,12 @@ class AutomationResponse(BaseModel):
     model: str | None
 
     name: str
+    description: str | None = None
     prompt: str | None
     preset_metadata: dict | None = None
+    plugin_spec: dict | None = None
     trigger: dict
+    observability_associations: dict[str, str] | None = None
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1137,7 +1254,9 @@ class AutomationRunResponse(BaseModel):
     timeout_at: UtcDatetime | None
     sandbox_id: str | None
     bash_command_id: str | None = None
+    observability_associations: dict[str, Any] | None = None
     run_metadata: dict[str, Any] | None = None
+    resolved_runtime: dict[str, Any] | None = None
     created_at: UtcDatetime
     started_at: UtcDatetime | None
     completed_at: UtcDatetime | None
@@ -1216,6 +1335,13 @@ class CapabilitiesResponse(_SetupContractModel):
     )
     triggers: TriggerCapabilities
     features: list[str]
+    repo_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Git providers whose repositories a run clones with the user's "
+            "token, as RepoSource provider names (github, gitlab, ...)."
+        ),
+    )
 
 
 class DraftValidationError(_SetupContractModel):

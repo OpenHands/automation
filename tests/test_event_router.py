@@ -11,7 +11,12 @@ from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
-from openhands.automation.models import Automation, AutomationRun, IntegrationEvent
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    CustomWebhook,
+    IntegrationEvent,
+)
 
 
 @pytest.fixture
@@ -80,6 +85,33 @@ def github_pr_payload() -> dict:
                 "private": False,
             },
             "sender": {"id": 1, "login": "testuser"},
+        },
+    }
+
+
+@pytest.fixture
+def azure_devops_pr_payload() -> dict:
+    """Sample OpenHands-forwarded Azure DevOps pull request event payload."""
+    return {
+        "organization": {
+            "git_org": "fabrikam",
+            "openhands_org_id": "00000000-0000-0000-0000-000000000123",
+        },
+        "payload": {
+            "id": "2ab4e3d3-b7a6-425e-92b1-5a9982c1269e",
+            "eventType": "git.pullrequest.created",
+            "publisherId": "tfs",
+            "resource": {
+                "repository": {
+                    "name": "fabrikam-web",
+                    "project": {"name": "Fabrikam Fiber"},
+                },
+                "pullRequestId": 42,
+                "status": "active",
+            },
+            "resourceContainers": {
+                "account": {"baseUrl": "https://dev.azure.com/fabrikam/"},
+            },
         },
     }
 
@@ -316,6 +348,84 @@ async def test_receive_jira_dc_event_with_matching_automation(
     assert data["received"] is True
     assert data["matched"] == 1
     assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_azure_devops_event_with_matching_automation(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    azure_devops_pr_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving an Azure DevOps event that matches an automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test Azure DevOps Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "azure_devops",
+            "on": "git.pullrequest.created",
+            "filter": "resource.repository.name == 'fabrikam-web'",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(azure_devops_pr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/azure_devops",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+    # The run carries the raw Service Hook payload for the automation to read.
+    run = (await async_session.execute(select(AutomationRun))).scalars().one()
+    assert run.event_payload is not None
+    assert run.event_payload["event_key"] == "git.pullrequest.created"
+    assert run.event_payload["payload"] == azure_devops_pr_payload["payload"]
+
+
+@pytest.mark.asyncio
+async def test_receive_azure_devops_event_without_event_type_is_ignored(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    azure_devops_pr_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An Azure DevOps delivery without eventType is acknowledged, not run."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    del azure_devops_pr_payload["payload"]["eventType"]
+
+    signature, body = sign_payload(azure_devops_pr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/azure_devops",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matched"] == 0
 
 
 @pytest.mark.asyncio
@@ -699,3 +809,77 @@ async def test_github_event_without_a_delivery_header_is_still_recorded(
     assert len(events) == 2
     assert {event.provider_event_id for event in events} == {None}
     assert {event.matched_count for event in events} == {0}
+
+
+async def _add_custom_webhook(
+    async_session,
+    org_id: uuid.UUID,
+    source: str,
+    *,
+    secret: str = "s3cret-value",
+    event_id_header: str | None = None,
+) -> None:
+    async_session.add(
+        CustomWebhook(
+            org_id=org_id,
+            name=source,
+            source=source,
+            webhook_secret=secret,
+            event_key_expr="type",
+            signature_header="X-Signature-256",
+            event_id_header=event_id_header,
+        )
+    )
+    await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_redelivered_custom_event_creates_runs_once(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    async_session,
+    mock_authenticated_user,
+):
+    """A custom source's configured delivery header dedupes through the same path."""
+    await _add_custom_webhook(
+        async_session, org_id, "canvas", event_id_header="X-GitHub-Delivery"
+    )
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="On canvas events",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "canvas", "on": "review_requested"},
+        )
+    )
+    await async_session.commit()
+
+    body = json.dumps({"type": "review_requested"}).encode()
+    digest = hmac.new(b"s3cret-value", body, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Signature-256": f"sha256={digest}",
+        "X-GitHub-Delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+        "Content-Type": "application/json",
+    }
+    url = f"/api/automation/v1/events/{org_id}/canvas"
+
+    first = await async_client.post(url, content=body, headers=headers)
+    second = await async_client.post(url, content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert first.json()["matched"] == 1
+    assert len(first.json()["runs_created"]) == 1
+
+    # The redelivery is acknowledged but not routed again.
+    assert second.status_code == 200
+    assert second.json()["matched"] == 0
+    assert second.json()["runs_created"] == []
+
+    runs = (await async_session.execute(select(AutomationRun))).scalars().all()
+    assert len(runs) == 1
+    events = (await async_session.execute(select(IntegrationEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].provider_event_id == "72d3162e-cc78-11e3-81ab-4c9367dc0958"

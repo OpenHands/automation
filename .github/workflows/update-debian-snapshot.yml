@@ -25,7 +25,7 @@ jobs:
             IMAGE: openhands/automation:snapshot-update
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                   token: ${{ secrets.OPENHANDS_BOT_GITHUB_PAT_PUBLIC }}
             - name: Select newest snapshot older than seven days
@@ -61,7 +61,7 @@ jobs:
                   git push --force-with-lease -u origin "$BRANCH"
                   BODY=$(cat <<EOF2
                   ## Summary
-                  Advance the automation runtime to Debian snapshot \\`$SNAPSHOT\\`, the newest UTC snapshot that completed the seven-day observation period.
+                  Advance the automation runtime to Debian snapshot \`$SNAPSHOT\`, the newest UTC snapshot that completed the seven-day observation period.
 
                   The workflow built and scanned the image before opening this PR.
 

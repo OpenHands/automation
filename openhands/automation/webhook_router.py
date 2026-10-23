@@ -71,6 +71,7 @@ def _webhook_to_response(webhook: CustomWebhook) -> CustomWebhookResponse:
         signature_header=webhook.signature_header,
         # A cleared column verifies as the default.
         signature_scheme=webhook.signature_scheme or DEFAULT_VERIFIER,
+        event_id_header=webhook.event_id_header,
         enabled=webhook.enabled,
         created_at=webhook.created_at,
         updated_at=webhook.updated_at,
@@ -99,7 +100,7 @@ def _webhook_to_create_response(
 async def create_webhook(
     data: CustomWebhookCreate,
     auth: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CustomWebhookCreateResponse:
     """
     Register a new custom webhook source.
@@ -130,6 +131,7 @@ async def create_webhook(
         event_key_expr=data.event_key_expr,
         signature_header=data.signature_header,
         signature_scheme=data.signature_scheme,
+        event_id_header=data.event_id_header,
         enabled=True,
     )
 
@@ -152,7 +154,7 @@ async def create_webhook(
 @router.get("")
 async def list_webhooks(
     auth: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> CustomWebhookListResponse:
@@ -184,7 +186,7 @@ async def list_webhooks(
 async def get_webhook(
     webhook_id: uuid.UUID,
     auth: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CustomWebhookResponse:
     """Get details of a specific webhook."""
     webhook = await session.get(CustomWebhook, webhook_id)
@@ -203,13 +205,13 @@ async def update_webhook(
     webhook_id: uuid.UUID,
     data: CustomWebhookUpdate,
     auth: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CustomWebhookResponse:
     """
     Update a webhook's configuration.
 
     Updatable fields: `name`, `event_key_expr`, `signature_header`,
-    `signature_scheme`, `enabled`.
+    `signature_scheme`, `event_id_header`, `enabled`.
     The `source` cannot be changed after creation.
     """
     webhook = await session.get(CustomWebhook, webhook_id)
@@ -235,7 +237,7 @@ async def update_webhook(
 async def delete_webhook(
     webhook_id: uuid.UUID,
     auth: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     """
     Delete a webhook.
@@ -259,7 +261,7 @@ async def delete_webhook(
 async def rotate_webhook_secret(
     webhook_id: uuid.UUID,
     auth: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CustomWebhookSecretResponse:
     """
     Rotate the webhook signing secret.

@@ -2,15 +2,12 @@
 
 A PR that links issues (`Fixes #123`, `Closes #123`, `Resolves #123`, or a bare
 `#123` inside an `## Issue Number` section) may only merge once every linked
-issue carries the `ready-for-dev` label — see issue-readiness-check.yml, which
-applies that label when an issue meets the type-specific readiness criteria.
+issue carries the `ready-for-dev` label. The separate issue-readiness-check.yml
+workflow enforces who may apply that label.
 
-Issues created before the `ready-for-dev` rollout are grandfathered: the
-issue-readiness workflow only labels issues on `issues` events, so issues that
-predate it were never evaluated. Requiring the label retroactively would block
-PRs linked to those issues. The cutoff is the UTC day AFTER the rollout, so
-every issue predating deployment — including ones opened earlier that same day,
-before the workflow existed — is exempt.
+Older issues are exempt: the rollout did not evaluate them retroactively.
+The cutoff is the UTC day after deployment, so issues opened earlier on
+deployment day are also exempt.
 
 A PR that links no issues passes: many legitimate PRs (dependency bumps, small
 chores) have no tracking issue, and this gate's purpose is to keep linked work

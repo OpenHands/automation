@@ -32,7 +32,7 @@ async def set_telemetry_consent(
     body: TelemetryConsentRequest,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> TelemetryConsentResponse:
     """Persist frontend telemetry consent for local backend capture decisions."""
     if not get_config().service.is_local_mode:

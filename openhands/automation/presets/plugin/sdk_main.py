@@ -52,14 +52,17 @@ Env vars (Local mode):
 
 Common env vars:
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
+  AUTOMATION_ID              - automation ID for observability correlation (optional)
+  AUTOMATION_NAME            - automation name for observability correlation (optional)
   AUTOMATION_RUN_ID          - run ID for the callback payload (optional)
   AUTOMATION_USER_ID         - owner user ID for observability attribution (optional)
   AUTOMATION_ORG_ID          - owner org ID for observability context (optional)
+  AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
 
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
-  AUTOMATION_SESSION_URL     - direct URL to this conversation in the OpenHands UI
+  AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
                                (Cloud mode only; built from conversation.id)
 
 """
@@ -186,6 +189,7 @@ def _phase_poster() -> None:
 # SDK imports (before workspace context so import errors are caught)
 from openhands.sdk import Conversation, RemoteConversation
 from finish_tool_hook import finish_tool_required_hook_config
+from openhands.sdk.automation import automation_conversation_kwargs
 from openhands.tools.preset import TaskOutcome
 
 try:
@@ -217,11 +221,11 @@ def _normalize_mcp_config(raw_mcp_config):
     return raw_mcp_config
 
 
-
 def _build_conversation_title(event_context) -> str | None:
     """Build a descriptive conversation title from the automation event context.
 
     Returns "{automation_name} — {repo}#{number}" for PR/issue events,
+    including Azure DevOps pull requests,
     "{automation_name} — {timestamp}" otherwise, or None when no automation
     name is available (keeps the agent-server's default autotitle behavior).
     """
@@ -251,6 +255,24 @@ def _build_conversation_title(event_context) -> str | None:
                 number = candidate
         if isinstance(repo_name, str) and repo_name and number is not None:
             context = f"{repo_name.rsplit('/', 1)[-1]}#{number}"
+        # Azure DevOps Service Hook events arrive wrapped. The pull request is
+        # the resource itself, or sits under it for a pull request comment.
+        raw = event.get("payload")
+        resource = raw.get("resource") if isinstance(raw, dict) else None
+        if context is None and isinstance(resource, dict):
+            pull_request = resource.get("pullRequest")
+            if not isinstance(pull_request, dict):
+                pull_request = resource
+            ado_repo = pull_request.get("repository")
+            ado_repo_name = ado_repo.get("name") if isinstance(ado_repo, dict) else None
+            ado_number = pull_request.get("pullRequestId")
+            if (
+                isinstance(ado_repo_name, str)
+                and ado_repo_name
+                and isinstance(ado_number, int)
+                and not isinstance(ado_number, bool)
+            ):
+                context = f"{ado_repo_name}#{ado_number}"
     if context is None:
         context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"{name} — {context}"[:200]
@@ -390,7 +412,10 @@ with workspace_ctx as workspace:
         event_json = json.dumps(event_context["event"], indent=2)
         context_sections.append(f"""## Event Payload
 
-This automation was triggered by a webhook event:
+This automation was triggered by a webhook event. The full event payload is
+included below; use it directly. Do not read it from a shell environment
+variable such as `$AUTOMATION_EVENT_PAYLOAD`: the automation process receives
+that variable, but your terminal does not inherit it.
 
 ```json
 {event_json}
@@ -400,9 +425,7 @@ This automation was triggered by a webhook event:
     # the service could not deliver them as turns. They open the conversation
     # with this one instead of each starting a run of its own.
     if event_context and event_context.get("follow_up_turns"):
-        follow_ups = "\n\n".join(
-            str(turn) for turn in event_context["follow_up_turns"]
-        )
+        follow_ups = "\n\n".join(str(turn) for turn in event_context["follow_up_turns"])
         context_sections.append(f"""## Follow-up messages
 
 More activity arrived on the same subject while this run was queued:
@@ -524,20 +547,6 @@ More activity arrived on the same subject while this run was queued:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
-    # Cloud workspaces supply richer automation tags (for example, whether the
-    # trigger was cron or webhook). Only add fallback tags in local mode.
-    default_tags = workspace.default_conversation_tags or {}
-    conversation_tags = dict(experiment_tags)
-    if not any(
-        default_tags.get(key)
-        for key in ("automationtrigger", "automationid", "automationrunid")
-    ):
-        conversation_tags["automationtrigger"] = "automation"
-
-    automation_run_id = os.environ.get("AUTOMATION_RUN_ID")
-    if automation_run_id and not default_tags.get("automationrunid"):
-        conversation_tags["automationrunid"] = automation_run_id
-
     conversation_kwargs = {
         "agent": agent,
         "workspace": workspace,
@@ -545,7 +554,7 @@ More activity arrived on the same subject while this run was queued:
         "callbacks": [event_callback],
         "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
         "delete_on_close": False,  # Keep conversation history after completion
-        "tags": conversation_tags,
+        **automation_conversation_kwargs(conversation_tags=experiment_tags),
     }
     if automation_user_id and _conversation_supports_user_id():
         conversation_kwargs["user_id"] = automation_user_id
@@ -585,7 +594,7 @@ More activity arrived on the same subject while this run was queued:
     # Build session URL from conversation ID and inject as a secret so
     # the agent can use $AUTOMATION_SESSION_URL in bash commands.
     if not IS_LOCAL_MODE and api_url:
-        session_url = f"{api_url}/conversations/{conversation.id}"
+        session_url = f"{api_url}/canvas/conversations/{conversation.id}"
         conversation.update_secrets({"AUTOMATION_SESSION_URL": session_url})
         print(f"  session URL: {session_url}")
 

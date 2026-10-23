@@ -14,6 +14,9 @@ Related repositories have different responsibilities:
 
 If a PR is opened in the wrong repository, explicitly recommend closing and moving it to the repository that owns the change rather than merging it here. PRs must follow the repository's contribution and applicable code-review guidance.
 
+For issue triage, read [the review guide](.agents/skills/custom-codereview-guide.md#issue-triage-ownership-and-scope)
+for ownership and scope; PR evidence is not an issue-readiness requirement.
+
 ## Review-Facing Implementation Checklist
 
 Before opening a PR that changes scheduling, dispatch, run state, or sandbox
@@ -44,43 +47,68 @@ automation/
 │   └── automation/          # Main application package (openhands.automation namespace)
 │       ├── app.py              # FastAPI app, lifespan, background tasks
 │       ├── auth.py             # Auth via OpenHands /api/v1/users/me (API key + cookie)
-│       ├── config.py           # Pydantic settings (Settings, env prefix AUTOMATION_)
+│       ├── capabilities_router.py  # Capability discovery and preflight validation
+│       ├── config.py           # Pydantic settings (AppConfig sections, env prefix AUTOMATION_)
 │       ├── constants.py        # Timeouts, polling intervals, sandbox constants
+│       ├── conversations.py    # Routes an event to its subject's conversation
 │       ├── db.py               # Database engine and session factory (asyncpg / Cloud SQL)
 │       ├── dispatcher.py       # Polls PENDING runs, dispatches to sandbox (fire-and-forget)
+│       ├── event_router.py     # Receives webhook events, triggers automations
+│       ├── exceptions.py       # Transient vs terminal failure exceptions
 │       ├── execution.py        # Sandbox lifecycle: create → upload → execute → delete
+│       ├── filter_eval.py      # JMESPath-based filter evaluation for event matching
+│       ├── ingest.py           # Transport-neutral event ingestion (accept_event)
+│       ├── kv_router.py        # Per-automation KV store API (+ kv_helpers/kv_metrics/kv_schemas)
 │       ├── logger.py           # JSON structured logging configuration
+│       ├── middleware.py       # ASGI middleware
 │       ├── models.py           # SQLAlchemy models (Automation, AutomationRun, TarballUpload)
+│       ├── preset_router.py    # Preset-based automation creation
+│       ├── providers.py        # Event provider descriptors and signature verifiers
 │       ├── router.py           # API routes (CRUD, trigger, callback, runs list)
 │       ├── scheduler.py        # Cron scheduler — polls automations, creates PENDING runs
 │       ├── schemas.py          # Pydantic request/response schemas
+│       ├── subjects.py         # Maps an external subject to a conversation id
+│       ├── telemetry.py        # PostHog product telemetry (+ telemetry_router.py)
+│       ├── trigger_matcher.py  # Trigger matching for event-based automations
 │       ├── uploads.py          # Tarball upload router
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
+│       ├── webhook_router.py   # Custom webhook CRUD
+│       ├── backends/           # Execution backends (Cloud, Local)
+│       ├── event_schemas/      # Typed event payloads (GitHub, Jira DC, Bitbucket DC, custom)
 │       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
+│       │   ├── config_override.py  # Per-org runtime config overrides
 │       │   ├── loop.py         # Sync cycle, background loop, mark_git_sync_dirty hook
 │       │   ├── router.py       # Git sync status/trigger API
 │       │   ├── schemas.py      # Git sync request/response schemas
+│       │   ├── secret_store.py # At-rest encryption for org tokens/keys
 │       │   └── serializer.py   # Automation <-> git file-tree (de)serializer
+│       ├── presets/            # Preset tarball templates (prompt/, plugin/)
 │       ├── streams/            # Stream sources (Slack Socket Mode, see below)
 │       │   ├── base.py         # StreamProvider protocol, per-source health
 │       │   ├── slack.py        # Slack Socket Mode provider
 │       │   └── supervisor.py   # Source registry, supervised task per source
 │       ├── storage/            # File storage abstraction
 │       │   ├── file_store.py   # Abstract base class for file storage
-│       │   └── google_cloud.py # GCS implementation
+│       │   ├── factory.py      # Storage backend selection
+│       │   ├── google_cloud.py # GCS implementation
+│       │   ├── local.py        # Local filesystem implementation
+│       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
-│           └── time.py         # UTC time helpers
+│           ├── time.py         # UTC time helpers
+│           └── ...             # agent_server, kv, log_context, templates, webhook, ...
 ├── containers/
 │   └── Dockerfile          # Container image definition
+├── docs/                    # Design docs (KV store, run-phase reporting)
 ├── migrations/              # Alembic migrations
 ├── scripts/
 │   ├── test_automation.py  # E2E test (sandbox lifecycle with live streaming)
+│   ├── test_kv_e2e.py      # KV store E2E test
 │   └── test_tarball/       # Tarball contents uploaded to sandbox during test
 │       ├── main.py         # Test script run inside sandbox (SDK workspace test)
 │       └── setup.sh        # Installs SDK inside sandbox
@@ -139,7 +167,7 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 ## PR-Specific Documents
 
-When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should **not** be merged to `main`, store them in a `.pr/` directory at the repository root.
+When working on a PR that requires design documents, live-test logs, development-only scripts, or other temporary artifacts that should not remain on `main`, store them in a `.pr/` directory at the repository root.
 
 ```bash
 mkdir -p .pr
@@ -150,12 +178,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR and automatically removes the directory with a follow-up commit when a same-repo PR is approved. If artifacts reach `main`, including through a fork PR, the workflow opens or updates a cleanup PR against `main`.
+The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR. After a PR merges to `main`, the workflow opens or updates a cleanup PR to remove the directory, for both same-repository and fork PRs. Approval does not modify the source PR or rerun its CI just to remove temporary artifacts.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Merge the cleanup PR and let release-please update the release PR before merging it.
 - Cleanup PRs follow the normal review and required-check protections for `main`.
 
 
@@ -173,7 +202,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 7. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
-- **Happy path**: SDK inside sandbox POSTs to `POST /api/v1/automations/runs/{id}/complete`
+- **Happy path**: SDK inside sandbox POSTs to `POST /v1/runs/{id}/complete` on the service (injected as `AUTOMATION_CALLBACK_URL`; the service serves it under the `/api/automation` base path)
 - **Fallback**: Watchdog scans for runs past their `timeout_at` deadline, verifies status via sandbox bash history, and marks as COMPLETED or FAILED
 
 ### Env Vars Injected Into Sandbox
@@ -206,7 +235,7 @@ Supports **PostgreSQL** (cloud) and **SQLite** (local/self-hosted).
 | Config | `AUTOMATION_DB_HOST`, `AUTOMATION_DB_PORT`, etc. | `AUTOMATION_DB_URL=sqlite+aiosqlite:///path.db` |
 | Driver | asyncpg | aiosqlite |
 | Row locking | `FOR UPDATE SKIP LOCKED` | Skipped (single-process) |
-| Migrations | `alembic upgrade head` (manual) | Auto-run on startup |
+| Migrations | `alembic upgrade head`, or on startup with `AUTOMATION_RUN_MIGRATIONS_ON_STARTUP=true` | Auto-run on startup |
 
 ### Writing Migrations
 
@@ -404,7 +433,11 @@ exactly one org, the deterministic local org from `auth.py`'s
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're
   committed. Reading a repo written before encryption was turned on still
-  works — plaintext files pass through unchanged.
+  works — plaintext files pass through unchanged. Setting, changing or
+  clearing the key via `PUT /v1/git-sync/config` marks every synced
+  automation dirty (`apply_git_sync_config_override`), and the export treats
+  a plaintext file as stale while a key is set, so the next cycle rewrites
+  them all in one commit instead of leaving HEAD readable.
 - **Runtime config**: `PUT /v1/git-sync/config` configures, reconfigures or
   pauses/resumes the org's sync (repo/branch/path/token/encryption key/author)
   without a restart, via `git_sync/config_override.py` (overrides stored as

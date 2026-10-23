@@ -178,6 +178,7 @@ async def create_pending_run(
     telemetry_distinct_id: str | None = None,
     trigger_source: str | None = None,
     event_payload: dict[str, Any] | None = None,
+    observability_parent_span_context: str | None = None,
 ) -> AutomationRun:
     """Create a PENDING automation run for dispatch.
 
@@ -205,6 +206,7 @@ async def create_pending_run(
         telemetry_distinct_id=(
             telemetry_distinct_id or automation.telemetry_distinct_id
         ),
+        observability_parent_span_context=observability_parent_span_context,
     )
     session.add(run)
 
@@ -338,11 +340,29 @@ async def update_bash_command_id(
         logger.exception("Failed to update bash_command_id for run %s", run_id)
 
 
+async def update_run_resolved_runtime(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    resolved_runtime: dict[str, Any],
+) -> None:
+    """Persist runtime attributes resolved during dispatch."""
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(resolved_runtime=resolved_runtime)
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("Failed to update resolved_runtime for run %s", run_id)
+
+
 async def update_run_timeout_at(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: uuid.UUID,
     timeout_at: datetime,
-) -> None:
+) -> bool:
     """Reset the watchdog deadline for a run that is still RUNNING.
 
     Guarded by status == RUNNING so a run that already reached a terminal
@@ -350,10 +370,12 @@ async def update_run_timeout_at(
     resurrected. Failure is non-fatal: the run keeps its previous (longer)
     provisioning-phase deadline, which errs toward a later watchdog check,
     never an earlier one.
+
+    Returns False only when the run is known to be no longer RUNNING.
     """
     try:
         async with session_factory() as session:
-            await session.execute(
+            result: CursorResult = await session.execute(  # type: ignore[assignment]
                 update(AutomationRun)
                 .where(
                     AutomationRun.id == run_id,
@@ -362,8 +384,26 @@ async def update_run_timeout_at(
                 .values(timeout_at=timeout_at)
             )
             await session.commit()
+            return result.rowcount != 0
     except Exception:
         logger.exception("Failed to update timeout_at for run %s", run_id)
+        return True
+
+
+async def run_is_running(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+) -> bool:
+    """Whether the run is still RUNNING (True if the check itself fails)."""
+    try:
+        async with session_factory() as session:
+            status = await session.scalar(
+                select(AutomationRun.status).where(AutomationRun.id == run_id)
+            )
+            return status == AutomationRunStatus.RUNNING
+    except Exception:
+        logger.exception("Failed to read status for run %s", run_id)
+        return True
 
 
 async def update_run_current_phase(

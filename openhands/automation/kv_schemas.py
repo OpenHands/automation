@@ -221,10 +221,17 @@ class KVDeleteResponse(BaseModel):
 
 
 class KVListKeysResponse(BaseModel):
-    """Response for listing keys."""
+    """Response for listing keys.
+
+    ``count`` is the number of keys in this page; ``total`` is the automation's
+    full key count, so callers can page with ``limit``/``offset``.
+    """
 
     keys: list[str]
     count: int
+    total: int
+    limit: int
+    offset: int
 
 
 class KVIncrResponse(BaseModel):

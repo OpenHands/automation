@@ -52,7 +52,9 @@ from openhands.automation.schemas import (
 from openhands.automation.utils.webhook import get_webhook_config
 
 
-BUILTIN_PROVIDER_SOURCES = frozenset({"bitbucket_data_center", "github", "jira_dc"})
+BUILTIN_PROVIDER_SOURCES = frozenset(
+    {"azure_devops", "bitbucket_data_center", "github", "jira_dc"}
+)
 
 # Header bytes reach an app latin-1 decoded, so a signature header can carry a
 # non-ASCII str. `hmac.compare_digest` raises on those rather than returning
@@ -677,6 +679,33 @@ class TestGetWebhookConfigScheme:
         config = await get_webhook_config("legacy", org_id, async_session)
         assert config is not None
         assert config.signature_scheme == DEFAULT_VERIFIER
+
+
+class TestGetWebhookConfigEventIdHeader:
+    @pytest.mark.asyncio
+    async def test_delivery_header_comes_from_descriptor_or_row(
+        self, async_session, org_id, monkeypatch
+    ):
+        """Built-ins use their descriptor; a custom row uses its own field."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "shared")
+        builtin = await get_webhook_config("github", org_id, async_session)
+        assert builtin is not None
+        assert builtin.event_id_header == "X-GitHub-Delivery"
+
+        async_session.add(
+            CustomWebhook(
+                org_id=org_id,
+                name="Canvas",
+                source="github-events",
+                webhook_secret="whsec_abc",
+                event_id_header="X-GitHub-Delivery",
+            )
+        )
+        await async_session.commit()
+
+        custom = await get_webhook_config("github-events", org_id, async_session)
+        assert custom is not None
+        assert custom.event_id_header == "X-GitHub-Delivery"
 
 
 def _make_automation(org_id: uuid.UUID, user_id: uuid.UUID, source: str) -> Automation:

@@ -1,10 +1,16 @@
 """Tests for API router endpoints."""
 
+import contextlib
 import io
+import json
+import re
 import tarfile
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote_to_bytes
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -16,13 +22,19 @@ from openhands.automation.models import (
     TarballUpload,
     UploadStatus,
 )
-from openhands.automation.preset_router import _build_storage_path, _generate_tarball
+from openhands.automation.preset_router import (
+    _build_storage_path,
+    _generate_plugin_tarball,
+    _generate_tarball,
+)
 from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
 )
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 # Test UUIDs matching mock_authenticated_user fixture
@@ -30,6 +42,15 @@ TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 OTHER_ORG_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+# An automation an agent profile can be selected for: only the raw create
+# endpoint accepts one.
+PROFILE_AUTOMATION = {
+    "name": "Independent reviewer",
+    "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+    "tarball_path": "s3://bucket/reviewer.tar.gz",
+    "entrypoint": "python3 main.py",
+}
 
 
 @pytest.fixture
@@ -85,11 +106,13 @@ def preset_store(monkeypatch):
     return store
 
 
-async def _seed_prompt_preset_automation(async_session, store, prompt):
+async def _seed_prompt_preset_automation(
+    async_session, store, prompt, *, tarball=None, preset_metadata=None
+):
     """Insert a prompt-preset automation whose internal tarball bakes ``prompt``."""
     upload_id = uuid.uuid4()
     storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
-    store._storage[storage_path] = _generate_tarball(prompt)
+    store._storage[storage_path] = tarball or _generate_tarball(prompt)
 
     async_session.add(
         TarballUpload(
@@ -110,10 +133,27 @@ async def _seed_prompt_preset_automation(async_session, store, prompt):
         tarball_path=build_internal_url(upload_id),
         setup_script_path="setup.sh",
         entrypoint=".venv/bin/python main.py",
+        preset_metadata=preset_metadata,
     )
     async_session.add(automation)
     await async_session.commit()
     return automation
+
+
+def _tarball_files(store, tarball_path):
+    """Read every file of an internal tarball the preset store holds."""
+    upload_id = parse_internal_upload_id(tarball_path)
+    assert upload_id is not None
+    storage_path = _build_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id)
+    files = {}
+    with tarfile.open(
+        fileobj=io.BytesIO(store._storage[storage_path]), mode="r:gz"
+    ) as tar:
+        for member in tar.getmembers():
+            extracted = tar.extractfile(member)
+            if extracted is not None:
+                files[member.name] = extracted.read()
+    return files
 
 
 @pytest.fixture
@@ -925,6 +965,161 @@ class TestCreateAutomation:
         assert data["timeout"] == 1800
 
 
+class TestAgentProfileInCloudMode:
+    """A profile selected on a deployment whose profiles live in the OpenHands API."""
+
+    async def test_create_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+        # The profile is looked up as the caller, in the organization the
+        # automation is stored under.
+        [lookup] = agent_profiles_api.requests
+        assert (
+            lookup.headers["authorization"]
+            == agent_profiles_api.caller_auth["Authorization"]
+        )
+        assert lookup.headers["x-org-id"] == str(TEST_ORG_ID)
+
+    async def test_create_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={**PROFILE_AUTOMATION, "agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+
+    async def test_create_rejects_a_model_alongside_a_profile(
+        self, async_client, agent_profiles_api
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+                "model": "fast",
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "already specifies the model" in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param(httpx.Response(500), id="server-error"),
+            pytest.param(httpx.Response(200, text="<html>"), id="not-json"),
+            pytest.param(httpx.Response(200, json=[]), id="unexpected-shape"),
+        ],
+    )
+    async def test_create_reports_a_failing_openhands_api_as_a_bad_gateway(
+        self, async_client, agent_profiles_api, response
+    ):
+        agent_profiles_api.response = response
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 502
+
+    async def test_create_passes_on_a_credential_the_openhands_api_refuses(
+        self, async_client, agent_profiles_api
+    ):
+        agent_profiles_api.response = httpx.Response(401)
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 401
+
+    async def test_update_accepts_a_profile_of_the_callers_organization(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json=PROFILE_AUTOMATION,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"agent_profile_id": agent_profiles_api.profile_id},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["agent_profile_id"] == agent_profiles_api.profile_id
+
+    async def test_update_that_keeps_the_profile_does_not_look_it_up_again(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json={
+                **PROFILE_AUTOMATION,
+                "agent_profile_id": agent_profiles_api.profile_id,
+            },
+            headers=agent_profiles_api.caller_auth,
+        )
+        # The profile is deleted, and the OpenHands API goes down.
+        agent_profiles_api.response = httpx.Response(500)
+        agent_profiles_api.requests.clear()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"name": "Renamed", "agent_profile_id": agent_profiles_api.profile_id},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 200
+        assert agent_profiles_api.requests == []
+
+    async def test_update_rejects_a_profile_the_organization_does_not_have(
+        self, async_client, agent_profiles_api
+    ):
+        created = await async_client.post(
+            "/api/automation/v1",
+            json=PROFILE_AUTOMATION,
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{created.json()['id']}",
+            json={"agent_profile_id": str(uuid.uuid4())},
+            headers=agent_profiles_api.caller_auth,
+        )
+
+        assert response.status_code == 422
+        assert "not found" in response.json()["detail"]
+
+
 class TestListAutomations:
     """Tests for GET /v1 endpoint."""
 
@@ -1046,6 +1241,134 @@ class TestListAutomations:
         data = response.json()
         assert len(data["automations"]) == 2
         assert data["total"] == 5
+
+    async def _seed_automation(
+        self, async_session, *, user_id, org_id, name, age_minutes=0, created_at=None
+    ) -> Automation:
+        """Persist an automation by ``user_id``, created ``age_minutes`` ago or at
+        ``created_at``."""
+        automation = Automation(
+            user_id=user_id,
+            org_id=org_id,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/path/to/code.tar.gz",
+            entrypoint="uv run script.py",
+            created_at=created_at or utcnow() - timedelta(minutes=age_minutes),
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def _seed_mine_teammate_and_other_org(self, async_session):
+        """Persist the caller's automation, a newer teammate's, and another org's."""
+        await self._seed_automation(
+            async_session,
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Mine",
+            age_minutes=2,
+        )
+        await self._seed_automation(
+            async_session,
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate",
+            age_minutes=1,
+        )
+        await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID, name="Other org"
+        )
+
+    async def test_list_automations_lists_every_creator_without_a_filter(
+        self, async_client, async_session
+    ):
+        """Without created_by, the org's automations from every creator are listed."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get("/api/automation/v1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == ["Teammate", "Mine"]
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        ("created_by", "expected"),
+        [("me", ["Mine"]), ("others", ["Teammate"])],
+    )
+    async def test_list_automations_filters_by_creator(
+        self, async_client, async_session, created_by, expected
+    ):
+        """created_by keeps the caller's automations or the rest of the org's."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(f"/api/automation/v1?created_by={created_by}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [a["name"] for a in data["automations"]] == expected
+        assert data["total"] == len(expected)
+
+    async def test_list_automations_creator_filter_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only the filtered automations; pages keep newest-first."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Mine {i}",
+                age_minutes=i,
+            )
+        for i in range(2):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Teammate {i}",
+                age_minutes=i,
+            )
+
+        url = "/api/automation/v1?created_by=me&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
+
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
+        assert names == ["Mine 0", "Mine 1", "Mine 2"]
+
+    async def test_list_automations_pages_tied_created_at_by_id(
+        self, async_client, async_session
+    ):
+        """Automations with one created_at (e.g. one Git Sync import) page by id, so
+        each one is listed once across offsets."""
+        created_at = utcnow()
+        seeded = [
+            await self._seed_automation(
+                async_session,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Imported {i}",
+                created_at=created_at,
+            )
+            for i in range(5)
+        ]
+
+        pages = [
+            (await async_client.get(f"/api/automation/v1?limit=2&offset={o}")).json()
+            for o in (0, 2, 4)
+        ]
+
+        ids = [a["id"] for page in pages for a in page["automations"]]
+        assert ids == sorted((str(a.id) for a in seeded), reverse=True)
+
+    async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
+        """An unknown created_by value is a 422, not a silently unfiltered list."""
+        response = await async_client.get("/api/automation/v1?created_by=team")
+
+        assert response.status_code == 422
 
 
 class TestGetAutomation:
@@ -1317,6 +1640,37 @@ class TestUpdateAutomation:
         data = response.json()
         assert data["name"] == "Updated Name"
         assert data["entrypoint"] == "uv run script.py"
+
+    async def test_update_automation_description_clear(
+        self, async_client, async_session
+    ):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Original Name",
+            description="Summarizes weekly support trends.",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        url = f"/api/automation/v1/{automation.id}"
+
+        renamed = await async_client.patch(url, json={"name": "Updated Name"})
+        assert renamed.status_code == 200
+        assert renamed.json()["description"] == "Summarizes weekly support trends."
+
+        cleared = await async_client.patch(url, json={"description": None})
+        assert cleared.status_code == 200
+        assert cleared.json()["name"] == "Updated Name"
+        assert cleared.json()["description"] is None
+
+        await async_session.refresh(automation)
+        assert automation.description is None
+        fetched = await async_client.get(url)
+        assert fetched.status_code == 200
+        assert fetched.json()["description"] is None
 
     async def test_update_automation_schedule(self, async_client, async_session):
         """PATCH updates the trigger schedule."""
@@ -1627,6 +1981,323 @@ class TestUpdateAutomation:
             "prompt": "Updated prompt",
             "repos": [{"url": "owner/repo"}],
         }
+
+    async def test_update_repos_rebuilds_preset_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing repos rewrites repos_config.json and the recorded repos."""
+        # Arrange — a prompt preset that clones one repository.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/old", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/old", "provider": "github"}],
+            },
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act — replace the repository and pin a branch.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/new", "provider": "github", "ref": "dev"}]},
+        )
+
+        # Assert — the record and the executable tarball both carry the new list.
+        assert response.status_code == 200
+        data = response.json()
+        new_repos = [{"url": "owner/new", "ref": "dev", "provider": "github"}]
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+            "repos": new_repos,
+        }
+        assert data["tarball_path"] != original_tarball_path
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == new_repos
+        assert files["prompt.txt"].decode() == "Same prompt"
+
+    async def test_update_repos_accepts_a_single_repository(
+        self, async_client, async_session, preset_store
+    ):
+        """A single repository object is accepted as a one-item list."""
+        # Arrange — a prompt preset created without repositories.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": {"url": "owner/repo", "provider": "github"}},
+        )
+
+        # Assert — the missing repos_config.json is added.
+        assert response.status_code == 200
+        data = response.json()
+        assert data["preset_metadata"]["repos"] == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+
+    async def test_update_repos_empty_list_removes_them(
+        self, async_client, async_session, preset_store
+    ):
+        """An empty list removes the repositories from the record and tarball."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/old", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/old", "provider": "github"}],
+            },
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"repos": []}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.json()
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+        }
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert "repos_config.json" not in files
+        assert files["prompt.txt"].decode() == "Same prompt"
+
+    async def test_update_prompt_and_repos_rebuilds_tarball_once(
+        self, async_client, async_session, preset_store
+    ):
+        """Editing the prompt and repos together writes one new tarball."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Original prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Original prompt"},
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={
+                "prompt": "Updated prompt",
+                "repos": [{"url": "owner/repo", "provider": "github"}],
+            },
+        )
+
+        # Assert — one upload carries both edits.
+        assert response.status_code == 200
+        assert preset_store.write_stream.await_count == 1
+        data = response.json()
+        assert data["preset_metadata"] == {
+            "preset_type": "prompt",
+            "prompt": "Updated prompt",
+            "repos": [{"url": "owner/repo", "provider": "github"}],
+        }
+        files = _tarball_files(preset_store, data["tarball_path"])
+        assert files["prompt.txt"].decode() == "Updated prompt"
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+
+    async def test_update_unchanged_repos_does_not_regenerate_tarball(
+        self, async_client, async_session, preset_store
+    ):
+        """Re-sending the current repositories is a no-op."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            tarball=_generate_tarball(
+                "Same prompt", repos=[RepoSource(url="owner/repo", provider="github")]
+            ),
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "Same prompt",
+                "repos": [{"url": "owner/repo", "provider": "github"}],
+            },
+        )
+        original_tarball_path = automation.tarball_path
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == original_tarball_path
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_repos_on_plugin_preset_keeps_plugins(
+        self, async_client, async_session, preset_store
+    ):
+        """A plugin preset's repositories change without touching its plugins."""
+        # Arrange
+        original = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/plugin")], "Run the plugin"
+        )
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Run the plugin",
+            tarball=original,
+            preset_metadata={
+                "preset_type": "plugin",
+                "prompt": "Run the plugin",
+                "plugins": [{"source": "github:owner/plugin"}],
+            },
+        )
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        files = _tarball_files(preset_store, response.json()["tarball_path"])
+        assert json.loads(files["repos_config.json"]) == [
+            {"url": "owner/repo", "provider": "github"}
+        ]
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as tar:
+            plugins_file = tar.extractfile("plugins_config.json")
+            assert plugins_file is not None
+            assert files["plugins_config.json"] == plugins_file.read()
+
+    @pytest.mark.parametrize(
+        "preset_metadata",
+        [None, {"template": {"id": "bundle"}}, {"preset_type": "plugin_spec"}],
+    )
+    async def test_update_repos_on_other_automations_returns_422(
+        self, async_client, async_session, preset_metadata
+    ):
+        """Only prompt and plugin presets clone repositories they own."""
+        # Arrange — a custom bundle, a template bundle and a plugin spec.
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Not A Preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            preset_metadata=preset_metadata,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "Only prompt and plugin preset automations can update repos"
+        )
+
+    async def test_update_repos_rejects_an_invalid_repository(
+        self, async_client, async_session, preset_store
+    ):
+        """Repositories are validated as on creation."""
+        # Arrange
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+
+        # Act — a path with spaces is neither owner/repo nor a git URL.
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "org/Web Apps/repo", "provider": "github"}]},
+        )
+
+        # Assert
+        assert response.status_code == 422
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_repos_fails_when_tarball_cannot_be_rebuilt(
+        self, async_client, async_session, preset_store
+    ):
+        """Repositories are not recorded unless the tarball will clone them."""
+        # Arrange — the current tarball object is confirmed absent.
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Same prompt",
+            preset_metadata={"preset_type": "prompt", "prompt": "Same prompt"},
+        )
+        original_tarball_path = automation.tarball_path
+        preset_store.read = MagicMock(side_effect=ObjectNotFoundError("File not found"))
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"repos": [{"url": "owner/repo", "provider": "github"}]},
+        )
+
+        # Assert — nothing changed.
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.tarball_path == original_tarball_path
+        assert automation.preset_metadata == {
+            "preset_type": "prompt",
+            "prompt": "Same prompt",
+        }
+
+    async def test_update_repos_as_non_creator_returns_403(
+        self, async_client, async_session
+    ):
+        """Changing repositories edits the definition, so only the creator may."""
+        # Arrange — a teammate's preset in the same organization.
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Teammate Preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint=".venv/bin/python main.py",
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"repos": []}
+        )
+
+        # Assert
+        assert response.status_code == 403
 
     async def test_update_name_does_not_regenerate_preset_tarball(
         self, async_client, async_session, preset_store
@@ -2432,6 +3103,45 @@ class TestCompleteRun:
         await async_session.refresh(run)
         assert run.conversation_id == "conv-completed-123"
         assert run.status == AutomationRunStatus.COMPLETED
+
+    async def test_complete_run_uses_propagated_parent_span_context(
+        self, async_client, async_session
+    ):
+        """Complete endpoint attaches callback span to propagated trace context."""
+        from openhands.automation.models import AutomationRun, AutomationRunStatus
+
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Test Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        with patch("openhands.automation.router.span") as mock_span:
+            mock_span.return_value = contextlib.nullcontext(None)
+            response = await async_client.post(
+                f"/api/automation/v1/runs/{run.id}/complete",
+                headers={
+                    "X-OpenHands-Observability-Parent-Span-Context": "parent-context"
+                },
+                json={"status": "COMPLETED"},
+            )
+
+        assert response.status_code == 200
+        mock_span.assert_called_once()
+        assert mock_span.call_args.args[0] == "automation.callback.received"
+        assert mock_span.call_args.kwargs["parent_span_context"] == "parent-context"
 
     async def test_complete_run_ignores_task_result_metadata_for_status_detail(
         self, async_client, async_session
@@ -3514,6 +4224,104 @@ class TestReportRunPhase:
 
 class TestDownloadTarball:
     """Tests for GET /{automation_id}/tarball endpoint."""
+
+    @pytest.mark.parametrize(
+        ("name", "sanitized_name", "fallback_name"),
+        [
+            ("My Automation", "My Automation", "My Automation"),
+            ("Monday — review", "Monday — review", "Monday review"),
+            ("Robot 🤖", "Robot 🤖", "Robot"),
+            ("自动化", "自动化", "automation"),
+            ("Café", "Café", "Cafe"),
+            ("\"/\\\x00\x1f\x7f\r\nCafé 🤖;%'", "Café 🤖;%'", "Cafe ;%'"),
+            ('"\\/\x00\n\r\t\x1f\x7f', "automation", "automation"),
+            (
+                "\uff02;filename*=UTF-8''spoofed",
+                "\uff02;filename*=UTF-8''spoofed",
+                ";filename*=UTF-8''spoofed",
+            ),
+            ("a\uff3cb\ufe68c\u2100d", "a\uff3cb\ufe68c\u2100d", "abcacd"),
+        ],
+        ids=[
+            "ascii",
+            "em-dash",
+            "emoji",
+            "cjk",
+            "latin-1",
+            "mixed",
+            "empty",
+            "nfkd-quote",
+            "nfkd-solidus",
+        ],
+    )
+    async def test_internal_url_encodes_download_filename(
+        self, name, sanitized_name, fallback_name, mock_authenticated_user
+    ):
+        """Download names round-trip safely without changing the stored archive."""
+        from openhands.automation.router import download_automation_tarball
+
+        upload = TarballUpload(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="test-tarball",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/test/download.tar",
+        )
+        automation = Automation(
+            id=uuid.uuid4(),
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name=name,
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=build_internal_url(upload.id),
+            entrypoint="python main.py",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            content = b'print("hello")\n'
+            member = tarfile.TarInfo("main.py")
+            member.size = len(content)
+            tar.addfile(member, io.BytesIO(content))
+        tarball_bytes = archive.getvalue()
+        store = MagicMock()
+        store.read.return_value = tarball_bytes
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = upload
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        with patch(
+            "openhands.automation.router._get_org_automation",
+            new_callable=AsyncMock,
+            return_value=automation,
+        ):
+            response = await download_automation_tarball(
+                automation_id=automation.id,
+                user=mock_authenticated_user,
+                session=session,
+                file_store=store,
+            )
+
+        assert response.status_code == 200
+        assert response.body == tarball_bytes
+        assert response.headers["content-type"] == "application/x-tar"
+        store.read.assert_called_once_with(upload.storage_path)
+        disposition = response.headers["content-disposition"]
+        assert disposition.isascii()
+        fallback_part, separator, extended = disposition.partition("; filename*=")
+        fallback = re.fullmatch(r'attachment; filename="([^"\\/]+)"', fallback_part)
+        assert fallback is not None
+        assert all(32 <= ord(char) < 127 for char in fallback.group(1))
+        assert fallback.group(1) == f"{fallback_name}.tar"
+        if sanitized_name.isascii():
+            assert separator == ""
+        else:
+            assert separator
+            charset, language, encoded = extended.split("'", 2)
+            assert charset.lower() == "utf-8"
+            assert language == ""
+            assert unquote_to_bytes(encoded).decode("utf-8") == f"{sanitized_name}.tar"
 
     async def test_internal_url_returns_tarball_bytes(
         self, async_client, async_session

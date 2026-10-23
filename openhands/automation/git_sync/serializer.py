@@ -138,6 +138,7 @@ def _automation_yaml_fields(
         if automation.agent_profile_id
         else None,
         "trigger": automation.trigger,
+        "observability_associations": automation.observability_associations,
         "setup_script_path": automation.setup_script_path,
         "entrypoint": automation.entrypoint,
         "timeout": automation.timeout,
@@ -151,6 +152,10 @@ def _automation_yaml_fields(
             "url": None if tarball_is_internal else automation.tarball_path,
         },
     }
+    # Omit null descriptions so enabling this field does not rewrite every
+    # existing automation on the first sync cycle.
+    if automation.description is not None:
+        fields["description"] = automation.description
     # Omitted when nothing is executable, so upgrading doesn't rewrite every
     # already-synced automation.yaml just to add an empty list.
     if tarball_executables:
@@ -337,6 +342,11 @@ def encrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     return encrypted
 
 
+def is_encrypted(content: bytes) -> bool:
+    """Whether `content` is a token `encrypt_file_tree` wrote, not plaintext."""
+    return content.startswith(FERNET_TOKEN_PREFIX.encode())
+
+
 def decrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     """Decrypt files previously written by `encrypt_file_tree`.
 
@@ -347,7 +357,7 @@ def decrypt_file_tree(files: dict[str, bytes], key: str) -> dict[str, bytes]:
     cipher = Cipher(key)
     decrypted: dict[str, bytes] = {}
     for name, content in files.items():
-        if not content.startswith(FERNET_TOKEN_PREFIX.encode()):
+        if not is_encrypted(content):
             decrypted[name] = content
             continue
         secret = cipher.decrypt(content.decode(errors="replace"))

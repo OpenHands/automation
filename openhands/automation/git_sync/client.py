@@ -27,6 +27,50 @@ class GitSyncError(Exception):
     """Raised when a git subprocess invocation fails or times out."""
 
 
+class GitAuthError(GitSyncError):
+    """A git failure that will not fix itself on the next retry.
+
+    Credentials were missing or rejected, or the remote refused access: a
+    revoked/expired token, or a repo that was deleted or made private. Kept
+    distinct from a transient ``GitSyncError`` (network blip, timeout, remote
+    5xx) so the sync loop can back off and go quiet on a persistently broken
+    repo instead of retrying every interval and logging a full traceback each
+    time. Subclass, so existing ``except GitSyncError`` handlers still catch it.
+    """
+
+
+# Substrings git prints to stderr when the failure is authentication/access,
+# not a transient fault. Matched case-insensitively against redacted stderr.
+_AUTH_FAILURE_MARKERS: Final[tuple[str, ...]] = (
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "authentication failed",
+    "invalid username or password",
+    # Only SSH's: a bare "permission denied" is also a local filesystem error
+    # (read-only workspace, foreign-owned index.lock), which is no token issue.
+    "permission denied (publickey",
+    # GitHub's `remote:`/`ERROR:` line, the only hint on SSH.
+    "repository not found",
+    "returned error: 403",
+    "returned error: 401",
+    "access denied",
+)
+
+# git's own line for an HTTP 404 on any host: `fatal: repository '<url>' not found`.
+_REPO_NOT_FOUND_RE: Final[re.Pattern[str]] = re.compile(
+    r"repository '[^']*' not found", re.IGNORECASE
+)
+
+
+def _looks_like_auth_failure(stderr: str) -> bool:
+    """Whether git's stderr describes an auth/access failure vs a transient one."""
+    haystack = stderr.lower()
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS) or bool(
+        _REPO_NOT_FOUND_RE.search(stderr)
+    )
+
+
 def redact_url_credentials(text: str) -> str:
     """Blank out credentials embedded in any URL inside `text`.
 
@@ -104,10 +148,15 @@ async def _run_git(
         # git echoes the remote URL back in its own failure messages, so stderr
         # needs the same redaction as the argv.
         details = redact_url_credentials(stderr.decode(errors="replace").strip())
-        raise GitSyncError(
+        message = (
             f"git command failed ({proc.returncode}): {' '.join(logged_args)}\n"
             f"{details}"
         )
+        # Auth/access failures are persistent; the loop backs off on GitAuthError
+        # rather than retrying every interval against a repo it can't reach.
+        if _looks_like_auth_failure(details):
+            raise GitAuthError(message)
+        raise GitSyncError(message)
     return stdout.decode(errors="replace")
 
 

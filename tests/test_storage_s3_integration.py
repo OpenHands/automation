@@ -20,7 +20,10 @@ from openhands.automation.storage import ObjectNotFoundError, S3FileStore
 from openhands.automation.storage.google_cloud import FileSizeLimitExceeded
 
 
-MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2022-12-02T19-19-22Z"
+MINIO_IMAGE = (
+    "cgr.dev/chainguard/minio"
+    "@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1"
+)
 
 
 @pytest.fixture(scope="module")

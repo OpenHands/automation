@@ -211,6 +211,12 @@ class SandboxSettings(BaseSettings):
             verification result becomes terminal in seconds (default: 600)
         AUTOMATION_SANDBOX_POLL_INTERVAL: Status check interval (default: 5)
         AUTOMATION_SANDBOX_READY_TIMEOUT: Max wait for ready (default: 300)
+        AUTOMATION_SANDBOX_PROVISION_MAX_ATTEMPTS: Sandboxes tried per run when
+            one fails to start before the entrypoint runs; 1 disables retries
+            (default: 3)
+        AUTOMATION_SANDBOX_PROVISION_RETRY_DELAY: Base delay in seconds before
+            the next attempt, doubled per attempt with +/-50% jitter
+            (default: 30)
         AUTOMATION_EXTERNAL_DOWNLOAD_TIMEOUT: Download timeout (default: 120)
         AUTOMATION_EXTERNAL_MAX_FILESIZE: Max tarball size (default: 100MB)
         AUTOMATION_RATE_LIMIT_MIN_WAIT: Initial 429 wait (default: 10)
@@ -230,6 +236,8 @@ class SandboxSettings(BaseSettings):
     run_timeout_hard_grace: int = 600
     sandbox_poll_interval: int = 5
     sandbox_ready_timeout: int = 300
+    sandbox_provision_max_attempts: int = Field(default=3, ge=1)
+    sandbox_provision_retry_delay: float = Field(default=30, ge=0)
     external_download_timeout: int = 120
     external_max_filesize: int = 100 * 1024 * 1024  # 100 MB
     rate_limit_min_wait: int = 10
@@ -269,7 +277,10 @@ class KVSettings(BaseSettings):
     # with Retry-After so clients can back off and retry.
     kv_lock_timeout_ms: int = 5000
 
-    # Maximum size in bytes for KV store values (plaintext JSON, before encryption).
+    # Maximum size in bytes for a single KV value (plaintext JSON, before
+    # encryption). This is a per-value limit, not a total across the keys an
+    # automation owns: each key is stored in its own row, so many small values
+    # never add up to a failure.
     #
     # Performance guidance - PostgreSQL TOAST behavior:
     #
@@ -381,6 +392,11 @@ class GitSyncSettings(BaseSettings):
             back to AUTOMATION_KV_SECRET, then (local mode only) to a key
             file under the workspace. Required in cloud mode, where replicas
             share a database but not a disk.
+        AUTOMATION_GIT_SYNC_AUTH_FAILURE_BACKOFF_THRESHOLD: Consecutive auth
+            failures before the loop goes quiet (one WARNING instead of a
+            per-cycle traceback) for that org (default: 3; 0 keeps it loud).
+        AUTOMATION_GIT_SYNC_FAILURE_BACKOFF_CAP_SECONDS: Ceiling for the
+            exponential retry backoff after failures (default: 3600).
     """
 
     # The sync interval is deliberately not here: it is runtime-only, set from
@@ -401,6 +417,19 @@ class GitSyncSettings(BaseSettings):
     git_sync_local_workdir: str = ""
     git_sync_git_timeout_seconds: float = 60.0
     git_sync_secret: str = ""
+
+    # After this many consecutive auth failures, the loop stops logging a full
+    # traceback every cycle and logs one WARNING instead: a bad/expired token
+    # or a repo gone private/deleted won't fix itself on the next tick, so the
+    # per-cycle traceback is just noise. Mirrors the run-path
+    # `failure_disable_threshold` (utils/unhealthy.py). 0 keeps it always loud.
+    git_sync_auth_failure_backoff_threshold: int = 3
+    # Ceiling for the exponential backoff between retries after auth failures.
+    # The retry wait is `interval * 2**consecutive_auth_failures` capped here,
+    # but never shorter than the interval itself, so a permanently broken repo
+    # is still re-probed and self-heals the moment its token/repo is valid
+    # again. No hard disable, so nothing needs a manual re-enable.
+    git_sync_failure_backoff_cap_seconds: float = 3600.0
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
@@ -480,6 +509,13 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DB_POOL_SIZE: Connection pool size (default: 10)
         AUTOMATION_DB_MAX_OVERFLOW: Max overflow connections (default: 5)
         AUTOMATION_DB_POOL_RECYCLE: Pool recycle time in seconds (default: 1800)
+        AUTOMATION_RUN_MIGRATIONS_ON_STARTUP: Run `alembic upgrade head` on
+            startup for PostgreSQL too (default: false). SQLite always migrates
+            on startup.
+        AUTOMATION_CREATE_DATABASE_IF_MISSING: Have the migrations create the
+            PostgreSQL database first if it does not exist (default: false).
+            Read by migrations/env.py, so it also applies to
+            `alembic upgrade head`. The database user needs CREATEDB.
 
         # Database URL (alternative to host/port config, supports SQLite for local mode)
         AUTOMATION_DB_URL: Full database URL (e.g., sqlite+aiosqlite:////data/automations.db)
@@ -521,6 +557,10 @@ class ServiceSettings(BaseSettings):
         # Workspace retention (local mode only)
         AUTOMATION_WORKSPACE_RETENTION_SECONDS: Delete workspace directories
             for terminal runs older than this (default: 604800 — 7 days).
+            A run the watchdog itself terminalizes has its workspace removed
+            right then, so this is the backstop for the ones it never sees:
+            runs completed by callback, cancelled runs, and crashes. Set it to
+            0 to disable the sweep.
 
         # Sandbox cleanup (cloud mode only)
         AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS: Seconds after a run ends before
@@ -557,6 +597,7 @@ class ServiceSettings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle: int = 1800  # 30 minutes
+    run_migrations_on_startup: bool = False
 
     # Database URL (alternative config, supports SQLite for local mode)
     # When set, takes precedence over host/port config.

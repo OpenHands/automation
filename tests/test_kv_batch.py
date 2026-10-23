@@ -10,7 +10,6 @@ from openhands.automation.kv_helpers import validate_key
 from openhands.automation.kv_router import (
     KVOperationError,
     _execute_batch_operation,
-    _get_version,
     _validate_batch_key,
 )
 from openhands.automation.kv_schemas import (
@@ -76,16 +75,21 @@ class TestValidateBatchKey:
 
 
 class TestGetVersion:
-    """Test version extraction."""
+    """Test that the batch helpers leave $version to the metadata row.
 
-    def test_get_version_present(self):
-        assert _get_version({"$version": 5, "key": "value"}) == 5
+    ``$version`` now lives on ``AutomationKVMeta`` rather than inside the
+    per-key state, so batch operations never read or write it directly.
+    """
 
-    def test_get_version_missing(self):
-        assert _get_version({"key": "value"}) == 0
+    def test_reserved_version_key_not_a_state_key(self):
+        with pytest.raises(KVOperationError, match="reserved"):
+            _validate_batch_key("$version")
 
-    def test_get_version_empty_state(self):
-        assert _get_version({}) == 0
+    def test_batch_ops_ignore_version(self):
+        state = {"key": "value"}
+        op = KVBatchOpSet(op="set", key="other", value=1)
+        _execute_batch_operation(state, op)
+        assert "$version" not in state
 
 
 class TestBatchOpSet:
@@ -417,17 +421,19 @@ class TestBatchMultipleOps:
 
 
 class TestVersionBump:
-    """Test that $version is properly managed."""
+    """Test that batch operations don't manage $version themselves.
 
-    def test_version_starts_at_zero_if_missing(self):
+    The global counter lives on the metadata row; only the endpoint persists it
+    via ``_bump_version``. Batch helpers must leave user state untouched.
+    """
+
+    def test_version_not_injected_into_state(self):
         state = {"key": "value"}
-        assert _get_version(state) == 0
+        assert "$version" not in state
 
-    def test_version_preserved_across_reads(self):
+    def test_batch_op_does_not_write_version(self):
         state = {"$version": 5, "key": "value"}
-        assert _get_version(state) == 5
-        # Operations don't touch $version directly
         op = KVBatchOpSet(op="set", key="other", value="x")
         _execute_batch_operation(state, op)
-        # $version unchanged by operation (bump happens in _save_state)
-        assert state["$version"] == 5
+        # $version is not a stored key at all any more.
+        assert state == {"$version": 5, "key": "value", "other": "x"}

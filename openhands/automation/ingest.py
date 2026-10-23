@@ -23,6 +23,15 @@ from openhands.automation.conversations import (
     resolve_turn_text,
 )
 from openhands.automation.models import Automation, IntegrationEvent
+from openhands.automation.observability import (
+    add_event,
+    automation_attributes,
+    current_span_context,
+    span,
+)
+from openhands.automation.observability_associations import (
+    evaluate_observability_associations,
+)
 from openhands.automation.schemas import EventTrigger
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
@@ -122,16 +131,66 @@ async def accept_event(
             event.provider_event_id,
             org_id,
         )
+        add_event(
+            "automation.event.duplicate",
+            {
+                "automation.org_id": str(org_id),
+                "automation.event.source": source,
+                "automation.event.key": event.event_key,
+                "automation.event.provider_event_id": event.provider_event_id,
+            },
+        )
         return AcceptResult(matched=0, run_ids=[], duplicate=True)
 
     automations = await get_event_automations(org_id, source, session)
-    matched: list[tuple[Automation, EventTrigger]] = [
-        (automation, trigger)
-        for automation, trigger in automations
-        if matches_trigger(trigger, source, event.event_key, webhook_payload)
-    ]
+    matched: list[tuple[Automation, EventTrigger]] = []
+    for automation, trigger in automations:
+        matched_trigger = False
+        with span(
+            "automation.match.evaluate",
+            automation_attributes(
+                automation,
+                **{
+                    "automation.event.source": source,
+                    "automation.event.key": event.event_key,
+                    "automation.event.provider_event_id": event.provider_event_id,
+                    "automation.match.filter_expression": trigger.filter,
+                    "automation.match.destination": trigger.destination,
+                },
+            ),
+        ):
+            matched_trigger = matches_trigger(
+                trigger, source, event.event_key, webhook_payload
+            )
+            add_event(
+                "automation.match.evaluated",
+                automation_attributes(
+                    automation,
+                    **{
+                        "automation.event.source": source,
+                        "automation.event.key": event.event_key,
+                        "automation.match.matched": matched_trigger,
+                        "automation.match.decision": "matched"
+                        if matched_trigger
+                        else "not_matched",
+                    },
+                ),
+            )
+        if matched_trigger:
+            matched.append((automation, trigger))
 
     record.matched_count = len(matched)
+    add_event(
+        "automation.event.matched",
+        {
+            "automation.org_id": str(org_id),
+            "automation.event.source": source,
+            "automation.event.key": event.event_key,
+            "automation.event.provider_event_id": event.provider_event_id,
+            "automation.event.candidate_count": len(automations),
+            "automation.event.matched_count": len(matched),
+        },
+    )
 
     logger.info(
         "Event matched %d/%d automations for org=%s",
@@ -151,6 +210,8 @@ async def accept_event(
             "matched_count": len(matched),
         },
     )
+
+    event_parent_span_context = current_span_context()
 
     # Typed events (GitHub) keep their model shape; others store the payload.
     event_payload = (
@@ -183,6 +244,20 @@ async def accept_event(
             if not outcome.needs_run:
                 assert outcome.conversation_id is not None
                 conversation_ids.append(outcome.conversation_id)
+                add_event(
+                    "automation.route.conversation_continued",
+                    automation_attributes(
+                        automation,
+                        **{
+                            "automation.event.source": source,
+                            "automation.event.key": event.event_key,
+                            "automation.subject.key": subject_key,
+                            "automation.conversation_id": outcome.conversation_id,
+                            "openhands.conversation_id": outcome.conversation_id,
+                            "automation.route.coalesced": outcome.coalesced,
+                        },
+                    ),
+                )
                 await capture_automation_event(
                     "automation_conversation_continued",
                     request=request,
@@ -199,14 +274,37 @@ async def accept_event(
                 )
                 continue
 
+        associations = evaluate_observability_associations(
+            automation.observability_associations,
+            webhook_payload,
+        )
+
         # How a later event on this subject finds this run's sandbox.
         run = await create_automation_run(
             automation,
             session,
             event_payload=event_payload,
             subject_key=subject_key,
+            trigger_event_id=record.id,
+            observability_parent_span_context=event_parent_span_context,
+            observability_associations=associations or None,
         )
         run_ids.append(str(run.id))
+        run_created_attributes = {
+            **associations,
+            **automation_attributes(
+                automation,
+                run,
+                **{
+                    "automation.event.source": source,
+                    "automation.event.key": event.event_key,
+                    "automation.event.provider_event_id": event.provider_event_id,
+                    "automation.subject.key": subject_key,
+                },
+            ),
+        }
+        with span("automation.route.run_created", run_created_attributes):
+            add_event("automation.route.run_created", run_created_attributes)
         run_properties = {
             "trigger_source": "event",
             "event_source": source,
