@@ -27,7 +27,6 @@ from openhands.automation.schemas import (
     normalize_automation_state_enabled,
     validate_command_string,
 )
-from openhands.automation.tags import normalize_tags
 from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
@@ -110,17 +109,11 @@ class _BaseDraftBody(BaseModel):
     enabled: bool | None = None
     state: AutomationState | None = None
     template: TemplateProvenance | None = None
-    tags: list[str] | None = None
 
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
         return validate_automation_timeout(v)
-
-    @field_validator("tags")
-    @classmethod
-    def validate_tags(cls, v: list[str] | None) -> list[str] | None:
-        return None if v is None else normalize_tags(v)
 
     @model_validator(mode="before")
     @classmethod

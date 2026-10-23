@@ -431,12 +431,6 @@ def validate_command_string(
 # --- Template provenance ---
 
 # Keeps an opaque payload from bloating the preset_metadata JSON column.
-TAGS_DESCRIPTION: Final[str] = (
-    "Labels for grouping and filtering automations, e.g. 'software-factory'. "
-    "Each is trimmed, lowercased, and has whitespace replaced by '-'; at most "
-    "10 tags of up to 50 characters."
-)
-
 MAX_TEMPLATE_CONFIG_BYTES: Final[int] = 16_384
 
 
@@ -482,6 +476,12 @@ class TemplateProvenance(BaseModel):
 
 
 # --- Requests ---
+
+TAGS_DESCRIPTION: Final[str] = (
+    "Labels for grouping and filtering automations, e.g. 'software-factory'. "
+    "Each is trimmed, lowercased, and has whitespace replaced by '-'; at most "
+    "10 tags of up to 50 characters."
+)
 
 
 class CreateAutomationRequest(BaseModel):

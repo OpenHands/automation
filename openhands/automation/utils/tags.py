@@ -33,9 +33,7 @@ async def count_org_tags(
     if using_sqlite():
         elements = func.json_each(Automation.tags).table_valued("value")
     else:
-        elements = func.json_array_elements_text(Automation.tags).table_valued(
-            "value"
-        )
+        elements = func.json_array_elements_text(Automation.tags).table_valued("value")
     tag = elements.c.value
     count = func.count()
     result = await session.execute(

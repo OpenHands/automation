@@ -140,9 +140,7 @@ async def test_create_without_tags_returns_empty_list(async_client):
 
 
 async def test_create_rejects_invalid_tag(async_client):
-    response = await async_client.post(
-        BASE, json=_raw_body("Bad", tags=["not_a_slug"])
-    )
+    response = await async_client.post(BASE, json=_raw_body("Bad", tags=["not_a_slug"]))
     assert response.status_code == 422, response.text
 
 
@@ -160,37 +158,6 @@ async def test_template_create_returns_existing_tags_unchanged(async_client):
         first["id"],
         ["mine"],
     )
-
-
-async def test_prompt_preset_create_stores_tags(async_client):
-    response = await async_client.post(
-        f"{BASE}/preset/prompt",
-        json={
-            "name": "Prompted",
-            "prompt": "Say hello",
-            "trigger": {"type": "cron", "schedule": "0 9 * * 1", "timezone": "UTC"},
-            "tags": ["Software Factory"],
-        },
-    )
-    assert response.status_code == 201, response.text
-    assert response.json()["tags"] == ["software-factory"]
-
-
-async def test_dispatched_draft_keeps_tags(async_client):
-    created = await async_client.post(
-        f"{BASE}/drafts",
-        json={"endpoint": "/v1", "draft": _raw_body("Draft", tags=["qa"])},
-    )
-    assert created.status_code == 201, created.text
-
-    dispatched = await async_client.post(
-        f"{BASE}/drafts/{created.json()['id']}/dispatch"
-    )
-    assert dispatched.status_code == 201, dispatched.text
-    automation_id = dispatched.json()["automation_id"]
-
-    detail = await async_client.get(f"{BASE}/{automation_id}")
-    assert detail.json()["tags"] == ["qa"]
 
 
 # --- List filter ---

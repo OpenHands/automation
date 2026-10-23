@@ -384,7 +384,6 @@ async def create_automation_from_plugin_spec(
         agent_profile_id=runtime_fields["agent_profile_id"],
         trigger=trigger.model_dump(),
         observability_associations=body.observability_associations,
-        tags=body.tags,
         tarball_path=runtime_fields["tarball_path"],
         setup_script_path=runtime_fields["setup_script_path"],
         entrypoint=runtime_fields["entrypoint"],

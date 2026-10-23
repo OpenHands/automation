@@ -101,8 +101,8 @@ class Automation(Base):
         JSON, nullable=True
     )
 
-    # User-facing labels for grouping and filtering, normalized by
-    # utils/tags.py. Never NULL, so the tag facet query can expand every row.
+    # User-facing labels for grouping and filtering, normalized by tags.py.
+    # Never NULL, so the tag facet query can expand every row.
     tags: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, default=list, server_default=text("'[]'")
     )
