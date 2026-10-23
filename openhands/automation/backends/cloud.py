@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -24,6 +25,7 @@ from openhands.automation.config import get_config
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     DailySandboxLimitReachedError,
+    SandboxProvisioningError,
 )
 from openhands.automation.models import AutomationRun
 from openhands.automation.utils.api_key import get_api_key_for_automation_run
@@ -89,6 +91,44 @@ def _quota_limit_detail(resp: httpx.Response, error_code: str) -> dict | None:
     if isinstance(detail, dict) and detail.get("error") == error_code:
         return detail
     return None
+
+
+# Runtime ingress readiness failures are a fixed set of codes, safe to show.
+_INGRESS_STATUS_DETAIL = re.compile(r"runtime_ingress:[a-z_]+(?::\d{3})?")
+# Raw pod/scheduling text can leak registry hosts, secret names and node
+# taints, so only its class is recorded (same markers as the app server).
+_STATUS_DETAIL_CLASSES = (
+    (("ImagePullBackOff", "ErrImagePull"), "image_pull_error"),
+    (("CreateContainerConfigError",), "container_config_error"),
+    (("CreateContainerError",), "container_create_error"),
+    (("Insufficient cpu",), "insufficient_cpu"),
+    (("Insufficient memory",), "insufficient_memory"),
+    (("Insufficient ephemeral-storage",), "insufficient_ephemeral_storage"),
+    (("Insufficient pods",), "insufficient_pods"),
+    (
+        (
+            "untolerated taint",
+            "node affinity",
+            "node selector",
+            "volume node affinity conflict",
+            "topology spread",
+            "unbound",
+        ),
+        "scheduling_constraint",
+    ),
+)
+
+
+def summarize_status_detail(detail: Any) -> str | None:
+    """Return a user-safe summary of a runtime ``status_detail``."""
+    if not isinstance(detail, str) or not detail:
+        return None
+    if _INGRESS_STATUS_DETAIL.fullmatch(detail):
+        return detail
+    for markers, label in _STATUS_DETAIL_CLASSES:
+        if any(marker in detail for marker in markers):
+            return label
+    return "unclassified"
 
 
 class CloudSandboxBackend(ExecutionBackend):
@@ -265,15 +305,33 @@ class CloudSandboxBackend(ExecutionBackend):
     ) -> tuple[str, str, str]:
         """Create a sandbox and poll until RUNNING.
 
-        Returns (sandbox_id, session_api_key, agent_server_url).
+        Returns (sandbox_id, session_api_key, agent_server_url). If the sandbox
+        never becomes usable it is deleted before the error propagates.
         """
         if ready_timeout is None:
             ready_timeout = self._ready_timeout
 
         headers = {"Authorization": f"Bearer {api_key}"}
         sandbox_id = await self._create_sandbox(client, headers)
+        try:
+            return await self._wait_until_running(
+                client, sandbox_id, headers, ready_timeout
+            )
+        except Exception:
+            # Nothing has run in it yet; don't leave it counting against the
+            # user's sandbox limit. delete_sandbox never raises.
+            await delete_sandbox(client, self.api_url, api_key, sandbox_id)
+            raise
 
+    async def _wait_until_running(
+        self,
+        client: httpx.AsyncClient,
+        sandbox_id: str,
+        headers: dict[str, str],
+        ready_timeout: float,
+    ) -> tuple[str, str, str]:
         elapsed = 0.0
+        sb: dict[str, Any] = {}
         while elapsed < ready_timeout:
             sb = await self._poll_sandbox(client, sandbox_id, headers)
             status = sb.get("status", "UNKNOWN")
@@ -286,19 +344,43 @@ class CloudSandboxBackend(ExecutionBackend):
                 return sandbox_id, session_key, agent_url
 
             if status in ("ERROR", "MISSING"):
-                error_code = sb.get("error_code", "")
-                error_message = sb.get("error_message", "")
-                error_detail = f"status={status}"
-                if error_code:
-                    error_detail += f", error_code={error_code}"
-                if error_message:
-                    error_detail += f", error_message={error_message}"
-                raise RuntimeError(f"Sandbox {sandbox_id} failed: {error_detail}")
+                raise self._provisioning_error(sandbox_id, sb, f"status={status}")
 
             await asyncio.sleep(self._poll_interval)
             elapsed += self._poll_interval
 
-        raise TimeoutError(f"Sandbox {sandbox_id} not ready after {ready_timeout}s")
+        raise self._provisioning_error(
+            sandbox_id,
+            sb,
+            f"not ready after {ready_timeout}s, status={sb.get('status', 'UNKNOWN')}",
+            timed_out=True,
+        )
+
+    @staticmethod
+    def _provisioning_error(
+        sandbox_id: str,
+        sandbox: dict[str, Any],
+        what: str,
+        timed_out: bool = False,
+    ) -> SandboxProvisioningError:
+        raw_detail = sandbox.get("status_detail")
+        reason = summarize_status_detail(raw_detail)
+        logger.warning(
+            "Sandbox %s failed to provision: %s, status_detail=%r",
+            sandbox_id,
+            what,
+            raw_detail,
+        )
+        message = f"Sandbox failed to start: {what}"
+        if reason:
+            message += f", status_detail={reason}"
+        return SandboxProvisioningError(
+            message,
+            sandbox_id=sandbox_id,
+            status=str(sandbox.get("status", "UNKNOWN")),
+            reason=reason,
+            timed_out=timed_out,
+        )
 
     async def _create_sandbox(
         self, client: httpx.AsyncClient, headers: dict[str, str]
@@ -346,7 +428,8 @@ class CloudSandboxBackend(ExecutionBackend):
             items = resp.json()
             if not items:
                 raise RuntimeError(f"Sandbox {sandbox_id} disappeared")
-            return items[0]
+            # The batch endpoint returns null for an unknown id.
+            return items[0] or {"id": sandbox_id, "status": "MISSING"}
 
         return await _do_poll()
 

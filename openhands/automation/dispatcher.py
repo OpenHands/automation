@@ -17,6 +17,7 @@ in the ExecutionBackend (see automation/backends/).
 import asyncio
 import json
 import logging
+import random
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -28,7 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import X_ORG_ID_HEADER
-from openhands.automation.backends import get_backend
+from openhands.automation.backends import (
+    ExecutionBackend,
+    ExecutionContext,
+    get_backend,
+)
 from openhands.automation.config import ServiceSettings, get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
@@ -36,6 +41,7 @@ from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     DailySandboxLimitReachedError,
     PermanentDispatchError,
+    SandboxProvisioningError,
     TarballNotFoundError,
 )
 from openhands.automation.execution import execute_in_context
@@ -66,6 +72,7 @@ from openhands.automation.utils.run import (
     disable_automation,
     mark_run_status,
     mark_run_terminal,
+    run_is_running,
     update_bash_command_id,
     update_run_current_phase,
     update_run_resolved_runtime,
@@ -354,6 +361,77 @@ def _build_event_payload(
     return payload
 
 
+def _provisioning_deadline_seconds(run_timeout_seconds: int) -> int:
+    """Watchdog budget for a run whose entrypoint has not started yet."""
+    sandbox_cfg = get_config().sandbox
+    return (
+        sandbox_cfg.sandbox_ready_timeout
+        + run_timeout_seconds
+        + sandbox_cfg.run_timeout_margin
+    )
+
+
+async def _acquire_execution_context(
+    run: AutomationRun,
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_timeout_seconds: int,
+    log_ctx: dict[str, Any],
+) -> ExecutionContext | None:
+    """Get an execution context, retrying sandboxes that fail to start.
+
+    Only ``SandboxProvisioningError`` is retried: no automation code has run
+    and the failed sandbox is already deleted. Before each retry the run must
+    still be RUNNING; the same guarded write moves the watchdog deadline past
+    the next attempt. Returns None if the run was cancelled or reaped while
+    provisioning, after releasing any sandbox it got.
+    """
+    sandbox_cfg = get_config().sandbox
+    max_attempts = sandbox_cfg.sandbox_provision_max_attempts
+    attempt = 1
+    while True:
+        try:
+            ctx = await backend.get_execution_context(client)
+            break
+        except SandboxProvisioningError as exc:
+            exc.attempts = attempt
+            if attempt >= max_attempts:
+                raise
+            delay = (
+                sandbox_cfg.sandbox_provision_retry_delay
+                * 2 ** (attempt - 1)
+                * random.uniform(0.5, 1.5)
+            )
+            deadline = utcnow() + timedelta(
+                seconds=delay + _provisioning_deadline_seconds(run_timeout_seconds)
+            )
+            if not await update_run_timeout_at(session_factory, run.id, deadline):
+                logger.info(
+                    "Run no longer RUNNING; not retrying sandbox", extra=log_ctx
+                )
+                return None
+            logger.warning(
+                "Sandbox failed to start (attempt %d/%d), retrying in %.0fs: %s",
+                attempt,
+                max_attempts,
+                delay,
+                exc,
+                extra=log_ctx,
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+    if not await run_is_running(session_factory, run.id):
+        logger.info(
+            "Run no longer RUNNING after provisioning; releasing sandbox",
+            extra=log_ctx,
+        )
+        await backend.release_context(client, ctx)
+        return None
+    return ctx
+
+
 async def _execute_run(
     run: AutomationRun,
     settings: ServiceSettings,
@@ -531,7 +609,9 @@ async def _execute_run(
     # 3. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)
     try:
-        ctx = await backend.get_execution_context(client)
+        ctx = await _acquire_execution_context(
+            run, backend, client, session_factory, effective_timeout, _log_ctx()
+        )
     except ConcurrencyLimitReachedError as exc:
         logger.warning(
             "Run skipped — organization concurrency limit reached: %s",
@@ -594,6 +674,31 @@ async def _execute_run(
             },
         )
         return
+    except SandboxProvisioningError as exc:
+        logger.warning(
+            "Sandbox failed to start after %d attempt(s): %s",
+            exc.attempts,
+            exc,
+            extra=_log_ctx(sandbox_id=exc.sandbox_id),
+        )
+        await _fail(
+            f"{exc} (attempts: {exc.attempts})",
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.ENVIRONMENT_UNAVAILABLE,
+                detail=str(exc),
+                transient=True,
+                source="sandbox_api",
+                operation="get_execution_context",
+                code=exc.code,
+                extra={
+                    "sandbox_status": exc.status,
+                    "sandbox_status_detail": exc.reason,
+                    "attempts": exc.attempts,
+                },
+            ),
+        )
+        return
     except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
         source = "agent_server" if backend.is_local_mode else "sandbox_api"
@@ -606,6 +711,8 @@ async def _execute_run(
                 operation="get_execution_context",
             ),
         )
+        return
+    if ctx is None:
         return
 
     logger.info(
@@ -919,11 +1026,8 @@ async def dispatch_pending_runs(
                 # runs that die during provisioning. Once the bash command
                 # actually starts, _execute_run resets timeout_at to
                 # bash-start + run budget + margin (phase 2).
-                sandbox_cfg = get_config().sandbox
-                provisioning_deadline = (
-                    sandbox_cfg.sandbox_ready_timeout
-                    + run_timeout_seconds
-                    + sandbox_cfg.run_timeout_margin
+                provisioning_deadline = _provisioning_deadline_seconds(
+                    run_timeout_seconds
                 )
                 await mark_run_status(
                     session,

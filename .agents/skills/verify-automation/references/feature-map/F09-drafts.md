@@ -248,7 +248,7 @@ Preconditions:
   control-automation api POST "/v1/drafts/$TD/dispatch" --expect 201 --quiet
   TMA=$(control-automation api GET "/v1/drafts/$TD" --expect 200 --field materialized_automation_id)
   control-automation api GET "/v1/$TMA" --expect 200 --check state eq DRAFT
-  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"  # bug
+  control-automation api POST /v1 --json "{\"name\":\"qa tpl real\",\"tarball_path\":\"$TP\",\"entrypoint\":\"bash run.sh\",\"template\":{\"id\":\"qa-tpl-draft\",\"version\":\"1\"},\"trigger\":{\"type\":\"cron\",\"schedule\":\"0 0 1 1 *\"}}" --save F09.template-after-draft-test/create --expect 201 --check state eq ACTIVE --check id ne "$TMA"  # bug: status eq 200 && response.body.state eq DRAFT
   ```
   Observed: `200` with `id` equal to the DRAFT artifact (`state=DRAFT`,
   `enabled=false`), which the normal API then refuses to activate (409), so
@@ -286,7 +286,7 @@ Preconditions:
 - Deleting a draft skips pending runs with `error_detail` `Automation
   disabled`; the draft-specific reason is only in `status_detail.detail`.
 - Creator-only checks (403 `Only the draft creator can modify or dispatch
-  it`) and the `manage_automations` permission (403) cannot be reached in
-  local mode, where one user holds every permission.
+  it`) cannot be reached in local mode, where one user owns every draft.
+  Draft routes need only `view_automations`, like the create routes.
 - `agent_profile_id` and `observability_associations` are accepted by `POST
   /v1` but not by a `/v1` draft (shape 422).

@@ -11,6 +11,7 @@ from openhands.automation.app import app
 from openhands.automation.auth import authenticate_request
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import CustomWebhook
+from openhands.workspace import GitProvider, RepoSource
 
 
 # Test UUID matching mock_authenticated_user fixture
@@ -168,7 +169,12 @@ class TestGetCapabilities:
         body = response.json()
         assert body["ready"] is True
         assert body["triggerKinds"] == ["cron", "event"]
-        assert body["eventSources"] == ["bitbucket_data_center", "github", "jira_dc"]
+        assert body["eventSources"] == [
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        ]
         assert body["eventTypes"] == [
             "issue_comment.*",
             "issues.*",
@@ -183,6 +189,16 @@ class TestGetCapabilities:
         assert "webhookDelivery" in body["features"]
         assert "kvStore" in body["features"]
         assert "customTarball" in body["features"]
+        assert "automationDescription" in body["features"]
+        assert "repoUpdate" in body["features"]
+        # The list follows the pinned SDK's providers, so an SDK bump that adds
+        # one (Azure DevOps in 1.58.0) is advertised without a change here.
+        assert body["repoProviders"] == sorted(p.value for p in GitProvider)
+        assert "github" in body["repoProviders"]
+        # A client sends an advertised name back as a repo's provider, so each
+        # one must be a value RepoSource accepts.
+        for name in body["repoProviders"]:
+            assert RepoSource(url="https://example.com/org/repo", provider=name)
 
     async def test_advertises_the_configured_timeout_ceiling(
         self, async_client, ready_deployment, monkeypatch
@@ -296,6 +312,7 @@ class TestGetCapabilities:
         assert body["ready"] is False
         assert body["triggerKinds"] == []
         assert body["features"] == []
+        assert body["repoProviders"] == []
         assert body["triggers"] == {}
 
     async def test_advertised_cron_floor_follows_the_scheduler_interval(
@@ -323,6 +340,18 @@ class TestValidateDraft:
             "errors": [],
             "sampleEventMatched": None,
         }
+
+    async def test_description_is_valid_in_preflight(self, async_client):
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                {**CRON_DRAFT, "description": "Summarizes weekly support trends."}
+            ),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+        assert response.json()["errors"] == []
 
     @pytest.mark.parametrize(
         ("draft", "expected_error"),

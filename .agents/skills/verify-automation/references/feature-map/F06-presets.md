@@ -180,7 +180,7 @@ Preconditions:
 - **Preset continue_conversation keep_alive (`F06.continue-keep-alive`), known bug.** The preset should force `keep_alive: true` like `POST /v1` does.
   ```sh
   CKID=$(control-automation api POST /v1/preset/prompt --json '{"name":"qa-preset-continue","prompt":"hi","trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 201 --field id)
-  control-automation api GET "/v1/$CKID" --expect 200 --check trigger.destination eq continue_conversation --check keep_alive eq true --save F06.continue-keep-alive/get  # bug
+  control-automation api GET "/v1/$CKID" --expect 200 --check trigger.destination eq continue_conversation --check keep_alive eq true --save F06.continue-keep-alive/get  # bug: status eq 200 && response.body.keep_alive eq null
   ```
   Today `keep_alive` is stored as `null`. The watchdog and the run-complete
   handler clean up a sandbox unless `keep_alive` is `true`, trusting that
@@ -189,7 +189,7 @@ Preconditions:
   after each run. Raw creates do it right (`F05.keep-alive-continue`).
 - **Preset continue_conversation with keep_alive false (`F06.continue-keep-alive-false`), known bug.** The preset should refuse it like `POST /v1` does.
   ```sh
-  control-automation api POST /v1/preset/plugin --json '{"name":"qa-preset-continue-off","prompt":"hi","plugins":[{"source":"github:qa-org/qa-plugin"}],"keep_alive":false,"trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 422 --save F06.continue-keep-alive-false/create  # bug
+  control-automation api POST /v1/preset/plugin --json '{"name":"qa-preset-continue-off","prompt":"hi","plugins":[{"source":"github:qa-org/qa-plugin"}],"keep_alive":false,"trigger":{"type":"event","source":"qa-src","on":"qa.*","destination":"continue_conversation","subject_key_expr":"id"}}' --expect 422 --save F06.continue-keep-alive-false/create  # bug: status eq 201 && response.body.keep_alive eq false
   ```
   Today it answers 201 with `keep_alive: false`. The prompt preset behaves
   the same.

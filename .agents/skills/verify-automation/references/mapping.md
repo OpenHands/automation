@@ -177,20 +177,64 @@ Then exactly four H2 sections, in this order:
    `helper stop NAME` or `stop`.
 
    Two label markers keep the map honest without turning it red forever:
-   a bullet whose bold label says **known bug** (for example
+   **known bug** and **blocked**. A bullet whose bold label says **known
+   bug** (for example
    `**Stale secrets after update (`F08.secrets-visible`), known bug #1234.**`)
-   asserts the correct behavior and is reported as an expected failure
-   (`xfail`) while the bug lasts; when it starts passing (`xpass`) `map run`
-   fails so the marker gets removed. The command that fails because of the
-   bug ends its line with `# bug`; `map run` counts the bullet as reproduced
-   only when that command is the one that fails, and reports `fail` when an
-   arrange step breaks first (`map check` requires the marker). A timeout or an
-   early exit without a confirmed assertion location is a failure, never a
-   reproduced bug. Write a
-   negative bug assertion on one line, as `if cmd; then false; fi  # bug`.
-   A bullet whose label says **blocked**
+   follows the known-bug contract below. A bullet whose label says **blocked**
    names its prerequisite in prose, is reported as `blocked`, and is not
    executed. Later bullets never depend on variables set in either kind.
+
+   **The known-bug contract.** Keep these rules in step with the sibling
+   verification skills (verify-agent-server in OpenHands/software-agent-sdk,
+   verify-openhands in OpenHands/OpenHands), so a proof means the same thing
+   in each:
+
+   - The bullet asserts the **correct** behavior. The command that fails
+     because of the bug ends its line with `# bug: PREDICATE`, and the
+     predicate names the bug's own symptom: the value or error it produces,
+     not the whole response.
+   - Three outcomes. `xfail`: the marked command failed **and** its
+     predicate holds (the documented bug reproduced). `xpass`: every command
+     passed, so the correct behavior was observed; `map run` fails so the
+     marker gets removed. `fail`: anything else, including a different
+     failure at the marked command (a 401, 404 or 503 where the bug is a
+     500), an arrange step that breaks first, a timeout, an early exit
+     without a confirmed assertion location, or a pass after the family's
+     Preconditions or any recipe in its `Requires:` closure (the recipes it
+     requires, and theirs) failed earlier in the run (`--keep-going`), since
+     its arrange never ran.
+   - The predicate is `PATH OP [VALUE]` clauses joined by `&&`, matched like
+     `--check` against the JSON object the last `control-automation` call on
+     the marked line printed:
+     `# bug: status eq 201 && response.body.keep_alive eq false`.
+     An `api` call prints `status`, `response.status`, `response.body` and
+     its `checks`; the other verbs print their result or `error`/`hint`;
+     `--quiet` drops `response.body`, so match `checks.N.actual` or leave
+     `--quiet` off that line. A value the recipe computed (a shell variable,
+     a saved JSON file, a program's output) goes through
+     `control-automation assert --value|--json|stdin --check ...`, so the
+     predicate can name it: `# bug: value.status eq 200`.
+   - Every path in the predicate must be present in that output, except
+     under `missing`; a stored `null` counts as present. So
+     `checks.0.actual eq null` holds when the check ran and found nothing,
+     never on an error object that has no `checks`. A predicate made only of
+     `missing` clauses is rejected: anchor it on what the bug's output does
+     hold (`status eq 200 && response.body.id missing`).
+   - `exit N` (the marked command's exit status) is the last resort, for a
+     line whose symptom has no value to name. It says only that the line
+     failed that way. `exit` is reserved for it: a clause on the CLI's own
+     `exit` field (`exit eq 2`), which only its usage and environment errors
+     set, is rejected.
+   - `xpass` must mean the correct value was observed, so the marked command
+     asserts positively. `map check` rejects `if cmd; then false; fi`,
+     `! cmd` and `test !` on a `# bug` line, because an unrelated error in
+     `cmd` would read as a fix; use the verb's own expectation (`api
+     --expect`/`--check`, `state cat --contains`) or `assert`.
+   - `map check` rejects a missing or malformed predicate, and a `PATH OP`
+     predicate on a line that does not call the CLI.
+   - A fix is proven with the baseline reproducing (`xfail`) twice and the
+     fix passing (`xpass`) twice, with the same recipe, flags and fixtures
+     (see SKILL.md, "Verify an existing fix").
 
    Include the read-only second view for every mutation (a GET, a WebSocket
    frame, a file on disk, a sink delivery), the error cases that matter (404

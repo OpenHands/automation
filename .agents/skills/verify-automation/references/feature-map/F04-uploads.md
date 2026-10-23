@@ -213,10 +213,10 @@ Preconditions:
 - The body is never inspected. A non-tar upload is `COMPLETED` and fails
   only when a run downloads and unpacks it.
 - Uploads are scoped per user and org: another user in the same org gets 404
-  from GET and 403 `Upload belongs to another user` when creating an
-  automation from it (cloud mode only; the local user is the only user, so
-  this cannot be driven here). The same applies to the 403 on DELETE without
-  `manage_automations`: the local user holds every permission.
+  from GET and DELETE and 403 `Upload belongs to another user` when creating
+  an automation from it (cloud mode only; the local user is the only user, so
+  this cannot be driven here). Deleting needs only `view_automations`, like
+  uploading.
 - Uploads created by presets and draft dispatch appear in `GET /v1/uploads`
   next to your own (`prompt-automation-<name>`, `plugin-automation-<name>`,
   `...-edit` after a prompt PATCH).

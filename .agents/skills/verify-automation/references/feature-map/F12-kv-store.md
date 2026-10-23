@@ -397,20 +397,20 @@ Preconditions:
   ```sh
   control-automation api PUT /v1/kv/qa-gpm --query automation_id="$AID" --json '{"a":{"b":1}}' --expect 201
   control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query path=a.b --expect 200 --check value eq 1
-  control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query 'path=a[b' --expect 400 --save F12.get-path-malformed/get  # bug
+  control-automation api GET /v1/kv/qa-gpm --query automation_id="$AID" --query 'path=a[b' --expect 400 --save F12.get-path-malformed/get  # bug: status eq 500
   ```
 - **Empty PATCH path (`F12.patch-empty-path`), known bug.** `path:""` reaches `set_nested_value`, whose `parts[-1]` raises `IndexError`: 500 instead of 400.
   ```sh
   control-automation api PUT /v1/kv/qa-pep --query automation_id="$AID" --json '{"a":1}' --expect 201
   control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"a","value":2}' --expect 200
-  control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"","value":1}' --expect 400 --save F12.patch-empty-path/patch  # bug
+  control-automation api PATCH /v1/kv/qa-pep --query automation_id="$AID" --json '{"path":"","value":1}' --expect 400 --save F12.patch-empty-path/patch  # bug: status eq 500
   ```
 - **JWT for an automation that does not exist (`F12.jwt-unknown-automation`), known bug.** The token is accepted (the claim is never checked against the database): reads are empty, and the first write fails the foreign key on `automation_kv_meta`, which surfaces as 500.
   ```sh
   GHOST=$(control-automation kv token --automation-id 00000000-0000-4000-8000-00000000dead)
   control-automation api GET /v1/kv --auth none --header "Authorization: Bearer $GHOST" --expect 200 --check total eq 0
   control-automation api GET /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --expect 404 --check detail eq key_not_found
-  control-automation api PUT /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --json '1' --expect 4xx --save F12.jwt-unknown-automation/put  # bug
+  control-automation api PUT /v1/kv/qa-ghost --auth none --header "Authorization: Bearer $GHOST" --json '1' --expect 4xx --save F12.jwt-unknown-automation/put  # bug: status eq 500
   ```
 
 ## Gotchas

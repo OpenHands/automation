@@ -53,6 +53,8 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
+from openhands.automation.utils.webhook import get_webhook_config
+from openhands.workspace import GitProvider
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ _require_view_automations = require_permission("view_automations")
 # Features every deployment has: they come from the SDK code the service
 # packages into a run, not from configuration.
 _STATIC_FEATURES = (
+    "automationDescription",
     "automationDrafts",
     "conversationDispatch",
     # Can run a client-supplied tarball, so an entry may ship a script bundle.
@@ -72,6 +75,8 @@ _STATIC_FEATURES = (
     "presetPlugin",
     "presetPrompt",
     "repoClone",
+    # A preset's repositories can be changed with PATCH after creation.
+    "repoUpdate",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.
@@ -81,7 +86,7 @@ _TRIGGER_TAGS = frozenset({"cron", "event"})
 @router.get("/capabilities", response_model_exclude_none=True)
 async def get_capabilities(
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> CapabilitiesResponse:
     """Describe what this deployment supports, before anything is configured.
 
@@ -102,6 +107,7 @@ async def get_capabilities(
             event_types=[],
             triggers=TriggerCapabilities(),
             features=[],
+            repo_providers=[],
         )
 
     webhook_sources = {
@@ -142,6 +148,9 @@ async def get_capabilities(
             ),
         ),
         features=sorted(features),
+        # The SDK packaged into a run decides which providers' tokens it can
+        # clone with, so a setup form can offer exactly those repositories.
+        repo_providers=sorted(provider.value for provider in GitProvider),
     )
 
 
@@ -150,7 +159,7 @@ async def validate_draft(
     body: ValidateDraftRequest,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ValidateDraftResponse:
     """Validate a draft automation without creating it.
 

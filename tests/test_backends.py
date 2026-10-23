@@ -1,5 +1,6 @@
 """Tests for execution backends."""
 
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,12 +13,18 @@ from openhands.automation.backends import (
     LocalAgentServerBackend,
     get_backend,
 )
-from openhands.automation.backends.cloud import _concurrency_limit_detail
+from openhands.automation.backends.cloud import (
+    _concurrency_limit_detail,
+    summarize_status_detail,
+)
 from openhands.automation.backends.local import (
     local_runs_root,
     resolve_local_workspace_base,
 )
-from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    SandboxProvisioningError,
+)
 
 
 class TestExecutionContext:
@@ -277,16 +284,52 @@ class TestLocalAgentServerBackend:
                 bash_command_id="abc123def456",
             )
 
-    @pytest.mark.asyncio
-    async def test_cleanup_after_verification_is_noop(self, mock_run):
-        """cleanup_after_verification() is a no-op for local backend."""
-        backend = LocalAgentServerBackend(
+    def _cleanup_backend(self, mock_run, workspace_base):
+        return LocalAgentServerBackend(
             agent_server_url="http://localhost:3000",
             api_key="local-key",
             run=mock_run,
+            workspace_base=str(workspace_base),
         )
-        # Should not raise
-        await backend.cleanup_after_verification("run-123")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_only_this_runs_workspace(self, mock_run, tmp_path):
+        """#422: a finished run must not leave its uv environment behind."""
+        run_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        runs_root = local_runs_root(tmp_path)
+        for candidate in (run_id, other_id):
+            (runs_root / str(candidate)).mkdir(parents=True)
+            (runs_root / str(candidate) / "env.bin").write_bytes(b"x" * 32)
+
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification(str(run_id))
+
+        assert not (runs_root / str(run_id)).exists()
+        assert (runs_root / str(other_id) / "env.bin").exists()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_refuses_a_run_id_that_is_not_a_uuid(
+        self, mock_run, tmp_path
+    ):
+        """A traversing run id must never reach rmtree."""
+        runs_root = local_runs_root(tmp_path)
+        sibling = runs_root.parent / "evil"
+        sibling.mkdir(parents=True)
+        (sibling / "keep.txt").write_text("keep", encoding="utf-8")
+
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification("../evil")
+
+        assert (sibling / "keep.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_of_a_missing_workspace_does_not_raise(
+        self, mock_run, tmp_path
+    ):
+        """Cleanup runs after a crash too, where the directory may be gone."""
+        backend = self._cleanup_backend(mock_run, tmp_path)
+        await backend.cleanup_after_verification(str(uuid.uuid4()))
 
 
 class TestCloudSandboxBackend:
@@ -584,3 +627,140 @@ class TestCloudSandboxConcurrencyLimit:
 
         # No retry: the sandbox API was hit exactly once.
         assert client.post.await_count == 1
+
+
+class TestCloudSandboxProvisioningFailure:
+    """A sandbox that never becomes ready raises SandboxProvisioningError with
+    the runtime's reason, and is deleted before the error propagates."""
+
+    API = "https://app.test"
+
+    @staticmethod
+    def _backend() -> CloudSandboxBackend:
+        run = MagicMock()
+        run.sandbox_id = None
+        run.bash_command_id = None
+        backend = CloudSandboxBackend(
+            api_url=TestCloudSandboxProvisioningFailure.API, run=run
+        )
+        backend._poll_interval = 0
+        return backend
+
+    @staticmethod
+    def _client(polled: list | Exception, calls: list[str], delete_status: int = 200):
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.method)
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "sb1"})
+            if request.method == "DELETE":
+                return httpx.Response(delete_status, json=True)
+            if isinstance(polled, Exception):
+                raise polled
+            return httpx.Response(200, json=polled)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    @pytest.mark.asyncio
+    async def test_error_status_carries_runtime_detail_and_deletes(self):
+        calls: list[str] = []
+        polled = [
+            {
+                "id": "sb1",
+                "status": "ERROR",
+                "status_detail": "runtime_ingress:connection_error",
+            }
+        ]
+        async with self._client(polled, calls) as client:
+            with pytest.raises(SandboxProvisioningError) as exc_info:
+                await self._backend()._create_and_wait(client, "key")
+
+        exc = exc_info.value
+        assert exc.sandbox_id == "sb1"
+        assert exc.status == "ERROR"
+        assert exc.reason == "runtime_ingress:connection_error"
+        assert exc.code == "sandbox_error"
+        assert not exc.timed_out
+        assert "status=ERROR" in str(exc)
+        assert "runtime_ingress:connection_error" in str(exc)
+        assert calls[-1] == "DELETE"
+
+    @pytest.mark.asyncio
+    async def test_raw_pod_detail_is_summarized(self):
+        calls: list[str] = []
+        raw = "0/3 nodes are available: 3 Insufficient cpu. node pool-internal-7"
+        polled = [{"id": "sb1", "status": "ERROR", "status_detail": raw}]
+        async with self._client(polled, calls) as client:
+            with pytest.raises(SandboxProvisioningError) as exc_info:
+                await self._backend()._create_and_wait(client, "key")
+
+        assert exc_info.value.reason == "insufficient_cpu"
+        assert "pool-internal" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_ready_timeout_deletes_sandbox(self):
+        calls: list[str] = []
+        polled = [{"id": "sb1", "status": "STARTING"}]
+        backend = self._backend()
+        setattr(backend, "_poll_interval", 0.001)
+        async with self._client(polled, calls) as client:
+            with pytest.raises(SandboxProvisioningError) as exc_info:
+                await backend._create_and_wait(client, "key", ready_timeout=0.002)
+
+        exc = exc_info.value
+        assert exc.timed_out
+        assert exc.status == "STARTING"
+        assert exc.code == "sandbox_ready_timeout"
+        assert calls[-1] == "DELETE"
+
+    @pytest.mark.asyncio
+    async def test_unknown_sandbox_is_missing(self):
+        """The batch endpoint returns null for an id it doesn't know."""
+        calls: list[str] = []
+        async with self._client([None], calls) as client:
+            with pytest.raises(SandboxProvisioningError) as exc_info:
+                await self._backend()._create_and_wait(client, "key")
+
+        assert exc_info.value.status == "MISSING"
+        assert exc_info.value.code == "sandbox_missing"
+        assert calls[-1] == "DELETE"
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_does_not_mask_error(self):
+        calls: list[str] = []
+        polled = [{"id": "sb1", "status": "ERROR"}]
+        async with self._client(polled, calls, delete_status=500) as client:
+            with pytest.raises(SandboxProvisioningError) as exc_info:
+                await self._backend()._create_and_wait(client, "key")
+
+        assert exc_info.value.reason is None
+        assert calls[-1] == "DELETE"
+
+    @pytest.mark.asyncio
+    async def test_other_failure_after_create_deletes_sandbox(self):
+        calls: list[str] = []
+        async with self._client(httpx.ConnectError("down"), calls) as client:
+            with pytest.raises(httpx.ConnectError):
+                await self._backend()._create_and_wait(client, "key")
+
+        assert calls[-1] == "DELETE"
+
+
+class TestSummarizeStatusDetail:
+    @pytest.mark.parametrize(
+        ("detail", "expected"),
+        [
+            (None, None),
+            ("", None),
+            ("runtime_ingress:timeout", "runtime_ingress:timeout"),
+            ("runtime_ingress:http_status:503", "runtime_ingress:http_status:503"),
+            ("runtime_ingress:bad value", "unclassified"),
+            ("Back-off pulling image: ImagePullBackOff", "image_pull_error"),
+            ("CreateContainerConfigError: secret missing", "container_config_error"),
+            ("CreateContainerError", "container_create_error"),
+            ("0/2 nodes: Insufficient memory", "insufficient_memory"),
+            ("1 node(s) had untolerated taint {x: y}", "scheduling_constraint"),
+            ("something else", "unclassified"),
+        ],
+    )
+    def test_summary(self, detail, expected):
+        assert summarize_status_detail(detail) == expected

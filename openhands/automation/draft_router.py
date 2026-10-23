@@ -98,8 +98,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/drafts", tags=["Automation Drafts"])
 
+# As with creating an automation, any org member may work with their own
+# drafts: a draft belongs to whoever saved it, and edit, dispatch and delete
+# check that the caller is its creator.
 _require_view_automations = require_permission("view_automations")
-_require_manage_automations = require_permission("manage_automations")
 
 
 async def _assert_org_automation_exists(
@@ -337,6 +339,7 @@ async def _materialize_raw_draft(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": None,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -375,6 +378,7 @@ async def _materialize_prompt_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -425,6 +429,7 @@ async def _materialize_plugin_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": model,
@@ -492,8 +497,8 @@ async def _materialize_draft(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_draft(
     body: CreateAutomationDraftRequest,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     if body.source_automation_id is not None:
         await _assert_org_automation_exists(
@@ -521,7 +526,7 @@ async def list_drafts(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftListResponse:
     base_query = select(AutomationDraft).where(
         AutomationDraft.org_id == user.org_id,
@@ -547,7 +552,7 @@ async def list_drafts(
 async def get_draft(
     draft_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     return AutomationDraftResponse.model_validate(draft)
@@ -557,8 +562,8 @@ async def get_draft(
 async def update_draft(
     draft_id: uuid.UUID,
     body: UpdateAutomationDraftRequest,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
@@ -580,8 +585,8 @@ async def update_draft(
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_draft(
     draft_id: uuid.UUID,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
@@ -610,8 +615,8 @@ async def dispatch_draft(
     request: Request,
     background_tasks: BackgroundTasks,
     body: DraftDispatchRequest | None = None,
-    user: AuthenticatedUser = Depends(_require_manage_automations),
-    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationRunResponse:
     del background_tasks
