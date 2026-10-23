@@ -11,6 +11,8 @@ updates:
 
     - package-ecosystem: pip
       directory: /
+      cooldown:
+          default-days: 7
       schedule:
           interval: weekly
       commit-message:
