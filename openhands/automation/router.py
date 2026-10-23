@@ -85,6 +85,7 @@ from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
+from openhands.automation.utils.event_sources import is_event_source_configured
 from openhands.automation.utils.model_profiles import (
     ensure_agent_profile_exists,
     resolve_model_profile_for_user,
@@ -115,7 +116,7 @@ from openhands.automation.utils.templates import (
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
-from openhands.automation.utils.webhook import get_webhook_config, is_builtin_source
+from openhands.automation.utils.webhook import is_builtin_source
 
 
 logger = logging.getLogger(__name__)
@@ -486,13 +487,15 @@ async def _resolve_plugin_spec_trigger(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Plugin automation requires a trigger or manifest suggested_trigger",
         )
-    if isinstance(trigger, EventTrigger) and not is_builtin_source(trigger.source):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Event source `{trigger.source}` is not configured",
-            )
+    if (
+        isinstance(trigger, EventTrigger)
+        and not is_builtin_source(trigger.source)
+        and not await is_event_source_configured(trigger.source, user.org_id, session)
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Event source `{trigger.source}` is not configured",
+        )
     return trigger
 
 

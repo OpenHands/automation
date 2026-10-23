@@ -8,12 +8,10 @@ Neither endpoint writes.
 
 import fnmatch
 import logging
-import uuid
 from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
@@ -29,7 +27,6 @@ from openhands.automation.event_schemas.github import (
     get_supported_event_types,
 )
 from openhands.automation.filter_eval import FilterFunctions
-from openhands.automation.models import CustomWebhook
 from openhands.automation.providers import builtin_sources
 from openhands.automation.scheduler import POLL_INTERVAL_SECONDS
 from openhands.automation.schemas import (
@@ -46,12 +43,16 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.cron import min_interval_seconds
+from openhands.automation.utils.event_sources import (
+    configured_stream_sources,
+    custom_event_sources,
+    get_event_source_delivery,
+)
 from openhands.automation.utils.model_profiles import (
     ensure_agent_profile_exists,
     validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
-from openhands.automation.utils.webhook import get_webhook_config
 from openhands.workspace import GitProvider
 
 
@@ -108,15 +109,18 @@ async def get_capabilities(
             repo_providers=[],
         )
 
-    builtin = builtin_sources() if config.service.webhook_secret else []
-    event_sources = sorted({*builtin, *await _custom_sources(user.org_id, session)})
+    webhook_sources = {
+        *(builtin_sources() if config.service.webhook_secret else []),
+        *await custom_event_sources(user.org_id, session),
+    }
+    event_sources = sorted({*webhook_sources, *configured_stream_sources(user.org_id)})
 
     # Not a packaged-code feature: the id is passed through to the run, whose
     # conversation server resolves it - the Agent Server locally, the OpenHands
     # app server in cloud, which has to be a version that serves
     # /api/agent-profiles.
     features = [*_STATIC_FEATURES, "agentProfiles"]
-    if event_sources:
+    if webhook_sources:
         features.append("webhookDelivery")
     if config.kv.enabled:
         features.append("kvStore")
@@ -126,7 +130,9 @@ async def get_capabilities(
         max_automation_timeout_seconds=config.sandbox.max_run_duration,
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
-        event_types=(get_supported_event_patterns() if "github" in builtin else []),
+        event_types=(
+            get_supported_event_patterns() if "github" in event_sources else []
+        ),
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
                 min_interval_seconds=_cron_interval_floor(),
@@ -213,15 +219,15 @@ async def validate_draft(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
+        delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
+        if delivery is None:
             errors.append(
                 DraftValidationError(
                     field="trigger.source",
                     code="event_source_not_configured",
                     message=(
-                        f"No webhook is configured to deliver '{trigger.source}' "
-                        "events to this deployment."
+                        f"No event delivery is configured for '{trigger.source}' "
+                        "events in this deployment."
                     ),
                 )
             )
@@ -232,7 +238,7 @@ async def validate_draft(
                     event = parse_event(
                         trigger.source,
                         body.sample_event,
-                        event_key_expr=webhook.event_key_expr,
+                        event_key_expr=delivery.event_key_expr,
                     )
                 except ValueError as e:
                     errors.append(
@@ -263,20 +269,6 @@ def _agent_profile_error(error: HTTPException) -> DraftValidationError:
         code="invalid_agent_profile",
         message=str(error.detail),
     )
-
-
-async def _custom_sources(org_id: uuid.UUID, session: AsyncSession) -> list[str]:
-    """Custom webhook sources this organization has enabled.
-
-    These carry their own per-webhook secret, so they work whether or not the
-    service-level webhook secret for built-in sources is configured.
-    """
-    result = await session.execute(
-        select(CustomWebhook.source)
-        .where(CustomWebhook.org_id == org_id, CustomWebhook.enabled.is_(True))
-        .distinct()
-    )
-    return list(result.scalars().all())
 
 
 def _cron_interval_floor() -> int:
