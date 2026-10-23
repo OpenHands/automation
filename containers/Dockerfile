@@ -28,7 +28,11 @@ ARG UV_VERSION=0.13.5
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+# Upgrade pip first: the base image's pip vendors an old certifi bundle that
+# still trusts the compromised eMudhra roots (GHSA-6q48-6c7w-9gw2), so it must
+# not be the tool that downloads uv.
+RUN pip install --no-cache-dir "pip>=26.2.2" \
+    && pip install --no-cache-dir "uv==${UV_VERSION}"
 
 COPY pyproject.toml uv.lock ./
 COPY README.md ./
