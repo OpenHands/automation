@@ -65,6 +65,8 @@ from openhands.automation.schemas import (
     AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
+    AutomationTagCount,
+    AutomationTagsResponse,
     CreateAutomationRequest,
     EventTrigger,
     RunCompleteRequest,
@@ -72,6 +74,7 @@ from openhands.automation.schemas import (
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
+from openhands.automation.tags import normalize_tag
 from openhands.automation.telemetry import (
     capture_automation_event,
     get_request_telemetry_context,
@@ -105,6 +108,7 @@ from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
 )
+from openhands.automation.utils.tags import count_org_tags, has_tag
 from openhands.automation.utils.tarball_validation import (
     is_http_url,
     parse_internal_upload_id,
@@ -289,6 +293,7 @@ async def create_automation(
         preset_metadata=preset_metadata,
         trigger=body.trigger.model_dump(),
         observability_associations=body.observability_associations,
+        tags=body.tags,
         tarball_path=body.tarball_path,
         setup_script_path=body.setup_script_path,
         entrypoint=body.entrypoint,
@@ -625,6 +630,9 @@ async def list_automations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     created_by: Literal["me", "others"] | None = Query(default=None),
+    tag: str | None = Query(
+        default=None, description="Only automations carrying this tag"
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -637,6 +645,13 @@ async def list_automations(
         base_query = base_query.where(Automation.user_id == user.user_id)
     elif created_by == "others":
         base_query = base_query.where(Automation.user_id != user.user_id)
+    if tag is not None:
+        try:
+            base_query = base_query.where(has_tag(normalize_tag(tag)))
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -655,6 +670,19 @@ async def list_automations(
     return AutomationListResponse(
         automations=[AutomationResponse.model_validate(a) for a in automations],
         total=total,
+    )
+
+
+# Before /{automation_id}, which would otherwise take "tags" as an id.
+@router.get("/tags")
+async def list_automation_tags(
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session),
+) -> AutomationTagsResponse:
+    """Tags on the caller's org's live automations, most-used first."""
+    counts = await count_org_tags(session, user.org_id)
+    return AutomationTagsResponse(
+        tags=[AutomationTagCount(tag=tag, count=count) for tag, count in counts]
     )
 
 

@@ -102,6 +102,12 @@ class Automation(Base):
         JSON, nullable=True
     )
 
+    # User-facing labels for grouping and filtering, normalized by tags.py.
+    # Never NULL, so the tag facet query can expand every row.
+    tags: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
+
     # Path to SDK code tarball (e.g., S3 or GCS URL)
     tarball_path: Mapped[str] = mapped_column(Text, nullable=False)
 

@@ -30,6 +30,7 @@ from openhands.automation.providers import (
     reserved_sources,
     verifier_schemes,
 )
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -480,6 +481,12 @@ class TemplateProvenance(BaseModel):
 
 # --- Requests ---
 
+TAGS_DESCRIPTION: Final[str] = (
+    "Labels for grouping and filtering automations, e.g. 'software-factory'. "
+    "Each is trimmed, lowercased, and has whitespace replaced by '-'; at most "
+    "10 tags of up to 50 characters."
+)
+
 
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -513,6 +520,7 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -596,6 +604,11 @@ class CreateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str]) -> list[str]:
+        return normalize_tags(v)
 
     @field_validator("timeout")
     @classmethod
@@ -697,6 +710,10 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] | None = Field(
+        default=None,
+        description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -755,6 +772,15 @@ class UpdateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str] | None) -> list[str]:
+        # Runs only when the field is sent; an explicit null would hit the
+        # NOT NULL column, so clearing is spelled [].
+        if v is None:
+            raise ValueError("tags cannot be null; send [] to clear them")
+        return normalize_tags(v)
 
     @field_validator("timeout")
     @classmethod
@@ -1095,6 +1121,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
+    tags: list[str] = Field(default_factory=list)
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1121,6 +1148,17 @@ class AutomationResponse(BaseModel):
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
     total: int
+
+
+class AutomationTagCount(BaseModel):
+    tag: str
+    count: int = Field(..., description="Live automations carrying this tag")
+
+
+class AutomationTagsResponse(BaseModel):
+    """The org's tags, most-used first, for a list filter."""
+
+    tags: list[AutomationTagCount]
 
 
 class CreateAutomationDraftRequest(BaseModel):
