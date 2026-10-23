@@ -29,7 +29,10 @@ def test_builder_uses_fixed_uv_version() -> None:
     # bundle that still trusts the compromised roots.
     assert 'pip install --no-cache-dir "pip>=26.2.2"' in dockerfile
     assert dockerfile.index('"pip>=26.2.2"') < dockerfile.index('"uv==${UV_VERSION}"')
-    assert 'pip install --no-cache-dir "uv==${UV_VERSION}"' in dockerfile
+    assert (
+        'pip install --use-deprecated=legacy-certs --no-cache-dir "uv==${UV_VERSION}"'
+        in dockerfile
+    )
 
 
 def test_runtime_contract_is_preserved() -> None:
