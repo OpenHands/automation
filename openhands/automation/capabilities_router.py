@@ -53,7 +53,6 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_combination,
     validate_model_profile_for_user,
 )
-from openhands.automation.utils.webhook import get_webhook_config
 from openhands.workspace import GitProvider
 
 
