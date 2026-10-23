@@ -228,7 +228,7 @@ async def get_kv_auth_context(
             )
         ),
     ] = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVAuthContext:
     """Unified auth dependency for KV endpoints.
 
@@ -682,8 +682,8 @@ async def list_keys(
         description="Maximum number of keys to return (paginated)",
     ),
     offset: int = Query(default=0, ge=0, description="Number of keys to skip"),
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVListKeysResponse:
     """List keys for this automation, paginated.
 
@@ -724,8 +724,8 @@ async def get_value(
     key: ValidatedKey,
     path: str | None = Query(default=None, description="Nested path (dot notation)"),
     meta: bool = Query(default=False, description="Include metadata and version"),
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVKeyResponse | KVKeyPathResponse | KVKeyMetaResponse:
     """Get a value by key, optionally at a nested path.
 
@@ -787,8 +787,8 @@ async def set_value(
         default=None,
         description="Only set if current state version matches (optimistic lock)",
     ),
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVSetResponse | KVConflictResponse:
     """Set a value for a key.
 
@@ -864,8 +864,8 @@ async def patch_value(
         default=None,
         description="Only patch if current state version matches (optimistic lock)",
     ),
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVKeyPathResponse:
     """Update a nested path within an existing value.
 
@@ -918,8 +918,8 @@ async def delete_key(
         default=None,
         description="Only delete if current state version matches (optimistic lock)",
     ),
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVDeleteResponse:
     """Delete a key.
 
@@ -955,8 +955,8 @@ async def delete_key(
 async def increment(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVIncrResponse:
     """Atomically increment an integer value.
 
@@ -996,8 +996,8 @@ async def increment(
 async def decrement(
     key: ValidatedKey,
     body: KVIncrRequest | None = None,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVIncrResponse:
     """Atomically decrement an integer value.
 
@@ -1037,8 +1037,8 @@ async def decrement(
 async def lpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVListLengthResponse:
     """Push a value to the left (front) of a list.
 
@@ -1074,8 +1074,8 @@ async def lpush(
 async def rpush(
     key: ValidatedKey,
     body: KVListPushRequest,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVListLengthResponse:
     """Push a value to the right (back) of a list.
 
@@ -1110,8 +1110,8 @@ async def rpush(
 @router.post("/{key}/lpop")
 async def lpop(
     key: ValidatedKey,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVKeyResponse:
     """Pop a value from the left (front) of a list.
 
@@ -1144,8 +1144,8 @@ async def lpop(
 @router.post("/{key}/rpop")
 async def rpop(
     key: ValidatedKey,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVKeyResponse:
     """Pop a value from the right (back) of a list.
 
@@ -1178,8 +1178,8 @@ async def rpop(
 @router.get("/{key}/len")
 async def list_length(
     key: ValidatedKey,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVListLengthResponse:
     """Get the length of a list."""
     kv_config = get_config().kv
@@ -1355,8 +1355,8 @@ def _execute_batch_operation(
 @router.post("/batch")
 async def batch(
     body: KVBatchRequest,
-    ctx: KVAuthContext = Depends(get_kv_auth_context),
-    session: AsyncSession = Depends(get_session),
+    ctx: KVAuthContext = Depends(get_kv_auth_context, scope="function"),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> KVBatchResponse:
     """Execute multiple KV operations atomically in a single transaction.
 

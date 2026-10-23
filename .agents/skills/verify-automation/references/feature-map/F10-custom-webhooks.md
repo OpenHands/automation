@@ -160,7 +160,7 @@ Preconditions:
 - **Explicit null on a required field (`F10.patch-null-required`), known bug.** The update model accepts `null` for every field, the handler writes it, and the NOT NULL constraint fails at commit with no handler, so the client gets a bare 500 instead of a 422. The row is left unchanged.
   ```sh
   NUL_ID=$(control-automation api POST /v1/webhooks --json '{"name":"qa null","source":"qa-null","webhook_secret":"qa-null-secret"}' --expect 201 --field id)
-  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"name":null}' --expect 422 --save F10.patch-null-required/name-null  # bug
+  control-automation api PATCH "/v1/webhooks/$NUL_ID" --json '{"name":null}' --expect 422 --save F10.patch-null-required/name-null  # bug: status eq 500
   ```
   Expected: 422 naming `name` (and the same for `enabled`, `event_key_expr`,
   `signature_header`). Actual: `500 Internal Server Error` with an

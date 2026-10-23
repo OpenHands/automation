@@ -1,6 +1,6 @@
 [project]
 name = "openhands-automation"
-version = "1.20.1"
+version = "1.25.1"
 description = "OpenHands automation service"
 readme = "README.md"
 license = "MIT"
@@ -19,14 +19,16 @@ dependencies = [
   "asyncpg>=0.30",
   "boto3>=1.35",
   "cachetools>=7.0.5",
+  # eMudhra CA distrust: GHSA-6q48-6c7w-9gw2
+  "certifi>=2026.10.19",
   "cloud-sql-python-connector[asyncpg]>=1.16",
   "croniter>=2",
-  "fastapi>=0.115",
+  "fastapi>=0.121",
   "google-cloud-storage>=2.18",
   "httpx>=0.27",
   "jmespath>=1.0",
-  "openhands-sdk==1.55.1",
-  "openhands-workspace==1.55.1",
+  "openhands-sdk==1.58.1",
+  "openhands-workspace==1.58.1",
   "pg8000>=1.31",
   "prometheus-client>=0.19",
   "pydantic>=2",
@@ -73,6 +75,9 @@ dev = [
     "pytest-xdist>=3.6.0",
     "pytest-timeout>=2.4.0",
     "testcontainers[postgres,minio]>=4.10.0",
+]
+production = [
+    "ddtrace==4.15.6",
 ]
 
 # Ruff configuration

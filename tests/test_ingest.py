@@ -128,10 +128,16 @@ def captured_telemetry(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args) -> bool:
             return False
 
+        async def aclose(self) -> None:
+            return None
+
         async def post(self, url: str, *, json: dict[str, Any]) -> FakeResponse:
             events.append(str(json["event"]))
             return FakeResponse()
 
+    # The shared client caches the first instance it creates; start the test
+    # without one so the fake is dropped again with the rest of the patch.
+    monkeypatch.setattr(telemetry, "_telemetry_http_client", None)
     monkeypatch.setattr(telemetry.httpx, "AsyncClient", FakeClient)
     yield events
     clear_config_cache()

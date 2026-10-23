@@ -20,6 +20,11 @@ from openhands.automation.uploads import (
 )
 
 
+TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+OTHER_USER_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+
 class TestBuildStoragePath:
     """Test storage path generation."""
 
@@ -215,3 +220,59 @@ class TestCreateUpload:
         # Assert
         assert response.status_code == 201
         assert response.json()["status"] == "COMPLETED"
+
+
+class TestDeleteUpload:
+    """Tests for DELETE /v1/uploads/{upload_id} endpoint."""
+
+    async def _add_upload(self, async_session, user_id: uuid.UUID) -> TarballUpload:
+        upload = TarballUpload(
+            user_id=user_id,
+            org_id=TEST_ORG_ID,
+            name="member-upload",
+            status=UploadStatus.COMPLETED,
+            storage_path="uploads/member-upload.tar.gz",
+        )
+        async_session.add(upload)
+        await async_session.commit()
+        return upload
+
+    async def test_delete_own_upload_as_member_succeeds(
+        self, readonly_client, async_session
+    ):
+        """A member can delete a tarball they uploaded."""
+        # Arrange
+        upload = await self._add_upload(async_session, TEST_USER_ID)
+        file_store = MagicMock()
+        app.dependency_overrides[get_file_store] = lambda: file_store
+
+        # Act
+        response = await readonly_client.delete(
+            f"/api/automation/v1/uploads/{upload.id}"
+        )
+
+        # Assert
+        assert response.status_code == 204
+        await async_session.refresh(upload)
+        assert upload.deleted_at is not None
+        file_store.delete.assert_called_once_with("uploads/member-upload.tar.gz")
+
+    async def test_delete_another_users_upload_as_member_returns_404(
+        self, readonly_client, async_session
+    ):
+        """A member cannot delete someone else's upload."""
+        # Arrange
+        upload = await self._add_upload(async_session, OTHER_USER_ID)
+        file_store = MagicMock()
+        app.dependency_overrides[get_file_store] = lambda: file_store
+
+        # Act
+        response = await readonly_client.delete(
+            f"/api/automation/v1/uploads/{upload.id}"
+        )
+
+        # Assert
+        assert response.status_code == 404
+        await async_session.refresh(upload)
+        assert upload.deleted_at is None
+        file_store.delete.assert_not_called()

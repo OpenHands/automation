@@ -90,6 +90,33 @@ def github_pr_payload() -> dict:
 
 
 @pytest.fixture
+def azure_devops_pr_payload() -> dict:
+    """Sample OpenHands-forwarded Azure DevOps pull request event payload."""
+    return {
+        "organization": {
+            "git_org": "fabrikam",
+            "openhands_org_id": "00000000-0000-0000-0000-000000000123",
+        },
+        "payload": {
+            "id": "2ab4e3d3-b7a6-425e-92b1-5a9982c1269e",
+            "eventType": "git.pullrequest.created",
+            "publisherId": "tfs",
+            "resource": {
+                "repository": {
+                    "name": "fabrikam-web",
+                    "project": {"name": "Fabrikam Fiber"},
+                },
+                "pullRequestId": 42,
+                "status": "active",
+            },
+            "resourceContainers": {
+                "account": {"baseUrl": "https://dev.azure.com/fabrikam/"},
+            },
+        },
+    }
+
+
+@pytest.fixture
 def jira_dc_comment_payload() -> dict:
     """Sample OpenHands-forwarded Jira DC comment event payload."""
     return {
@@ -321,6 +348,84 @@ async def test_receive_jira_dc_event_with_matching_automation(
     assert data["received"] is True
     assert data["matched"] == 1
     assert len(data["runs_created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_azure_devops_event_with_matching_automation(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    azure_devops_pr_payload: dict,
+    async_session,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Test receiving an Azure DevOps event that matches an automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=mock_authenticated_user.user_id,
+        org_id=org_id,
+        name="Test Azure DevOps Automation",
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+        trigger={
+            "type": "event",
+            "source": "azure_devops",
+            "on": "git.pullrequest.created",
+            "filter": "resource.repository.name == 'fabrikam-web'",
+        },
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    signature, body = sign_payload(azure_devops_pr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/azure_devops",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["received"] is True
+    assert data["matched"] == 1
+    assert len(data["runs_created"]) == 1
+    # The run carries the raw Service Hook payload for the automation to read.
+    run = (await async_session.execute(select(AutomationRun))).scalars().one()
+    assert run.event_payload is not None
+    assert run.event_payload["event_key"] == "git.pullrequest.created"
+    assert run.event_payload["payload"] == azure_devops_pr_payload["payload"]
+
+
+@pytest.mark.asyncio
+async def test_receive_azure_devops_event_without_event_type_is_ignored(
+    async_client: AsyncClient,
+    org_id: uuid.UUID,
+    azure_devops_pr_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An Azure DevOps delivery without eventType is acknowledged, not run."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    del azure_devops_pr_payload["payload"]["eventType"]
+
+    signature, body = sign_payload(azure_devops_pr_payload, "test-secret")
+
+    response = await async_client.post(
+        f"/api/automation/v1/events/{org_id}/azure_devops",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["matched"] == 0
 
 
 @pytest.mark.asyncio
