@@ -581,6 +581,8 @@ When bumping `openhands-sdk` / `openhands-workspace` pins:
   Use the committed lock for reproducible installs; review newly resolved
   artifacts before committing a lock update.
 
-Use uv >= 0.9.25 for this policy; older versions cannot enforce all of
-the configured release-age settings. `tool.uv.required-version` also guards
-direct `uv sync` and `uv lock` use outside Make.
+Use uv >= 0.9.25 for this policy. Older versions cannot parse the boolean
+first-party exemptions and can discard the entire `[tool.uv]` table, including
+`required-version`. The committed lock rejects those versions; the Makefile
+also checks the version before syncing. Check `uv --version` before direct
+`uv sync` or `uv lock` use, especially when recreating a missing lock.
