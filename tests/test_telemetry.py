@@ -1,8 +1,10 @@
+import asyncio
 import importlib.metadata
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -161,6 +163,7 @@ async def test_capture_reuses_shared_http_client(monkeypatch):
 
     await telemetry.capture_automation_event("automation_created")
     await telemetry.capture_automation_event("automation_event_received")
+    await telemetry.flush_telemetry_events()
 
     assert len(_MockAsyncClient.instances) == 1
     assert len(_MockAsyncClient.posts) == 2
@@ -176,6 +179,120 @@ async def test_close_telemetry_http_client_allows_clean_restart(monkeypatch):
     assert first_client.is_closed is True
     second_client = telemetry.get_telemetry_http_client()
     assert second_client is not first_client
+
+
+@pytest.fixture
+def blocked_posthog(monkeypatch):
+    """A PostHog that holds every POST open until the test sets the event.
+
+    The hold times out after a second, so a capture that waits on the POST
+    fails these tests instead of hanging them.
+    """
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    release = asyncio.Event()
+
+    class _BlockedAsyncClient(_MockAsyncClient):
+        async def post(self, url: str, json: dict) -> _Response:
+            await asyncio.wait_for(release.wait(), timeout=1)
+            return await super().post(url, json)
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _BlockedAsyncClient)
+    monkeypatch.setattr(telemetry, "_backend_distinct_id", "automation-backend:test")
+    return release
+
+
+@pytest.mark.asyncio
+async def test_capture_returns_without_waiting_for_posthog(blocked_posthog):
+    # Callers capture inside open transactions; awaiting the POST here would
+    # hold their connection idle in transaction for the round trip.
+    await telemetry.capture_automation_event(
+        "automation_created", automation=_automation()
+    )
+
+    assert _MockAsyncClient.posts == []
+    assert len(telemetry._pending_sends) == 1
+
+    blocked_posthog.set()
+    await telemetry.flush_telemetry_events()
+
+    assert len(_MockAsyncClient.posts) == 1
+    assert not telemetry._pending_sends
+
+
+@pytest.mark.asyncio
+async def test_capture_stamps_the_event_when_captured_not_when_sent(
+    blocked_posthog, monkeypatch
+):
+    captured_at = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(telemetry, "utcnow", lambda: captured_at)
+    await telemetry.capture_automation_event("automation_created")
+
+    monkeypatch.setattr(telemetry, "utcnow", lambda: captured_at + timedelta(1))
+    blocked_posthog.set()
+    await telemetry.flush_telemetry_events()
+
+    _, payload = _MockAsyncClient.posts[0]
+    assert payload["timestamp"] == captured_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_flush_cancels_sends_still_running_at_timeout(blocked_posthog):
+    await telemetry.capture_automation_event("automation_created")
+
+    await telemetry.flush_telemetry_events(timeout=0.01)
+
+    assert not telemetry._pending_sends
+    assert _MockAsyncClient.posts == []
+
+
+@pytest.mark.asyncio
+async def test_capture_drops_events_once_send_queue_is_full(
+    blocked_posthog, monkeypatch
+):
+    monkeypatch.setattr(telemetry, "MAX_PENDING_SENDS", 1)
+
+    await telemetry.capture_automation_event("automation_created")
+    await telemetry.capture_automation_event("automation_updated")
+    blocked_posthog.set()
+    await telemetry.flush_telemetry_events()
+
+    assert [payload["event"] for _, payload in _MockAsyncClient.posts] == [
+        "automation_created"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_failure_is_contained(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+
+    class _UnreachableAsyncClient(_MockAsyncClient):
+        async def post(self, url: str, json: dict) -> _Response:
+            raise httpx.ConnectError("posthog unreachable")
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _UnreachableAsyncClient)
+    monkeypatch.setattr(telemetry, "_backend_distinct_id", "automation-backend:test")
+
+    await telemetry.capture_automation_event("automation_created")
+    (send,) = telemetry._pending_sends
+    await telemetry.flush_telemetry_events()
+
+    assert send.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_close_telemetry_http_client_sends_queued_events_first(monkeypatch):
+    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
+    clear_config_cache()
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
+    monkeypatch.setattr(telemetry, "_backend_distinct_id", "automation-backend:test")
+
+    await telemetry.capture_automation_event("automation_created")
+    await telemetry.close_telemetry_http_client()
+
+    assert len(_MockAsyncClient.posts) == 1
+    assert _MockAsyncClient.instances[0].is_closed is True
 
 
 @pytest.mark.asyncio
@@ -211,6 +328,7 @@ async def test_local_capture_uses_canvas_distinct_id(monkeypatch):
         run=run,
         properties={"trigger_source": "callback"},
     )
+    await telemetry.flush_telemetry_events()
 
     assert len(_MockAsyncClient.posts) == 1
     url, payload = _MockAsyncClient.posts[0]
@@ -255,6 +373,7 @@ async def test_cloud_capture_uses_user_id_and_org_properties(monkeypatch):
         automation=automation,
         properties={"creation_path": "prompt_preset"},
     )
+    await telemetry.flush_telemetry_events()
 
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == str(automation.user_id)
@@ -279,6 +398,7 @@ async def test_capture_is_disabled_without_posthog_key(monkeypatch):
         "automation_created",
         automation=_automation(),
     )
+    await telemetry.flush_telemetry_events()
 
     assert _MockAsyncClient.posts == []
 
@@ -300,6 +420,7 @@ async def test_local_capture_requires_stored_telemetry_consent(monkeypatch):
         automation=_automation(),
         request_context=TelemetryRequestContext(client_source="agent_canvas"),
     )
+    await telemetry.flush_telemetry_events()
 
     assert _MockAsyncClient.posts == []
 
@@ -320,6 +441,7 @@ async def test_cloud_capture_does_not_require_frontend_distinct_id(monkeypatch):
         "automation_created",
         automation=automation,
     )
+    await telemetry.flush_telemetry_events()
 
     assert len(_MockAsyncClient.posts) == 1
     _, payload = _MockAsyncClient.posts[0]
@@ -359,6 +481,7 @@ async def test_local_capture_uses_stored_consent_without_request_id(monkeypatch)
             run=run,
             session_factory=session_factory,
         )
+        await telemetry.flush_telemetry_events()
 
         assert len(_MockAsyncClient.posts) == 1
         _, payload = _MockAsyncClient.posts[0]
@@ -483,6 +606,7 @@ async def test_telemetry_consent_route_stores_consent_and_emits_link_event(
                 session,
             )
 
+        await telemetry.flush_telemetry_events()
         assert response.consent_granted is True
         assert len(_MockAsyncClient.posts) == 1
         _, payload = _MockAsyncClient.posts[0]
@@ -615,6 +739,7 @@ async def test_local_capture_falls_back_to_backend_id_without_canvas_actor(
     monkeypatch.setattr(telemetry, "get_stored_telemetry_consent", stored_consent)
 
     await telemetry.capture_automation_event("automation_event_matched")
+    await telemetry.flush_telemetry_events()
 
     _, payload = _MockAsyncClient.posts[0]
     assert payload["distinct_id"] == "automation-backend:local-api"
@@ -654,6 +779,51 @@ async def test_backend_distinct_id_is_db_backed_and_stable():
         assert stored == first
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_backend_distinct_id_is_cached_after_first_read():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        first = await telemetry.get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+    finally:
+        await engine.dispose()
+
+    # No database at all: the cached id is enough.
+    assert first is not None
+    assert await telemetry.get_automation_backend_distinct_id() == first
+
+
+@pytest.mark.asyncio
+async def test_backend_distinct_id_inserted_in_callers_transaction_is_not_cached():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            rolled_back = await telemetry.get_automation_backend_distinct_id(
+                session=session
+            )
+            await session.rollback()
+
+        assert telemetry._backend_distinct_id is None
+        persisted = await telemetry.get_automation_backend_distinct_id(
+            session_factory=session_factory
+        )
+    finally:
+        await engine.dispose()
+
+    assert persisted is not None
+    assert persisted != rolled_back
+    assert telemetry._backend_distinct_id == persisted
 
 
 def test_server_version_properties_cache_package_metadata_lookup(monkeypatch):

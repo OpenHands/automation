@@ -77,6 +77,30 @@ async def test_lifespan_migrates_sqlite_always_and_postgres_when_enabled(
     assert migrate.await_count == (1 if migrates else 0)
 
 
+@pytest.mark.parametrize("posthog_api_key", [None, "phc_test"])
+async def test_lifespan_caches_telemetry_backend_id_when_posthog_is_configured(
+    monkeypatch, idle_startup, posthog_api_key
+):
+    load_backend_id = AsyncMock(return_value="automation-backend:test")
+    monkeypatch.setattr(
+        app_module, "get_automation_backend_distinct_id", load_backend_id
+    )
+    if posthog_api_key is None:
+        monkeypatch.delenv("AUTOMATION_POSTHOG_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", posthog_api_key)
+
+    async with app_module.lifespan(app_module.app):
+        pass
+
+    if posthog_api_key is None:
+        load_backend_id.assert_not_awaited()
+    else:
+        load_backend_id.assert_awaited_once_with(
+            session_factory=app_module.app.state.session_factory
+        )
+
+
 @pytest.fixture
 def postgres_server(postgres_container):
     return {

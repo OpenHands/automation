@@ -16,6 +16,7 @@ from testcontainers.postgres import PostgresContainer
 # works correctly with pytest's caplog fixture
 os.environ["LOG_JSON"] = "0"
 
+from openhands.automation import telemetry  # noqa: E402
 from openhands.automation.app import app  # noqa: E402
 from openhands.automation.auth import (  # noqa: E402
     AuthenticatedUser,
@@ -47,6 +48,12 @@ def ensure_log_propagation():
     # Restore original propagation settings
     for name, propagate in original_propagate.items():
         logging.getLogger(name).propagate = propagate
+
+
+@pytest.fixture(autouse=True)
+def reset_telemetry_backend_id(monkeypatch):
+    """Each test gets a fresh database, so a cached id from another is stale."""
+    monkeypatch.setattr(telemetry, "_backend_distinct_id", None)
 
 
 @pytest.fixture(scope="session")

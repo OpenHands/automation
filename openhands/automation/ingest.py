@@ -96,10 +96,10 @@ async def accept_event(
     `request` and `session_factory` are both telemetry plumbing. Telemetry
     resolves its distinct id from the database, and HTTP callers supply that
     reader indirectly as `request.app.state.session_factory`; a caller that
-    passes neither drops every event silently. So non-HTTP transports must pass
-    `session_factory`. It is deliberately not `session`: telemetry writes its id
-    row, and sharing this session would move that write into the caller's
-    transaction.
+    passes neither drops every event silently until the process has cached
+    the id. So non-HTTP transports must pass `session_factory`. It is
+    deliberately not `session`: telemetry writes its id row, and sharing this
+    session would move that write into the caller's transaction.
     """
     source = event.source
     webhook_payload = event.payload

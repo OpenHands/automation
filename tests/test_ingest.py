@@ -636,6 +636,7 @@ async def test_accept_event_emits_telemetry_without_a_request(
         async_session,
         session_factory=async_session_factory,
     )
+    await telemetry.flush_telemetry_events()
 
     assert result.matched == 1
     assert captured_telemetry == [
@@ -675,6 +676,7 @@ async def test_accept_event_telemetry_needs_a_session_source(
         ),
         async_session,
     )
+    await telemetry.flush_telemetry_events()
 
     assert result.matched == 1
     assert captured_telemetry == []

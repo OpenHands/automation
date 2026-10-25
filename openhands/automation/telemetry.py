@@ -1,5 +1,12 @@
-"""Best-effort PostHog product telemetry for automation lifecycle events."""
+"""Best-effort PostHog product telemetry for automation lifecycle events.
 
+Callers capture while their transaction is still open, so capture must not wait
+on the network: the PostHog POST runs in a background task, and the backend id
+is cached after its first read so a request never checks out a second pooled
+connection for it.
+"""
+
+import asyncio
 import json
 import logging
 import uuid
@@ -24,7 +31,7 @@ from openhands.automation.utils.service_metadata import (
     get_service_metadata,
     set_service_metadata,
 )
-from openhands.automation.utils.time import ensure_utc
+from openhands.automation.utils.time import ensure_utc, utcnow
 from openhands.automation.utils.version import (
     ServerVersionInfo,
     get_sdk_version,
@@ -34,6 +41,13 @@ from openhands.automation.utils.version import (
 
 logger = logging.getLogger("automation.telemetry")
 _telemetry_http_client: httpx.AsyncClient | None = None
+# Write-once in the database, so safe to keep for the process lifetime.
+_backend_distinct_id: str | None = None
+# Strong references: the event loop only holds weak ones to tasks.
+_pending_sends: set[asyncio.Task[None]] = set()
+# Bounds memory if PostHog stalls; each send ends within its client timeouts.
+MAX_PENDING_SENDS = 1000
+SHUTDOWN_FLUSH_TIMEOUT_SECONDS = 2.0
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
@@ -51,8 +65,22 @@ def get_telemetry_http_client() -> httpx.AsyncClient:
     return _telemetry_http_client
 
 
+async def flush_telemetry_events(timeout: float | None = None) -> None:
+    """Wait for queued PostHog sends, cancelling any still running at ``timeout``."""
+    pending = set(_pending_sends)
+    if not pending:
+        return
+    _, unfinished = await asyncio.wait(pending, timeout=timeout)
+    for task in unfinished:
+        task.cancel()
+    if unfinished:
+        logger.debug("Dropped %d unsent automation telemetry events", len(unfinished))
+        await asyncio.gather(*unfinished, return_exceptions=True)
+
+
 async def close_telemetry_http_client() -> None:
-    """Close the shared telemetry client and clear it for future lifespans."""
+    """Flush queued sends, then close the shared client for future lifespans."""
+    await flush_telemetry_events(timeout=SHUTDOWN_FLUSH_TIMEOUT_SECONDS)
     global _telemetry_http_client
     client = _telemetry_http_client
     _telemetry_http_client = None
@@ -88,8 +116,14 @@ async def get_automation_backend_distinct_id(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> str | None:
     """Return the DB-backed automation backend PostHog distinct ID."""
+    global _backend_distinct_id
+    if _backend_distinct_id is not None:
+        return _backend_distinct_id
+
     try:
         if session is not None:
+            # Not cached: an id inserted here belongs to the caller's
+            # transaction, which may still roll back.
             return await _get_or_create_backend_distinct_id(session)
 
         if session_factory is None and request is not None:
@@ -102,10 +136,12 @@ async def get_automation_backend_distinct_id(
         async with session_factory() as new_session:
             distinct_id = await _get_or_create_backend_distinct_id(new_session)
             await new_session.commit()
-            return distinct_id
     except Exception:
         logger.debug("Failed to load automation telemetry backend ID", exc_info=True)
         return None
+
+    _backend_distinct_id = distinct_id
+    return distinct_id
 
 
 def _normalize_frontend_distinct_id(frontend_distinct_id: str | None) -> str:
@@ -362,7 +398,11 @@ async def capture_automation_event(
     session: AsyncSession | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Capture a sanitized automation product event without affecting callers."""
+    """Capture a sanitized automation product event without affecting callers.
+
+    The event is built from the arguments now and queued; the PostHog POST
+    happens in the background, so callers never wait on it.
+    """
     try:
         await _capture_automation_event(
             event,
@@ -446,10 +486,25 @@ async def _capture_automation_event(
             backend_distinct_id=backend_distinct_id,
         ),
         "properties": event_properties,
+        # Sends run concurrently, so arrival order is not event order.
+        "timestamp": utcnow().isoformat(),
     }
 
-    response = await get_telemetry_http_client().post(
-        f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-        json=payload,
+    if len(_pending_sends) >= MAX_PENDING_SENDS:
+        logger.debug("Dropped automation telemetry event %s: send queue full", event)
+        return
+    task = asyncio.create_task(
+        _send_event(
+            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}", payload
+        )
     )
-    response.raise_for_status()
+    _pending_sends.add(task)
+    task.add_done_callback(_pending_sends.discard)
+
+
+async def _send_event(url: str, payload: dict[str, Any]) -> None:
+    try:
+        response = await get_telemetry_http_client().post(url, json=payload)
+        response.raise_for_status()
+    except Exception:
+        logger.debug("Failed to send automation telemetry event", exc_info=True)

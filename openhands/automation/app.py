@@ -37,6 +37,7 @@ from openhands.automation.scheduler import scheduler_loop
 from openhands.automation.streams import stream_supervisor_loop
 from openhands.automation.telemetry import (
     close_telemetry_http_client,
+    get_automation_backend_distinct_id,
     get_telemetry_http_client,
 )
 from openhands.automation.telemetry_router import router as telemetry_router
@@ -134,6 +135,13 @@ async def lifespan(app: FastAPI):
     # `alembic upgrade head` separately.
     if engine_result.is_sqlite or settings.run_migrations_on_startup:
         await run_migrations(settings)
+
+    # Cache the telemetry backend id up front, so a request capturing an event
+    # inside its transaction never checks out a second connection to read it.
+    if settings.posthog_api_key:
+        await get_automation_backend_distinct_id(
+            session_factory=app.state.session_factory
+        )
 
     # Start the background scheduler and dispatcher
     shutdown_event = asyncio.Event()
