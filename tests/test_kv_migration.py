@@ -25,6 +25,8 @@ import uuid
 from contextlib import closing
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +115,14 @@ def sqlite_db_path(tmp_path):
         path.unlink()
 
 
+def _current_migration_head() -> str:
+    config = Config(os.path.join(PROJECT_ROOT, "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    assert head is not None
+    return head
+
+
 def _assert_revision(db_path: str, revision: str) -> None:
     with sqlite3.connect(db_path) as connection:
         row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
@@ -139,6 +149,33 @@ def _execute(db_path: str, statements: list[str]) -> None:
         for statement in statements:
             connection.execute(statement)
         connection.commit()
+
+
+def _table_names(db_path: str) -> set[str]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+
+def _column_names(db_path: str, table_name: str) -> set[str]:
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in rows}
+
+
+def _assert_pre_kv_migration_schema(db_path: str) -> None:
+    _assert_revision(db_path, "028")
+    tables = _table_names(db_path)
+    assert "automation_kv_legacy" not in tables, tables
+    assert "automation_kv_meta" not in tables, tables
+    assert "automation_kv" in tables, tables
+    assert "consecutive_auth_failures" not in _column_names(
+        db_path, "automation_git_sync_org_config"
+    )
 
 
 def _seed_legacy_document(db_path: str) -> str:
@@ -201,6 +238,7 @@ def test_legacy_document_fans_out(sqlite_db_path):
 
     _alembic(db_url, "upgrade", "head")
 
+    _assert_revision(sqlite_db_path, _current_migration_head())
     _assert_fanned_out(sqlite_db_path)
 
 
@@ -260,6 +298,7 @@ def test_failed_upgrade_changes_nothing_and_can_be_retried(
 
     assert _snapshot(sqlite_db_path) == before
     _alembic(db_url, "upgrade", "head")
+    _assert_revision(sqlite_db_path, _current_migration_head())
     _assert_fanned_out(sqlite_db_path)
 
 
@@ -276,6 +315,7 @@ def test_upgrade_repairs_state_left_by_earlier_failure(sqlite_db_path, start, pa
 
     _alembic(db_url, "upgrade", "head")
 
+    _assert_revision(sqlite_db_path, _current_migration_head())
     _assert_fanned_out(sqlite_db_path)
 
 
@@ -298,3 +338,53 @@ def test_partial_030_state_with_rows_is_not_repaired(sqlite_db_path):
     assert "nothing was changed" in output, output
 
     assert _snapshot(sqlite_db_path) == before
+
+
+@pytest.mark.parametrize(
+    ("secret", "expected_error"),
+    [
+        (None, "AUTOMATION_KV_SECRET is required"),
+        ("wrong-kv-migration-test-secret", "AUTOMATION_KV_SECRET must be the secret"),
+    ],
+)
+def test_legacy_rows_migration_failure_rolls_back_and_can_retry(
+    sqlite_db_path, secret, expected_error
+):
+    """Failed 030 upgrades must not strand earlier SQLite DDL from 029."""
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", "028")
+    _assert_revision(sqlite_db_path, "028")
+    _seed_legacy_document(sqlite_db_path)
+
+    output = _alembic_expect_failure(db_url, "upgrade", "head", secret=secret)
+    assert expected_error in output, output
+
+    _assert_pre_kv_migration_schema(sqlite_db_path)
+    with sqlite3.connect(sqlite_db_path) as connection:
+        rows = connection.execute(
+            "SELECT state_encrypted FROM automation_kv"
+        ).fetchall()
+    assert len(rows) == 1, rows
+
+    _alembic(db_url, "upgrade", "head")
+    _assert_revision(sqlite_db_path, _current_migration_head())
+
+
+def test_partial_029_sqlite_column_state_recovers(sqlite_db_path):
+    db_url = f"sqlite:///{sqlite_db_path}"
+    _alembic(db_url, "upgrade", "028")
+    _seed_legacy_document(sqlite_db_path)
+    with sqlite3.connect(sqlite_db_path) as connection:
+        connection.execute(
+            "ALTER TABLE automation_git_sync_org_config "
+            "ADD COLUMN consecutive_auth_failures INTEGER DEFAULT '0' NOT NULL"
+        )
+        connection.commit()
+
+    _assert_revision(sqlite_db_path, "028")
+    assert "consecutive_auth_failures" in _column_names(
+        sqlite_db_path, "automation_git_sync_org_config"
+    )
+
+    _alembic(db_url, "upgrade", "head")
+    _assert_revision(sqlite_db_path, _current_migration_head())

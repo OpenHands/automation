@@ -54,6 +54,12 @@ class TestCustomWebhookCreateSchema:
             CustomWebhookCreate(name="Test", source="github")
         assert "reserved source name" in str(exc_info.value)
 
+    def test_reserved_source_azure_devops_rejected(self):
+        """Reserved source 'azure_devops' should be rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            CustomWebhookCreate(name="Test", source="azure_devops")
+        assert "reserved source name" in str(exc_info.value)
+
     def test_reserved_source_jira_dc_rejected(self):
         """Reserved source 'jira_dc' should be rejected."""
         with pytest.raises(ValidationError) as exc_info:
@@ -250,7 +256,12 @@ class TestReservedSources:
 
     def test_builtin_sources_reserved(self):
         """Built-in sources should be reserved."""
-        assert RESERVED_SOURCES == {"bitbucket_data_center", "github", "jira_dc"}
+        assert RESERVED_SOURCES == {
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        }
 
 
 class TestWebhookSecretGeneration:

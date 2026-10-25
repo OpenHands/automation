@@ -168,10 +168,10 @@ Adequate design context states:
 
 Put it in the PR description, or link a `.pr/` design doc that covers it from
 the `pr-design-doc` skill. Count a `.pr/` doc only when the link is pinned to a
-commit SHA, not the branch name. Approving a same-repository PR runs the
-`PR Artifacts` cleanup, which removes `.pr/` from the branch, so a branch link
-stops resolving before a human maintainer reads it, while a SHA link keeps
-working.
+commit SHA, not the branch name. After a PR merges to `main`, the `PR Artifacts`
+workflow opens or updates a cleanup PR to remove `.pr/` from `main`. A
+SHA-pinned link preserves access to the reviewed document after cleanup and
+later branch changes.
 
 Scale the response to the risk assessment:
 

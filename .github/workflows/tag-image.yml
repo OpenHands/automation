@@ -1,9 +1,15 @@
 ---
 # Adds a git-tag name to existing Docker images.
-# Triggered when a tag is pushed: finds the images built at the tag's commit
-# (tagged `sha-<full>`) and adds the tag name as an alias for the same manifest.
-# Semver tags (X.Y.Z) also get X.Y, X, and latest aliases.
+# Triggered when a tag is pushed: finds the multi-arch image built at the tag's
+# commit (tagged `sha-<full>`) and adds the tag name as an alias for the same
+# manifest. Semver tags (X.Y.Z) also get X.Y, X, and latest aliases.
 # No rebuild — pure registry-side retag via `docker buildx imagetools create`.
+#
+# Release-please pushes the release tag a minute or so after the release PR
+# merges, while the Docker workflow is still building the image for that same
+# commit — so wait-for-build blocks until that run completes before retagging.
+# Tags pushed to already-built commits pass straight through: watching a
+# completed run returns immediately.
 name: Tag Docker images
 
 on:
@@ -12,7 +18,38 @@ on:
             - '*'
 
 jobs:
+    wait-for-build:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 60
+        permissions:
+            actions: read
+        steps:
+            - name: Wait for the Docker workflow run on this commit
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  COMMIT_SHA: ${{ github.sha }}
+              shell: bash
+              run: |
+                  # The Docker run is registered by the branch push, which normally
+                  # lands a minute or more before the tag does — but retry briefly in
+                  # case this tag arrived first.
+                  run_id=""
+                  for _ in $(seq 1 10); do
+                    run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                      --workflow ghcr-build.yml --commit "$COMMIT_SHA" \
+                      --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+                    [[ -n "$run_id" ]] && break
+                    sleep 30
+                  done
+                  if [[ -z "$run_id" ]]; then
+                    echo "::error::No Docker workflow run found for $COMMIT_SHA — the image was never built for this commit."
+                    exit 1
+                  fi
+                  echo "Waiting on Docker run $run_id for $COMMIT_SHA."
+                  gh run watch --repo "$GITHUB_REPOSITORY" "$run_id" --interval 30 --exit-status
+
     retag:
+        needs: wait-for-build
         runs-on: ubuntu-24.04
         permissions:
             packages: write
@@ -43,25 +80,14 @@ jobs:
               env:
                   SRC: ghcr.io/openhands/automation:sha-${{ github.sha }}
                   TAGS: ${{ steps.meta.outputs.tags }}
+                  COMMIT_SHA: ${{ github.sha }}
               shell: bash
               run: |
                   set -euo pipefail
-                  # The Docker build workflow runs concurrently with this one, so the
-                  # source image may not be available yet. Retry for up to 5 minutes.
-                  MAX_ATTEMPTS=30
-                  SLEEP_SECS=10
-                  for i in $(seq 1 $MAX_ATTEMPTS); do
-                    if docker buildx imagetools inspect "$SRC" > /dev/null 2>&1; then
-                      echo "Source image available (attempt $i)"
-                      break
-                    fi
-                    if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
-                      echo "::error::Source image $SRC not found after $((MAX_ATTEMPTS * SLEEP_SECS))s. The Docker build for commit ${{ github.sha }} may have failed."
-                      exit 1
-                    fi
-                    echo "Waiting for source image (attempt $i/$MAX_ATTEMPTS)..."
-                    sleep $SLEEP_SECS
-                  done
+                  if ! docker buildx imagetools inspect "$SRC" > /dev/null 2>&1; then
+                    echo "::error::Source image $SRC does not exist. The Docker workflow for commit $COMMIT_SHA may not have completed successfully. Re-run this workflow once the build finishes."
+                    exit 1
+                  fi
                   args=()
                   while IFS= read -r tag; do
                     [[ -z "$tag" ]] && continue

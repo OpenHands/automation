@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -23,10 +25,16 @@ from openhands.automation.dispatcher import (
     _build_event_payload,
     _execute_run,
     _execute_run_safe,
+    _fetch_plugins_on_agent_server,
+    _validate_plugin_run_agent_profile,
     dispatch_pending_runs,
     dispatcher_loop,
 )
-from openhands.automation.exceptions import ConcurrencyLimitReachedError
+from openhands.automation.exceptions import (
+    ConcurrencyLimitReachedError,
+    DailySandboxLimitReachedError,
+    SandboxProvisioningError,
+)
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -53,6 +61,183 @@ TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 def mock_client():
     """Mock httpx.AsyncClient for tests."""
     return MagicMock()
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_posts_pinned_sources():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "path": "/tmp/plugin-cache/abc123",
+                "resolved_ref": "abc123",
+                "source": "github:org/plugin",
+                "repo_path": None,
+                "manifest": {"name": "plugin"},
+                "skills": [],
+                "commands": ["run"],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetched = await _fetch_plugins_on_agent_server(
+            client=client,
+            agent_url="http://agent-server",
+            session_key="session-key",
+            plugin_fetches=[
+                {
+                    "source": "github:org/plugin",
+                    "ref": "abc123",
+                    "repo_path": None,
+                    "resolved_ref": "ignored-runtime-only-field",
+                }
+            ],
+        )
+
+    assert fetched[0]["path"] == "/tmp/plugin-cache/abc123"
+    assert requests[0].url == "http://agent-server/api/plugins/fetch"
+    assert requests[0].headers["x-session-api-key"] == "session-key"
+    assert json.loads(requests[0].content) == {
+        "source": "github:org/plugin",
+        "ref": "abc123",
+        "repo_path": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_plugin_profile_validation_rejects_drift(monkeypatch):
+    from openhands.automation.config import clear_config_cache
+    from openhands.automation.plugin_specs import PluginSpecError
+
+    profile_id = uuid.UUID("0a1b2c3d-0000-4000-8000-000000000011")
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/agent-profiles":
+            return httpx.Response(
+                200,
+                json={"profiles": [{"id": str(profile_id), "name": "plugin-agent"}]},
+            )
+        if request.url.path == "/api/agent-profiles/plugin-agent":
+            return httpx.Response(
+                200,
+                json={
+                    "profile": {
+                        "id": str(profile_id),
+                        "name": "plugin-agent",
+                        "llm_profile_ref": "default",
+                        "tools": [
+                            {"name": "terminal", "params": {}},
+                            {"name": "file_editor", "params": {}},
+                        ],
+                    }
+                },
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://openhands-api")
+    clear_config_cache()
+    automation = SimpleNamespace(
+        agent_profile_id=profile_id,
+        org_id=TEST_ORG_ID,
+    )
+    backend = SimpleNamespace(
+        is_local_mode=False,
+        get_api_key=AsyncMock(return_value="run-api-key"),
+    )
+    resolved_runtime = {
+        "manifest": {
+            "runtime": {
+                "agent_profile": {
+                    "required": True,
+                    "allowed_tools": ["terminal"],
+                }
+            }
+        }
+    }
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(PluginSpecError, match="file_editor"):
+            await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=cast(Automation, automation),
+                resolved_runtime=resolved_runtime,
+            )
+
+    clear_config_cache()
+    assert requests[0].headers["authorization"] == "Bearer run-api-key"
+    assert requests[0].headers["x-org-id"] == str(TEST_ORG_ID)
+
+
+@pytest.mark.asyncio
+async def test_plugin_profile_validation_preserves_transient_api_failures(monkeypatch):
+    from openhands.automation.config import clear_config_cache
+
+    profile_id = uuid.UUID("0a1b2c3d-0000-4000-8000-000000000011")
+
+    def fail_connect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setenv("AUTOMATION_OPENHANDS_API_BASE_URL", "http://openhands-api")
+    clear_config_cache()
+    automation = SimpleNamespace(agent_profile_id=profile_id, org_id=TEST_ORG_ID)
+    backend = SimpleNamespace(
+        is_local_mode=False,
+        get_api_key=AsyncMock(return_value="run-api-key"),
+    )
+    resolved_runtime = {"manifest": {"runtime": {"agent_profile": {"required": True}}}}
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_connect)) as client:
+        with pytest.raises(HTTPException) as exc_info:
+            await _validate_plugin_run_agent_profile(
+                client=client,
+                backend=backend,
+                automation=cast(Automation, automation),
+                resolved_runtime=resolved_runtime,
+            )
+
+    clear_config_cache()
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_surfaces_structured_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": {"code": "missing_secret", "message": "Missing secret"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(Exception, match="missing_secret"):
+            await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url="http://agent-server",
+                session_key="session-key",
+                plugin_fetches=[{"source": "github:org/plugin"}],
+            )
+
+
+@pytest.mark.asyncio
+async def test_fetch_plugins_on_agent_server_preserves_retryable_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "agent server unavailable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await _fetch_plugins_on_agent_server(
+                client=client,
+                agent_url="http://agent-server",
+                session_key="session-key",
+                plugin_fetches=[{"source": "github:org/plugin"}],
+            )
+
+    assert exc_info.value.response.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -1232,8 +1417,7 @@ class TestBuildEventPayload:
 
 
 class TestExecuteRunConcurrencyLimit:
-    """When the org/workspace is at its concurrent-sandbox limit, the run is
-    marked SKIPPED (not FAILED) and the automation is left enabled."""
+    """Quota-limited runs are skipped without disabling their automation."""
 
     async def _make_running_run(self, async_session_factory):
         """Create an automation + a RUNNING run (as the dispatcher leaves it
@@ -1276,24 +1460,33 @@ class TestExecuteRunConcurrencyLimit:
             )
         return run, run_id, automation_id
 
-    async def test_concurrency_limit_marks_skipped_and_keeps_enabled(
-        self, async_session_factory, mock_settings, mock_client
+    @pytest.mark.parametrize(
+        ("error_type", "kind"),
+        [
+            (ConcurrencyLimitReachedError, "concurrency_limit"),
+            (DailySandboxLimitReachedError, "daily_sandbox_limit"),
+        ],
+    )
+    async def test_quota_limit_marks_skipped_and_keeps_enabled(
+        self, async_session_factory, mock_settings, mock_client, error_type, kind
     ):
-        """A ConcurrencyLimitReachedError from get_execution_context marks the
-        run SKIPPED (with completed_at, no error_detail) and does NOT disable
-        the automation."""
+        """Persist the quota skip and emit its reason without disabling the job."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
         backend.is_local_mode = False
         backend.get_execution_context = AsyncMock(
-            side_effect=ConcurrencyLimitReachedError(
-                "You have reached your limit of 3 concurrent conversations."
-            )
+            side_effect=error_type("Sandbox quota reached.")
         )
         backend.release_context = AsyncMock()
 
-        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
             await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
         async with async_session_factory() as session:
@@ -1310,8 +1503,11 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.completed_at is not None
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
-            assert updated.status_detail["kind"] == "concurrency_limit"
+            assert updated.status_detail["kind"] == kind
             assert updated.status_detail["transient"] is True
+            assert updated.status_detail["detail"] == "Sandbox quota reached."
+            assert updated.status_detail["source"] == "sandbox_api"
+            assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.error_detail is None  # SKIPPED is not a failure
 
             auto = (
@@ -1324,6 +1520,14 @@ class TestExecuteRunConcurrencyLimit:
                 .first()
             )
             assert auto.enabled is True  # transient org-level condition: not disabled
+
+        capture_event.assert_awaited_once_with(
+            "automation_run_skipped",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={"trigger_source": "dispatcher", "skip_reason": kind},
+        )
 
         # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
@@ -1361,6 +1565,365 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["source"] == "sandbox_api"
             assert updated.status_detail["operation"] == "get_execution_context"
             assert updated.status_detail["transient"] is False
+
+    async def test_retryable_plugin_preflight_failure_stays_enabled(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A transient plugin-source outage is not permanent."""
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                side_effect=PluginSpecError(
+                    "Failed to preflight automation plugin: source unavailable",
+                    code="source_unavailable",
+                    status_code=502,
+                ),
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["kind"] == "server_error"
+            assert updated.status_detail["status_code"] == 502
+            assert updated.status_detail["code"] == "source_unavailable"
+            assert updated.status_detail["transient"] is True
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    async def test_plugin_fetch_transport_failure_releases_context(
+        self, async_session_factory, mock_settings
+    ):
+        """A transient agent-server plugin fetch error must not leak a sandbox."""
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        ctx = MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+        )
+        backend.get_execution_context = AsyncMock(return_value=ctx)
+        backend.release_context = AsyncMock()
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+
+        def fail_connect(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("agent server down", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(fail_connect))
+        payload = (
+            b"tarball",
+            {},
+            {"kind": "plugin_spec", "entrypoint": "python main.py", "manifest": {}},
+            [{"source": "github:org/plugin"}],
+        )
+
+        try:
+            with (
+                patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ),
+                patch(
+                    "openhands.automation.dispatcher.build_execution_payload",
+                    return_value=payload,
+                ),
+            ):
+                await _execute_run(run, mock_settings, async_session_factory, client)
+        finally:
+            await client.aclose()
+
+        backend.release_context.assert_awaited_once_with(client, ctx)
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "fetch_plugin"
+            assert updated.status_detail["transient"] is True
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+
+class TestExecuteRunProvisioningRetry:
+    """A sandbox that fails to start before the entrypoint runs is retried with
+    a fresh sandbox, as long as the run is still RUNNING."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_retries(self, monkeypatch):
+        sandbox_cfg = get_config().sandbox
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_retry_delay", 0)
+        monkeypatch.setattr(sandbox_cfg, "sandbox_provision_max_attempts", 3)
+
+    async def _make_running_run(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="https://example.com/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(seconds=60),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+        return run, run_id
+
+    @staticmethod
+    async def _load(async_session_factory, run_id) -> AutomationRun:
+        async with async_session_factory() as session:
+            return (
+                await session.execute(
+                    select(AutomationRun)
+                    .options(selectinload(AutomationRun.automation))
+                    .where(AutomationRun.id == run_id)
+                )
+            ).scalar_one()
+
+    @staticmethod
+    async def _set_status(async_session_factory, run_id, status, error=None):
+        async with async_session_factory() as session:
+            run = await session.get(AutomationRun, run_id)
+            assert run is not None
+            run.status = status
+            run.error_detail = error
+            await session.commit()
+
+    @staticmethod
+    def _provisioning_error() -> SandboxProvisioningError:
+        return SandboxProvisioningError(
+            "Sandbox failed to start: status=ERROR, "
+            "status_detail=runtime_ingress:connection_error",
+            sandbox_id="sb-failed",
+            status="ERROR",
+            reason="runtime_ingress:connection_error",
+        )
+
+    @staticmethod
+    def _backend(side_effect) -> MagicMock:
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(side_effect=side_effect)
+        backend.release_context = AsyncMock()
+        backend.build_env_vars = MagicMock(return_value={})
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        return backend
+
+    @staticmethod
+    def _ctx() -> MagicMock:
+        return MagicMock(
+            agent_url="http://agent.test", sandbox_id="sbx-ok", session_key="sk-1"
+        )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_retries_sandbox_that_failed_to_start(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        original_timeout_at = run.timeout_at
+        deadlines = []
+        ctx = self._ctx()
+
+        async def acquire(_client):
+            if not deadlines:
+                deadlines.append(None)
+                raise self._provisioning_error()
+            # The retry must have pushed the watchdog deadline out first.
+            deadlines.append(
+                (await self._load(async_session_factory, run_id)).timeout_at
+            )
+            return ctx
+
+        backend = self._backend(acquire)
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 2
+        assert deadlines[1] > original_timeout_at + timedelta(
+            seconds=get_config().sandbox.sandbox_ready_timeout
+        )
+        mock_execute.assert_awaited_once()
+        backend.release_context.assert_not_called()
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.RUNNING
+        assert updated.sandbox_id == "sbx-ok"
+
+    async def test_exhausted_retries_fail_with_runtime_reason(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(self._provisioning_error())
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 3
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.error_detail is not None
+        assert "runtime_ingress:connection_error" in updated.error_detail
+        assert "attempts: 3" in updated.error_detail
+        detail = updated.status_detail
+        assert detail is not None
+        assert detail["phase"] == "dispatch"
+        assert detail["kind"] == "environment_unavailable"
+        assert detail["transient"] is True
+        assert detail["code"] == "sandbox_error"
+        assert detail["sandbox_status"] == "ERROR"
+        assert detail["sandbox_status_detail"] == "runtime_ingress:connection_error"
+        assert detail["attempts"] == 3
+        assert updated.automation.enabled is True
+        backend.release_context.assert_not_called()
+
+    async def test_single_attempt_disables_retry(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        monkeypatch.setattr(get_config().sandbox, "sandbox_provision_max_attempts", 1)
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(self._provisioning_error())
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.status_detail is not None
+        assert updated.status_detail["attempts"] == 1
+
+    @pytest.mark.parametrize(
+        ("status", "error"),
+        [
+            (AutomationRunStatus.CANCELLED, "Cancelled by user"),
+            (AutomationRunStatus.FAILED, "Timed out: watchdog"),
+        ],
+    )
+    async def test_no_retry_once_run_is_terminal(
+        self, async_session_factory, mock_settings, mock_client, status, error
+    ):
+        """Cancel or watchdog expiry during provisioning stops retries, and the
+        dispatcher never overwrites that terminal state."""
+        run, run_id = await self._make_running_run(async_session_factory)
+
+        async def acquire(_client):
+            await self._set_status(async_session_factory, run_id, status, error)
+            raise self._provisioning_error()
+
+        backend = self._backend(acquire)
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == status
+        assert updated.error_detail == error
+        assert updated.status_detail is None
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_cancel_during_provisioning_releases_sandbox(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A sandbox that comes up after the run was cancelled is deleted and
+        the entrypoint never starts."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        ctx = self._ctx()
+
+        async def acquire(_client):
+            await self._set_status(
+                async_session_factory,
+                run_id,
+                AutomationRunStatus.CANCELLED,
+                "Cancelled by user",
+            )
+            return ctx
+
+        backend = self._backend(acquire)
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_awaited_once_with(mock_client, ctx)
+        mock_execute.assert_not_called()
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.CANCELLED
+        assert updated.sandbox_id is None
+
+    async def test_concurrency_limit_on_retry_is_skipped(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(
+            [self._provisioning_error(), ConcurrencyLimitReachedError("limit")]
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 2
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.SKIPPED
+        assert updated.status_detail is not None
+        assert updated.status_detail["kind"] == "concurrency_limit"
+
+    async def test_other_errors_are_not_retried(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        run, run_id = await self._make_running_run(async_session_factory)
+        backend = self._backend(RuntimeError("boom"))
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert backend.get_execution_context.await_count == 1
+        updated = await self._load(async_session_factory, run_id)
+        assert updated.status == AutomationRunStatus.FAILED
+        assert updated.status_detail is not None
+        assert updated.status_detail["kind"] == "unknown"
 
 
 class TestExecuteRunDerivedConversationId:

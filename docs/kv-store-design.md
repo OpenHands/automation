@@ -707,7 +707,7 @@ are left exactly as they were. To recover:
 1. Back up the database file.
 2. Set `AUTOMATION_KV_SECRET` to the secret the state was written with, and
    restart. The upgrade runs again.
-3. Check that the log says `SQLite database migrations applied successfully`
+3. Check that the log says `Database migrations applied successfully`
    and that `alembic_version` is at the head revision.
 
 Releases up to 1.19.3 could leave a SQLite database half-migrated: 029's

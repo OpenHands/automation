@@ -3,6 +3,8 @@
 import json
 import logging
 import uuid
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError
 from typing import Any
 
 import httpx
@@ -10,6 +12,7 @@ from fastapi import Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from openhands.automation import __version__
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import get_config
 from openhands.automation.middleware import (
@@ -22,10 +25,15 @@ from openhands.automation.utils.service_metadata import (
     set_service_metadata,
 )
 from openhands.automation.utils.time import ensure_utc
-from openhands.automation.utils.version import get_server_version_info
+from openhands.automation.utils.version import (
+    ServerVersionInfo,
+    get_sdk_version,
+    get_server_version_info,
+)
 
 
 logger = logging.getLogger("automation.telemetry")
+_telemetry_http_client: httpx.AsyncClient | None = None
 AUTOMATION_BACKEND_ID_PROPERTY = "automation_backend_id"
 FRONTEND_DISTINCT_ID_PROPERTY = "frontend_distinct_id"
 POSTHOG_CAPTURE_PATH = "/capture/"
@@ -33,6 +41,23 @@ TELEMETRY_CONSENT_METADATA_KEY = "posthog_frontend_consent_by_distinct_id"
 TELEMETRY_CONSENT_ANONYMOUS_ID = "__anonymous__"
 
 TELEMETRY_BACKEND_DISTINCT_ID_KEY = "posthog_backend_distinct_id"
+
+
+def get_telemetry_http_client() -> httpx.AsyncClient:
+    """Return the process-wide client used for PostHog capture requests."""
+    global _telemetry_http_client
+    if _telemetry_http_client is None:
+        _telemetry_http_client = httpx.AsyncClient(timeout=2.0)
+    return _telemetry_http_client
+
+
+async def close_telemetry_http_client() -> None:
+    """Close the shared telemetry client and clear it for future lifespans."""
+    global _telemetry_http_client
+    client = _telemetry_http_client
+    _telemetry_http_client = None
+    if client is not None:
+        await client.aclose()
 
 
 async def _get_or_create_backend_distinct_id(session: AsyncSession) -> str:
@@ -238,6 +263,20 @@ def _resolve_distinct_id(
     )
 
 
+@lru_cache(maxsize=1)
+def _installed_sdk_version() -> str:
+    # Only successful lookups are cached: lru_cache does not memoize exceptions.
+    return get_sdk_version()
+
+
+def _server_version_properties() -> ServerVersionInfo:
+    try:
+        sdk_version = _installed_sdk_version()
+    except PackageNotFoundError:
+        return get_server_version_info(missing_sdk_version="unknown")
+    return {"package_version": __version__, "sdk_version": sdk_version}
+
+
 def _base_properties(
     *,
     request_context: TelemetryRequestContext,
@@ -251,7 +290,7 @@ def _base_properties(
         "deployment_mode": "local" if settings.is_local_mode else "cloud",
         "deployment_kind": "local" if settings.is_local_mode else "remote",
         "automation_service": "openhands_automation",
-        **get_server_version_info(missing_sdk_version="unknown"),
+        **_server_version_properties(),
     }
 
     properties[AUTOMATION_BACKEND_ID_PROPERTY] = backend_distinct_id
@@ -409,9 +448,8 @@ async def _capture_automation_event(
         "properties": event_properties,
     }
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        response = await client.post(
-            f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
-            json=payload,
-        )
-        response.raise_for_status()
+    response = await get_telemetry_http_client().post(
+        f"{settings.posthog_host.rstrip('/')}{POSTHOG_CAPTURE_PATH}",
+        json=payload,
+    )
+    response.raise_for_status()
