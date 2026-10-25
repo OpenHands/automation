@@ -24,7 +24,7 @@ Routes: `POST /api/automation/v1/events/{org_id}/{source}`,
 
 ## Sub-features
 
-- `F11.no-match`: a correctly signed custom delivery with no matching automation answers 200 `{received:true, matched:0, runs_created:[], conversations_continued:[]}` and is still recorded in `integration_events` with `matched_count` 0.
+- `F11.no-match`: a correctly signed custom delivery with no matching automation answers 200 `{received:true, matched:0, runs_created:[], conversations_continued:[]}`. It is recorded in `integration_events` with `matched_count` 0 only when the org has an enabled automation on that source; with none, nothing is recorded.
 - `F11.hmac-signature`: `hmac_sha256_hex` accepts `sha256=<hex>` and bare hex; a tampered signature or a wrong secret answers 401 `Invalid signature`, and an unsigned delivery 401 `Missing signature header: X-Signature-256`; no API key is needed.
 - `F11.standard-webhooks`: a `standard_webhooks` delivery verifies with a server-generated `whsec_` secret (used whole as the key) and with a base64 `whsec_` secret; a timestamp older than 300 s, a missing `webhook-id` or a tampered signature answers 401 `Invalid signature`.
 - `F11.slack-v0`: a `slack_v0` delivery (`v0=` signature over `v0:<ts>:<body>` plus `X-Slack-Request-Timestamp`) is accepted; a stale or missing timestamp, or an `hmac_sha256_hex` signature in the Slack header, answers 401.
@@ -87,11 +87,16 @@ Preconditions:
   each run dumps its environment to `qa-env.json` and completes through the
   callback within seconds.
 
-- **No matching automation (`F11.no-match`).** Accepted and recorded, nothing matched.
+- **No matching automation (`F11.no-match`).** Accepted, nothing matched; recorded only once the source has a candidate automation.
   ```sh
   control-automation event send qa-orders --secret qa-orders-secret --json '{"type":"misc.noop"}' --expect 200 --check received eq true --check matched eq 0 --check runs_created len-eq 0 --check conversations_continued len-eq 0 --save F11.no-match/send
+  control-automation state sql "SELECT count(*) AS n FROM integration_events WHERE source = 'qa-orders' AND event_key = 'misc.noop'" --check rows.0.n eq 0
+  control-automation fixture automation --kind callback --name 'qa never matches' --event-source qa-orders --on 'misc.never' --field id
+  control-automation event send qa-orders --secret qa-orders-secret --json '{"type":"misc.noop"}' --expect 200 --check matched eq 0 --check runs_created len-eq 0 --save F11.no-match/candidate
   control-automation state sql "SELECT matched_count, provider_event_id FROM integration_events WHERE source = 'qa-orders' AND event_key = 'misc.noop'" --check count eq 1 --check rows.0.matched_count eq 0 --check rows.0.provider_event_id eq null
   ```
+  With no automation on `qa-orders` the delivery leaves no row; once one
+  exists, the same delivery is recorded with `matched_count` 0.
 - **HMAC signatures (`F11.hmac-signature`).** Both header forms verify; anything else is refused before the body is read.
   ```sh
   control-automation event send qa-orders --secret qa-orders-secret --json '{"type":"misc.prefixed"}' --expect 200 --save F11.hmac-signature/prefixed
@@ -310,8 +315,9 @@ decode to the same key).
   duplicate delivery id, an event the provider cannot parse, or a filter that
   raised. Tell them apart with a matching automation and the
   `integration_events` table: a parse failure (no event key, unsupported
-  GitHub event) records no row, a duplicate records no second row, and a plain
-  no-match records a row with `matched_count` 0.
+  GitHub event) or a source with no enabled automation records no row, a
+  duplicate records no second row, and a plain no-match records a row with
+  `matched_count` 0.
 - Filters see the raw body (for built-ins, the inside of `payload`), but the
   run's `AUTOMATION_EVENT_PAYLOAD.event` differs by source: the
   `{payload, source_override, event_key}` wrapper for custom webhooks, the

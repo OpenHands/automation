@@ -147,9 +147,49 @@ def captured_telemetry(monkeypatch: pytest.MonkeyPatch):
 async def test_accept_event_no_automations(
     org_id: uuid.UUID,
     async_session,
+    async_session_factory,
     slack_payload: dict,
+    captured_telemetry: list[str],
 ):
-    """No automations configured: nothing matches, nothing is created."""
+    """No automations configured: nothing is recorded or sent."""
+    result = await accept_event(
+        org_id,
+        AcceptedEvent(
+            source="slack",
+            event_key="app_mention",
+            payload=slack_payload,
+            provider_event_id="Ev123456",
+        ),
+        async_session,
+        session_factory=async_session_factory,
+    )
+
+    assert isinstance(result, AcceptResult)
+    assert result.matched == 0
+    assert result.run_ids == []
+    assert result.duplicate is False
+    assert captured_telemetry == []
+    assert await fetch_runs(async_session) == []
+    assert await fetch_events(async_session) == []
+
+
+@pytest.mark.asyncio
+async def test_accept_event_ignores_automations_on_another_source(
+    org_id: uuid.UUID,
+    async_session,
+    slack_payload: dict,
+    mock_authenticated_user,
+):
+    """Candidates are per source: a github automation does not record slack events."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "github", "on": "push"},
+        )
+    )
+    await async_session.commit()
+
     result = await accept_event(
         org_id,
         AcceptedEvent(
@@ -160,11 +200,8 @@ async def test_accept_event_no_automations(
         async_session,
     )
 
-    assert isinstance(result, AcceptResult)
     assert result.matched == 0
-    assert result.run_ids == []
-    assert result.duplicate is False
-    assert await fetch_runs(async_session) == []
+    assert await fetch_events(async_session) == []
 
 
 @pytest.mark.asyncio
@@ -766,8 +803,18 @@ async def test_accept_event_records_events_that_match_nothing(
     org_id: uuid.UUID,
     async_session,
     slack_payload: dict,
+    mock_authenticated_user,
 ):
     """Nothing matches, so the row is the only evidence the event arrived."""
+    async_session.add(
+        make_automation(
+            org_id,
+            mock_authenticated_user.user_id,
+            {"type": "event", "source": "slack", "on": "message"},
+        )
+    )
+    await async_session.commit()
+
     result = await accept_event(
         org_id,
         AcceptedEvent(
@@ -899,9 +946,20 @@ async def test_accept_event_deduplicates_within_one_org_only(
     org_id: uuid.UUID,
     async_session,
     slack_payload: dict,
+    mock_authenticated_user,
 ):
     """A custom webhook's source name is only unique per org, so the key is too."""
     other_org = uuid.uuid4()
+    for owner in (org_id, other_org):
+        async_session.add(
+            make_automation(
+                owner,
+                mock_authenticated_user.user_id,
+                {"type": "event", "source": "ci", "on": "build"},
+            )
+        )
+    await async_session.commit()
+
     delivery = AcceptedEvent(
         source="ci",
         event_key="build",

@@ -788,10 +788,24 @@ async def test_github_event_without_a_delivery_header_is_still_recorded(
     org_id: uuid.UUID,
     github_push_payload: dict,
     async_session,
+    mock_authenticated_user,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """No delivery id: recorded with a NULL key, and never deduplicated."""
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    # A candidate that does not match, so the event is recorded but runs nothing.
+    async_session.add(
+        Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org_id,
+            name="On pull requests",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            trigger={"type": "event", "source": "github", "on": "pull_request"},
+        )
+    )
+    await async_session.commit()
 
     signature, body = sign_payload(github_push_payload, "test-secret")
     headers = {

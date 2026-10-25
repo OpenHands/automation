@@ -84,7 +84,8 @@ async def accept_event(
 
     Records the event and creates the runs in one transaction, deduplicating on
     `event.provider_event_id` when the transport supplies one. Commits before
-    returning.
+    returning. An event for a source the org has no enabled automations on is
+    not recorded and leaves the session uncommitted.
 
     A matched automation whose trigger sets `destination` to
     `continue_conversation` first tries to deliver the event as another turn on
@@ -104,6 +105,15 @@ async def accept_event(
     source = event.source
     webhook_payload = event.payload
 
+    # With no candidates the row has no job: a redelivery cannot start a run,
+    # and there is no filter whose misses it could explain. Returning here
+    # keeps a burst from an org with nothing configured from holding pooled
+    # connections across an insert, telemetry and a commit.
+    automations = await get_event_automations(org_id, source, session)
+    if not automations:
+        logger.info("Event matched 0/0 automations for org=%s", org_id)
+        return AcceptResult(matched=0, run_ids=[])
+
     record = IntegrationEvent(
         org_id=org_id,
         source=source,
@@ -111,10 +121,10 @@ async def accept_event(
         event_key=event.event_key,
         payload=webhook_payload,
     )
-    # Insert before doing any routing work, so a redelivery costs one failed
-    # INSERT rather than a match pass. The savepoint is what keeps the
-    # violation recoverable: without it the failure would poison the
-    # transaction the caller still has to commit.
+    # Insert before matching, so a redelivery costs one failed INSERT rather
+    # than a match pass. The savepoint is what keeps the violation
+    # recoverable: without it the failure would poison the transaction the
+    # caller still has to commit.
     try:
         async with session.begin_nested():
             session.add(record)
@@ -142,7 +152,6 @@ async def accept_event(
         )
         return AcceptResult(matched=0, run_ids=[], duplicate=True)
 
-    automations = await get_event_automations(org_id, source, session)
     matched: list[tuple[Automation, EventTrigger]] = []
     for automation, trigger in automations:
         matched_trigger = False

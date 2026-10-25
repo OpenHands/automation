@@ -604,7 +604,8 @@ class IntegrationEvent(Base):
     """One accepted delivery, written in the same transaction as its runs.
 
     The dedupe key for redeliveries, and the only trace an event that matched
-    nothing leaves.
+    nothing leaves. Only written when the org has an enabled automation on the
+    event's source: with none, there is nothing to dedupe or debug.
     """
 
     __tablename__ = "integration_events"
