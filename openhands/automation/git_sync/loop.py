@@ -64,7 +64,6 @@ from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
-    AutomationOwnerKind,
     AutomationState,
     TarballUpload,
     UploadStatus,
@@ -300,7 +299,6 @@ class _Owner(NamedTuple):
 
     user_id: uuid.UUID
     org_id: uuid.UUID
-    kind: AutomationOwnerKind = AutomationOwnerKind.USER
 
 
 def _import_owner(org_config: AutomationGitSyncOrgConfig) -> _Owner | None:
@@ -309,19 +307,11 @@ def _import_owner(org_config: AutomationGitSyncOrgConfig) -> _Owner | None:
     The admin who last saved the org's Git Sync config: an automation runs as
     its owner, and in cloud mode that means minting the owner's API key, so it
     has to be a real member of the org. Local mode has no such user and keeps
-    its deterministic local identity. An org's `import_owner_user_id` (a service
-    account, verified when saved) takes precedence over both.
-
-    `None` -- an org row never saved from the UI, outside local mode -- makes
-    the import skip new directories (see `_create_automation_from_git`);
-    already-synced automations keep their owner and update as usual.
+    its deterministic local identity. `None` -- an org row never saved from
+    the UI, outside local mode -- makes the import skip new directories (see
+    `_create_automation_from_git`); already-synced automations keep their
+    owner and update as usual.
     """
-    if org_config.import_owner_user_id is not None:
-        return _Owner(
-            org_config.import_owner_user_id,
-            org_config.org_id,
-            AutomationOwnerKind.SERVICE,
-        )
     if org_config.configured_by_user_id is not None:
         return _Owner(org_config.configured_by_user_id, org_config.org_id)
     if get_config().service.is_local_mode:
@@ -617,12 +607,7 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(
-        user_id=owner.user_id,
-        owner_kind=owner.kind,
-        org_id=owner.org_id,
-        **values,
-    )
+    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
     session.add(automation)
     await session.flush()
 

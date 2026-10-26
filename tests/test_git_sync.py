@@ -50,7 +50,6 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
-    AutomationOwnerKind,
     AutomationState,
     Base,
     TarballUpload,
@@ -2624,47 +2623,6 @@ class TestImportedAutomationDefaults:
         update_logs = [r for r in caplog.messages if "Updated automation" in r]
         assert update_logs
         assert "Repo Writer <writer@example.com>" in update_logs[0]
-
-    async def test_imports_belong_to_import_owner_sa(
-        self, sqlite_session_factory, git_settings, service_settings, origin
-    ):
-        admin_id, sa_id = uuid.uuid4(), uuid.uuid4()
-        async with sqlite_session_factory() as session:
-            await apply_git_sync_config_override(
-                session, LOCAL_ORG_ID, {}, configured_by_user_id=admin_id
-            )
-            (
-                await get_or_create_org_config(session, LOCAL_ORG_ID)
-            ).import_owner_user_id = sa_id
-            await session.commit()
-        await self._push_hand_written(origin)
-
-        await self._cycle(sqlite_session_factory, git_settings, service_settings)
-
-        async with sqlite_session_factory() as session:
-            automation = (await session.execute(select(Automation))).scalars().one()
-            upload = (await session.execute(select(TarballUpload))).scalars().one()
-        assert automation.user_id == sa_id
-        assert automation.owner_kind is AutomationOwnerKind.SERVICE
-        assert upload.user_id == sa_id
-
-    async def test_without_import_owner_the_configuring_user_owns_imports(
-        self, sqlite_session_factory, git_settings, service_settings, origin
-    ):
-        admin_id = uuid.uuid4()
-        async with sqlite_session_factory() as session:
-            await apply_git_sync_config_override(
-                session, LOCAL_ORG_ID, {}, configured_by_user_id=admin_id
-            )
-            await session.commit()
-        await self._push_hand_written(origin)
-
-        await self._cycle(sqlite_session_factory, git_settings, service_settings)
-
-        async with sqlite_session_factory() as session:
-            automation = (await session.execute(select(Automation))).scalars().one()
-        assert automation.user_id == admin_id
-        assert automation.owner_kind is AutomationOwnerKind.USER
 
 
 class TestFailureBackoffState:

@@ -41,7 +41,7 @@ Routes: `GET /api/automation/v1/git-sync/status`, `PUT /api/automation/v1/git-sy
 - `F13.commit-author`: commits use the message `Sync automations from agent server` and author `OpenHands Automation <automation@openhands.dev>` unless `author_name`/`author_email` are set.
 - `F13.slugs`: slugs are the lowercased name with non-alphanumeric runs collapsed to `-`, capped at 80 characters; a second automation with the same name gets `-<first 8 hex of its id>`.
 - `F13.export-external`: an automation with an external `tarball_path` exports only `automation.yaml` with `tarball_source: {type: external, url: ...}`.
-- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an INACTIVE automation (its YAML sets neither `enabled` nor `state`) owned by the configuring user, or by the org's `import_owner_user_id` service account when set, with an internal tarball, and the import pushes no commit of its own.
+- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an INACTIVE automation (its YAML sets neither `enabled` nor `state`) owned by the configuring user, with an internal tarball, and the import pushes no commit of its own.
 - `F13.import-invalid-skipped`: a directory with invalid YAML or without `entrypoint` is skipped with a logged warning; the cycle still succeeds.
 - `F13.import-update`: editing `name` and `enabled` in a synced `automation.yaml` updates the automation; its slug directory stays.
 - `F13.conflict-service-wins`: when the same automation is edited through the API and in git before a sync, the API version ends up in both the database and the repo.

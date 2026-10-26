@@ -13,18 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openhands.automation.auth import (
-    AuthenticatedUser,
-    get_http_client,
-    require_permission,
-)
+from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.config import GitSyncSettings, ServiceSettings, get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync.client import GitSyncError, check_remote_access
 from openhands.automation.git_sync.config_override import (
     apply_git_sync_config_override,
     find_org_using_repo,
-    get_or_create_org_config,
     get_org_config,
     lock_repo_identity,
     resolve_candidate_git_sync_settings,
@@ -40,7 +35,6 @@ from openhands.automation.git_sync.schemas import (
 )
 from openhands.automation.git_sync.secret_store import GitSyncSecretStoreError
 from openhands.automation.models import AutomationGitSyncState
-from openhands.automation.utils.owner import verify_service_account
 
 
 logger = logging.getLogger("automation.git_sync")
@@ -110,9 +104,6 @@ async def _build_status_response(
         dirty_count=dirty_count or 0,
         sync_in_progress=sync_in_progress,
         sync_started_at=sync_started_at if sync_in_progress else None,
-        import_owner_user_id=(
-            org_config.import_owner_user_id if org_config is not None else None
-        ),
     )
 
 
@@ -129,7 +120,6 @@ async def get_git_sync_status(
 @router.put("/config")
 async def update_git_sync_config(
     data: GitSyncConfigUpdateRequest,
-    request: Request,
     user: AuthenticatedUser = Depends(_require_manage_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> GitSyncStatusResponse:
@@ -138,8 +128,7 @@ async def update_git_sync_config(
     Configuring a repo is what turns sync on, so everything here takes effect
     immediately -- there is no boot-time flag left to disagree with. The
     caller is recorded as the org's configuring user: automations imported
-    from git are created as them (see loop.py), unless `import_owner_user_id`
-    names a service account of the org, which owns them instead.
+    from git are created as them (see loop.py).
 
     Refused with a 409 when another org already syncs the same repository,
     branch and path. Each org's export writes `{path}/{slug}/` and its import
@@ -147,17 +136,7 @@ async def update_git_sync_config(
     other's automations.
     """
     update = data.model_dump(exclude_unset=True)
-    set_import_owner = "import_owner_user_id" in update
-    import_owner_user_id = update.pop("import_owner_user_id", None)
     mapped = {_CONFIG_OVERRIDE_FIELDS[key]: value for key, value in update.items()}
-
-    if import_owner_user_id is not None:
-        await verify_service_account(
-            import_owner_user_id,
-            user.org_id,
-            get_http_client(request),
-            field="import_owner_user_id",
-        )
 
     if _REPO_IDENTITY_FIELDS & mapped.keys():
         candidate = await resolve_candidate_git_sync_settings(
@@ -191,10 +170,6 @@ async def update_git_sync_config(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Cannot store the git sync secrets securely: {e}",
         ) from e
-    if set_import_owner:
-        (
-            await get_or_create_org_config(session, user.org_id)
-        ).import_owner_user_id = import_owner_user_id
     await session.commit()
 
     git_settings = await resolve_effective_git_sync_settings(session, user.org_id)
@@ -223,7 +198,6 @@ async def check_git_sync_config(
         {
             _CONFIG_OVERRIDE_FIELDS[key]: value
             for key, value in data.model_dump(exclude_unset=True).items()
-            if key in _CONFIG_OVERRIDE_FIELDS
         },
     )
 

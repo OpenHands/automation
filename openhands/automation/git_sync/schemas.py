@@ -1,7 +1,5 @@
 """Pydantic schemas for the git sync status API."""
 
-import uuid
-
 from pydantic import BaseModel, Field, field_validator
 
 from openhands.automation.config import normalize_git_sync_path
@@ -24,8 +22,6 @@ class GitSyncStatusResponse(BaseModel):
     # caller can't tell "running" from "nothing happened".
     sync_in_progress: bool = False
     sync_started_at: UtcDatetime | None = None
-    # The service account that owns automations imported from git, if set.
-    import_owner_user_id: uuid.UUID | None = None
 
 
 class GitSyncTriggerResponse(BaseModel):
@@ -76,9 +72,6 @@ class GitSyncConfigUpdateRequest(BaseModel):
     encryption_key: str | None = None
     author_name: str | None = None
     author_email: str | None = None
-    # A service account of the org; null clears it. Not a runtime-config
-    # override: it is stored in its own column.
-    import_owner_user_id: uuid.UUID | None = None
 
     @field_validator(
         "repo_url",
