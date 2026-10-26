@@ -607,6 +607,30 @@ async def _execute_run(
             ),
         )
         return
+    except APIKeyError as exc:
+        # The agent-profile check mints the owner's key (e.g. the owner left
+        # the org). Fail through _fail so the unhealthy check and failure
+        # telemetry run, the same as the non-plugin dispatch path.
+        logger.error(
+            "Plugin preflight could not get the API key: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        error = f"Failed to get API key for plugin preflight: {exc}"
+        await _fail(
+            error,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.UNKNOWN,
+                detail=error,
+                transient=False,
+                source="openhands_api",
+                operation="preflight_plugin",
+                code=type(exc).__name__,
+            ),
+        )
+        return
 
     # 3. Get execution context - if this fails, nothing to clean up
     # Note: This also initializes backend state (e.g., API key for cloud mode)

@@ -1641,6 +1641,86 @@ class TestExecuteRunConcurrencyLimit:
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
 
+    async def test_plugin_preflight_api_key_error_fails_run_with_dispatch_detail(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A failed owner key mint in the plugin preflight fails the run as a
+        dispatch error, runs the unhealthy check, and creates no sandbox."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP 403: user is not a member of the org")
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+            patch(
+                "openhands.automation.dispatcher.maybe_disable_unhealthy_automation_after_run",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as maybe_disable,
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        maybe_disable.assert_awaited_once_with(async_session_factory, automation_id)
+        capture_event.assert_awaited_once_with(
+            "automation_run_failed",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+                "automation_disabled": False,
+            },
+        )
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert "API key" in updated.error_detail
+            assert "HTTP 403" in updated.error_detail
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["transient"] is False
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
     async def test_plugin_fetch_transport_failure_releases_context(
         self, async_session_factory, mock_settings
     ):
