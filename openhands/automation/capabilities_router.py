@@ -77,6 +77,9 @@ _STATIC_FEATURES = (
     "repoClone",
     # A preset's repositories can be changed with PATCH after creation.
     "repoUpdate",
+    # An automation can be owned by a service account, and the service
+    # account's owner kind is reported; admins may edit and enable those.
+    "serviceAccountOwners",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.

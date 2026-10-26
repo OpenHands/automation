@@ -58,6 +58,13 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
+class AutomationOwnerKind(StrEnum):
+    """What kind of principal owns an automation (``Automation.user_id``)."""
+
+    USER = "user"
+    SERVICE = "service"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -65,6 +72,14 @@ class Automation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # SERVICE: user_id is a service account of the org. Managers (not the
+    # service account itself) may then edit and enable the automation.
+    owner_kind: Mapped[AutomationOwnerKind] = mapped_column(
+        Enum(AutomationOwnerKind, native_enum=False, length=16),
+        nullable=False,
+        default=AutomationOwnerKind.USER,
+        server_default=AutomationOwnerKind.USER.value,
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

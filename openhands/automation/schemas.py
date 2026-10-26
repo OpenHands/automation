@@ -20,7 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.models import AutomationState
+from openhands.automation.models import AutomationOwnerKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -1114,6 +1114,7 @@ class AutomationResponse(BaseModel):
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
+    owner_kind: AutomationOwnerKind = AutomationOwnerKind.USER
     org_id: uuid.UUID
     model: str | None
 

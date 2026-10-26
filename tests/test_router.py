@@ -17,6 +17,7 @@ from sqlalchemy import select
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
+    AutomationOwnerKind,
     AutomationRun,
     AutomationState,
     TarballUpload,
@@ -411,6 +412,129 @@ class TestPermissionEnforcement:
         )
 
         assert response.status_code == 403
+
+
+class TestServiceOwnedAutomations:
+    """Edit rule for automations owned by a service account (SA).
+
+    ``readonly_client`` is a member with ``view_automations`` only;
+    ``async_client`` holds ``manage_automations``. Both act as TEST_USER_ID.
+    """
+
+    _SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    async def _sa_automation(
+        self, async_session, *, user_id=None, enabled: bool = True
+    ) -> Automation:
+        automation = Automation(
+            user_id=user_id or self._SA_ID,
+            owner_kind=AutomationOwnerKind.SERVICE,
+            org_id=TEST_ORG_ID,
+            name="SA Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=enabled,
+            state=AutomationState.ACTIVE if enabled else AutomationState.INACTIVE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_response_has_owner_kind(self, async_client, async_session):
+        sa_owned = await self._sa_automation(async_session)
+
+        response = await async_client.get(f"/api/automation/v1/{sa_owned.id}")
+
+        assert response.json()["owner_kind"] == "service"
+
+    async def test_human_owned_defaults_to_user_owner_kind(
+        self, async_client, local_mode
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Mine",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "tarball_path": "s3://bucket/code.tar.gz",
+                "entrypoint": "uv run script.py",
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["owner_kind"] == "user"
+
+    async def test_manager_can_edit_service_owned(self, async_client, async_session):
+        automation = await self._sa_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "Renamed"
+
+    async def test_manager_can_enable_service_owned(self, async_client, async_session):
+        automation = await self._sa_automation(async_session, enabled=False)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "ACTIVE"
+
+    async def test_member_cannot_edit_service_owned(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session)
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_edit_own_automation(
+        self, readonly_client, async_session
+    ):
+        """The SA's own run key must not edit the automation it runs."""
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_delete_own_automation(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_dispatch_own_automation(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
+
+        assert response.status_code == 403
+
+    async def test_patch_owner_kind_returns_422(self, async_client, async_session):
+        automation = await self._sa_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"owner_kind": "user"}
+        )
+
+        assert response.status_code == 422
 
 
 class TestCreateAutomation:

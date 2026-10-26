@@ -33,6 +33,7 @@ from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
     AutomationDraft,
+    AutomationOwnerKind,
     AutomationRun,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
@@ -141,12 +142,19 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     access to the automation row, so the check lives here in the handler
     path instead of in the dependency.
 
+    A service-account-owned automation has no creator escape: only holders of
+    ``manage_automations`` pass, so the service account's own run key cannot
+    edit, delete, dispatch or cancel the automation it runs.
+
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
     """
     if "manage_automations" in user.permissions:
         return
-    if automation.user_id == user.user_id:
+    if (
+        automation.owner_kind != AutomationOwnerKind.SERVICE
+        and automation.user_id == user.user_id
+    ):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -170,6 +178,13 @@ def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
 def _assert_can_update_fields(
     automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
 ) -> None:
+    """Allow a full edit by the creator, or by a manager of a service-owned one.
+
+    ``_assert_can_manage`` has already run: a service-owned automation reaches
+    here only for a ``manage_automations`` holder, so no permission recheck.
+    """
+    if automation.owner_kind == AutomationOwnerKind.SERVICE:
+        return
     if automation.user_id == user.user_id:
         return
     if _is_disable_only_update(update_data):
@@ -709,7 +724,8 @@ async def update_automation(
     """Partially update an automation.
 
     Only the creator may edit the definition. Admins and owners may turn an
-    automation off but cannot reactivate it or change what it runs.
+    automation off but cannot reactivate it or change what it runs, except for
+    an automation owned by a service account, which they may edit and enable.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
