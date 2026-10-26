@@ -12,9 +12,10 @@ same validators, turns `state`/`enabled` into the disable bookkeeping
 (`disabled_reason`, `disabled_detail`, `disabled_at`) and keeps
 `keep_alive` true for `continue_conversation` triggers.
 
-Source: `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/utils/tarball_validation.py`, `openhands/automation/utils/templates.py`, `openhands/automation/utils/timeout.py`, `openhands/automation/utils/cron.py`, `openhands/automation/utils/state.py`, `openhands/automation/utils/model_profiles.py`
+Source: `openhands/automation/router.py`, `openhands/automation/schemas.py`, `openhands/automation/utils/tarball_validation.py`, `openhands/automation/utils/templates.py`, `openhands/automation/utils/timeout.py`, `openhands/automation/utils/cron.py`, `openhands/automation/utils/state.py`, `openhands/automation/utils/model_profiles.py`, `openhands/automation/tags.py`, `openhands/automation/utils/tags.py`
 
 Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
+`GET /api/automation/v1/tags`,
 `GET /api/automation/v1/{automation_id}`, `PATCH /api/automation/v1/{automation_id}`,
 `DELETE /api/automation/v1/{automation_id}`,
 `GET /api/automation/v1/{automation_id}/tarball`
@@ -33,6 +34,7 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.keep-alive-continue`: an event trigger with `destination: continue_conversation` forces `keep_alive: true` on create; `keep_alive: false` with it answers 422.
 - `F05.template-idempotent`: a create with `template` answers 201 and records `preset_metadata.template`; a repeat with the same `template.id` answers 200 with the same automation unchanged (the new body is ignored).
 - `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others`, and rejects out-of-range `limit` and unknown `created_by` with 422.
+- `F05.tags`: `tags` on create and PATCH are trimmed, lowercased and hyphenated (`Software Factory` is stored as `software-factory`) and deduplicated; a non-slug tag, more than 10 tags or an explicit `null` answers 422; PATCH replaces the list and `[]` clears it. `GET /v1?tag=` filters the page and `total`; `GET /v1/tags` answers `{tags: [{tag, count}]}` for live automations, most-used first.
 - `F05.get`: an unknown id answers 404 `Automation not found`, a non-UUID 422.
 - `F05.patch-fields`: PATCH updates `name`, `trigger`, `timeout`, `entrypoint`, `setup_script_path` and bumps `updated_at`; unset fields are kept; a GET shows the stored values.
 - `F05.patch-state`: PATCH `state: INACTIVE` sets `enabled: false`, `disabled_reason: manual`, `disabled_detail {"reason":"manual","source":"user"}`, `disabled_at` and records a disable event; `enabled: true` reactivates and clears all three.
@@ -178,6 +180,17 @@ Preconditions:
   The `sleep` is deliberate: `created_at` has one-second precision, and
   rows in the same second are ordered by random UUID. `others` is empty
   because the local user is the only user.
+- **Tags, tag filter and facets (`F05.tags`).** Normalized on write, filtered and counted on read.
+  ```sh
+  G1=$(control-automation api POST /v1 --json '{"name":"qa-tags-1","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","tags":["QA Tags","qa-tags","qa-extra"]}' --expect 201 --check tags.0 eq qa-tags --check tags.1 eq qa-extra --check tags len-eq 2 --save F05.tags/create --field id)
+  control-automation api POST /v1 --json '{"name":"qa-tags-bad","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh","tags":["qa_tags"]}' --expect 422
+  control-automation api GET /v1 --query tag=qa-tags --expect 200 --check total eq 1 --check automations.0.id eq "$G1" --save F05.tags/filter
+  control-automation api GET /v1/tags --expect 200 --check tags len-ge 2 --save F05.tags/facets
+  control-automation api PATCH "/v1/$G1" --json '{"tags":["qa-extra"]}' --expect 200 --check tags len-eq 1 --check tags.0 eq qa-extra
+  control-automation api GET /v1 --query tag=qa-tags --expect 200 --check total eq 0
+  control-automation api PATCH "/v1/$G1" --json '{"tags":null}' --expect 422
+  control-automation api PATCH "/v1/$G1" --json '{"tags":[]}' --expect 200 --check tags len-eq 0
+  ```
 - **Get errors (`F05.get`).** Unknown and malformed ids.
   ```sh
   control-automation api GET /v1/00000000-0000-4000-8000-000000000000 --expect 404 --check detail eq 'Automation not found' --save F05.get/unknown
