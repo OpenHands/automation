@@ -2577,6 +2577,42 @@ class TestImportedAutomationDefaults:
             automation = (await session.execute(select(Automation))).scalars().one()
         assert automation.enabled is True
 
+    @pytest.mark.parametrize("key", ["enabled", "state"])
+    async def test_new_folder_with_null_value_imports_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin, key
+    ):
+        await self._push_hand_written(origin, self._YAML + f"{key}:\n")
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    @pytest.mark.parametrize("key", ["enabled", "state"])
+    async def test_update_with_null_value_keeps_an_inactive_automation_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin, key
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            automation.enabled = False
+            automation.state = AutomationState.INACTIVE
+            await session.commit()
+
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag") + f"{key}:\n"
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py --flag"
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
     async def test_update_without_enabled_keeps_the_current_value(
         self, sqlite_session_factory, git_settings, service_settings, origin
     ):

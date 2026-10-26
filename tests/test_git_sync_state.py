@@ -171,8 +171,9 @@ async def test_invalid_state_metadata_rejects_before_tarball_upload(
         pytest.param(
             {"enabled": False}, AutomationState.INACTIVE, False, id="legacy-off"
         ),
+        # An empty value counts as an absent key.
         pytest.param(
-            {"enabled": None}, AutomationState.ACTIVE, True, id="legacy-empty"
+            {"enabled": None}, AutomationState.INACTIVE, False, id="legacy-empty"
         ),
         pytest.param(
             {"state": "ACTIVE", "enabled": True},

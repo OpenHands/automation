@@ -533,10 +533,11 @@ async def _validate_and_resolve_fields(
     raw_enabled = fields.get("enabled")
 
     requested_enabled = parse_automation_enabled(raw_enabled)
-    if "state" not in fields and "enabled" not in fields:
-        # Neither key given: an update keeps the current value, and a new
-        # folder imports INACTIVE so a person turns it on. Anyone who can push
-        # to the repo could otherwise start an automation as its owner.
+    if raw_state is None and raw_enabled is None:
+        # Neither key given (or both empty in YAML): an update keeps the current
+        # value, and a new folder imports INACTIVE so a person turns it on.
+        # Anyone who can push to the repo could otherwise start an automation
+        # as its owner.
         state = existing.state if existing is not None else AutomationState.INACTIVE
         requested_enabled = automation_state_enabled(state)
     else:
