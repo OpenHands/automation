@@ -1538,7 +1538,11 @@ async def list_automation_changes(
     result = await session.execute(
         select(AutomationChangeEvent)
         .where(AutomationChangeEvent.automation_id == automation_id)
-        .order_by(AutomationChangeEvent.created_at.desc())
+        # id breaks ties: rows of one transaction share a timestamp, and SQLite
+        # stores whole seconds, so paging would otherwise be unstable.
+        .order_by(
+            AutomationChangeEvent.created_at.desc(), AutomationChangeEvent.id.desc()
+        )
         .offset(offset)
         .limit(limit)
     )
