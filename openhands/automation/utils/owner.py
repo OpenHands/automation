@@ -19,6 +19,10 @@ from openhands.automation.utils.tarball_validation import (
 )
 
 
+# The org role enterprise gives every service account.
+SERVICE_ACCOUNT_ROLE = "service_account"
+
+
 @dataclass(frozen=True)
 class ResolvedOwner:
     """The ``user_id`` and ``owner_kind`` a new automation is stored with."""
@@ -34,6 +38,9 @@ async def resolve_owner(
 ) -> ResolvedOwner:
     """Resolve the owner requested by ``owner_user_id`` (omitted = the caller).
 
+    When omitted, the caller owns the automation. If the caller is a service
+    account, the row is service-owned.
+
     Another owner must be an active service account of the caller's org, and
     only holders of ``manage_automations`` may pick one. The enterprise API is
     the source of truth for the account type; local mode has no service
@@ -45,7 +52,15 @@ async def resolve_owner(
             cannot be asked.
     """
     if owner_user_id is None:
-        return ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
+        # A service account's own key must not hold the creator's edit rights
+        # over what it creates, or it could change what runs as itself. Its
+        # role (from the enterprise ``/users/me`` response) identifies it.
+        kind = (
+            AutomationOwnerKind.SERVICE
+            if user.role == SERVICE_ACCOUNT_ROLE
+            else AutomationOwnerKind.USER
+        )
+        return ResolvedOwner(user.user_id, kind)
 
     if "manage_automations" not in user.permissions:
         raise HTTPException(

@@ -5042,6 +5042,44 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 403
 
+    async def test_sa_caller_without_owner_user_id_creates_a_service_owned_row(
+        self, service_account_client
+    ):
+        """A service account's own key never creates an automation it could manage."""
+        body = self._body()
+        del body["owner_user_id"]
+
+        response = await service_account_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+        assert response.json()["owner_kind"] == "service"
+
+    async def test_sa_caller_cannot_edit_the_automation_it_created(
+        self, service_account_client
+    ):
+        body = self._body()
+        del body["owner_user_id"]
+        created = await service_account_client.post("/api/automation/v1", json=body)
+        automation_id = created.json()["id"]
+
+        response = await service_account_client.patch(
+            f"/api/automation/v1/{automation_id}", json={"name": "renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_human_caller_without_owner_user_id_still_owns_the_row(
+        self, async_client
+    ):
+        body = self._body()
+        del body["owner_user_id"]
+
+        response = await async_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 201
+        assert response.json()["owner_kind"] == "user"
+
     async def test_create_as_non_sa_user_returns_422(
         self, async_client, enterprise_api
     ):
