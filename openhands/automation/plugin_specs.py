@@ -319,6 +319,22 @@ class CreatePluginSpecAutomationRequest(BaseModel):
         return validate_automation_timeout(value)
 
 
+class PluginSpecPreflightResponse(BaseModel):
+    """Read-only preflight of an executable plugin spec.
+
+    The parsed manifest (config schema, runtime profile requirements,
+    suggested trigger) plus the resolved ref, with no side effects. Used by
+    launch flows to render typed config inputs and a default trigger before
+    the user commits to creating an automation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: AutomationPluginManifest
+    resolved_ref: str | None = None
+    suggested_trigger: Trigger | None = None
+
+
 def validate_plugin_source_allowed(
     plugin: AutomationPluginSource,
     *,

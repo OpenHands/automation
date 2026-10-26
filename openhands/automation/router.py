@@ -48,6 +48,7 @@ from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
+    PluginSpecPreflightResponse,
     entrypoint_for_manifest,
     preflight_manifest,
     resolve_suggested_trigger,
@@ -408,6 +409,43 @@ async def create_automation_from_plugin_spec(
         properties={"creation_path": "plugin_spec"},
     )
     return AutomationResponse.model_validate(automation)
+
+
+@router.get(
+    "/plugin-spec/preflight",
+    response_model=PluginSpecPreflightResponse,
+)
+async def preflight_plugin_spec(
+    source: str,
+    ref: str | None = None,
+    repo_path: str | None = None,
+    user: AuthenticatedUser = Depends(_require_view_automations),  # noqa: ARG001
+) -> PluginSpecPreflightResponse:
+    """Read-only preflight of a plugin spec.
+
+    Resolves and parses the plugin manifest (config schema, runtime profile
+    requirements, suggested trigger) with no side effects. Used by launch
+    flows to render typed config inputs and a default trigger before the user
+    commits to creating an automation.
+    """
+    plugin = AutomationPluginSource(source=source, ref=ref, repo_path=repo_path)
+    allow_local_sources = _allow_local_plugin_sources()
+    try:
+        resolved_ref, manifest = preflight_manifest(
+            plugin, allow_local_sources=allow_local_sources
+        )
+        validate_required_plugins(
+            manifest.runtime.plugins,
+            allow_local_sources=allow_local_sources,
+        )
+        suggested_trigger = resolve_suggested_trigger(manifest, {})
+    except PluginSpecError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return PluginSpecPreflightResponse(
+        manifest=manifest,
+        resolved_ref=resolved_ref,
+        suggested_trigger=suggested_trigger,
+    )
 
 
 def _allow_local_plugin_sources() -> bool:
