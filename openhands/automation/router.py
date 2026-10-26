@@ -1,6 +1,7 @@
 """FastAPI router for the automations CRUD API."""
 
 import asyncio
+import json
 import logging
 import re
 import unicodedata
@@ -1131,39 +1132,87 @@ async def delete_automation(
     )
 
 
-def _require_pinned_plugins_for_transfer(auto: Automation) -> None:
-    """Refuse a transfer to a service account while a plugin ref can still move.
+async def _pin_plugins_for_transfer(
+    auto: Automation,
+    session: AsyncSession,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Pin the plugin refs of ``auto`` to commit SHAs for a service account.
 
     An automation runs the plugin code its ref points at. Under a service
     account that code would change, with no edit visible here, whenever anyone
     pushes to the plugin repo. Create and update pin the refs for a
     service-account-owned automation; a human-owned one may hold branch refs,
-    so a transfer is refused until every ref is a full commit SHA. Nothing is
-    rewritten at transfer: pinning needs a network fetch of the manifest.
+    so the transfer pins them the same way:
+
+    - plugin spec: the manifest is resolved as on create, and the resolved SHAs
+      of the plugin and its secondary plugins replace the stored refs.
+    - plugin preset: each ref in ``preset_metadata`` is resolved, and the
+      tarball's ``plugins_config.json`` is rewritten with the SHAs.
+
+    Raises:
+        HTTPException: 422 when a plugin cannot be fetched or validated, or
+            when its refs cannot be checked (experiment variants keep their
+            plugins only inside the tarball).
     """
-    detail = (
-        "Plugin refs must be full 40-character commit SHAs, including secondary "
-        "plugins, before a service account can own this automation"
-    )
     if auto.plugin_spec:
-        plugin = auto.plugin_spec.get("plugin") or {}
-        required = auto.plugin_spec.get("required_plugins")
-        refs = [plugin.get("ref")] + [
-            (item or {}).get("ref") for item in required or []
-        ]
-        if required is None or not all(
-            isinstance(ref, str) and _COMMIT_SHA_RE.fullmatch(ref) for ref in refs
-        ):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+        plugin = AutomationPluginSource.model_validate(auto.plugin_spec.get("plugin"))
+        config, manifest, resolved_ref, required_plugins = (
+            _fetch_validated_plugin_manifest(plugin, auto.plugin_spec.get("config"))
+        )
+        auto.plugin_spec = _plugin_runtime_fields(
+            plugin=plugin,
+            plugin_config=config,
+            manifest=manifest,
+            model=None,
+            agent_profile_id=None,
+            pinned_ref=resolved_ref,
+            pinned_required_plugins=required_plugins,
+        )["plugin_spec"]
     elif (auto.preset_metadata or {}).get("preset_type") == "plugin":
-        # Experiment variants keep their plugins only inside the tarball, so an
-        # automation without recorded plugins cannot be checked.
         plugins = (auto.preset_metadata or {}).get("plugins")
         if plugins is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Plugin refs cannot be checked for this automation, so it "
+                "cannot be transferred to a service account",
+            )
+        # A full SHA is already pinned; any other ref is resolved by lookup.
+        pinned = []
+        for item in plugins:
+            if _COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
+                pinned.append(item)
+                continue
+            try:
+                [resolved] = validate_required_plugins(
+                    [AutomationPluginSource.model_validate(item)],
+                    allow_local_sources=_allow_local_plugin_sources(),
+                )
+            except PluginSpecError as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)
+                ) from exc
+            ref = resolved.pop("resolved_ref", None)
+            pinned.append({**resolved, **({"ref": ref} if ref else {})})
         _require_pinned_plugin_refs(
-            [PluginSource.model_validate(item) for item in plugins], None
+            [PluginSource.model_validate(item) for item in pinned], None
         )
+        if pinned == plugins:
+            return
+        new_tarball_path = await regenerate_preset_tarball(
+            auto,
+            {"plugins_config.json": json.dumps(pinned, indent=2)},
+            session,
+            background_tasks,
+        )
+        if new_tarball_path is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="The plugin refs of this automation cannot be pinned, so it "
+                "cannot be transferred to a service account",
+            )
+        auto.tarball_path = new_tarball_path
+        auto.preset_metadata = {**(auto.preset_metadata or {}), "plugins": pinned}
 
 
 @router.post("/{automation_id}/transfer")
@@ -1171,6 +1220,7 @@ async def transfer_automation(
     automation_id: uuid.UUID,
     body: TransferAutomationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
@@ -1228,7 +1278,7 @@ async def transfer_automation(
             get_http_client(request),
             field="service_account_id",
         )
-        _require_pinned_plugins_for_transfer(auto)
+        await _pin_plugins_for_transfer(auto, session, background_tasks)
 
     now = utcnow()
     disabled_detail = {"reason": "owner_changed", "source": "transfer"}

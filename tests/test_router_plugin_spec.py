@@ -1,4 +1,5 @@
 import json
+import shutil
 import uuid
 from pathlib import Path
 
@@ -876,32 +877,104 @@ async def test_human_owned_plugin_stores_no_secondary_pins(
     assert "required_plugins" not in response.json()["plugin_spec"]
 
 
-@pytest.mark.asyncio
-async def test_transfer_to_service_account_refuses_branch_ref(
-    async_client, tmp_path, agent_profiles_api, enterprise_api
-):
-    """A human-owned plugin on a branch is not handed to a service account."""
-    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
-    plugin = write_plugin(tmp_path)
-    created = await async_client.post(
+async def _create_human_plugin_spec(client, plugin, headers, ref="main"):
+    created = await client.post(
         "/api/automation/v1/plugin-spec",
         json={
             "name": "Plugin",
-            "plugin": {"source": str(plugin), "ref": "main"},
+            "plugin": {"source": str(plugin), "ref": ref},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
         },
-        headers=agent_profiles_api.caller_auth,
+        headers=headers,
     )
     assert created.status_code == 201
+    return created.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_service_account_pins_branch_ref(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    """A human-owned plugin on a branch is pinned to its commit at transfer."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin, secondary = _write_plugin_with_secondary(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
 
     response = await async_client.post(
-        f"/api/automation/v1/{created.json()['id']}/transfer",
+        f"/api/automation/v1/{automation_id}/transfer",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    plugin_spec = response.json()["plugin_spec"]
+    assert plugin_spec["plugin"]["ref"] == PINNED_SHA
+    assert plugin_spec["required_plugins"] == [
+        {"source": str(secondary), "ref": SECONDARY_SHA}
+    ]
+    stored = await async_client.get(
+        f"/api/automation/v1/{automation_id}", headers=agent_profiles_api.caller_auth
+    )
+    assert stored.json()["plugin_spec"] == plugin_spec
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_service_account_accepts_full_sha_ref(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth, ref=PINNED_SHA
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/transfer",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+    assert response.json()["plugin_spec"]["required_plugins"] == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_service_account_fails_when_manifest_unavailable(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    """No manifest, no pin: the transfer is refused and the owner stays."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
+    shutil.rmtree(plugin)
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/transfer",
         json={"to": "service", "service_account_id": str(SA_ID)},
         headers=agent_profiles_api.caller_auth,
     )
 
     assert response.status_code == 422
-    assert "40-character commit SHA" in response.json()["detail"]
+    assert "preflight automation plugin" in response.json()["detail"]
+    stored = await async_client.get(
+        f"/api/automation/v1/{automation_id}", headers=agent_profiles_api.caller_auth
+    )
+    assert stored.json()["owner_kind"] == "user"
+    assert stored.json()["plugin_spec"]["plugin"]["ref"] == "main"
 
 
 @pytest.mark.asyncio

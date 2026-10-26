@@ -5631,18 +5631,6 @@ class TestTransferPresetPluginPinning:
             json={"to": "service", "service_account_id": str(self.SA_ID)},
         )
 
-    async def test_branch_ref_returns_422(
-        self, async_client, enterprise_api, async_session
-    ):
-        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
-
-        response = await self._transfer(
-            async_client, async_session, [{"source": "github:o/r", "ref": "main"}]
-        )
-
-        assert response.status_code == 422
-        assert "40-character commit SHA" in response.json()["detail"]
-
     async def test_sha_ref_transfers(self, async_client, enterprise_api, async_session):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
 
@@ -5651,3 +5639,83 @@ class TestTransferPresetPluginPinning:
         )
 
         assert response.status_code == 200
+
+    async def test_branch_ref_is_pinned_at_transfer(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        monkeypatch.setattr(
+            "openhands.automation.router.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
+                for p in plugins
+            ],
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        automation_id = automation.id
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation_id}/transfer",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 200
+        pinned = [{"source": "github:o/r", "ref": self.SHA}]
+        assert response.json()["preset_metadata"]["plugins"] == pinned
+        upload = await async_session.scalar(
+            select(TarballUpload).where(
+                TarballUpload.id
+                == uuid.UUID(response.json()["tarball_path"].rsplit("/", 1)[-1])
+            )
+        )
+        assert upload is not None
+        assert upload.user_id == self.SA_ID
+        with tarfile.open(
+            fileobj=io.BytesIO(preset_store._storage[upload.storage_path]), mode="r:gz"
+        ) as tar:
+            member = tar.extractfile("plugins_config.json")
+            assert member is not None
+            assert json.loads(member.read()) == pinned
+
+    async def test_unresolvable_ref_returns_422_and_keeps_owner(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        def unreachable(plugins, **_):
+            raise PluginSpecError("Failed to preflight required plugin")
+
+        monkeypatch.setattr(
+            "openhands.automation.router.validate_required_plugins", unreachable
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        automation_id = automation.id
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation_id}/transfer",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
