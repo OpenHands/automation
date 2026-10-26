@@ -209,10 +209,12 @@ Completion is handled asynchronously:
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `OPENHANDS_API_KEY` | Per-user key issued via service key | SDK auth for get_llm()/get_secrets() |
-| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`) | Cloud API base URL |
-| `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
-| `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
+| `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
+| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
+| `AGENT_SERVER_URL` | Local backend | Local agent-server URL from the sandbox's point of view |
+| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured | Automation service key for local callbacks (not the agent-server session key) |
+| `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
+| `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -222,7 +224,7 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Callback & Race Condition Handling
 
-- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses standard API key auth — the per-user `OPENHANDS_API_KEY` passed into the sandbox is validated via `authenticate_request`, and ownership is verified against the run's parent automation.
+- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses `authenticate_request`. Cloud runs use the per-user `OPENHANDS_API_KEY`; local runs use `AUTOMATION_CALLBACK_API_KEY` when configured (the service's local API key, not the agent-server session key). The authenticated user must own the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
 - **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
