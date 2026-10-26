@@ -18,8 +18,10 @@ from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
     AutomationDisableEvent,
+    AutomationGitSyncState,
     AutomationOwnerKind,
     AutomationRun,
+    AutomationRunStatus,
     AutomationState,
     TarballUpload,
     UploadStatus,
@@ -5317,3 +5319,326 @@ class TestAutomationChangeEvents:
             OTHER_USER_ID,
         )
         assert (git_event.actor_kind, git_event.actor_user_id) == ("git_sync", None)
+
+
+class TestTransferAutomation:
+    """POST /v1/{id}/transfer: move an automation between a person and a service account.
+
+    ``async_client`` holds ``manage_automations``; ``readonly_client`` is a
+    view-only member. Both act as TEST_USER_ID.
+    """
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    def _url(self, automation) -> str:
+        return f"/api/automation/v1/{automation.id}/transfer"
+
+    def _to_sa(self) -> dict:
+        return {"to": "service", "service_account_id": str(self.SA_ID)}
+
+    async def _owned_by(self, async_session, user_id, **overrides) -> Automation:
+        fields = {
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "enabled": True,
+            "state": AutomationState.ACTIVE,
+            **overrides,
+        }
+        automation = Automation(
+            user_id=user_id,
+            org_id=TEST_ORG_ID,
+            name="Transferable",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            entrypoint="uv run script.py",
+            **fields,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_transfer_creator_to_sa_sets_owner_and_inactive(
+        self, readonly_client, member_enterprise_api, async_session
+    ):
+        member_enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        automation = await self._owned_by(
+            async_session,
+            TEST_USER_ID,
+            tarball_path=build_internal_url(upload.id),
+        )
+        async_session.add(
+            AutomationGitSyncState(
+                automation_id=automation.id,
+                org_id=TEST_ORG_ID,
+                slug="transferable",
+                dirty=False,
+            )
+        )
+        await async_session.commit()
+        automation_id = automation.id
+
+        response = await readonly_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == str(automation_id)
+        assert body["user_id"] == str(self.SA_ID)
+        assert body["owner_kind"] == "service"
+        assert body["enabled"] is False
+        assert body["state"] == "INACTIVE"
+        assert body["disabled_reason"] == "owner_changed"
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
+        sync_state = (
+            await async_session.execute(
+                select(AutomationGitSyncState).where(
+                    AutomationGitSyncState.automation_id == automation_id
+                )
+            )
+        ).scalar_one()
+        assert sync_state.dirty is True
+        disable_event = (
+            await async_session.execute(
+                select(AutomationDisableEvent).where(
+                    AutomationDisableEvent.automation_id == automation_id
+                )
+            )
+        ).scalar_one()
+        assert disable_event.reason == "owner_changed"
+        change = (
+            await async_session.execute(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id
+                )
+            )
+        ).scalar_one()
+        assert change.action == "transfer"
+        assert change.actor_user_id == TEST_USER_ID
+        assert "user_id" in change.changed_fields
+        assert str(self.SA_ID) not in repr(change.changed_fields)
+
+    async def test_transfer_by_manager_moves_another_members_automation(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, OTHER_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == str(self.SA_ID)
+
+    async def test_transfer_by_member_non_creator_returns_403(
+        self, readonly_client, member_enterprise_api, async_session
+    ):
+        member_enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, OTHER_USER_ID)
+
+        response = await readonly_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 403
+        await async_session.refresh(automation)
+        assert automation.user_id == OTHER_USER_ID
+
+    async def test_transfer_to_self_requires_manage(
+        self, readonly_client, async_session
+    ):
+        automation = await self._owned_by(
+            async_session,
+            TestServiceOwnedAutomations._SA_ID,
+            owner_kind=AutomationOwnerKind.SERVICE,
+        )
+
+        response = await readonly_client.post(self._url(automation), json={"to": "self"})
+
+        assert response.status_code == 403
+
+    async def test_transfer_to_self_by_manager_takes_ownership(
+        self, async_client, async_session
+    ):
+        automation = await self._owned_by(
+            async_session,
+            self.SA_ID,
+            owner_kind=AutomationOwnerKind.SERVICE,
+        )
+
+        response = await async_client.post(self._url(automation), json={"to": "self"})
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+        assert response.json()["owner_kind"] == "user"
+        assert response.json()["enabled"] is False
+
+    @pytest.mark.parametrize(
+        "run_status", [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+    )
+    async def test_transfer_with_live_run_returns_409(
+        self, async_client, enterprise_api, async_session, run_status
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        async_session.add(
+            AutomationRun(
+                automation_id=automation.id, status=run_status, trigger_source="manual"
+            )
+        )
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+        assert automation.enabled is True
+
+    async def test_transfer_draft_state_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, enabled=False, state=AutomationState.DRAFT
+        )
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+
+    async def test_transfer_releases_subjects(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.COMPLETED,
+            subject_key="slack:C1:1.0",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        await async_session.refresh(run)
+        assert run.subject_released_at is not None
+        assert run.subject_key == "slack:C1:1.0"
+
+    async def test_transfer_to_human_target_returns_422(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+
+    async def test_transfer_enterprise_failure_returns_502(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.error = 500
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 502
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+
+    async def test_transfer_to_current_owner_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(
+            async_session, self.SA_ID, owner_kind=AutomationOwnerKind.SERVICE
+        )
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+
+    async def test_transfer_other_org_returns_404(self, async_client, async_session):
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        automation.org_id = OTHER_ORG_ID
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json={"to": "self"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Automation not found"
+
+    async def test_transfer_emits_telemetry_event(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        with patch(
+            "openhands.automation.router.capture_automation_event",
+            new_callable=AsyncMock,
+        ) as capture:
+            response = await async_client.post(
+                self._url(automation), json=self._to_sa()
+            )
+
+        assert response.status_code == 200
+        assert capture.await_args.args[0] == "automation_transferred"
+
+    async def test_transfer_rejects_malformed_body(self, async_client, async_session):
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        for body in ({"to": "service"}, {"to": "nobody"}, {}):
+            response = await async_client.post(self._url(automation), json=body)
+            assert response.status_code == 422
+
+
+class TestTransferPresetPluginPinning:
+    """A preset plugin bakes its refs into the tarball, so a moving ref blocks the transfer."""
+
+    SA_ID = TestTransferAutomation.SA_ID
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    async def _transfer(self, client, async_session, plugins):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Plugin preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="python3 main.py",
+            enabled=True,
+            state=AutomationState.ACTIVE,
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return await client.post(
+            f"/api/automation/v1/{automation.id}/transfer",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+    async def test_branch_ref_returns_422(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await self._transfer(
+            async_client, async_session, [{"source": "github:o/r", "ref": "main"}]
+        )
+
+        assert response.status_code == 422
+        assert "40-character commit SHA" in response.json()["detail"]
+
+    async def test_sha_ref_transfers(self, async_client, enterprise_api, async_session):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await self._transfer(
+            async_client, async_session, [{"source": "github:o/r", "ref": self.SHA}]
+        )
+
+        assert response.status_code == 200

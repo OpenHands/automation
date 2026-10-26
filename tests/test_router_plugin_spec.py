@@ -874,3 +874,62 @@ async def test_human_owned_plugin_stores_no_secondary_pins(
 
     assert response.status_code == 201
     assert "required_plugins" not in response.json()["plugin_spec"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_service_account_refuses_branch_ref(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    """A human-owned plugin on a branch is not handed to a service account."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+
+    response = await async_client.post(
+        f"/api/automation/v1/{created.json()['id']}/transfer",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "40-character commit SHA" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_to_self_keeps_plugin_spec(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/{created.json()['id']}/transfer",
+        json={"to": "self"},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA

@@ -1314,6 +1314,27 @@ class AutomationRunListResponse(BaseModel):
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
+class TransferAutomationRequest(BaseModel):
+    """Move an automation to a service account, or back to the caller."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    to: Literal["service", "self"]
+    service_account_id: uuid.UUID | None = Field(
+        default=None,
+        description="Required when `to` is `service`; not allowed otherwise.",
+    )
+
+    @model_validator(mode="after")
+    def _service_account_matches_target(self) -> "TransferAutomationRequest":
+        if (self.to == "service") != (self.service_account_id is not None):
+            raise ValueError(
+                "service_account_id is required when to is 'service' and "
+                "not allowed when to is 'self'"
+            )
+        return self
+
+
 class AutomationChangeResponse(BaseModel):
     """One audited change to an automation (field names only, no values)."""
 

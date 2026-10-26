@@ -239,11 +239,8 @@ class EnterpriseApi:
         return httpx.Response(200, json=member)
 
 
-@pytest.fixture
-async def enterprise_api(
-    async_client, monkeypatch
-) -> AsyncGenerator[EnterpriseApi, None]:
-    """Cloud mode, with the enterprise service API answering membership lookups.
+async def _serve_enterprise_api(monkeypatch) -> AsyncGenerator[EnterpriseApi, None]:
+    """Cloud mode, with the enterprise service API answering on the test HTTP client.
 
     Any other request goes to the HTTP client the test had installed before
     (for example ``agent_profiles_api``'s), so both can be used together.
@@ -266,6 +263,24 @@ async def enterprise_api(
     await app.state.http_client.aclose()
     app.state.http_client = previous
     clear_config_cache()
+
+
+@pytest.fixture
+async def enterprise_api(
+    async_client, monkeypatch
+) -> AsyncGenerator[EnterpriseApi, None]:
+    """The enterprise API for a test whose caller holds ``manage_automations``."""
+    async for api in _serve_enterprise_api(monkeypatch):
+        yield api
+
+
+@pytest.fixture
+async def member_enterprise_api(
+    readonly_client, monkeypatch
+) -> AsyncGenerator[EnterpriseApi, None]:
+    """The enterprise API for a test whose caller is a view-only member."""
+    async for api in _serve_enterprise_api(monkeypatch):
+        yield api
 
 
 @pytest.fixture

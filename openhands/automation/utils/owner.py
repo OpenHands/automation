@@ -68,8 +68,29 @@ async def resolve_owner(
             detail="Only admins and owners can create an automation for a "
             "service account",
         )
+    await verify_service_account(owner_user_id, user.org_id, client)
+    return ResolvedOwner(owner_user_id, AutomationOwnerKind.SERVICE)
+
+
+async def verify_service_account(
+    service_account_id: uuid.UUID,
+    org_id: uuid.UUID,
+    client: httpx.AsyncClient,
+    field: str = "owner_user_id",
+) -> None:
+    """Check that ``service_account_id`` is an active service account of ``org_id``.
+
+    The enterprise API is the source of truth for the account type. Local mode
+    has no service accounts, so every id is rejected there.
+
+    ``field`` names the request field in the 422 message.
+
+    Raises:
+        HTTPException: 422 when it is not an active service account of the
+            org; 502 when enterprise cannot be asked.
+    """
     try:
-        member = await get_org_member(client, user.org_id, owner_user_id)
+        member = await get_org_member(client, org_id, service_account_id)
     except EnterpriseClientError as exc:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
@@ -78,16 +99,14 @@ async def resolve_owner(
 
     if (
         member is None
-        or member.org_id != user.org_id
+        or member.org_id != org_id
         or member.account_type != "service"
         or member.status != "active"
     ):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="owner_user_id must be an active service account of this "
-            "organization",
+            detail=f"{field} must be an active service account of this organization",
         )
-    return ResolvedOwner(owner_user_id, AutomationOwnerKind.SERVICE)
 
 
 async def assign_upload_to_owner(

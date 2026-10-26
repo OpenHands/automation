@@ -61,6 +61,8 @@ from openhands.automation.plugin_specs import (
     validate_required_plugins,
 )
 from openhands.automation.preset_router import (
+    _COMMIT_SHA_RE,
+    _require_pinned_plugin_refs,
     dump_repos,
     regenerate_preset_tarball,
     repos_config_json,
@@ -78,6 +80,7 @@ from openhands.automation.schemas import (
     EventTrigger,
     RunCompleteRequest,
     RunPhaseRequest,
+    TransferAutomationRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -107,6 +110,7 @@ from openhands.automation.utils.owner import (
     ResolvedOwner,
     assign_upload_to_owner,
     resolve_owner,
+    verify_service_account,
 )
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -135,6 +139,7 @@ from openhands.automation.utils.templates import (
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 from openhands.automation.utils.webhook import is_builtin_source
+from openhands.sdk.plugin import PluginSource
 
 
 logger = logging.getLogger(__name__)
@@ -1124,6 +1129,169 @@ async def delete_automation(
         user=user,
         automation=auto,
     )
+
+
+def _require_pinned_plugins_for_transfer(auto: Automation) -> None:
+    """Refuse a transfer to a service account while a plugin ref can still move.
+
+    An automation runs the plugin code its ref points at. Under a service
+    account that code would change, with no edit visible here, whenever anyone
+    pushes to the plugin repo. Create and update pin the refs for a
+    service-account-owned automation; a human-owned one may hold branch refs,
+    so a transfer is refused until every ref is a full commit SHA. Nothing is
+    rewritten at transfer: pinning needs a network fetch of the manifest.
+    """
+    detail = (
+        "Plugin refs must be full 40-character commit SHAs, including secondary "
+        "plugins, before a service account can own this automation"
+    )
+    if auto.plugin_spec:
+        plugin = auto.plugin_spec.get("plugin") or {}
+        required = auto.plugin_spec.get("required_plugins")
+        refs = [plugin.get("ref")] + [(item or {}).get("ref") for item in required or []]
+        if required is None or not all(
+            isinstance(ref, str) and _COMMIT_SHA_RE.fullmatch(ref) for ref in refs
+        ):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+    elif (auto.preset_metadata or {}).get("preset_type") == "plugin":
+        # Experiment variants keep their plugins only inside the tarball, so an
+        # automation without recorded plugins cannot be checked.
+        plugins = auto.preset_metadata.get("plugins")
+        if plugins is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+        _require_pinned_plugin_refs(
+            [PluginSource.model_validate(item) for item in plugins], None
+        )
+
+
+@router.post("/{automation_id}/transfer")
+async def transfer_automation(
+    automation_id: uuid.UUID,
+    body: TransferAutomationRequest,
+    request: Request,
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> AutomationResponse:
+    """Move an automation to a service account of the org, or back to the caller.
+
+    The creator may move their own automation to a service account; holders of
+    ``manage_automations`` may move any automation, and only they may move one
+    to themselves (``to: self``). The automation keeps its id, KV store and
+    conversation ids, but ends INACTIVE: a person must re-enable it under the
+    new owner. Refused (409) while a run is PENDING or RUNNING or the
+    automation is a draft.
+    """
+    auto = await _get_org_automation(session, automation_id, user.org_id)
+    if body.to == "self":
+        if "manage_automations" not in user.permissions:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Only admins and owners can take ownership of an automation",
+            )
+        new_owner = ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
+    else:
+        await _assert_can_manage(auto, user)
+        assert body.service_account_id is not None  # guaranteed by the schema
+        new_owner = ResolvedOwner(body.service_account_id, AutomationOwnerKind.SERVICE)
+
+    if (auto.user_id, auto.owner_kind) == (new_owner.user_id, new_owner.kind):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="The automation already has this owner"
+        )
+    if auto.state == ModelAutomationState.DRAFT:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="A draft automation cannot be transferred"
+        )
+    live_run = await session.scalar(
+        select(AutomationRun.id)
+        .where(
+            AutomationRun.automation_id == auto.id,
+            AutomationRun.status.in_(
+                (AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING)
+            ),
+        )
+        .limit(1)
+    )
+    if live_run is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="The automation has a pending or running run; wait for it to "
+            "finish or cancel it",
+        )
+
+    if new_owner.kind == AutomationOwnerKind.SERVICE:
+        await verify_service_account(
+            new_owner.user_id,
+            user.org_id,
+            get_http_client(request),
+            field="service_account_id",
+        )
+        _require_pinned_plugins_for_transfer(auto)
+
+    now = utcnow()
+    disabled_detail = {"reason": "owner_changed", "source": "transfer"}
+    auto.user_id = new_owner.user_id
+    auto.owner_kind = new_owner.kind
+    auto.enabled = False
+    auto.state = ModelAutomationState.INACTIVE
+    auto.disabled_reason = "owner_changed"
+    auto.disabled_detail = disabled_detail
+    auto.disabled_at = now
+    session.add(
+        AutomationDisableEvent(
+            automation_id=auto.id,
+            reason="owner_changed",
+            detail=disabled_detail,
+            source="transfer",
+        )
+    )
+    # No run is live (409 above); this covers one accepted since that check.
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        auto.id,
+        reason="Automation transferred to a new owner",
+        disabled_detail=disabled_detail,
+        completed_at=now,
+        include_manual=True,
+    )
+    # Conversations started under the old owner must not be continued as the new
+    # one: stop routing events to them. The run rows keep their subject keys.
+    await session.execute(
+        update(AutomationRun)
+        .where(
+            AutomationRun.automation_id == auto.id,
+            AutomationRun.subject_key.isnot(None),
+            AutomationRun.subject_released_at.is_(None),
+        )
+        .values(subject_released_at=now)
+    )
+    await assign_upload_to_owner(session, auto.tarball_path, user.org_id, new_owner)
+    await session.flush()
+    await session.refresh(auto)
+    await mark_git_sync_dirty(session, auto)
+    record_change(
+        session,
+        auto,
+        user,
+        "transfer",
+        [
+            "user_id",
+            "owner_kind",
+            "enabled",
+            "state",
+            "disabled_reason",
+            "disabled_detail",
+            "disabled_at",
+        ],
+    )
+    await capture_automation_event(
+        "automation_transferred",
+        request=request,
+        user=user,
+        automation=auto,
+        properties={"to": body.to},
+    )
+    return AutomationResponse.model_validate(auto)
 
 
 @router.get("/{automation_id}/tarball")
