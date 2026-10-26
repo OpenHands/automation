@@ -632,8 +632,13 @@ def build_execution_payload(
         source, allow_local_sources=allow_local_sources
     )
     config = validate_plugin_config(manifest, requested_config)
+    # A stored list pins the secondary plugins (service-account-owned
+    # automations); otherwise they follow the manifest's refs.
+    stored_required = plugin_spec.get("required_plugins")
     required_plugins = validate_required_plugins(
-        manifest.runtime.plugins,
+        [AutomationPluginSource.model_validate(item) for item in stored_required]
+        if stored_required is not None
+        else manifest.runtime.plugins,
         allow_local_sources=allow_local_sources,
     )
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)

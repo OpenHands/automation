@@ -501,3 +501,50 @@ def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
     )
 
     assert requested_refs == [sha]
+
+
+def test_run_fetches_the_pinned_secondary_plugins_not_the_moved_branch(
+    tmp_path, monkeypatch
+):
+    """Stored ``required_plugins`` win over the manifest's mutable secondary refs."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    pinned = "0123456789abcdef0123456789abcdef01234567"
+    moved = "ffffffffffffffffffffffffffffffffffffffff"
+    plugin = write_plugin(tmp_path)
+    secondary = write_plugin(tmp_path / "secondary")
+    manifest_data = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest_data.setdefault("runtime", {})["plugins"] = [
+        {"source": str(secondary), "ref": "main"}
+    ]
+    _write_automation_manifest(plugin, manifest_data)
+    real_preflight = plugin_specs.preflight_plugin
+
+    @contextmanager
+    def preflight(**kwargs):
+        if kwargs["source"] == str(secondary):
+            # The branch has moved: a floating ref now resolves to `moved`.
+            ref = kwargs["ref"]
+            resolved = ref if ref and len(ref) == 40 else moved
+            with real_preflight(**{**kwargs, "ref": None}):
+                yield SimpleNamespace(resolved_ref=resolved)
+        else:
+            with real_preflight(**kwargs) as checked:
+                yield checked
+
+    monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
+
+    *_, plugin_fetches = build_execution_payload(
+        plugin_spec={
+            "plugin": {"source": str(plugin)},
+            "config": {},
+            "required_plugins": [{"source": str(secondary), "ref": pinned}],
+        },
+        agent_profile_id=None,
+        agent_profile_name=None,
+        llm_profile_name=None,
+        work_dir="/workspace/project",
+    )
+
+    assert plugin_fetches[1:] == [{"source": str(secondary), "ref": pinned}]

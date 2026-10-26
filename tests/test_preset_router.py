@@ -2664,7 +2664,12 @@ class TestCreatePresetAsServiceAccount:
             (
                 "/api/automation/v1/preset/plugin",
                 {
-                    "plugins": [{"source": "github:owner/plugin"}],
+                    "plugins": [
+                        {
+                            "source": "github:owner/plugin",
+                            "ref": "0123456789abcdef0123456789abcdef01234567",
+                        }
+                    ],
                     "prompt": "Do something",
                 },
             ),
@@ -2730,3 +2735,72 @@ class TestCreatePresetAsServiceAccount:
         assert response.status_code == 422
         assert "active service account" in response.json()["detail"]
         assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    @pytest.mark.parametrize(
+        "plugin_body",
+        [
+            {"plugins": [{"source": "github:owner/plugin"}]},
+            {"plugins": [{"source": "github:owner/plugin", "ref": "main"}]},
+            {
+                "variants": [
+                    {
+                        "name": "a",
+                        "weight": 1,
+                        "plugins": [
+                            {
+                                "source": "github:owner/plugin",
+                                "ref": "0123456789abcdef0123456789abcdef01234567",
+                            }
+                        ],
+                    },
+                    {
+                        "name": "b",
+                        "weight": 1,
+                        "plugins": [{"source": "github:owner/plugin", "ref": "v1"}],
+                    },
+                ],
+                "experiment_id": "exp",
+            },
+        ],
+    )
+    async def test_plugin_preset_as_sa_rejects_mutable_refs(
+        self, async_client, async_session, enterprise_api, plugin_body
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "owner_user_id": str(self.SA_ID),
+                **plugin_body,
+            },
+        )
+
+        assert response.status_code == 422
+        assert "40-character commit SHA" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    async def test_plugin_preset_as_sa_accepts_a_full_sha_ref(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "owner_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": self.FULL_SHA}],
+            },
+        )
+
+        assert response.status_code == 201

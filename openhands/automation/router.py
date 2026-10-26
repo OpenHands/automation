@@ -453,21 +453,25 @@ def _allow_local_plugin_sources() -> bool:
 def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
     plugin_config: dict[str, Any] | None,
-) -> tuple[dict[str, Any], Any, str | None]:
-    """Preflight a plugin; return its config, manifest and resolved commit SHA."""
+) -> tuple[dict[str, Any], Any, str | None, list[dict[str, Any]]]:
+    """Preflight a plugin.
+
+    Returns its config, manifest, resolved commit SHA and the preflighted
+    secondary plugins (each with its own ``resolved_ref``).
+    """
     allow_local_sources = _allow_local_plugin_sources()
     try:
         resolved_ref, manifest = preflight_manifest(
             plugin, allow_local_sources=allow_local_sources
         )
-        validate_required_plugins(
+        required_plugins = validate_required_plugins(
             manifest.runtime.plugins,
             allow_local_sources=allow_local_sources,
         )
         resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    return resolved_config, manifest, resolved_ref
+    return resolved_config, manifest, resolved_ref, required_plugins
 
 
 def _profile_requirements_signature(manifest: Any) -> dict[str, Any]:
@@ -491,18 +495,32 @@ def _plugin_runtime_fields(
     model: str | None,
     agent_profile_id: uuid.UUID | None,
     pinned_ref: str | None = None,
+    pinned_required_plugins: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Automation fields derived from a plugin spec.
 
     ``pinned_ref`` (the resolved commit SHA) replaces the plugin's ref in the
     stored spec, so every run fetches exactly that commit.
+    ``pinned_required_plugins`` (the preflighted secondary plugins) is stored
+    with each ref replaced by its resolved SHA; runs fetch those instead of
+    re-resolving the manifest's secondary plugins.
     """
     if pinned_ref:
         plugin = plugin.model_copy(update={"ref": pinned_ref})
+    pins: dict[str, Any] = {}
+    if pinned_required_plugins is not None:
+        pins["required_plugins"] = [
+            {
+                **{k: v for k, v in item.items() if k != "resolved_ref"},
+                **({"ref": item["resolved_ref"]} if item.get("resolved_ref") else {}),
+            }
+            for item in pinned_required_plugins
+        ]
     return {
         "plugin_spec": {
             "plugin": plugin.model_dump(exclude_none=True),
             "config": plugin_config,
+            **pins,
         },
         "manifest": manifest,
         "model": model,
@@ -557,10 +575,11 @@ async def _resolve_plugin_spec_runtime_fields(
     ``pin_ref`` stores the resolved commit SHA as the plugin ref, for a
     service-account-owned automation: a moving branch or tag would otherwise
     let anyone who can push to the plugin repo change code that runs as the
-    service account, with no edit visible here.
+    service account, with no edit visible here. The manifest's secondary
+    plugins are pinned the same way.
     """
-    plugin_config, manifest, resolved_ref = _fetch_validated_plugin_manifest(
-        plugin, plugin_config
+    plugin_config, manifest, resolved_ref, required_plugins = (
+        _fetch_validated_plugin_manifest(plugin, plugin_config)
     )
 
     agent_profile_name = (
@@ -622,6 +641,7 @@ async def _resolve_plugin_spec_runtime_fields(
         model=model,
         agent_profile_id=agent_profile_id,
         pinned_ref=resolved_ref if pin_ref else None,
+        pinned_required_plugins=required_plugins if pin_ref else None,
     )
 
 
@@ -652,11 +672,11 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         )
     requested_config = existing_plugin_spec.get("config")
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest, _old_ref = _fetch_validated_plugin_manifest(
+    _old_config, old_manifest, _old_ref, _old_required = _fetch_validated_plugin_manifest(
         old_plugin, requested_config
     )
-    plugin_config, manifest, resolved_ref = _fetch_validated_plugin_manifest(
-        plugin, requested_config
+    plugin_config, manifest, resolved_ref, required_plugins = (
+        _fetch_validated_plugin_manifest(plugin, requested_config)
     )
     if _profile_requirements_signature(manifest) != _profile_requirements_signature(
         old_manifest
@@ -668,15 +688,15 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
                 "new plugin manifest changes profile requirements"
             ),
         )
+    is_service_owned = automation.owner_kind == AutomationOwnerKind.SERVICE
     return _plugin_runtime_fields(
         plugin=plugin,
         plugin_config=plugin_config,
         manifest=manifest,
         model=automation.model,
         agent_profile_id=automation.agent_profile_id,
-        pinned_ref=resolved_ref
-        if automation.owner_kind == AutomationOwnerKind.SERVICE
-        else None,
+        pinned_ref=resolved_ref if is_service_owned else None,
+        pinned_required_plugins=required_plugins if is_service_owned else None,
     )
 
 

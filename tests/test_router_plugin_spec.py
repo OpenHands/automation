@@ -785,3 +785,92 @@ async def test_patch_sa_owned_plugin_source_stores_resolved_sha(
 
     assert response.status_code == 200
     assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+
+
+SECONDARY_SHA = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+
+
+@pytest.fixture
+def resolve_secondary_plugin_refs_to_sha(monkeypatch, tmp_path):
+    """Make preflight report SECONDARY_SHA as the commit a secondary ref resolves to."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from openhands.automation import plugin_specs
+
+    real_preflight = plugin_specs.preflight_plugin
+    secondary_source = str(tmp_path / "secondary" / "plugin")
+
+    @contextmanager
+    def preflight(**kwargs):
+        if kwargs["source"] != secondary_source:
+            with real_preflight(**kwargs) as checked:
+                yield checked
+            return
+        with real_preflight(**{**kwargs, "ref": None}):
+            yield SimpleNamespace(resolved_ref=SECONDARY_SHA)
+
+    monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
+
+
+def _write_plugin_with_secondary(tmp_path: Path) -> tuple[Path, Path]:
+    plugin = write_plugin(tmp_path)
+    secondary = write_plugin(tmp_path / "secondary")
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest.setdefault("runtime", {})["plugins"] = [
+        {"source": str(secondary), "ref": "main"}
+    ]
+    _write_plugin_automation(plugin, manifest)
+    return plugin, secondary
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_stores_resolved_sha_of_secondary_plugins(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin, secondary = _write_plugin_with_secondary(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["required_plugins"] == [
+        {"source": str(secondary), "ref": SECONDARY_SHA}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_human_owned_plugin_stores_no_secondary_pins(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    plugin, _secondary = _write_plugin_with_secondary(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert "required_plugins" not in response.json()["plugin_spec"]
