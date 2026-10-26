@@ -18,14 +18,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # server_default backfills every existing row as human-owned.
+    # server_default backfills every existing row as human-owned. The ORM
+    # stores enum member NAMES (native_enum=False), so the default is "USER",
+    # not the API value "user".
     op.add_column(
         "automations",
         sa.Column(
             "owner_kind",
             sa.String(length=16),
             nullable=False,
-            server_default="user",
+            server_default="USER",
         ),
     )
 

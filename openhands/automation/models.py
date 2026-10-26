@@ -78,7 +78,7 @@ class Automation(Base):
         Enum(AutomationOwnerKind, native_enum=False, length=16),
         nullable=False,
         default=AutomationOwnerKind.USER,
-        server_default=AutomationOwnerKind.USER.value,
+        server_default=AutomationOwnerKind.USER.name,  # ORM stores member names
     )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
