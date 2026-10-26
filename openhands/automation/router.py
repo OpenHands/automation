@@ -35,8 +35,8 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
-    AutomationDisableEvent,
     AutomationChangeEvent,
+    AutomationDisableEvent,
     AutomationDraft,
     AutomationOwnerKind,
     AutomationRun,
@@ -68,10 +68,10 @@ from openhands.automation.preset_router import (
     repos_config_json,
 )
 from openhands.automation.schemas import (
-    AutomationListResponse,
-    AutomationResponse,
     AutomationChangeListResponse,
     AutomationChangeResponse,
+    AutomationListResponse,
+    AutomationResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
     AutomationTagCount,
@@ -1148,7 +1148,9 @@ def _require_pinned_plugins_for_transfer(auto: Automation) -> None:
     if auto.plugin_spec:
         plugin = auto.plugin_spec.get("plugin") or {}
         required = auto.plugin_spec.get("required_plugins")
-        refs = [plugin.get("ref")] + [(item or {}).get("ref") for item in required or []]
+        refs = [plugin.get("ref")] + [
+            (item or {}).get("ref") for item in required or []
+        ]
         if required is None or not all(
             isinstance(ref, str) and _COMMIT_SHA_RE.fullmatch(ref) for ref in refs
         ):
@@ -1156,7 +1158,7 @@ def _require_pinned_plugins_for_transfer(auto: Automation) -> None:
     elif (auto.preset_metadata or {}).get("preset_type") == "plugin":
         # Experiment variants keep their plugins only inside the tarball, so an
         # automation without recorded plugins cannot be checked.
-        plugins = auto.preset_metadata.get("plugins")
+        plugins = (auto.preset_metadata or {}).get("plugins")
         if plugins is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
         _require_pinned_plugin_refs(

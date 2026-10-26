@@ -11,6 +11,7 @@ import logging
 import shutil
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from openhands.automation.git_sync.client import (
     commit_and_push,
     diff_names,
     ensure_repo,
+    last_commit_author,
     pull,
 )
 from openhands.automation.git_sync.config_override import (
@@ -62,6 +64,7 @@ from openhands.automation.models import (
     Automation,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
+    AutomationOwnerKind,
     AutomationState,
     TarballUpload,
     UploadStatus,
@@ -281,6 +284,14 @@ def _remove_exported_automation(directory: Path) -> None:
         directory.rmdir()
 
 
+# Resolves the author of the commit behind an imported directory, for the log.
+CommitAuthor = Callable[[], Awaitable[str]]
+
+
+async def _unknown_author() -> str:
+    return "unknown author"
+
+
 # --- Import owner -------------------------------------------------------------
 
 
@@ -289,6 +300,7 @@ class _Owner(NamedTuple):
 
     user_id: uuid.UUID
     org_id: uuid.UUID
+    kind: AutomationOwnerKind = AutomationOwnerKind.USER
 
 
 def _import_owner(org_config: AutomationGitSyncOrgConfig) -> _Owner | None:
@@ -297,11 +309,19 @@ def _import_owner(org_config: AutomationGitSyncOrgConfig) -> _Owner | None:
     The admin who last saved the org's Git Sync config: an automation runs as
     its owner, and in cloud mode that means minting the owner's API key, so it
     has to be a real member of the org. Local mode has no such user and keeps
-    its deterministic local identity. `None` -- an org row never saved from
-    the UI, outside local mode -- makes the import skip new directories (see
-    `_create_automation_from_git`); already-synced automations keep their
-    owner and update as usual.
+    its deterministic local identity. An org's `import_owner_user_id` (a service
+    account, verified when saved) takes precedence over both.
+
+    `None` -- an org row never saved from the UI, outside local mode -- makes
+    the import skip new directories (see `_create_automation_from_git`);
+    already-synced automations keep their owner and update as usual.
     """
+    if org_config.import_owner_user_id is not None:
+        return _Owner(
+            org_config.import_owner_user_id,
+            org_config.org_id,
+            AutomationOwnerKind.SERVICE,
+        )
     if org_config.configured_by_user_id is not None:
         return _Owner(org_config.configured_by_user_id, org_config.org_id)
     if get_config().service.is_local_mode:
@@ -523,9 +543,16 @@ async def _validate_and_resolve_fields(
     raw_enabled = fields.get("enabled")
 
     requested_enabled = parse_automation_enabled(raw_enabled)
-    if requested_enabled is None:
-        requested_enabled = True
-    state = model_automation_state(raw_state, requested_enabled)
+    if "state" not in fields and "enabled" not in fields:
+        # Neither key given: an update keeps the current value, and a new
+        # folder imports INACTIVE so a person turns it on. Anyone who can push
+        # to the repo could otherwise start an automation as its owner.
+        state = existing.state if existing is not None else AutomationState.INACTIVE
+        requested_enabled = automation_state_enabled(state)
+    else:
+        if requested_enabled is None:
+            requested_enabled = True
+        state = model_automation_state(raw_state, requested_enabled)
     enabled = automation_state_enabled(state)
 
     if existing is not None and state == AutomationState.DRAFT != existing.state:
@@ -578,6 +605,7 @@ async def _create_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -589,7 +617,12 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
+    automation = Automation(
+        user_id=owner.user_id,
+        owner_kind=owner.kind,
+        org_id=owner.org_id,
+        **values,
+    )
     session.add(automation)
     await session.flush()
 
@@ -604,7 +637,12 @@ async def _create_automation_from_git(
             dirty=False,
         )
     )
-    logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
+    logger.info(
+        "Imported new automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        slug,
+        await commit_author(),
+    )
 
 
 def _changed_columns(automation: Automation, values: dict) -> list[str]:
@@ -631,6 +669,7 @@ async def _update_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -662,7 +701,12 @@ async def _update_automation_from_git(
     state.content_hash = new_hash
     state.last_synced_commit = head
     state.last_synced_at = utcnow()
-    logger.info("Updated automation %s from git (slug=%r)", automation.id, state.slug)
+    logger.info(
+        "Updated automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        state.slug,
+        await commit_author(),
+    )
 
 
 async def _changed_slugs_since(
@@ -771,6 +815,13 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
+
+        # Looked up only when a create or update logs it, not for every
+        # directory the diff touched.
+        async def commit_author(directory: Path = directory) -> str:
+            author = await last_commit_author(workdir, directory, timeout)
+            return author or "unknown author"
+
         # A rolled-back savepoint revives the soft-deleted upload rows queued
         # inside it, so their storage paths must not stay pending for deletion.
         pending_snapshot = len(pending_storage_deletes)
@@ -794,6 +845,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
                     result.imported += 1
                 else:
@@ -804,6 +856,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]

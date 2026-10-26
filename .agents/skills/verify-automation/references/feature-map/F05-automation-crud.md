@@ -18,7 +18,9 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 `GET /api/automation/v1/tags`,
 `GET /api/automation/v1/{automation_id}`, `PATCH /api/automation/v1/{automation_id}`,
 `DELETE /api/automation/v1/{automation_id}`,
-`GET /api/automation/v1/{automation_id}/tarball`
+`GET /api/automation/v1/{automation_id}/tarball`,
+`POST /api/automation/v1/{automation_id}/transfer`,
+`GET /api/automation/v1/{automation_id}/changes`
 
 ## Sub-features
 
@@ -44,6 +46,8 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.tarball-download`: `GET /v1/{id}/tarball` for an internal upload answers 200 `application/x-tar` with `Content-Disposition: attachment; filename="<name>.tar"` and the uploaded bytes unchanged.
 - `F05.tarball-filename`: a non-ASCII name gets an ASCII `filename` fallback plus an RFC 5987 `filename*`; quotes and slashes are stripped.
 - `F05.tarball-external`: an `https://` tarball answers 302 to the URL; `s3://` and `gs://` answer 422 `Cannot proxy s3:// tarball URLs...`.
+- `F05.changes`: PATCH, enable, disable and DELETE each add one audit row (`update`, `enable`, `disable`, `delete`) holding field names only; `GET /v1/{id}/changes` answers `{changes, total}` newest first and pages with `limit`/`offset`; after a DELETE it answers 404.
+- `F05.transfer`: `POST /v1/{id}/transfer` with `{to: "self"}` on an automation the caller already owns answers 409, `{to: "service", service_account_id}` answers 422 in local mode (no service accounts), and a body missing `service_account_id` answers 422.
 - `F05.auth`: every route answers 401 without a key or with a wrong key.
 
 ## How to get to it (agent POV)
@@ -291,6 +295,25 @@ Preconditions:
   ```
   The CLI does not follow redirects, so the 302 and its `Location` are
   visible. `{automation_id}` is literal text in the 422 message.
+- **Change audit (`F05.changes`).** One row per change, field names only, readable until the automation is deleted.
+  ```sh
+  CHID=$(control-automation api POST /v1 --json '{"name":"qa-changes","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api PATCH "/v1/$CHID" --json '{"name":"qa-changes-renamed"}' --expect 200
+  control-automation api PATCH "/v1/$CHID" --json '{"enabled":false}' --expect 200
+  control-automation api GET "/v1/$CHID/changes" --expect 200 --check total eq 2 --check changes.0.action eq disable --check changes.1.action eq update --check changes.1.changed_fields.0 eq name --check changes.1.actor_kind eq user --save F05.changes/list
+  control-automation api GET "/v1/$CHID/changes" --query limit=1 --query offset=1 --expect 200 --check total eq 2 --check changes.0.action eq update
+  control-automation api DELETE "/v1/$CHID" --expect 204
+  control-automation api GET "/v1/$CHID/changes" --expect 404 --check detail eq 'Automation not found' --save F05.changes/deleted
+  ```
+  The audit row stores names, never values: the new `name` is not in it.
+- **Transfer (`F05.transfer`).** Local mode has no service accounts, so only the refusals can be driven.
+  ```sh
+  TRID=$(control-automation api POST /v1 --json '{"name":"qa-transfer","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"self"}' --expect 409 --check detail eq 'The automation already has this owner' --save F05.transfer/self
+  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"service","service_account_id":"00000000-0000-4000-8000-000000000001"}' --expect 422 --check detail contains 'must be an active service account' --save F05.transfer/service
+  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"service"}' --expect 422
+  control-automation api GET "/v1/$TRID" --expect 200 --check state eq ACTIVE --check owner_kind eq user
+  ```
 - **Key required (`F05.auth`).** No key or a wrong key gets 401 on every route.
   ```sh
   control-automation api GET /v1 --auth none --expect 401 --check detail contains 'Authentication required' --save F05.auth/list

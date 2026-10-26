@@ -672,6 +672,76 @@ class TestOrgScoping:
         assert row.configured_by_user_id == mock_authenticated_user.user_id
 
 
+class TestImportOwnerConfig:
+    """`import_owner_user_id`: the service account that owns imported automations."""
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    async def _put(self, client, value):
+        return await client.put(
+            "/api/automation/v1/git-sync/config", json={"import_owner_user_id": value}
+        )
+
+    async def test_saves_an_active_service_account(
+        self, async_client, async_session, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, ORG_ID)
+
+        response = await self._put(async_client, str(self.SA_ID))
+
+        assert response.status_code == 200
+        assert response.json()["import_owner_user_id"] == str(self.SA_ID)
+        row = await async_session.get(AutomationGitSyncOrgConfig, ORG_ID)
+        assert row is not None
+        assert row.import_owner_user_id == self.SA_ID
+
+    async def test_human_account_returns_422_and_saves_nothing(
+        self, async_client, async_session, enterprise_api
+    ):
+        enterprise_api.add_member(
+            self.SA_ID, ORG_ID, account_type="human", role="member"
+        )
+
+        response = await self._put(async_client, str(self.SA_ID))
+
+        assert response.status_code == 422
+        assert "import_owner_user_id" in response.json()["detail"]
+        assert await async_session.get(AutomationGitSyncOrgConfig, ORG_ID) is None
+
+    async def test_enterprise_failure_returns_502(self, async_client, enterprise_api):
+        enterprise_api.error = 500
+
+        response = await self._put(async_client, str(self.SA_ID))
+
+        assert response.status_code == 502
+
+    async def test_null_clears_it(self, async_client, async_session, enterprise_api):
+        enterprise_api.add_member(self.SA_ID, ORG_ID)
+        await self._put(async_client, str(self.SA_ID))
+
+        response = await self._put(async_client, None)
+
+        assert response.status_code == 200
+        assert response.json()["import_owner_user_id"] is None
+
+    async def test_other_updates_keep_it_and_check_ignores_it(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, ORG_ID)
+        await self._put(async_client, str(self.SA_ID))
+
+        response = await async_client.put(
+            "/api/automation/v1/git-sync/config", json={"branch": "develop"}
+        )
+        checked = await async_client.post(
+            "/api/automation/v1/git-sync/check",
+            json={"import_owner_user_id": str(self.SA_ID)},
+        )
+
+        assert response.json()["import_owner_user_id"] == str(self.SA_ID)
+        assert checked.status_code == 200
+
+
 class TestGitSyncConfigCheck:
     """`POST /check` answers "would this configuration reach its repo?".
 

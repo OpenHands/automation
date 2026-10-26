@@ -5215,7 +5215,13 @@ class TestAutomationChangeEvents:
 
         events = await self._events(async_session, automation.id)
         assert [e.action for e in events] == ["disable", "enable"]
-        assert events[0].changed_fields == ["disabled_at", "disabled_detail", "disabled_reason", "enabled", "state"]
+        assert events[0].changed_fields == [
+            "disabled_at",
+            "disabled_detail",
+            "disabled_reason",
+            "enabled",
+            "state",
+        ]
 
     async def test_failed_patch_writes_no_change_event(
         self, async_client, async_session
@@ -5296,7 +5302,7 @@ class TestAutomationChangeEvents:
         assert response.status_code == 404
 
     async def test_record_change_marks_service_account_actor(self, async_session):
-        from openhands.automation.auth import AuthMethod, AuthenticatedUser
+        from openhands.automation.auth import AuthenticatedUser, AuthMethod
         from openhands.automation.utils.change_events import record_change
 
         automation = await _seed_s3_automation(async_session)
@@ -5322,7 +5328,7 @@ class TestAutomationChangeEvents:
 
 
 class TestTransferAutomation:
-    """POST /v1/{id}/transfer: move an automation between a person and a service account.
+    """POST /v1/{id}/transfer: move an automation to or from a service account.
 
     ``async_client`` holds ``manage_automations``; ``readonly_client`` is a
     view-only member. Both act as TEST_USER_ID.
@@ -5450,7 +5456,9 @@ class TestTransferAutomation:
             owner_kind=AutomationOwnerKind.SERVICE,
         )
 
-        response = await readonly_client.post(self._url(automation), json={"to": "self"})
+        response = await readonly_client.post(
+            self._url(automation), json={"to": "self"}
+        )
 
         assert response.status_code == 403
 
@@ -5587,6 +5595,7 @@ class TestTransferAutomation:
             )
 
         assert response.status_code == 200
+        assert capture.await_args is not None
         assert capture.await_args.args[0] == "automation_transferred"
 
     async def test_transfer_rejects_malformed_body(self, async_client, async_session):
@@ -5598,7 +5607,7 @@ class TestTransferAutomation:
 
 
 class TestTransferPresetPluginPinning:
-    """A preset plugin bakes its refs into the tarball, so a moving ref blocks the transfer."""
+    """A preset plugin bakes its refs into its tarball; a moving ref blocks transfer."""
 
     SA_ID = TestTransferAutomation.SA_ID
     SHA = "0123456789abcdef0123456789abcdef01234567"

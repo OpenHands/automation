@@ -949,6 +949,11 @@ class AutomationGitSyncOrgConfig(Base):
     # minting the owner's API key, so it has to be a real member of the org.
     configured_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
+    # A service account of the org that owns automations imported from git, in
+    # place of `configured_by_user_id`. Verified through the enterprise API when
+    # saved (see `git_sync/router.py`).
+    import_owner_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
     last_synced_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_synced_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(

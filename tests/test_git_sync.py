@@ -50,6 +50,8 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
+    AutomationOwnerKind,
+    AutomationState,
     Base,
     TarballUpload,
     UploadStatus,
@@ -652,8 +654,14 @@ class TestRunSyncCycle:
             )
         )
         await commit_and_push(
-            editor_dir, "automations", "edit", "Human", "human@example.com",
-            "main", "", 30,
+            editor_dir,
+            "automations",
+            "edit",
+            "Human",
+            "human@example.com",
+            "main",
+            "",
+            30,
         )
 
         await run_sync_cycle(
@@ -2505,6 +2513,158 @@ class TestOrgIsolation:
             upload = (await session.execute(select(TarballUpload))).scalars().one()
             assert upload.user_id == admin_id
             assert upload.org_id == LOCAL_ORG_ID
+
+
+class TestImportedAutomationDefaults:
+    """What an automation authored in git starts as, and what a git edit keeps."""
+
+    _YAML = (
+        "name: Hand Written\n"
+        "entrypoint: python main.py\n"
+        "trigger:\n"
+        "  type: cron\n"
+        "  schedule: '0 12 * * *'\n"
+        "  timezone: UTC\n"
+    )
+
+    async def _push_hand_written(self, origin, yaml_text: str | None = None) -> None:
+        seed_dir = origin.parent / f"seed-{uuid.uuid4().hex[:6]}"
+        await ensure_repo(seed_dir, f"file://{origin}", "main", "", 30)
+        await pull(seed_dir, "main", "", 30)
+        autodir = seed_dir / "automations" / "hand-written"
+        autodir.mkdir(parents=True, exist_ok=True)
+        (autodir / "automation.yaml").write_text(yaml_text or self._YAML)
+        (autodir / "tarball").mkdir(exist_ok=True)
+        (autodir / "tarball" / "main.py").write_text('print("hi")')
+        await commit_and_push(
+            seed_dir,
+            "automations",
+            "seed",
+            "Repo Writer",
+            "writer@example.com",
+            "main",
+            "",
+            30,
+        )
+
+    async def _cycle(self, factory, git_settings, service_settings):
+        return await run_sync_cycle(
+            factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+    async def test_new_folder_without_enabled_imports_inactive(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin)
+
+        result = await self._cycle(
+            sqlite_session_factory, git_settings, service_settings
+        )
+
+        assert result.imported == 1
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_new_folder_with_enabled_true_still_imports_active(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.enabled is True
+
+    async def test_update_without_enabled_keeps_the_current_value(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        await self._push_hand_written(origin, self._YAML + "enabled: true\n")
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            automation.enabled = False
+            automation.state = AutomationState.INACTIVE
+            await session.commit()
+
+        # The edit drops `enabled` and changes the entrypoint.
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag")
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.entrypoint == "python main.py --flag"
+        assert automation.enabled is False
+        assert automation.state.value == "INACTIVE"
+
+    async def test_import_and_update_log_the_commit_author(
+        self,
+        sqlite_session_factory,
+        git_settings,
+        service_settings,
+        origin,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        await self._push_hand_written(origin)
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+        assert "Repo Writer <writer@example.com>" in caplog.text
+        assert "Imported new automation" in caplog.text
+
+        caplog.clear()
+        await self._push_hand_written(
+            origin, self._YAML.replace("main.py", "main.py --flag")
+        )
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        update_logs = [r for r in caplog.messages if "Updated automation" in r]
+        assert update_logs
+        assert "Repo Writer <writer@example.com>" in update_logs[0]
+
+    async def test_imports_belong_to_import_owner_sa(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        admin_id, sa_id = uuid.uuid4(), uuid.uuid4()
+        async with sqlite_session_factory() as session:
+            await apply_git_sync_config_override(
+                session, LOCAL_ORG_ID, {}, configured_by_user_id=admin_id
+            )
+            (
+                await get_or_create_org_config(session, LOCAL_ORG_ID)
+            ).import_owner_user_id = sa_id
+            await session.commit()
+        await self._push_hand_written(origin)
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+            upload = (await session.execute(select(TarballUpload))).scalars().one()
+        assert automation.user_id == sa_id
+        assert automation.owner_kind is AutomationOwnerKind.SERVICE
+        assert upload.user_id == sa_id
+
+    async def test_without_import_owner_the_configuring_user_owns_imports(
+        self, sqlite_session_factory, git_settings, service_settings, origin
+    ):
+        admin_id = uuid.uuid4()
+        async with sqlite_session_factory() as session:
+            await apply_git_sync_config_override(
+                session, LOCAL_ORG_ID, {}, configured_by_user_id=admin_id
+            )
+            await session.commit()
+        await self._push_hand_written(origin)
+
+        await self._cycle(sqlite_session_factory, git_settings, service_settings)
+
+        async with sqlite_session_factory() as session:
+            automation = (await session.execute(select(Automation))).scalars().one()
+        assert automation.user_id == admin_id
+        assert automation.owner_kind is AutomationOwnerKind.USER
 
 
 class TestFailureBackoffState:

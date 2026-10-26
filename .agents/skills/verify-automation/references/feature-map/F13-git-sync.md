@@ -41,7 +41,7 @@ Routes: `GET /api/automation/v1/git-sync/status`, `PUT /api/automation/v1/git-sy
 - `F13.commit-author`: commits use the message `Sync automations from agent server` and author `OpenHands Automation <automation@openhands.dev>` unless `author_name`/`author_email` are set.
 - `F13.slugs`: slugs are the lowercased name with non-alphanumeric runs collapsed to `-`, capped at 80 characters; a second automation with the same name gets `-<first 8 hex of its id>`.
 - `F13.export-external`: an automation with an external `tarball_path` exports only `automation.yaml` with `tarball_source: {type: external, url: ...}`.
-- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an automation owned by the configuring user, with an internal tarball, and the import pushes no commit of its own.
+- `F13.import-new`: a directory pushed to the repo with `automation.yaml` and `tarball/` becomes an INACTIVE automation (its YAML sets neither `enabled` nor `state`) owned by the configuring user, or by the org's `import_owner_user_id` service account when set, with an internal tarball, and the import pushes no commit of its own.
 - `F13.import-invalid-skipped`: a directory with invalid YAML or without `entrypoint` is skipped with a logged warning; the cycle still succeeds.
 - `F13.import-update`: editing `name` and `enabled` in a synced `automation.yaml` updates the automation; its slug directory stays.
 - `F13.conflict-service-wins`: when the same automation is edited through the API and in git before a sync, the API version ends up in both the database and the repo.
@@ -278,11 +278,13 @@ Preconditions:
   control-automation api POST /v1/git-sync/sync --expect 202 --check triggered eq true
   control-automation api GET /v1/git-sync/status --until-ok 60 --check last_synced_at ne "$PREV" --check sync_in_progress eq false --check last_error eq null --check last_synced_commit eq "$PUSHED"
   IMP=$(control-automation state sql "SELECT automation_id FROM automation_git_sync_state WHERE slug = 'qa-from-git'" --field rows.0.automation_id)
-  control-automation api GET "/v1/$IMP" --expect 200 --check name eq 'qa from git' --check user_id eq "$ME" --check entrypoint eq 'bash run.sh' --check trigger.schedule eq '0 9 * * 1' --check tarball_path matches '^oh-internal://' --check enabled eq true --save F13.import-new/automation
+  control-automation api GET "/v1/$IMP" --expect 200 --check name eq 'qa from git' --check user_id eq "$ME" --check entrypoint eq 'bash run.sh' --check trigger.schedule eq '0 9 * * 1' --check tarball_path matches '^oh-internal://' --check enabled eq false --check state eq INACTIVE --save F13.import-new/automation
   control-automation state sql "SELECT dirty FROM automation_git_sync_state WHERE slug = 'qa-from-git'" --check rows.0.dirty eq 0
   test "$(git -C "$B" rev-parse main)" = "$PUSHED"
   ```
-  The new automation runs as the configuring user (`$ME`), its tarball was
+  The new automation is INACTIVE because the YAML sets neither `enabled` nor
+  `state`; an edit that omits both keeps the current value. It runs as the
+  configuring user (`$ME`), its tarball was
   rebuilt from `tarball/` into an internal upload, and the cycle pushed
   nothing back (`main` is still the pushed commit).
 - **Invalid directories are skipped (`F13.import-invalid-skipped`).**
