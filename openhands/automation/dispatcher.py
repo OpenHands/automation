@@ -50,7 +50,6 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
     AutomationState,
-    TarballUpload,
 )
 from openhands.automation.observability import (
     add_event,
@@ -86,6 +85,7 @@ from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_exception,
 )
 from openhands.automation.utils.tarball_validation import (
+    get_org_upload,
     is_http_url,
     parse_internal_upload_id,
 )
@@ -241,23 +241,25 @@ async def _fetch_plugins_on_agent_server(
 
 async def _download_internal_tarball(
     upload_id: uuid.UUID,
+    org_id: uuid.UUID,
     session: AsyncSession | None,
 ) -> bytes:
     """Download a tarball from storage using the TarballUpload record.
 
+    Only an upload in ``org_id`` (the automation's org) is used; an upload in
+    another org is treated as missing.
+
     Raises:
-        TarballNotFoundError: If the tarball upload record doesn't exist, or if
-            the record exists but its storage object is missing. Both are
-            permanent errors that should disable the automation.
+        TarballNotFoundError: If the tarball upload record doesn't exist in
+            ``org_id``, or if the record exists but its storage object is
+            missing. Both are permanent errors that should disable the
+            automation.
         ValueError: If no database session is provided.
     """
     if session is None:
         raise ValueError("Database session required to resolve oh-internal:// URLs")
 
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, org_id)
     if upload is None:
         raise TarballNotFoundError(
             f"Internal tarball upload not found: {upload_id}. "
@@ -806,7 +808,9 @@ async def _execute_run(
             if upload_id is None:
                 raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
             async with session_factory() as session:
-                tarball_source = await _download_internal_tarball(upload_id, session)
+                tarball_source = await _download_internal_tarball(
+                    upload_id, automation.org_id, session
+                )
             logger.info(
                 "Internal tarball downloaded (%d bytes)",
                 len(tarball_source),

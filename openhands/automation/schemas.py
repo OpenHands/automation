@@ -582,7 +582,8 @@ class CreateAutomationRequest(BaseModel):
     def validate_tarball_path(cls, v: str) -> str:
         if not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, "
+                "http://, or https://"
             )
         return v
 
@@ -746,7 +747,8 @@ class UpdateAutomationRequest(BaseModel):
     def validate_tarball_path(cls, v: str | None) -> str | None:
         if v is not None and not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, "
+                "http://, or https://"
             )
         return v
 

@@ -307,6 +307,38 @@ class TestIsHttpUrl:
         assert is_http_url("gs://bucket/key.tar.gz") is False
 
 
+async def test_download_internal_tarball_ignores_other_org_upload(
+    async_session_factory,
+):
+    """An upload outside the automation's org is treated as missing."""
+    from openhands.automation.dispatcher import _download_internal_tarball
+    from openhands.automation.exceptions import TarballNotFoundError
+    from openhands.automation.models import TarballUpload, UploadStatus
+
+    upload_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        session.add(
+            TarballUpload(
+                id=upload_id,
+                user_id=TEST_USER_ID,
+                org_id=uuid.uuid4(),
+                name="other-org-upload",
+                status=UploadStatus.COMPLETED,
+                storage_path=f"uploads/other/{upload_id}.tar",
+            )
+        )
+        await session.commit()
+    store = MagicMock()
+    store.read.return_value = b"other org tarball"
+
+    with patch("openhands.automation.storage.get_file_store", return_value=store):
+        async with async_session_factory() as session:
+            with pytest.raises(TarballNotFoundError):
+                await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
+
+    store.read.assert_not_called()
+
+
 class TestMarkRunStatus:
     """Tests for mark_run_status function."""
 

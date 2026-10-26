@@ -36,7 +36,6 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
-    TarballUpload,
 )
 from openhands.automation.observability import (
     add_event,
@@ -110,6 +109,7 @@ from openhands.automation.utils.state import (
 )
 from openhands.automation.utils.tags import count_org_tags, has_tag
 from openhands.automation.utils.tarball_validation import (
+    get_org_upload,
     is_http_url,
     parse_internal_upload_id,
     validate_tarball_path,
@@ -716,6 +716,20 @@ async def update_automation(
 
     update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
+    # Same ownership check as create. Only a new value is checked: clients resend
+    # the stored path on save, and that upload can belong to another member (a
+    # Git Sync edit stores it as the user who configured Git Sync).
+    requested_tarball_path = update_data.get("tarball_path")
+    if (
+        requested_tarball_path is not None
+        and requested_tarball_path != auto.tarball_path
+    ):
+        await validate_tarball_path(
+            tarball_path=requested_tarball_path,
+            user_id=user.user_id,
+            org_id=user.org_id,
+            session=session,
+        )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
     repos_requested = "repos" in update_data
@@ -1022,14 +1036,8 @@ async def download_automation_tarball(
 
     upload_id = parse_internal_upload_id(auto.tarball_path)
     if upload_id is not None:
-        result = await session.execute(
-            select(TarballUpload).where(
-                TarballUpload.id == upload_id,
-                TarballUpload.deleted_at.is_(None),
-            )
-        )
-        upload = result.scalars().first()
-        if upload is None:
+        upload = await get_org_upload(session, upload_id, auto.org_id)
+        if upload is None or upload.deleted_at is not None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Tarball not found (underlying upload may have been deleted)",

@@ -140,6 +140,37 @@ async def _seed_prompt_preset_automation(
     return automation
 
 
+async def _seed_upload(async_session, *, user_id, org_id):
+    """Insert a COMPLETED internal upload owned by ``user_id`` in ``org_id``."""
+    upload_id = uuid.uuid4()
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=user_id,
+        org_id=org_id,
+        name="seed-upload",
+        status=UploadStatus.COMPLETED,
+        storage_path=_build_storage_path(org_id, user_id, upload_id),
+    )
+    async_session.add(upload)
+    await async_session.commit()
+    return upload
+
+
+async def _seed_s3_automation(async_session, *, tarball_path="s3://bucket/code.tar.gz"):
+    """Insert an automation the test user created, with the given tarball_path."""
+    automation = Automation(
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="Custom Automation",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path=tarball_path,
+        entrypoint="uv run script.py",
+    )
+    async_session.add(automation)
+    await async_session.commit()
+    return automation
+
+
 def _tarball_files(store, tarball_path):
     """Read every file of an internal tarball the preset store holds."""
     upload_id = parse_internal_upload_id(tarball_path)
@@ -2456,6 +2487,135 @@ class TestUpdateAutomation:
         # Assert — the object the automation still points at survives.
         assert old_storage_path in preset_store._storage
 
+    async def test_update_prompt_does_not_regenerate_from_other_org_upload(
+        self, async_client, async_session, preset_store
+    ):
+        """Regeneration never reads or deletes an upload outside the org."""
+        # Arrange — a preset automation whose tarball_path names another org's upload.
+        foreign = await _seed_upload(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID
+        )
+        foreign_storage_path = foreign.storage_path
+        preset_store._storage[foreign_storage_path] = _generate_tarball("Foreign")
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, "Original prompt"
+        )
+        automation.tarball_path = build_internal_url(foreign.id)
+        await async_session.commit()
+
+        # Act
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Updated prompt"},
+        )
+
+        # Assert — the foreign upload is untouched and nothing was rebuilt.
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == build_internal_url(foreign.id)
+        await async_session.refresh(foreign)
+        assert foreign.deleted_at is None
+        assert foreign_storage_path in preset_store._storage
+        preset_store.write_stream.assert_not_called()
+
+    async def test_update_tarball_path_rejects_other_users_upload(
+        self, async_client, async_session
+    ):
+        """PATCH may only point an automation at the caller's own upload."""
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 403
+        await async_session.refresh(automation)
+        assert automation.tarball_path == "s3://bucket/code.tar.gz"
+
+    async def test_update_tarball_path_rejects_other_org_upload(
+        self, async_client, async_session
+    ):
+        """An upload in another org is reported as not found."""
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=OTHER_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 404
+        await async_session.refresh(automation)
+        assert automation.tarball_path == "s3://bucket/code.tar.gz"
+
+    async def test_update_tarball_path_accepts_own_completed_upload(
+        self, async_client, async_session
+    ):
+        """The caller's own completed upload is accepted."""
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == build_internal_url(upload.id)
+
+    @pytest.mark.parametrize(
+        "tarball_path",
+        [
+            "https://example.com/code.tar.gz",
+            "s3://bucket/other.tar.gz",
+            "gs://bucket/other.tar.gz",
+        ],
+    )
+    async def test_update_tarball_path_accepts_external_url(
+        self, async_client, async_session, tarball_path
+    ):
+        """External URLs keep working; they are fetched at dispatch time."""
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": tarball_path},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["tarball_path"] == tarball_path
+
+    async def test_update_unchanged_tarball_path_is_not_revalidated(
+        self, async_client, async_session
+    ):
+        """Sending back the stored tarball_path does not fail the edit.
+
+        Canvas resends the current tarball_path when it saves a custom
+        automation. That upload can belong to another org member: a Git Sync
+        edit stores the new tarball as the user who configured Git Sync.
+        """
+        upload = await _seed_upload(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID
+        )
+        automation = await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Renamed", "tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "Renamed"
+
     async def test_update_automation_timeout(self, async_client, async_session):
         """Can update automation timeout."""
         automation = Automation(
@@ -4366,6 +4526,28 @@ class TestDownloadTarball:
         assert response.headers["content-type"] == "application/x-tar"
         assert 'filename="My Automation.tar"' in response.headers["content-disposition"]
         mock_store.read.assert_called_once_with(upload.storage_path)
+
+    async def test_internal_url_other_org_upload_returns_404(
+        self, async_client, async_session
+    ):
+        """An upload outside the automation's org is never served."""
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        upload = await _seed_upload(
+            async_session, user_id=OTHER_USER_ID, org_id=OTHER_ORG_ID
+        )
+        mock_store = MagicMock()
+        mock_store.read.return_value = b"other org tarball"
+        app.dependency_overrides[get_file_store] = lambda: mock_store
+        automation = await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/tarball")
+
+        assert response.status_code == 404
+        mock_store.read.assert_not_called()
 
     async def test_internal_url_upload_deleted_returns_404(
         self, async_client, async_session
