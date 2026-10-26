@@ -1,6 +1,6 @@
 FROM python:3.12-slim-trixie AS snapshot-base
 
-ARG DEBIAN_SNAPSHOT=20260930T000000Z
+ARG DEBIAN_SNAPSHOT=20261012T000000Z
 
 RUN printf '%s\n' \
         'Types: deb' \
@@ -24,7 +24,7 @@ RUN printf '%s\n' \
 
 FROM snapshot-base AS builder
 
-ARG UV_VERSION=0.12.23
+ARG UV_VERSION=0.13.5
 
 WORKDIR /app
 
@@ -44,6 +44,9 @@ FROM snapshot-base AS runtime
 WORKDIR /app
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH="/app"
+# The service image runs behind an ingress. Direct deployments can override
+# this with their trusted proxy IPs or CIDRs.
+ENV FORWARDED_ALLOW_IPS='*'
 
 LABEL com.datadoghq.tags.service="automation"
 
@@ -52,7 +55,8 @@ COPY --from=builder /app/migrations /app/migrations
 COPY --from=builder /app/alembic.ini /app/alembic.ini
 
 RUN /usr/local/bin/python -m pip uninstall --yes pip && \
-    groupadd -r automation && useradd -r -g automation -u 42420 automation
+    groupadd -r automation && useradd -r -g automation -u 42420 automation && \
+    mkdir /data && chown automation:automation /data
 USER automation
 
 EXPOSE 8000

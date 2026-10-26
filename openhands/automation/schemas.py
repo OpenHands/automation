@@ -45,6 +45,7 @@ from openhands.automation.utils.timeout import (
     validate_automation_timeout,
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.workspace import RepoSource
 
 
 # Allowed URI schemes for tarball_path (includes internal upload scheme)
@@ -212,7 +213,10 @@ class EventTrigger(BaseModel):
     type: Literal["event"] = "event"
     source: str = Field(
         ...,
-        description="Event source: 'github' or custom webhook source name",
+        description=(
+            "Event source: a built-in source such as 'github' or 'azure_devops', "
+            "or a custom webhook source name"
+        ),
     )
     on: str | list[str] = Field(
         ...,
@@ -493,6 +497,7 @@ class CreateAutomationRequest(BaseModel):
     )
 
     name: str = Field(..., min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -673,6 +678,7 @@ class UpdateAutomationRequest(BaseModel):
     )
 
     name: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(
         default=None,
         min_length=1,
@@ -685,6 +691,14 @@ class UpdateAutomationRequest(BaseModel):
     )
 
     prompt: str | None = Field(default=None, max_length=50000)
+    repos: list[RepoSource] | None = Field(
+        default=None,
+        description=(
+            "Repositories a prompt or plugin preset clones before it runs. Replaces "
+            "the whole list; an empty list or null removes them. Other automations "
+            "answer 422."
+        ),
+    )
     trigger: Trigger | None = Field(
         default=None, description="Trigger configuration (cron or event-based)"
     )
@@ -735,6 +749,12 @@ class UpdateAutomationRequest(BaseModel):
                 "tarball_path must start with s3://, gs://, http://, or https://"
             )
         return v
+
+    @field_validator("repos", mode="before")
+    @classmethod
+    def normalize_repos(cls, v: Any) -> Any:
+        """Accept a single repository as well as a list, as the presets do."""
+        return [v] if isinstance(v, (str, dict)) else v
 
     @field_validator("setup_script_path")
     @classmethod
@@ -1095,6 +1115,7 @@ class AutomationResponse(BaseModel):
     model: str | None
 
     name: str
+    description: str | None = None
     prompt: str | None
     preset_metadata: dict | None = None
     plugin_spec: dict | None = None
@@ -1338,6 +1359,13 @@ class CapabilitiesResponse(_SetupContractModel):
     )
     triggers: TriggerCapabilities
     features: list[str]
+    repo_providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Git providers whose repositories a run clones with the user's "
+            "token, as RepoSource provider names (github, gitlab, ...)."
+        ),
+    )
 
 
 class DraftValidationError(_SetupContractModel):

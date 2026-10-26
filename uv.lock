@@ -469,11 +469,11 @@ wheels = [
 
 [[package]]
 name = "certifi"
-version = "2026.4.22"
+version = "2026.10.19"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/25/ee/6caf7a40c36a1220410afe15a1cc64993a1f864871f698c0f93acb72842a/certifi-2026.4.22.tar.gz", hash = "sha256:8d455352a37b71bf76a79caa83a3d6c25afee4a385d632127b6afb3963f1c580", size = 137077, upload-time = "2026-04-22T11:26:11.191Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2/certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae", size = 137598, upload-time = "2026-10-20T02:24:16.604Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/30/7cd8fdcdfbc5b869528b079bfb76dcdf6056b1a2097a662e5e8c04f42965/certifi-2026.4.22-py3-none-any.whl", hash = "sha256:3cb2210c8f88ba2318d29b0388d1023c8492ff72ecdde4ebdaddbb13a31b1c4a", size = 135707, upload-time = "2026-04-22T11:26:09.372Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b", size = 136464, upload-time = "2026-10-20T02:24:15.072Z" },
 ]
 
 [[package]]
@@ -2292,7 +2292,7 @@ wheels = [
 
 [[package]]
 name = "openhands-automation"
-version = "1.23.1"
+version = "1.25.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -2301,6 +2301,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "cachetools" },
+    { name = "certifi" },
     { name = "cloud-sql-python-connector", extra = ["asyncpg"] },
     { name = "croniter" },
     { name = "fastapi" },
@@ -2349,14 +2350,15 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "cachetools", specifier = ">=7.0.5" },
+    { name = "certifi", specifier = ">=2026.10.19" },
     { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.16" },
     { name = "croniter", specifier = ">=2" },
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastapi", specifier = ">=0.121" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jmespath", specifier = ">=1.0" },
-    { name = "openhands-sdk", specifier = "==1.56.0" },
-    { name = "openhands-workspace", specifier = "==1.56.0" },
+    { name = "openhands-sdk", specifier = "==1.58.1" },
+    { name = "openhands-workspace", specifier = "==1.58.1" },
     { name = "pg8000", specifier = ">=1.31" },
     { name = "prometheus-client", specifier = ">=0.19" },
     { name = "pydantic", specifier = ">=2" },
@@ -2389,10 +2391,11 @@ production = [{ name = "ddtrace", specifier = "==4.15.6" }]
 
 [[package]]
 name = "openhands-sdk"
-version = "1.56.0"
+version = "1.58.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
+    { name = "certifi" },
     { name = "deprecation" },
     { name = "fakeredis", extra = ["lua"] },
     { name = "fastmcp" },
@@ -2411,23 +2414,24 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/de/8c/50764d1693977769a111af181cb65f07f5ddd0c03d9f58a0136dad07ee05/openhands_sdk-1.56.0.tar.gz", hash = "sha256:60b34918214430bace7574ed53c4f52f492cdcf0cd39864846910470db96dd47", size = 797833, upload-time = "2026-10-19T13:32:57.948Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/2e/ec5c9b7b696120f2a8fea8c5352211ae0748662193b29b31421771959a31/openhands_sdk-1.58.1.tar.gz", hash = "sha256:64b40f793301e18444e6074530ca6e1508bdbd4010f7cf4cd9a9b8cf5358e09d", size = 809349, upload-time = "2026-10-23T00:44:58.204Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/10/934a4add5475cfa7ae1413592c9d4255e3c2b85d3785135675809dd6e2ea/openhands_sdk-1.56.0-py3-none-any.whl", hash = "sha256:7a20bc6a1860119eedcc93dbe4f8d2f02aee323b43c7ebe4b307633c88bd74e5", size = 947094, upload-time = "2026-10-19T13:32:52.299Z" },
+    { url = "https://files.pythonhosted.org/packages/61/03/443116c7fd3f5605952d828f65e2733620cfa7a801571b915e80eb432932/openhands_sdk-1.58.1-py3-none-any.whl", hash = "sha256:eb8dfecd5edef95a073db29df2194388f3d59d345a54aa4adab6456484e6615e", size = 959637, upload-time = "2026-10-23T00:44:54.047Z" },
 ]
 
 [[package]]
 name = "openhands-workspace"
-version = "1.56.0"
+version = "1.58.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "certifi" },
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/66/c9/380a964885714ac0f94849416a4e078871526af23021c50a48dea1335a9e/openhands_workspace-1.56.0.tar.gz", hash = "sha256:864d1a6667f368b7c1186eebaf2e54006828f71fcc3dc6ed8720783458266b6a", size = 30144, upload-time = "2026-10-19T13:33:00.022Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/59/5540be36358687c236ec0f83ce6e1411428318e83bce4aa59f7125e6d894/openhands_workspace-1.58.1.tar.gz", hash = "sha256:0fffac9b215ac8e1b0cdc0d2e4d993dc1646e88be1da05adc5bfb84c2bbab154", size = 30238, upload-time = "2026-10-23T00:44:59.877Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/92/ba25e0fe149c9ec8ebb705804ed7173e525341a7266bfaa085bf421ac5b8/openhands_workspace-1.56.0-py3-none-any.whl", hash = "sha256:66a0930fb4a03c5485d6a78449d3fe5227f62576785e2a22a6715a5b4e6b630e", size = 37083, upload-time = "2026-10-19T13:32:55.22Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/55/73074342f6acd7bad1f83cf2c2d8d43d71f2fb02c7623cb181af264f163b/openhands_workspace-1.58.1-py3-none-any.whl", hash = "sha256:b321e938482d2a4b6e79b5f79c900398fea8ddaeee70625c0d528fc6fc272b32", size = 37101, upload-time = "2026-10-23T00:44:56.315Z" },
 ]
 
 [[package]]

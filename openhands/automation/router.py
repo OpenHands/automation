@@ -55,7 +55,11 @@ from openhands.automation.plugin_specs import (
     validate_plugin_config,
     validate_required_plugins,
 )
-from openhands.automation.preset_router import regenerate_preset_prompt_tarball
+from openhands.automation.preset_router import (
+    dump_repos,
+    regenerate_preset_tarball,
+    repos_config_json,
+)
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
@@ -84,6 +88,7 @@ from openhands.automation.utils.callback_error import format_callback_error
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
+from openhands.automation.utils.event_sources import is_event_source_configured
 from openhands.automation.utils.model_profiles import (
     ensure_agent_profile_exists,
     resolve_model_profile_for_user,
@@ -115,7 +120,7 @@ from openhands.automation.utils.templates import (
 )
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
-from openhands.automation.utils.webhook import get_webhook_config, is_builtin_source
+from openhands.automation.utils.webhook import is_builtin_source
 
 
 logger = logging.getLogger(__name__)
@@ -231,7 +236,7 @@ async def create_automation(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create a new automation.
 
@@ -282,6 +287,7 @@ async def create_automation(
         user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
+        description=body.description,
         model=model,
         agent_profile_id=body.agent_profile_id,
         preset_metadata=preset_metadata,
@@ -327,7 +333,7 @@ async def create_automation_from_plugin_spec(
     request: Request,
     response: Response,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""
     if body.template is not None:
@@ -486,13 +492,15 @@ async def _resolve_plugin_spec_trigger(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Plugin automation requires a trigger or manifest suggested_trigger",
         )
-    if isinstance(trigger, EventTrigger) and not is_builtin_source(trigger.source):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Event source `{trigger.source}` is not configured",
-            )
+    if (
+        isinstance(trigger, EventTrigger)
+        and not is_builtin_source(trigger.source)
+        and not await is_event_source_configured(trigger.source, user.org_id, session)
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Event source `{trigger.source}` is not configured",
+        )
     return trigger
 
 
@@ -626,7 +634,7 @@ async def list_automations(
         default=None, description="Only automations carrying this tag"
     ),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
     """List automations for the caller's org (excludes soft-deleted)."""
     base_query = select(Automation).where(
@@ -682,7 +690,7 @@ async def list_automation_tags(
 async def get_automation(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Get a single automation by ID."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
@@ -696,11 +704,6 @@ async def update_automation(
     request: Request,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    # Function scope commits the session when the handler returns, BEFORE the
-    # response is sent and its background tasks run. With the default request
-    # scope the deferred tarball delete would run before the commit, and a
-    # commit failure would strand a live upload record pointing at an
-    # already-deleted object.
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Partially update an automation.
@@ -713,6 +716,18 @@ async def update_automation(
 
     update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
+    # Repositories are not a column: a preset bakes them into its tarball and
+    # records them in preset_metadata, so they are applied with the prompt below.
+    repos_requested = "repos" in update_data
+    update_data.pop("repos", None)
+    if repos_requested and (auto.preset_metadata or {}).get("preset_type") not in (
+        "prompt",
+        "plugin",
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Only prompt and plugin preset automations can update repos",
+        )
     plugin_update_requested = "plugin" in update_data
     if plugin_update_requested:
         if update_data["plugin"] is None:
@@ -867,25 +882,51 @@ async def update_automation(
     for field, value in update_data.items():
         setattr(auto, field, value)
 
-    # A preset automation bakes its prompt into the tarball the dispatcher
-    # executes; the `prompt` column is metadata only. When the prompt actually
-    # changes, rebuild the tarball so the next dispatch runs the new prompt
-    # instead of the original baked one. Skipped when the value is unchanged (a
-    # no-op edit), or for non-preset automations.
-    if (
+    # A preset automation bakes its prompt and repositories into the tarball the
+    # dispatcher executes; the `prompt` column and preset metadata are a record
+    # only. When either actually changes, rebuild the tarball once so the next
+    # dispatch runs the edit instead of the original baked files. Skipped when
+    # the values are unchanged (a no-op edit), or for non-preset automations.
+    prompt_changed = (
         "prompt" in update_data
         and isinstance(auto.prompt, str)
         and auto.prompt != original_prompt
-    ):
-        new_tarball_path = await regenerate_preset_prompt_tarball(
-            auto, auto.prompt, session, background_tasks
+    )
+    new_repos = dump_repos(body.repos)
+    repos_changed = repos_requested and new_repos != (
+        (auto.preset_metadata or {}).get("repos") or []
+    )
+    files: dict[str, str | None] = {}
+    if prompt_changed:
+        files["prompt.txt"] = auto.prompt
+    if repos_changed:
+        files["repos_config.json"] = repos_config_json(new_repos) if new_repos else None
+    if files:
+        new_tarball_path = await regenerate_preset_tarball(
+            auto, files, session, background_tasks
         )
         if new_tarball_path is not None:
             auto.tarball_path = new_tarball_path
-        # Keep preset metadata in sync with the edited prompt. Reassign the
-        # whole dict: in-place mutation of a JSON column is not change-tracked.
+        elif repos_changed:
+            # Unlike the prompt column, recorded repositories that the tarball
+            # does not clone would claim a checkout the next run never makes.
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "This automation's repositories cannot be changed: its preset "
+                "tarball could not be rebuilt",
+            )
+        # Keep preset metadata in sync with the edit. Reassign the whole dict:
+        # in-place mutation of a JSON column is not change-tracked.
         if auto.preset_metadata is not None:
-            auto.preset_metadata = {**auto.preset_metadata, "prompt": auto.prompt}
+            metadata = dict(auto.preset_metadata)
+            if prompt_changed:
+                metadata["prompt"] = auto.prompt
+            if repos_changed:
+                if new_repos:
+                    metadata["repos"] = new_repos
+                else:
+                    metadata.pop("repos", None)
+            auto.preset_metadata = metadata
 
     if skip_pending_reason is not None:
         await skip_pending_runs_for_disabled_automation(
@@ -907,7 +948,11 @@ async def update_automation(
         request=request,
         user=user,
         automation=auto,
-        properties={"updated_fields": sorted(update_data.keys())},
+        properties={
+            "updated_fields": sorted(
+                update_data.keys() | ({"repos"} if repos_requested else set())
+            )
+        },
     )
     return AutomationResponse.model_validate(auto)
 
@@ -917,7 +962,7 @@ async def delete_automation(
     automation_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     """Soft delete an automation."""
     auto = await _get_org_automation(session, automation_id, user.org_id)
@@ -962,7 +1007,7 @@ async def delete_automation(
 async def download_automation_tarball(
     automation_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> Response:
     """Download the tarball for an automation.
@@ -1049,7 +1094,7 @@ async def dispatch_automation(
     automation_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Manually dispatch an automation run.
 
@@ -1098,7 +1143,7 @@ async def list_automation_runs(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunListResponse:
     """List runs for a specific automation.
 
@@ -1142,7 +1187,7 @@ async def complete_run(
     body: RunCompleteRequest,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Receive completion callback from the SDK running inside a sandbox.
 
@@ -1376,7 +1421,7 @@ async def report_run_phase(
     run_id: uuid.UUID,
     body: RunPhaseRequest,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Record a live progress phase reported from inside the sandbox.
 
@@ -1429,7 +1474,7 @@ async def cancel_run(
     run_id: uuid.UUID,
     request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationRunResponse:
     """Cancel a pending or running automation run.
 

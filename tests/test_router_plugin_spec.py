@@ -5,11 +5,36 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from openhands.automation.config import clear_config_cache
 from openhands.automation.models import Automation
 from openhands.automation.plugin_specs import AutomationPluginSource
 from openhands.automation.router import (
     _resolve_plugin_spec_update_fields_reusing_existing_profiles,
 )
+
+
+TEST_ORG_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
+SLACK_TEAM_ID = "T12345678"
+SLACK_BOT_USER_ID = "U87654321"
+
+
+def configure_slack_stream(monkeypatch, org_id: uuid.UUID = TEST_ORG_ID) -> None:
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+    monkeypatch.setenv(
+        "AUTOMATION_SLACK_APPS",
+        json.dumps(
+            [
+                {
+                    "org_id": str(org_id),
+                    "app_token": "xapp-1",
+                    "bot_token": "xoxb-1",
+                    "team_id": SLACK_TEAM_ID,
+                    "bot_user_id": SLACK_BOT_USER_ID,
+                }
+            ]
+        ),
+    )
+    clear_config_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -318,6 +343,33 @@ async def test_create_plugin_spec_rejects_unconfigured_suggested_event_source(
 
     assert response.status_code == 422
     assert "Event source `linear` is not configured" in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_accepts_configured_stream_source(
+    async_client, tmp_path, agent_profiles_api, monkeypatch
+):
+    configure_slack_stream(monkeypatch)
+    plugin = write_suggested_trigger_plugin(
+        tmp_path,
+        {
+            "type": "event",
+            "source": "slack",
+            "on": "app_mention",
+            "filter": f"team_id == '{SLACK_TEAM_ID}'",
+        },
+    )
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={"name": "Hello Plugin", "plugin": {"source": str(plugin)}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["trigger"]["source"] == "slack"
+    assert data["trigger"]["on"] == "app_mention"
 
 
 @pytest.mark.asyncio

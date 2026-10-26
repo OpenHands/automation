@@ -77,6 +77,7 @@ from openhands.automation.telemetry import (
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.event_sources import get_event_source_delivery
 from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
@@ -91,7 +92,6 @@ from openhands.automation.utils.tarball_validation import (
     validate_tarball_path,
 )
 from openhands.automation.utils.timeout import default_automation_timeout
-from openhands.automation.utils.webhook import get_webhook_config
 
 
 logger = logging.getLogger(__name__)
@@ -248,15 +248,15 @@ async def _validate_draft_body(
     if isinstance(trigger, CronTrigger):
         errors.extend(_cron_errors(trigger))
     elif isinstance(trigger, EventTrigger):
-        webhook = await get_webhook_config(trigger.source, user.org_id, session)
-        if webhook is None:
+        delivery = await get_event_source_delivery(trigger.source, user.org_id, session)
+        if delivery is None:
             errors.append(
                 DraftValidationError(
                     field="trigger.source",
                     code="event_source_not_configured",
                     message=(
-                        f"No webhook is configured to deliver '{trigger.source}' "
-                        "events to this deployment."
+                        f"No event delivery is configured for '{trigger.source}' "
+                        "events in this deployment."
                     ),
                 )
             )
@@ -339,6 +339,7 @@ async def _materialize_raw_draft(
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": None,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -377,6 +378,7 @@ async def _materialize_prompt_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": resolve_model_profile_for_user(body.model, user),
@@ -427,6 +429,7 @@ async def _materialize_plugin_draft(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
     return {
         "name": body.name,
+        "description": body.description,
         "prompt": body.prompt,
         "preset_metadata": preset_metadata,
         "model": model,
@@ -495,7 +498,7 @@ async def _materialize_draft(
 async def create_draft(
     body: CreateAutomationDraftRequest,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     if body.source_automation_id is not None:
         await _assert_org_automation_exists(
@@ -523,7 +526,7 @@ async def list_drafts(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftListResponse:
     base_query = select(AutomationDraft).where(
         AutomationDraft.org_id == user.org_id,
@@ -549,7 +552,7 @@ async def list_drafts(
 async def get_draft(
     draft_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     return AutomationDraftResponse.model_validate(draft)
@@ -560,7 +563,7 @@ async def update_draft(
     draft_id: uuid.UUID,
     body: UpdateAutomationDraftRequest,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
@@ -583,7 +586,7 @@ async def update_draft(
 async def delete_draft(
     draft_id: uuid.UUID,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> None:
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
@@ -613,7 +616,7 @@ async def dispatch_draft(
     background_tasks: BackgroundTasks,
     body: DraftDispatchRequest | None = None,
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationRunResponse:
     del background_tasks
