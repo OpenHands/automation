@@ -73,6 +73,7 @@ from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import record_change
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
@@ -606,6 +607,23 @@ async def _create_automation_from_git(
     logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
 
 
+def _changed_columns(automation: Automation, values: dict) -> list[str]:
+    """Names of the columns `values` would change (names only, for the audit row)."""
+    # A stored trigger may lack defaults the validated one carries; compare the
+    # normalized form so an unchanged trigger does not read as changed.
+    current_trigger = automation.trigger
+    try:
+        current_trigger = _TRIGGER_ADAPTER.validate_python(current_trigger).model_dump()
+    except ValidationError:
+        pass
+    return [
+        column
+        for column, value in values.items()
+        if (current_trigger if column == "trigger" else getattr(automation, column))
+        != value
+    ]
+
+
 async def _update_automation_from_git(
     session: AsyncSession,
     state: AutomationGitSyncState,
@@ -636,8 +654,10 @@ async def _update_automation_from_git(
         _Owner(automation.user_id, automation.org_id),
         existing=automation,
     )
+    changed_fields = _changed_columns(automation, values)
     for column, value in values.items():
         setattr(automation, column, value)
+    record_change(session, automation, None, "git_sync_update", changed_fields)
 
     state.content_hash = new_hash
     state.last_synced_commit = head

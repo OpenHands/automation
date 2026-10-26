@@ -65,6 +65,14 @@ class AutomationOwnerKind(StrEnum):
     SERVICE = "service"
 
 
+class AutomationChangeActorKind(StrEnum):
+    """Who made a recorded change to an automation."""
+
+    USER = "user"
+    SERVICE = "service"
+    GIT_SYNC = "git_sync"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -193,6 +201,11 @@ class Automation(Base):
     )
     disable_events: Mapped[list["AutomationDisableEvent"]] = relationship(
         "AutomationDisableEvent",
+        back_populates="automation",
+        cascade="all, delete-orphan",
+    )
+    change_events: Mapped[list["AutomationChangeEvent"]] = relationship(
+        "AutomationChangeEvent",
         back_populates="automation",
         cascade="all, delete-orphan",
     )
@@ -469,6 +482,44 @@ class AutomationDisableEvent(Base):
         back_populates="disable_events",
     )
     run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
+
+
+class AutomationChangeEvent(Base):
+    """Audit record of who changed an automation and which fields.
+
+    Holds field NAMES only, never values, so a prompt, secret or URL cannot
+    leak through the audit trail. Written in the same transaction as the
+    change (see ``utils/run.py:record_change``).
+    """
+
+    __tablename__ = "automation_change_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("automations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # NULL for Git sync, which has no acting user.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    actor_kind: Mapped[AutomationChangeActorKind] = mapped_column(
+        Enum(AutomationChangeActorKind, native_enum=False, length=16),
+        nullable=False,
+    )
+    # update | enable | disable | transfer | delete | git_sync_update
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+        index=True,
+    )
+
+    automation: Mapped["Automation"] = relationship(
+        "Automation", back_populates="change_events"
+    )
 
 
 class TarballUpload(Base):

@@ -1314,6 +1314,26 @@ class AutomationRunListResponse(BaseModel):
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
+class AutomationChangeResponse(BaseModel):
+    """One audited change to an automation (field names only, no values)."""
+
+    id: uuid.UUID
+    actor_user_id: uuid.UUID | None
+    actor_kind: Literal["user", "service", "git_sync"]
+    action: str
+    changed_fields: list[str]
+    created_at: UtcDatetime
+
+    model_config = {"from_attributes": True}
+
+
+class AutomationChangeListResponse(BaseModel):
+    """Response for listing an automation's changes."""
+
+    changes: list[AutomationChangeResponse]
+    total: int
+
+
 # --- Capability and Preflight Schemas ---
 
 

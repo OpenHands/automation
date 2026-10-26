@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationOwnerKind,
     AutomationRun,
@@ -5166,3 +5167,153 @@ class TestCreateAsServiceAccount:
         )
 
         assert response.status_code == 403
+
+
+class TestAutomationChangeEvents:
+    """Audit rows in ``automation_change_events`` and ``GET /v1/{id}/changes``."""
+
+    async def _events(self, async_session, automation_id):
+        result = await async_session.execute(
+            select(AutomationChangeEvent)
+            .where(AutomationChangeEvent.automation_id == automation_id)
+            .order_by(AutomationChangeEvent.created_at)
+        )
+        return result.scalars().all()
+
+    async def test_patch_writes_change_event_with_field_names(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Secret new name", "entrypoint": "uv run other.py"},
+        )
+
+        assert response.status_code == 200
+        (event,) = await self._events(async_session, automation.id)
+        assert event.action == "update"
+        assert event.actor_user_id == TEST_USER_ID
+        assert event.actor_kind == "user"
+        assert event.changed_fields == ["entrypoint", "name"]
+        # Names only: no value is stored anywhere on the row.
+        assert "Secret new name" not in repr(event.changed_fields)
+
+    async def test_patch_enable_and_disable_write_their_own_action(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": False}
+        )
+        await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        events = await self._events(async_session, automation.id)
+        assert [e.action for e in events] == ["disable", "enable"]
+        assert events[0].changed_fields == ["disabled_at", "disabled_detail", "disabled_reason", "enabled", "state"]
+
+    async def test_failed_patch_writes_no_change_event(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": "ftp://bucket/code.tar.gz"},
+        )
+
+        assert response.status_code == 422
+        assert await self._events(async_session, automation.id) == []
+
+    async def test_delete_writes_change_event(self, async_client, async_session):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 204
+        (event,) = await self._events(async_session, automation.id)
+        assert event.action == "delete"
+        assert event.actor_user_id == TEST_USER_ID
+        assert event.changed_fields == []
+
+    async def test_changes_endpoint_lists_newest_first_with_paging(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+        for name in ("one", "two", "three"):
+            await async_client.patch(
+                f"/api/automation/v1/{automation.id}", json={"name": name}
+            )
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/changes?limit=2&offset=1"
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 3
+        assert len(body["changes"]) == 2
+        assert body["changes"][0]["action"] == "update"
+        assert body["changes"][0]["changed_fields"] == ["name"]
+        assert body["changes"][0]["actor_kind"] == "user"
+        assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
+
+    async def test_changes_endpoint_other_org_404(self, async_client, async_session):
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=OTHER_ORG_ID,
+            name="Other org",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        own = await _seed_s3_automation(async_session)
+        async_session.add(automation)
+        await async_session.commit()
+
+        assert (
+            await async_client.get(f"/api/automation/v1/{own.id}/changes")
+        ).status_code == 200
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        assert response.status_code == 404
+
+    async def test_changes_unreadable_after_delete(self, async_client, async_session):
+        # History of a soft-deleted automation stays unreadable through the API.
+        automation = await _seed_s3_automation(async_session)
+        assert (
+            await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+        ).status_code == 200
+        await async_client.delete(f"/api/automation/v1/{automation.id}")
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        assert response.status_code == 404
+
+    async def test_record_change_marks_service_account_actor(self, async_session):
+        from openhands.automation.auth import AuthMethod, AuthenticatedUser
+        from openhands.automation.utils.change_events import record_change
+
+        automation = await _seed_s3_automation(async_session)
+        service = AuthenticatedUser(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            email="",
+            role="service_account",
+            permissions=["view_automations"],
+            auth_method=AuthMethod.API_KEY,
+        )
+
+        record_change(async_session, automation, service, "update", ["name"])
+        record_change(async_session, automation, None, "git_sync_update", [])
+        await async_session.commit()
+
+        user_event, git_event = await self._events(async_session, automation.id)
+        assert (user_event.actor_kind, user_event.actor_user_id) == (
+            "service",
+            OTHER_USER_ID,
+        )
+        assert (git_event.actor_kind, git_event.actor_user_id) == ("git_sync", None)

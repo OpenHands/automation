@@ -47,6 +47,7 @@ from openhands.automation.git_sync.serializer import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationGitSyncOrgConfig,
     AutomationGitSyncState,
     Base,
@@ -629,6 +630,52 @@ class TestRunSyncCycle:
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
             assert automation.entrypoint == "python main.py --flag"
+
+    async def test_git_update_writes_change_event(
+        self, sqlite_session_factory, file_store, git_settings, service_settings, origin
+    ):
+        automation_id = await _create_internal_automation(
+            sqlite_session_factory, file_store
+        )
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+        editor_dir = origin.parent / "editor"
+        await ensure_repo(editor_dir, f"file://{origin}", "main", "", 30)
+        await pull(editor_dir, "main", "", 30)
+        yaml_path = (
+            editor_dir / "automations" / "my-first-automation" / "automation.yaml"
+        )
+        yaml_path.write_text(
+            yaml_path.read_text().replace(
+                "entrypoint: python main.py", "entrypoint: python main.py --flag"
+            )
+        )
+        await commit_and_push(
+            editor_dir, "automations", "edit", "Human", "human@example.com",
+            "main", "", 30,
+        )
+
+        await run_sync_cycle(
+            sqlite_session_factory, LOCAL_ORG_ID, git_settings, service_settings
+        )
+
+        async with sqlite_session_factory() as session:
+            (event,) = (
+                (
+                    await session.execute(
+                        select(AutomationChangeEvent).where(
+                            AutomationChangeEvent.automation_id == automation_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert event.action == "git_sync_update"
+        assert event.actor_kind == "git_sync"
+        assert event.actor_user_id is None
+        assert event.changed_fields == ["entrypoint"]
 
     async def test_import_only_reads_directories_that_actually_changed(
         self,

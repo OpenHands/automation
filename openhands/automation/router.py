@@ -36,6 +36,7 @@ from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
     AutomationDisableEvent,
+    AutomationChangeEvent,
     AutomationDraft,
     AutomationOwnerKind,
     AutomationRun,
@@ -67,6 +68,8 @@ from openhands.automation.preset_router import (
 from openhands.automation.schemas import (
     AutomationListResponse,
     AutomationResponse,
+    AutomationChangeListResponse,
+    AutomationChangeResponse,
     AutomationRunListResponse,
     AutomationRunResponse,
     AutomationTagCount,
@@ -89,6 +92,7 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
+from openhands.automation.utils.change_events import record_change
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
@@ -182,6 +186,20 @@ def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
             and update_data.get("enabled", False) is False
         )
     return update_data.get("enabled") is False
+
+
+def _update_action(update_data: dict[str, Any]) -> str:
+    """Audit action of a PATCH: enable or disable when it only flips the switch."""
+    lifecycle_fields = {
+        "enabled",
+        "state",
+        "disabled_reason",
+        "disabled_detail",
+        "disabled_at",
+    }
+    if "enabled" in update_data and set(update_data) <= lifecycle_fields:
+        return "enable" if update_data["enabled"] else "disable"
+    return "update"
 
 
 def _assert_can_update_fields(
@@ -1047,16 +1065,16 @@ async def update_automation(
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
+    updated_fields = sorted(
+        update_data.keys() | ({"repos"} if repos_requested else set())
+    )
+    record_change(session, auto, user, _update_action(update_data), updated_fields)
     await capture_automation_event(
         "automation_updated",
         request=request,
         user=user,
         automation=auto,
-        properties={
-            "updated_fields": sorted(
-                update_data.keys() | ({"repos"} if repos_requested else set())
-            )
-        },
+        properties={"updated_fields": updated_fields},
     )
     return AutomationResponse.model_validate(auto)
 
@@ -1099,6 +1117,7 @@ async def delete_automation(
     )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
+    record_change(session, auto, user, "delete", [])
     await capture_automation_event(
         "automation_deleted",
         request=request,
@@ -1273,6 +1292,39 @@ async def list_automation_runs(
         runs=[AutomationRunResponse.model_validate(r) for r in runs],
         total=total,
         status_counts=status_counts,
+    )
+
+
+@router.get("/{automation_id}/changes")
+async def list_automation_changes(
+    automation_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> AutomationChangeListResponse:
+    """List who changed an automation and which fields, latest first.
+
+    Field names only, never values. A soft-deleted automation is a 404, so its
+    history is not readable through the API.
+    """
+    await _get_org_automation(session, automation_id, user.org_id)
+
+    total = await session.scalar(
+        select(func.count())
+        .select_from(AutomationChangeEvent)
+        .where(AutomationChangeEvent.automation_id == automation_id)
+    )
+    result = await session.execute(
+        select(AutomationChangeEvent)
+        .where(AutomationChangeEvent.automation_id == automation_id)
+        .order_by(AutomationChangeEvent.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return AutomationChangeListResponse(
+        changes=[AutomationChangeResponse.model_validate(e) for e in result.scalars()],
+        total=total or 0,
     )
 
 
