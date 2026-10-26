@@ -198,6 +198,76 @@ async def agent_profiles_api(
     clear_agent_profile_cache()
 
 
+class EnterpriseApi:
+    """The enterprise service API's membership lookup, as a cloud-mode test sees it.
+
+    ``members`` maps a user id to the membership the endpoint reports for it;
+    a user not in it gets the 404 enterprise returns for a non-member.
+    """
+
+    def __init__(self) -> None:
+        self.members: dict[str, dict] = {}
+        self.error: int | None = None
+        self.requests: list[httpx.Request] = []
+
+    def add_member(
+        self,
+        user_id,
+        org_id,
+        *,
+        account_type: str = "service",
+        status: str = "active",
+        role: str = "service_account",
+    ) -> None:
+        self.members[str(user_id)] = {
+            "user_id": str(user_id),
+            "org_id": str(org_id),
+            "account_type": account_type,
+            "role": role,
+            "status": status,
+        }
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.error is not None:
+            return httpx.Response(self.error)
+        # /api/service/users/{user_id}/orgs/{org_id}/membership
+        user_id = request.url.path.split("/")[4]
+        member = self.members.get(user_id)
+        if member is None:
+            return httpx.Response(404, json={"detail": "Not a member"})
+        return httpx.Response(200, json=member)
+
+
+@pytest.fixture
+async def enterprise_api(
+    async_client, monkeypatch
+) -> AsyncGenerator[EnterpriseApi, None]:
+    """Cloud mode, with the enterprise service API answering membership lookups.
+
+    Any other request goes to the HTTP client the test had installed before
+    (for example ``agent_profiles_api``'s), so both can be used together.
+    """
+    from openhands.automation.config import clear_config_cache
+
+    monkeypatch.delenv("AUTOMATION_AGENT_SERVER_URL", raising=False)
+    monkeypatch.setenv("AUTOMATION_SERVICE_KEY", "test-service-key")
+    clear_config_cache()
+    api = EnterpriseApi()
+    previous = app.state.http_client
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/service/"):
+            return api.respond(request)
+        return await previous._transport.handle_async_request(request)
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    yield api
+    await app.state.http_client.aclose()
+    app.state.http_client = previous
+    clear_config_cache()
+
+
 @pytest.fixture
 async def readonly_client(
     async_engine, async_session_factory, async_session, mock_readonly_user

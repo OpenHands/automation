@@ -97,6 +97,8 @@ automation/
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│           ├── enterprise_client.py  # Enterprise service API: org membership / account type
+│           ├── owner.py        # Resolve `owner_user_id` (service account) on create
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)

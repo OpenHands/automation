@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tarfile
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -30,6 +31,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    OWNER_USER_ID_DESCRIPTION,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -285,6 +287,9 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    owner_user_id: uuid.UUID | None = Field(
+        default=None, description=OWNER_USER_ID_DESCRIPTION
+    )
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)

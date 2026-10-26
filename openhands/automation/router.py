@@ -25,7 +25,11 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.config import get_config
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -95,6 +99,7 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists,
     validate_agent_profile_combination,
 )
+from openhands.automation.utils.owner import assign_upload_to_owner, resolve_owner
 from openhands.automation.utils.run import (
     create_pending_run,
     record_first_run_outcome,
@@ -261,6 +266,8 @@ async def create_automation(
 
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
+
+    ``owner_user_id`` creates it as a service account of the org (managers only).
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
 
@@ -279,7 +286,10 @@ async def create_automation(
     # not depend on the OpenHands API, and before the rest of the transaction.
     await ensure_agent_profile_exists(body.agent_profile_id, request, user)
 
-    # Validate tarball_path (checks ownership for internal uploads)
+    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
+
+    # Validate tarball_path (checks ownership for internal uploads). Always
+    # against the caller: a service account owns an upload only after creation.
     await validate_tarball_path(
         tarball_path=body.tarball_path,
         user_id=user.user_id,
@@ -299,7 +309,8 @@ async def create_automation(
     state = model_automation_state(body.state, body.enabled)
 
     auto = Automation(
-        user_id=user.user_id,
+        user_id=owner.user_id,
+        owner_kind=owner.kind,
         org_id=user.org_id,
         name=body.name,
         description=body.description,
@@ -321,6 +332,7 @@ async def create_automation(
         ).frontend_distinct_id,
     )
     session.add(auto)
+    await assign_upload_to_owner(session, body.tarball_path, user.org_id, owner)
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
@@ -359,6 +371,8 @@ async def create_automation_from_plugin_spec(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
+    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
+
     runtime_fields = await _resolve_plugin_spec_runtime_fields(
         plugin=body.plugin,
         plugin_config=body.config,
@@ -395,7 +409,8 @@ async def create_automation_from_plugin_spec(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     automation = Automation(
-        user_id=user.user_id,
+        user_id=owner.user_id,
+        owner_kind=owner.kind,
         org_id=user.org_id,
         name=body.name,
         prompt=None,

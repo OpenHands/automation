@@ -611,3 +611,51 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
 
     assert exc_info.value.status_code == 403
     assert "changes profile requirements" in exc_info.value.detail
+
+
+SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_as_service_account(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["user_id"] == str(SA_ID)
+    assert response.json()["owner_kind"] == "service"
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_as_non_sa_user_returns_422(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID, account_type="human", role="member")
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "active service account" in response.json()["detail"]

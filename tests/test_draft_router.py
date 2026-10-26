@@ -5,14 +5,17 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import select
 
 from openhands.automation.app import app
 from openhands.automation.models import (
     Automation,
     AutomationDraft,
+    AutomationOwnerKind,
     AutomationRun,
     AutomationRunStatus,
     AutomationState,
+    TarballUpload,
 )
 from openhands.automation.storage import get_file_store
 
@@ -588,3 +591,94 @@ async def test_member_cannot_change_another_users_draft(readonly_client, async_s
     await async_session.refresh(draft)
     assert draft.name == "Another user's draft"
     assert draft.deleted_at is None
+
+
+SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+
+async def _create_sa_prompt_draft(async_client, **draft_overrides):
+    return await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "SA draft",
+                "prompt": "Write a short greeting.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "owner_user_id": str(SA_ID),
+                **draft_overrides,
+            },
+        },
+    )
+
+
+async def test_sa_draft_dispatch_materializes_sa_owned_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is True
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 201
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    assert automation is not None
+    assert automation.user_id == SA_ID
+    assert automation.owner_kind == AutomationOwnerKind.SERVICE
+    # The draft stays the caller's; only the automation belongs to the SA.
+    assert draft.user_id == TEST_USER_ID
+    upload_id = automation.tarball_path.rsplit("/", 1)[-1]
+    upload = await async_session.get(TarballUpload, uuid.UUID(upload_id))
+    assert upload is not None
+    assert upload.user_id == SA_ID
+
+
+async def test_redispatch_sa_draft_reuses_materialized_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    first = await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    assert first.status_code == 201
+    second = await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    assert second.status_code == 201
+
+    rows = (await async_session.execute(select(Automation))).scalars().all()
+    assert len(rows) == 1
+
+
+async def test_deleting_sa_draft_deletes_its_materialized_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+
+    response = await async_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+
+    assert response.status_code == 204
+    automation = (await async_session.execute(select(Automation))).scalars().one()
+    await async_session.refresh(automation)
+    assert automation.deleted_at is not None
+
+
+async def test_sa_draft_with_non_sa_owner_is_not_dispatchable(
+    async_client, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID, account_type="human", role="member")
+
+    created = await _create_sa_prompt_draft(async_client)
+
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is False
+    assert [e["code"] for e in created.json()["validation_errors"]] == [
+        "owner_user_id_422"
+    ]

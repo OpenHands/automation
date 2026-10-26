@@ -22,7 +22,11 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser, require_permission
+from openhands.automation.auth import (
+    AuthenticatedUser,
+    get_http_client,
+    require_permission,
+)
 from openhands.automation.capabilities_router import (
     _cron_errors,
     _event_type_errors,
@@ -81,6 +85,11 @@ from openhands.automation.utils.event_sources import get_event_source_delivery
 from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
+)
+from openhands.automation.utils.owner import (
+    ResolvedOwner,
+    assign_upload_to_owner,
+    resolve_owner,
 )
 from openhands.automation.utils.run import (
     create_pending_run,
@@ -145,9 +154,21 @@ def _assert_draft_creator(draft: AutomationDraft, user: AuthenticatedUser) -> No
     )
 
 
+def _draft_owner_user_id(draft: AutomationDraft) -> uuid.UUID:
+    """The user the draft's automation belongs to: its service account, if any."""
+    owner = draft.draft_body.get("owner_user_id")
+    return uuid.UUID(owner) if owner else draft.user_id
+
+
 async def _get_live_materialized_draft_automation(
-    session: AsyncSession, draft: AutomationDraft
+    session: AsyncSession, draft: AutomationDraft, owner_user_id: uuid.UUID
 ) -> Automation | None:
+    """The draft's materialized automation, if it is still the draft's own.
+
+    ``owner_user_id`` is the owner the automation is materialized under (the
+    caller, or the draft's service account): an automation owned by someone
+    else is not reused.
+    """
     if draft.materialized_automation_id is None:
         return None
     automation = await session.get(Automation, draft.materialized_automation_id)
@@ -155,7 +176,7 @@ async def _get_live_materialized_draft_automation(
         automation is None
         or automation.org_id != draft.org_id
         or automation.deleted_at is not None
-        or automation.user_id != draft.user_id
+        or automation.user_id != owner_user_id
         or automation.state != AutomationState.DRAFT
     ):
         return None
@@ -191,6 +212,7 @@ def _normalize_draft_body_or_422(
 async def _validate_draft_body(
     endpoint: DraftEndpoint,
     draft_body: dict[str, Any],
+    request: Request,
     user: AuthenticatedUser,
     session: AsyncSession,
 ) -> tuple[DraftModel | None, list[DraftValidationError]]:
@@ -201,6 +223,17 @@ async def _validate_draft_body(
         return None, _schema_errors(e)
 
     errors: list[DraftValidationError] = []
+    try:
+        await resolve_owner(draft.owner_user_id, user, get_http_client(request))
+    except HTTPException as e:
+        errors.append(
+            DraftValidationError(
+                field="owner_user_id",
+                code=f"owner_user_id_{e.status_code}",
+                message=str(e.detail),
+            )
+        )
+
     try:
         validate_model_profile_for_user(draft.model, user)
     except HTTPException as e:
@@ -268,11 +301,12 @@ async def _validate_draft_body(
 
 async def _refresh_validation(
     draft: AutomationDraft,
+    request: Request,
     user: AuthenticatedUser,
     session: AsyncSession,
 ) -> DraftModel | None:
     parsed, errors = await _validate_draft_body(
-        cast(DraftEndpoint, draft.endpoint), draft.draft_body, user, session
+        cast(DraftEndpoint, draft.endpoint), draft.draft_body, request, user, session
     )
     draft.validation_errors = _errors_to_json(errors) if errors else None
     draft.dispatchable = not errors
@@ -284,16 +318,17 @@ async def _write_generated_tarball(
     session: AsyncSession,
     file_store: FileStore,
     user: AuthenticatedUser,
+    owner: ResolvedOwner,
     name: str,
     prefix: str,
     description: str,
     tarball_content: bytes,
 ) -> str:
     upload_id = uuid.uuid4()
-    storage_path = build_upload_storage_path(user.org_id, user.user_id, upload_id)
+    storage_path = build_upload_storage_path(user.org_id, owner.user_id, upload_id)
     upload = TarballUpload(
         id=upload_id,
-        user_id=user.user_id,
+        user_id=owner.user_id,
         org_id=user.org_id,
         name=f"{prefix}-{_safe_truncate(name, 50)}",
         description=_safe_truncate(description, 200),
@@ -326,14 +361,17 @@ async def _write_generated_tarball(
 async def _materialize_raw_draft(
     body: CreateAutomationRequest,
     user: AuthenticatedUser,
+    owner: ResolvedOwner,
     session: AsyncSession,
 ) -> dict[str, Any]:
+    # Validated against the caller; the upload then moves to the owner.
     await validate_tarball_path(
         tarball_path=body.tarball_path,
         user_id=user.user_id,
         org_id=user.org_id,
         session=session,
     )
+    await assign_upload_to_owner(session, body.tarball_path, user.org_id, owner)
     preset_metadata = None
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
@@ -356,6 +394,7 @@ async def _materialize_raw_draft(
 async def _materialize_prompt_draft(
     body: CreatePromptAutomationRequest,
     user: AuthenticatedUser,
+    owner: ResolvedOwner,
     session: AsyncSession,
     file_store: FileStore,
 ) -> dict[str, Any]:
@@ -364,6 +403,7 @@ async def _materialize_prompt_draft(
         session=session,
         file_store=file_store,
         user=user,
+        owner=owner,
         name=body.name,
         prefix="draft-prompt-automation",
         description=(
@@ -395,6 +435,7 @@ async def _materialize_prompt_draft(
 async def _materialize_plugin_draft(
     body: CreatePluginAutomationRequest,
     user: AuthenticatedUser,
+    owner: ResolvedOwner,
     session: AsyncSession,
     file_store: FileStore,
 ) -> dict[str, Any]:
@@ -413,6 +454,7 @@ async def _materialize_plugin_draft(
         session=session,
         file_store=file_store,
         user=user,
+        owner=owner,
         name=body.name,
         prefix="draft-plugin-automation",
         description=f"Draft plugin automation test: {_safe_truncate(body.name, 100)}",
@@ -451,19 +493,28 @@ async def _materialize_draft(
     session: AsyncSession,
     file_store: FileStore,
 ) -> Automation:
+    owner = await resolve_owner(
+        cast(Any, parsed).owner_user_id, user, get_http_client(request)
+    )
     if isinstance(parsed, CreateAutomationRequest):
-        values = await _materialize_raw_draft(parsed, user, session)
+        values = await _materialize_raw_draft(parsed, user, owner, session)
     elif isinstance(parsed, CreatePromptAutomationRequest):
-        values = await _materialize_prompt_draft(parsed, user, session, file_store)
+        values = await _materialize_prompt_draft(
+            parsed, user, owner, session, file_store
+        )
     elif isinstance(parsed, CreatePluginAutomationRequest):
-        values = await _materialize_plugin_draft(parsed, user, session, file_store)
+        values = await _materialize_plugin_draft(
+            parsed, user, owner, session, file_store
+        )
     else:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Unsupported draft endpoint",
         )
 
-    automation = await _get_live_materialized_draft_automation(session, draft)
+    automation = await _get_live_materialized_draft_automation(
+        session, draft, owner.user_id
+    )
 
     values.update(
         {
@@ -477,7 +528,8 @@ async def _materialize_draft(
     if automation is None:
         automation = Automation(
             id=uuid.uuid4(),
-            user_id=user.user_id,
+            user_id=owner.user_id,
+            owner_kind=owner.kind,
             org_id=user.org_id,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
@@ -497,6 +549,7 @@ async def _materialize_draft(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_draft(
     body: CreateAutomationDraftRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
@@ -515,7 +568,7 @@ async def create_draft(
     )
     session.add(draft)
     await session.flush()
-    await _refresh_validation(draft, user, session)
+    await _refresh_validation(draft, request, user, session)
     await session.flush()
     await session.refresh(draft)
     return AutomationDraftResponse.model_validate(draft)
@@ -562,6 +615,7 @@ async def get_draft(
 async def update_draft(
     draft_id: uuid.UUID,
     body: UpdateAutomationDraftRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationDraftResponse:
@@ -576,7 +630,7 @@ async def update_draft(
         draft.draft_body = draft_body
     if body.name is not None or body.draft is not None:
         draft.name = _draft_name(body.name, draft_body)
-    await _refresh_validation(draft, user, session)
+    await _refresh_validation(draft, request, user, session)
     await session.flush()
     await session.refresh(draft)
     return AutomationDraftResponse.model_validate(draft)
@@ -593,7 +647,9 @@ async def delete_draft(
     deleted_at = utcnow()
     draft.deleted_at = deleted_at
 
-    automation = await _get_live_materialized_draft_automation(session, draft)
+    automation = await _get_live_materialized_draft_automation(
+        session, draft, _draft_owner_user_id(draft)
+    )
     if automation is not None:
         automation.enabled = False
         automation.deleted_at = deleted_at
@@ -622,7 +678,7 @@ async def dispatch_draft(
     del background_tasks
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
-    parsed = await _refresh_validation(draft, user, session)
+    parsed = await _refresh_validation(draft, request, user, session)
     if parsed is None:
         await session.flush()
         raise HTTPException(

@@ -2627,3 +2627,106 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+class TestCreatePresetAsServiceAccount:
+    """``owner_user_id`` on preset creation: the generated upload follows it."""
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    @pytest.fixture(autouse=True)
+    def file_store(self):
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        store = MagicMock()
+
+        async def write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            return len([chunk async for chunk in stream])
+
+        store.write_stream = AsyncMock(side_effect=write_stream)
+        app.dependency_overrides[get_file_store] = lambda: store
+        yield store
+        app.dependency_overrides.pop(get_file_store, None)
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("/api/automation/v1/preset/prompt", {"prompt": "Do something"}),
+            (
+                "/api/automation/v1/preset/plugin",
+                {
+                    "plugins": [{"source": "github:owner/plugin"}],
+                    "prompt": "Do something",
+                },
+            ),
+        ],
+    )
+    async def test_sa_owns_automation_and_upload(
+        self, async_client, async_session, enterprise_api, path, body
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            path,
+            json={
+                "name": "SA preset",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "owner_user_id": str(self.SA_ID),
+                **body,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(self.SA_ID)
+        assert response.json()["owner_kind"] == "service"
+        uploads = (await async_session.execute(select(TarballUpload))).scalars().all()
+        assert [upload.user_id for upload in uploads] == [self.SA_ID]
+
+    async def test_preset_as_sa_without_manage_returns_403(
+        self, readonly_client, async_session
+    ):
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "owner_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_preset_as_non_sa_user_returns_422_and_creates_no_upload(
+        self, async_client, async_session, enterprise_api
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "owner_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None

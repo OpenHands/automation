@@ -4953,3 +4953,144 @@ class TestDownloadTarball:
 
         assert response.status_code == 500
         assert "retrieve" in response.json()["detail"].lower()
+
+
+class TestCreateAsServiceAccount:
+    """POST /v1 with ``owner_user_id``: the automation is owned by a service account.
+
+    ``async_client`` holds ``manage_automations``; ``enterprise_api`` answers the
+    membership lookup the service makes before accepting the owner.
+    """
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    def _body(self, **overrides):
+        return {
+            "name": "SA automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "owner_user_id": str(self.SA_ID),
+            **overrides,
+        }
+
+    async def test_create_as_service_account_sets_owner(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(self.SA_ID)
+        assert response.json()["owner_kind"] == "service"
+        lookup = enterprise_api.requests[0]
+        assert lookup.url.path == (
+            f"/api/service/users/{self.SA_ID}/orgs/{TEST_ORG_ID}/membership"
+        )
+        assert lookup.headers["X-Service-API-Key"] == "test-service-key"
+
+    async def test_omitted_owner_is_the_caller(self, async_client, enterprise_api):
+        body = self._body()
+        del body["owner_user_id"]
+
+        response = await async_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+        assert response.json()["owner_kind"] == "user"
+        assert enterprise_api.requests == []
+
+    async def test_create_as_sa_without_manage_returns_403(
+        self, readonly_client, async_session
+    ):
+        response = await readonly_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 403
+
+    async def test_create_as_non_sa_user_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_non_member_returns_422(self, async_client, enterprise_api):
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_disabled_sa_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID, status="disabled")
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_sa_of_another_org_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, OTHER_ORG_ID)
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_enterprise_failure_returns_502_and_creates_nothing(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.error = 500
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 502
+        assert (await async_session.execute(select(Automation))).first() is None
+
+    async def test_local_mode_returns_422(self, async_client, local_mode):
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_sa_reassigns_upload(
+        self, async_client, async_session, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 201
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
+
+    async def test_upload_of_another_user_is_rejected_before_reassign(
+        self, async_client, async_session, enterprise_api
+    ):
+        """The tarball is validated against the caller, not the service account."""
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=self.SA_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 403

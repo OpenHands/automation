@@ -488,8 +488,20 @@ TAGS_DESCRIPTION: Final[str] = (
 )
 
 
+OWNER_USER_ID_DESCRIPTION = (
+    "Create the automation as this service account of the organization instead "
+    "of as the caller. Requires manage_automations. The automation, and its "
+    "upload, then belong to the service account, whose API key its runs use. "
+    "Omitted: the caller owns it."
+)
+
+
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    owner_user_id: uuid.UUID | None = Field(
+        default=None, description=OWNER_USER_ID_DESCRIPTION
+    )
 
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
