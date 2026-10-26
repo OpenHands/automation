@@ -676,8 +676,8 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         )
     requested_config = existing_plugin_spec.get("config")
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest, _old_ref, _old_required = _fetch_validated_plugin_manifest(
-        old_plugin, requested_config
+    _old_config, old_manifest, _old_ref, _old_required = (
+        _fetch_validated_plugin_manifest(old_plugin, requested_config)
     )
     plugin_config, manifest, resolved_ref, required_plugins = (
         _fetch_validated_plugin_manifest(plugin, requested_config)
