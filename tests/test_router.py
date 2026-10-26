@@ -2553,6 +2553,30 @@ class TestUpdateAutomation:
         await async_session.refresh(automation)
         assert automation.tarball_path == "s3://bucket/code.tar.gz"
 
+    @pytest.mark.parametrize("state", ["deleted", "uploading"])
+    async def test_update_tarball_path_rejects_unusable_own_upload(
+        self, async_client, async_session, state
+    ):
+        """The caller's own upload is refused while deleted or not completed."""
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        if state == "deleted":
+            upload.deleted_at = utcnow()
+        else:
+            upload.status = UploadStatus.UPLOADING
+        await async_session.commit()
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 400
+        await async_session.refresh(automation)
+        assert automation.tarball_path == "s3://bucket/code.tar.gz"
+
     async def test_update_tarball_path_accepts_own_completed_upload(
         self, async_client, async_session
     ):
