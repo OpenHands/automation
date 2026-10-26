@@ -378,6 +378,7 @@ async def create_automation_from_plugin_spec(
         plugin_config=body.config,
         request=request,
         user=user,
+        pin_ref=owner.kind == AutomationOwnerKind.SERVICE,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -452,10 +453,11 @@ def _allow_local_plugin_sources() -> bool:
 def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
     plugin_config: dict[str, Any] | None,
-) -> tuple[dict[str, Any], Any]:
+) -> tuple[dict[str, Any], Any, str | None]:
+    """Preflight a plugin; return its config, manifest and resolved commit SHA."""
     allow_local_sources = _allow_local_plugin_sources()
     try:
-        _resolved_ref, manifest = preflight_manifest(
+        resolved_ref, manifest = preflight_manifest(
             plugin, allow_local_sources=allow_local_sources
         )
         validate_required_plugins(
@@ -465,7 +467,7 @@ def _fetch_validated_plugin_manifest(
         resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    return resolved_config, manifest
+    return resolved_config, manifest, resolved_ref
 
 
 def _profile_requirements_signature(manifest: Any) -> dict[str, Any]:
@@ -488,7 +490,15 @@ def _plugin_runtime_fields(
     manifest: Any,
     model: str | None,
     agent_profile_id: uuid.UUID | None,
+    pinned_ref: str | None = None,
 ) -> dict[str, Any]:
+    """Automation fields derived from a plugin spec.
+
+    ``pinned_ref`` (the resolved commit SHA) replaces the plugin's ref in the
+    stored spec, so every run fetches exactly that commit.
+    """
+    if pinned_ref:
+        plugin = plugin.model_copy(update={"ref": pinned_ref})
     return {
         "plugin_spec": {
             "plugin": plugin.model_dump(exclude_none=True),
@@ -540,9 +550,18 @@ async def _resolve_plugin_spec_runtime_fields(
     plugin_config: dict[str, Any] | None,
     request: Request,
     user: AuthenticatedUser,
+    pin_ref: bool = False,
 ) -> dict[str, Any]:
-    """Validate a plugin spec and return automation fields derived from it."""
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, plugin_config)
+    """Validate a plugin spec and return automation fields derived from it.
+
+    ``pin_ref`` stores the resolved commit SHA as the plugin ref, for a
+    service-account-owned automation: a moving branch or tag would otherwise
+    let anyone who can push to the plugin repo change code that runs as the
+    service account, with no edit visible here.
+    """
+    plugin_config, manifest, resolved_ref = _fetch_validated_plugin_manifest(
+        plugin, plugin_config
+    )
 
     agent_profile_name = (
         manifest.runtime.agent_profile.default_name
@@ -602,6 +621,7 @@ async def _resolve_plugin_spec_runtime_fields(
         manifest=manifest,
         model=model,
         agent_profile_id=agent_profile_id,
+        pinned_ref=resolved_ref if pin_ref else None,
     )
 
 
@@ -632,10 +652,12 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         )
     requested_config = existing_plugin_spec.get("config")
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest = _fetch_validated_plugin_manifest(
+    _old_config, old_manifest, _old_ref = _fetch_validated_plugin_manifest(
         old_plugin, requested_config
     )
-    plugin_config, manifest = _fetch_validated_plugin_manifest(plugin, requested_config)
+    plugin_config, manifest, resolved_ref = _fetch_validated_plugin_manifest(
+        plugin, requested_config
+    )
     if _profile_requirements_signature(manifest) != _profile_requirements_signature(
         old_manifest
     ):
@@ -652,6 +674,9 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         manifest=manifest,
         model=automation.model,
         agent_profile_id=automation.agent_profile_id,
+        pinned_ref=resolved_ref
+        if automation.owner_kind == AutomationOwnerKind.SERVICE
+        else None,
     )
 
 
@@ -813,6 +838,7 @@ async def update_automation(
                 else None,
                 request=request,
                 user=user,
+                pin_ref=auto.owner_kind == AutomationOwnerKind.SERVICE,
             )
         except HTTPException as exc:
             if (

@@ -659,3 +659,129 @@ async def test_create_plugin_spec_as_non_sa_user_returns_422(
 
     assert response.status_code == 422
     assert "active service account" in response.json()["detail"]
+
+
+PINNED_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture
+def resolve_plugin_refs_to_pinned_sha(monkeypatch):
+    """Make preflight report PINNED_SHA as the commit a branch ref resolves to."""
+    from openhands.automation import plugin_specs
+
+    real_preflight = plugin_specs.preflight_manifest
+
+    def preflight(plugin, **kwargs):
+        _resolved_ref, manifest = real_preflight(plugin, **kwargs)
+        return PINNED_SHA, manifest
+
+    monkeypatch.setattr("openhands.automation.router.preflight_manifest", preflight)
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_stores_resolved_sha(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"] == {
+        "source": str(plugin),
+        "ref": PINNED_SHA,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_without_ref_stores_resolved_sha(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+
+
+@pytest.mark.asyncio
+async def test_human_owned_plugin_keeps_the_requested_ref(
+    async_client, tmp_path, agent_profiles_api, resolve_plugin_refs_to_pinned_sha
+):
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_patch_sa_owned_plugin_source_stores_resolved_sha(
+    async_client,
+    async_session,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    """A manager changing the ref of an SA-owned plugin pins the new one too."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "owner_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin), "ref": "release"}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA

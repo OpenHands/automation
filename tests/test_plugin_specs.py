@@ -467,3 +467,37 @@ def test_fetch_manifest_rejects_invalid_suggested_cron(tmp_path):
 
     with pytest.raises(PluginSpecError, match="Invalid automation plugin manifest"):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+
+def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
+    tmp_path, monkeypatch
+):
+    """A stored full SHA is what each run asks the plugin source for.
+
+    This holds for any stored ref (run-time preflight uses ``plugin.ref``), so
+    pinning an SA-owned automation only needs the SHA stored at create.
+    """
+    from contextlib import contextmanager
+
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    plugin = write_plugin(tmp_path)
+    real_preflight = plugin_specs.preflight_plugin
+    requested_refs: list[str | None] = []
+
+    @contextmanager
+    def preflight(**kwargs):
+        requested_refs.append(kwargs["ref"])
+        with real_preflight(**kwargs) as checked:
+            yield checked
+
+    monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
+
+    build_execution_payload(
+        plugin_spec={"plugin": {"source": str(plugin), "ref": sha}, "config": {}},
+        agent_profile_id=None,
+        agent_profile_name=None,
+        llm_profile_name=None,
+        work_dir="/workspace/project",
+    )
+
+    assert requested_refs == [sha]
