@@ -1232,6 +1232,18 @@ async def transfer_automation(
     conversation ids, but ends INACTIVE: a person must re-enable it under the
     new owner. Refused (409) while a run is PENDING or RUNNING or the
     automation is a draft.
+
+    Plugin refs are pinned to commit SHAs on a transfer to a service account
+    (see ``_pin_plugins_for_transfer``).
+
+    Known limits:
+
+    - ``keep_alive`` and deferred-cleanup sandboxes of runs that already
+      finished are cleaned up with the NEW owner's key after a transfer. They
+      can outlive the transfer until the runtime TTL.
+    - The live-run check and the commit are not under a row lock. A run
+      dispatched in between can finish under the old owner's key and get 403 on
+      its callbacks, until the watchdog times it out.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     if body.to == "self":
