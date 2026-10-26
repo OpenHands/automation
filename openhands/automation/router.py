@@ -677,7 +677,7 @@ async def list_automations(
 @router.get("/tags")
 async def list_automation_tags(
     user: AuthenticatedUser = Depends(_require_view_automations),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationTagsResponse:
     """Tags on the caller's org's live automations, most-used first."""
     counts = await count_org_tags(session, user.org_id)
