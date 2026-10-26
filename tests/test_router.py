@@ -448,6 +448,40 @@ class TestServiceOwnedAutomations:
 
         assert response.json()["owner_kind"] == "service"
 
+    async def test_patch_tarball_path_reassigns_upload_to_the_sa(
+        self, async_client, async_session
+    ):
+        sa_owned = await self._sa_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{sa_owned.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == self._SA_ID
+
+    async def test_patch_tarball_path_of_human_owned_keeps_upload_owner(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
     async def test_human_owned_defaults_to_user_owner_kind(
         self, async_client, local_mode
     ):

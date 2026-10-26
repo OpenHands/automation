@@ -99,7 +99,11 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists,
     validate_agent_profile_combination,
 )
-from openhands.automation.utils.owner import assign_upload_to_owner, resolve_owner
+from openhands.automation.utils.owner import (
+    ResolvedOwner,
+    assign_upload_to_owner,
+    resolve_owner,
+)
 from openhands.automation.utils.run import (
     create_pending_run,
     record_first_run_outcome,
@@ -806,6 +810,15 @@ async def update_automation(
             org_id=user.org_id,
             session=session,
         )
+        if auto.owner_kind == AutomationOwnerKind.SERVICE:
+            # Validated against the caller above; the service account owns it
+            # from now on, as on create.
+            await assign_upload_to_owner(
+                session,
+                requested_tarball_path,
+                user.org_id,
+                ResolvedOwner(auto.user_id, auto.owner_kind),
+            )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
     repos_requested = "repos" in update_data
