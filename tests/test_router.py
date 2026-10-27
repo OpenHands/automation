@@ -5391,9 +5391,9 @@ class TestTransferAutomation:
         return automation
 
     async def test_transfer_creator_to_sa_sets_owner_and_inactive(
-        self, readonly_client, member_enterprise_api, async_session
+        self, async_client, enterprise_api, async_session
     ):
-        member_enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
         upload = await _seed_upload(
             async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
         )
@@ -5413,7 +5413,7 @@ class TestTransferAutomation:
         await async_session.commit()
         automation_id = automation.id
 
-        response = await readonly_client.post(self._url(automation), json=self._to_sa())
+        response = await async_client.post(self._url(automation), json=self._to_sa())
 
         assert response.status_code == 200
         body = response.json()
@@ -5464,17 +5464,21 @@ class TestTransferAutomation:
         assert response.status_code == 200
         assert response.json()["user_id"] == str(self.SA_ID)
 
-    async def test_transfer_by_member_non_creator_returns_403(
-        self, readonly_client, member_enterprise_api, async_session
+    @pytest.mark.parametrize("creator_id", [TEST_USER_ID, OTHER_USER_ID])
+    async def test_transfer_to_service_requires_manage_automations(
+        self, readonly_client, member_enterprise_api, async_session, creator_id
     ):
+        """Not even the creator may hand their automation to a service account."""
         member_enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
-        automation = await self._owned_by(async_session, OTHER_USER_ID)
+        automation = await self._owned_by(async_session, creator_id)
 
         response = await readonly_client.post(self._url(automation), json=self._to_sa())
 
         assert response.status_code == 403
         await async_session.refresh(automation)
-        assert automation.user_id == OTHER_USER_ID
+        assert automation.user_id == creator_id
+        assert automation.owner_kind == AutomationOwnerKind.USER
+        assert automation.enabled is True
 
     async def test_transfer_to_self_requires_manage(
         self, readonly_client, async_session

@@ -110,6 +110,7 @@ from openhands.automation.utils.model_profiles import (
 from openhands.automation.utils.owner import (
     ResolvedOwner,
     assign_upload_to_owner,
+    require_service_owner_permission,
     resolve_owner,
     verify_service_account,
 )
@@ -1226,11 +1227,11 @@ async def transfer_automation(
 ) -> AutomationResponse:
     """Move an automation to a service account of the org, or back to the caller.
 
-    The creator may move their own automation to a service account; holders of
-    ``manage_automations`` may move any automation, and only they may move one
-    to themselves (``to: self``). The automation keeps its id and KV store, but
-    ends INACTIVE: a person must re-enable it under the new owner. Refused (409)
-    while a run is PENDING or RUNNING or the automation is a draft.
+    Only holders of ``manage_automations`` may transfer: to a service account
+    (``to: service``) or to themselves (``to: self``). The automation keeps its
+    id and KV store, but ends INACTIVE: a person must re-enable it under the new
+    owner. Refused (409) while a run is PENDING or RUNNING or the automation is
+    a draft.
 
     Conversation ids of subject-keyed runs include the owner for a
     service-owned automation (``subjects.conversation_id_for``): after a
@@ -1258,7 +1259,10 @@ async def transfer_automation(
             )
         new_owner = ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
     else:
-        await _assert_can_manage(auto, user)
+        require_service_owner_permission(
+            user,
+            "Only admins and owners can transfer an automation to a service account",
+        )
         assert body.service_account_id is not None  # guaranteed by the schema
         new_owner = ResolvedOwner(body.service_account_id, AutomationOwnerKind.SERVICE)
 

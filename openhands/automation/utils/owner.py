@@ -62,14 +62,21 @@ async def resolve_owner(
         )
         return ResolvedOwner(user.user_id, kind)
 
-    if "manage_automations" not in user.permissions:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail="Only admins and owners can create an automation for a "
-            "service account",
-        )
+    require_service_owner_permission(
+        user, "Only admins and owners can create an automation for a service account"
+    )
     await verify_service_account(owner_user_id, user.org_id, client)
     return ResolvedOwner(owner_user_id, AutomationOwnerKind.SERVICE)
+
+
+def require_service_owner_permission(user: AuthenticatedUser, detail: str) -> None:
+    """Only holders of ``manage_automations`` may make a service account an owner.
+
+    Raises:
+        HTTPException: 403 with ``detail`` without the permission.
+    """
+    if "manage_automations" not in user.permissions:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 async def verify_service_account(
