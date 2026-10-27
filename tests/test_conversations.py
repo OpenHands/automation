@@ -617,7 +617,9 @@ async def test_a_service_owned_automation_continues_its_owner_keyed_conversation
             org_id, automation.id, "slack", key, mock_authenticated_user.user_id
         )
     ]
-    assert second.conversation_ids != [expected_conversation(org_id, automation.id, key)]
+    assert second.conversation_ids != [
+        expected_conversation(org_id, automation.id, key)
+    ]
 
 
 @pytest.mark.asyncio
