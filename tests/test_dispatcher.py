@@ -1770,10 +1770,39 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["kind"] == kind
             assert updated.status_detail["transient"] is transient
             assert updated.status_detail.get("status_code") == status_code
-            if status_code in (401, 403, 404):
+            if status_code == 401:
+                assert "service key" in updated.error_detail
+                assert "owner may be disabled" not in updated.error_detail
+            if status_code in (403, 404):
                 assert "owner may be disabled" in updated.error_detail
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
+
+    async def test_owner_key_mint_network_error_is_transient(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A network failure reaching the key mint has no status and is transient."""
+        import httpx
+
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        error = APIKeyError("Request failed: connect error")
+        error.__cause__ = httpx.ConnectError("connect failed")
+        backend.get_execution_context = AsyncMock(side_effect=error)
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["kind"] == "transport"
+            assert updated.status_detail["transient"] is True
 
     @pytest.mark.parametrize(("status_code", "transient"), [(403, False), (503, True)])
     async def test_plugin_preflight_key_mint_failure_uses_status_code(

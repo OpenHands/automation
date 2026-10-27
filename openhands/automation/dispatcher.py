@@ -174,6 +174,13 @@ def _api_key_error_status_detail(
 
 def _api_key_error_message(exc: APIKeyError, what: str) -> str:
     """The failure message for ``exc``; permanent statuses get the likely cause."""
+    if exc.status_code == 401:
+        # Enterprise answers 401 only when the shared service key is missing or
+        # wrong. That is an operator fault, not an owner problem.
+        return (
+            f"Could not get an API key to {what} (HTTP 401). The service key "
+            "for the OpenHands API was rejected."
+        )
     if exc.status_code in _PERMANENT_API_KEY_STATUS_CODES:
         return (
             f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
