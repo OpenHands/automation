@@ -58,9 +58,9 @@ fi
 
 echo "[setup] Installing OpenHands SDK from PyPI (version: $SDK_VERSION)"
 uv pip install --python "$VENV_PYTHON" --quiet \
-  "openhands-sdk==${SDK_VERSION}" \
-  "openhands-tools==${SDK_VERSION}" \
-  "openhands-workspace==${SDK_VERSION}"
+  "openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk@9c6a63c6bed51715128929546de299cd43be1fd2#subdirectory=openhands-sdk" \
+  "openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk@9c6a63c6bed51715128929546de299cd43be1fd2#subdirectory=openhands-tools" \
+  "openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk@9c6a63c6bed51715128929546de299cd43be1fd2#subdirectory=openhands-workspace"
 
 if ! "$VENV_PYTHON" -c 'import openhands.sdk, openhands.tools, openhands.workspace'; then
     echo "[setup] ERROR: OpenHands SDK is not importable from .venv" >&2
