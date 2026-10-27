@@ -1,7 +1,7 @@
 """Add automations.owner_kind to tell service-account-owned automations apart.
 
-Revision ID: 035
-Revises: 034
+Revision ID: 036
+Revises: 035
 Create Date: 2026-10-26
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "035"
-down_revision: str = "034"
+revision: str = "036"
+down_revision: str = "035"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

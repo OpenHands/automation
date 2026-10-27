@@ -30,7 +30,7 @@ def _alembic(db_url: str, *args: str) -> None:
 def test_legacy_row_backfills_to_a_loadable_user_owner(tmp_path):
     db_path = str(tmp_path / "owner-kind.db")
     db_url = f"sqlite:///{db_path}"
-    _alembic(db_url, "upgrade", "034")
+    _alembic(db_url, "upgrade", "035")
     automation_id = uuid.uuid4()
     with sqlite3.connect(db_path) as con:
         con.execute(

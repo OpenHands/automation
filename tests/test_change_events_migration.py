@@ -33,7 +33,7 @@ def _alembic(db_url: str, *args: str) -> None:
 def test_change_events_attach_to_a_legacy_automation(tmp_path):
     db_path = str(tmp_path / "change-events.db")
     db_url = f"sqlite:///{db_path}"
-    _alembic(db_url, "upgrade", "035")
+    _alembic(db_url, "upgrade", "036")
     automation_id = uuid.uuid4()
     with sqlite3.connect(db_path) as con:
         con.execute(

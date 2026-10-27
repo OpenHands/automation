@@ -1,7 +1,7 @@
 """Add automation_change_events, the audit trail of changes to an automation.
 
-Revision ID: 036
-Revises: 035
+Revision ID: 037
+Revises: 036
 Create Date: 2026-10-26
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "036"
-down_revision: str = "035"
+revision: str = "037"
+down_revision: str = "036"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
