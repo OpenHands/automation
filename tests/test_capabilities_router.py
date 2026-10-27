@@ -183,6 +183,13 @@ class TestGetCapabilities:
             "push",
             "release.*",
         ]
+        by_source = body["eventTypesBySource"]
+        assert set(by_source) == {"bitbucket_data_center", "github", "jira_dc"}
+        assert by_source["github"] == body["eventTypes"]
+        assert "comment_created" in by_source["jira_dc"]
+        assert "jira:issue_updated" in by_source["jira_dc"]
+        assert "pr:opened" in by_source["bitbucket_data_center"]
+        assert "pr:comment:added" in by_source["bitbucket_data_center"]
         assert body["triggers"]["event"]["filterLanguage"] == "jmespath"
         assert "icontains" in body["triggers"]["event"]["filterFunctions"]
         assert "UTC" in body["triggers"]["cron"]["timezones"]
@@ -263,6 +270,7 @@ class TestGetCapabilities:
         assert body["triggerKinds"] == ["cron"]
         assert body["eventSources"] == []
         assert body["eventTypes"] == []
+        assert body["eventTypesBySource"] == {}
         assert "event" not in body["triggers"]
         assert "webhookDelivery" not in body["features"]
 
@@ -417,6 +425,46 @@ class TestValidateDraft:
     ):
         """An event that cannot be parsed would never fire the automation."""
         draft = with_trigger(EVENT_DRAFT, on=event_pattern)
+
+        response = await async_client.post(VALIDATE_URL, json=preflight(draft))
+
+        body = response.json()
+        assert addressed_errors(body) == expected_errors
+        assert body["valid"] == (expected_errors == [])
+
+    @pytest.mark.parametrize(
+        ("source", "event_pattern", "expected_errors"),
+        [
+            pytest.param("jira_dc", "comment_created", [], id="jira-dc-comment"),
+            pytest.param("jira_dc", "jira:issue_*", [], id="jira-dc-wildcard"),
+            pytest.param(
+                "jira_dc",
+                "jira:worklog_updated",
+                [("trigger.on", "event_type_not_delivered")],
+                id="jira-dc-unsubscribed",
+            ),
+            pytest.param(
+                "bitbucket_data_center", "pr:opened", [], id="bitbucket-dc-pr"
+            ),
+            pytest.param(
+                "bitbucket_data_center",
+                "pull_request.opened",
+                [("trigger.on", "event_type_not_delivered")],
+                id="bitbucket-dc-github-key",
+            ),
+            pytest.param("azure_devops", "anything", [], id="no-catalog"),
+        ],
+    )
+    async def test_data_center_event_types_are_checked_against_their_catalog(
+        self,
+        async_client,
+        configured_deployment,
+        source,
+        event_pattern,
+        expected_errors,
+    ):
+        """Each source's own catalog decides which event keys can fire."""
+        draft = with_trigger(EVENT_DRAFT, source=source, on=event_pattern)
 
         response = await async_client.post(VALIDATE_URL, json=preflight(draft))
 

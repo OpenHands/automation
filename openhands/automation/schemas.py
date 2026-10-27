@@ -830,6 +830,9 @@ class RequestedEventTypesResponse(BaseModel):
     source: str
     event_types: list[str]
     event_detection_rules: list[EventDetectionRule] = Field(default_factory=list)
+    # Organizations with an enabled automation on the source, for forwarders
+    # that fan an event out to them. None for sources routed to a single org.
+    org_ids: list[str] | None = None
 
 
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
@@ -1354,7 +1357,15 @@ class CapabilitiesResponse(_SetupContractModel):
             "Event key patterns matched with the same wildcard syntax a "
             "trigger's 'on' field uses. Only sources publishing a known "
             "catalog contribute; a custom webhook's keys come from its own "
-            "event_key_expr."
+            "event_key_expr. Kept to GitHub's patterns for older clients; "
+            "eventTypesBySource covers every source."
+        ),
+    )
+    event_types_by_source: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Event key patterns per offered event source, for each source "
+            "that publishes a catalog. A source missing here accepts any key."
         ),
     )
     triggers: TriggerCapabilities

@@ -45,9 +45,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.db import get_session
 from openhands.automation.event_schemas import WebhookEvent, parse_event
-from openhands.automation.event_schemas.github import (
-    get_event_detection_rules,
-    get_supported_event_types,
+from openhands.automation.event_schemas.catalog import (
+    event_detection_rules,
+    supported_event_types,
 )
 from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.observability import span
@@ -63,6 +63,7 @@ from openhands.automation.schemas import (
     WebhookConfig,
 )
 from openhands.automation.utils.webhook import (
+    get_event_automation_org_ids,
     get_requested_event_types,
     get_webhook_config,
 )
@@ -71,6 +72,10 @@ from openhands.automation.utils.webhook import (
 logger = logging.getLogger("automation.event_router")
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
+
+# Sources whose forwarder cannot tell an event's organization from the event
+# itself, so it delivers to every org with an automation on the source.
+FAN_OUT_SOURCES = frozenset({"jira_dc"})
 
 
 def _resolve_verifier(config: WebhookConfig, source: str) -> WebhookVerifier:
@@ -128,26 +133,27 @@ async def requested_event_types(
     ):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    if source == "github":
-        # GitHub forwarding is prefiltered at the event-family level. Return all
-        # event families automation can parse so webhook forwarding still works
+    catalog = supported_event_types(source)
+    if catalog is not None:
+        # Forwarding of a cataloged source is prefiltered at the event-type
+        # level. Return every type automation can parse so forwarding works
         # before any org has configured automations; automation performs the
         # granular action/filter matching after receiving the event.
-        event_types = get_supported_event_types()
+        event_types = catalog
     else:
         event_types = await get_requested_event_types(source, session)
-    event_detection_rules = (
-        [
-            EventDetectionRule.model_validate(rule)
-            for rule in get_event_detection_rules()
-        ]
-        if source == "github"
-        else []
-    )
     return RequestedEventTypesResponse(
         source=source,
         event_types=event_types,
-        event_detection_rules=event_detection_rules,
+        event_detection_rules=[
+            EventDetectionRule.model_validate(rule)
+            for rule in event_detection_rules(source)
+        ],
+        org_ids=(
+            await get_event_automation_org_ids(source, session)
+            if source in FAN_OUT_SOURCES
+            else None
+        ),
     )
 
 

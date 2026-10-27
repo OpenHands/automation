@@ -22,9 +22,10 @@ from openhands.automation.draft_schemas import (
     normalize_draft_body,
 )
 from openhands.automation.event_schemas import parse_event
-from openhands.automation.event_schemas.github import (
-    get_supported_event_patterns,
-    get_supported_event_types,
+from openhands.automation.event_schemas.catalog import (
+    SOURCE_LABELS,
+    supported_event_patterns,
+    supported_event_types,
 )
 from openhands.automation.filter_eval import FilterFunctions
 from openhands.automation.providers import builtin_sources
@@ -104,6 +105,7 @@ async def get_capabilities(
             trigger_kinds=[],
             event_sources=[],
             event_types=[],
+            event_types_by_source={},
             triggers=TriggerCapabilities(),
             features=[],
             repo_providers=[],
@@ -131,8 +133,15 @@ async def get_capabilities(
         trigger_kinds=["cron", "event"] if event_sources else ["cron"],
         event_sources=event_sources,
         event_types=(
-            get_supported_event_patterns() if "github" in event_sources else []
+            supported_event_patterns("github") or []
+            if "github" in event_sources
+            else []
         ),
+        event_types_by_source={
+            source: patterns
+            for source in event_sources
+            if (patterns := supported_event_patterns(source)) is not None
+        },
         triggers=TriggerCapabilities(
             cron=CronCapabilities(
                 min_interval_seconds=_cron_interval_floor(),
@@ -299,15 +308,16 @@ def _event_type_errors(trigger: EventTrigger) -> list[DraftValidationError]:
     Only sources publishing a known catalog can be checked. A custom webhook's
     event keys are whatever its own expression extracts, so anything matches.
     """
-    if trigger.source != "github":
+    supported = supported_event_types(trigger.source)
+    if supported is None:
         return []
 
-    supported = get_supported_event_types()
+    label = SOURCE_LABELS.get(trigger.source, trigger.source)
     return [
         DraftValidationError(
             field="trigger.on",
             code="event_type_not_delivered",
-            message=f"This deployment cannot parse '{pattern}' events from GitHub.",
+            message=f"This deployment cannot parse '{pattern}' events from {label}.",
         )
         for pattern in trigger.event_patterns
         if not any(
