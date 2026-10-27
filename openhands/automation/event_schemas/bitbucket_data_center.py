@@ -7,6 +7,28 @@ from pydantic import Field, computed_field
 from openhands.automation.event_schemas import WebhookEvent
 
 
+# The events the OpenHands server subscribes its Bitbucket Data Center webhooks
+# to, so the only ones it can forward.
+BITBUCKET_DATA_CENTER_EVENT_TYPES: tuple[str, ...] = (
+    "pr:comment:added",
+    "pr:comment:deleted",
+    "pr:comment:edited",
+    "pr:declined",
+    "pr:deleted",
+    "pr:from_ref_updated",
+    "pr:merged",
+    "pr:modified",
+    "pr:opened",
+    "pr:reviewer:approved",
+    "pr:reviewer:needs_work",
+    "pr:reviewer:unapproved",
+    "repo:comment:added",
+    "repo:comment:deleted",
+    "repo:comment:edited",
+    "repo:refs_changed",
+)
+
+
 class BitbucketDataCenterEvent(WebhookEvent):
     """Bitbucket Data Center webhook event.
 

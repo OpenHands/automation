@@ -7,6 +7,18 @@ from pydantic import Field, computed_field
 from openhands.automation.event_schemas import WebhookEvent
 
 
+# The events the OpenHands server subscribes its Jira DC webhook to, so the only
+# ones it can forward.
+JIRA_DC_EVENT_TYPES: tuple[str, ...] = (
+    "comment_created",
+    "comment_deleted",
+    "comment_updated",
+    "jira:issue_created",
+    "jira:issue_deleted",
+    "jira:issue_updated",
+)
+
+
 class JiraDcEvent(WebhookEvent):
     """Jira Data Center webhook event.
 
