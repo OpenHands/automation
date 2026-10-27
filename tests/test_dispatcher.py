@@ -37,6 +37,7 @@ from openhands.automation.exceptions import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationOwnerKind,
     AutomationRun,
     AutomationRunStatus,
     AutomationState,
@@ -2051,11 +2052,13 @@ class TestExecuteRunDerivedConversationId:
         trigger: dict,
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
+        owner_kind: AutomationOwnerKind = AutomationOwnerKind.USER,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
+                owner_kind=owner_kind,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
@@ -2129,8 +2132,35 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
-            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997"
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
         )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_service_owned_subject_run_gets_an_owner_keyed_id(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A service-owned run's id carries its owner, so a transfer re-keys it."""
+        env_vars, org_id, automation_id = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "event", "source": "github-events", "on": "*"},
+            subject_key="OpenHands/OpenHands/16997",
+            owner_kind=AutomationOwnerKind.SERVICE,
+        )
+
+        user_owned_id = conversation_id_for(
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
+            org_id,
+            automation_id,
+            "github-events",
+            "OpenHands/OpenHands/16997",
+            TEST_USER_ID,
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] != user_owned_id
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_run_without_a_subject_gets_no_id(

@@ -1228,10 +1228,14 @@ async def transfer_automation(
 
     The creator may move their own automation to a service account; holders of
     ``manage_automations`` may move any automation, and only they may move one
-    to themselves (``to: self``). The automation keeps its id, KV store and
-    conversation ids, but ends INACTIVE: a person must re-enable it under the
-    new owner. Refused (409) while a run is PENDING or RUNNING or the
-    automation is a draft.
+    to themselves (``to: self``). The automation keeps its id and KV store, but
+    ends INACTIVE: a person must re-enable it under the new owner. Refused (409)
+    while a run is PENDING or RUNNING or the automation is a draft.
+
+    Conversation ids of subject-keyed runs include the owner for a
+    service-owned automation (``subjects.conversation_id_for``): after a
+    transfer to a service account, new events start new conversations, and a
+    transfer back to a user restores the old ids.
 
     Plugin refs are pinned to commit SHAs on a transfer to a service account
     (see ``_pin_plugins_for_transfer``).

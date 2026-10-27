@@ -59,7 +59,7 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
-from openhands.automation.subjects import conversation_id_for
+from openhands.automation.subjects import conversation_id_for, service_owner_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -776,6 +776,7 @@ async def _execute_run(
                 automation.id,
                 trigger_source,
                 run.subject_key,
+                service_owner_id_of(automation),
             )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model
