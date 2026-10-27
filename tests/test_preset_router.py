@@ -98,6 +98,84 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+def _load_preset_repo_cloner(
+    preset_name: str, phases: list[str]
+) -> Callable[[Any, str], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_clone_configured_repos"
+    )
+    namespace: dict[str, Any] = {"os": os, "json": json, "report_phase": phases.append}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any, str], Any], namespace["_clone_configured_repos"])
+
+
+class TestPresetRepoCloning:
+    """A configured repository that fails to clone fails the run.
+
+    Continuing would run the agent in an empty workspace, without the repo's
+    context or skills, and still report the run COMPLETED.
+    """
+
+    @staticmethod
+    def _workspace(failed_repos: list[str]) -> MagicMock:
+        workspace = MagicMock()
+        workspace.clone_repos.return_value = MagicMock(
+            success_count=1 - len(failed_repos), failed_repos=failed_repos
+        )
+        return workspace
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_failed_clone_fails_the_run(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        repos = [{"url": "https://bb.example.com/scm/DEM/app.git"}]
+        config_file.write_text(json.dumps(repos))
+        workspace = self._workspace(["https://bb.example.com/scm/DEM/app.git"])
+        clone = _load_preset_repo_cloner(preset_name, [])
+
+        with pytest.raises(RuntimeError) as error:
+            clone(workspace, str(config_file))
+
+        assert "https://bb.example.com/scm/DEM/app.git" in str(error.value)
+        workspace.clone_repos.assert_called_once_with(repos)
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_successful_clone_returns_result(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        config_file.write_text(json.dumps([{"url": "owner/repo"}]))
+        workspace = self._workspace([])
+        phases: list[str] = []
+
+        result = _load_preset_repo_cloner(preset_name, phases)(
+            workspace, str(config_file)
+        )
+
+        assert result is workspace.clone_repos.return_value
+        assert phases == ["Cloning repositories"]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize("config", [None, []])
+    def test_no_configured_repos_clones_nothing(self, preset_name, config, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        if config is not None:
+            config_file.write_text(json.dumps(config))
+        workspace = self._workspace([])
+
+        result = _load_preset_repo_cloner(preset_name, [])(workspace, str(config_file))
+
+        assert result is None
+        workspace.clone_repos.assert_not_called()
+
+
 class TestPresetSessionUrl:
     """The session URL injected into a run must open the conversation in Agent Canvas.
 
