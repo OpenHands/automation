@@ -136,6 +136,52 @@ def _http_exception_status_detail(
     )
 
 
+# The enterprise key mint answers these when the owner can no longer have a key
+# (disabled or removed from the org, or the org is gone). Retrying cannot help.
+_PERMANENT_API_KEY_STATUS_CODES = frozenset({401, 403, 404})
+
+
+def _api_key_error_status_detail(
+    exc: APIKeyError, *, operation: str, error: str
+) -> dict[str, Any]:
+    """Run status detail for a failed owner key mint.
+
+    A permanent status is non-transient. It keeps kind ``unknown`` on purpose:
+    a kind the unhealthy-automation check counts would pause every automation
+    after three runs when the service key itself is wrong. A 5xx, 408, 429 or a
+    network error is transient.
+    """
+    status_code = exc.status_code
+    if status_code in _PERMANENT_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    elif status_code is not None and _is_retryable_http_status(status_code):
+        kind, transient = _run_status_kind_for_http_status(status_code), True
+    elif isinstance(exc.__cause__, httpx.RequestError):
+        kind, transient = RunStatusDetailKind.TRANSPORT, True
+    else:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    return make_run_status_detail(
+        phase=RunStatusPhase.DISPATCH,
+        kind=kind,
+        detail=error,
+        transient=transient,
+        source="openhands_api",
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
+def _api_key_error_message(exc: APIKeyError, what: str) -> str:
+    """The failure message for ``exc``; permanent statuses get the likely cause."""
+    if exc.status_code in _PERMANENT_API_KEY_STATUS_CODES:
+        return (
+            f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
+            "automation owner may be disabled or no longer in the organization."
+        )
+    return f"Failed to get API key to {what}: {exc}"
+
+
 def _plugin_agent_profile_requirement(
     resolved_runtime: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -617,17 +663,11 @@ async def _execute_run(
             exc_info=True,
             extra=_log_ctx(),
         )
-        error = f"Failed to get API key for plugin preflight: {exc}"
+        error = _api_key_error_message(exc, "run the plugin preflight")
         await _fail(
             error,
-            status_detail=make_run_status_detail(
-                phase=RunStatusPhase.DISPATCH,
-                kind=RunStatusDetailKind.UNKNOWN,
-                detail=error,
-                transient=False,
-                source="openhands_api",
-                operation="preflight_plugin",
-                code=type(exc).__name__,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="preflight_plugin", error=error
             ),
         )
         return
@@ -722,6 +762,21 @@ async def _execute_run(
                     "sandbox_status_detail": exc.reason,
                     "attempts": exc.attempts,
                 },
+            ),
+        )
+        return
+    except APIKeyError as exc:
+        logger.error(
+            "Could not get the owner's API key: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        error = _api_key_error_message(exc, "create the sandbox")
+        await _fail(
+            error,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="get_execution_context", error=error
             ),
         )
         return

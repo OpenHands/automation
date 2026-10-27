@@ -1722,6 +1722,109 @@ class TestExecuteRunConcurrencyLimit:
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
 
+    @pytest.mark.parametrize(
+        ("status_code", "transient", "kind"),
+        [
+            (401, False, "unknown"),
+            (403, False, "unknown"),
+            (404, False, "unknown"),
+            (500, True, "server_error"),
+            (503, True, "server_error"),
+            (429, True, "rate_limited"),
+            (None, False, "unknown"),
+        ],
+    )
+    async def test_owner_key_mint_failure_is_classified_by_status_code(
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        status_code,
+        transient,
+        kind,
+    ):
+        """A 401/403/404 from the key mint is a permanent run failure; a 5xx is
+        transient. The run fails either way and no sandbox is created."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_execution_context = AsyncMock(
+            side_effect=APIKeyError("HTTP error: body", status_code=status_code)
+        )
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == kind
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail.get("status_code") == status_code
+            if status_code in (401, 403, 404):
+                assert "owner may be disabled" in updated.error_detail
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    @pytest.mark.parametrize(("status_code", "transient"), [(403, False), (503, True)])
+    async def test_plugin_preflight_key_mint_failure_uses_status_code(
+        self, async_session_factory, mock_settings, mock_client, status_code, transient
+    ):
+        """The plugin preflight path classifies the key mint the same way."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP error", status_code=status_code)
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail["status_code"] == status_code
+
     async def test_plugin_fetch_transport_failure_releases_context(
         self, async_session_factory, mock_settings
     ):
