@@ -737,6 +737,13 @@ async def list_automations(
     tag: str | None = Query(
         default=None, description="Only automations carrying this tag"
     ),
+    owner_id: uuid.UUID | None = Query(
+        default=None,
+        description=(
+            "Only automations owned by this user or service account id. "
+            "Narrows the caller's org listing; it never reaches other orgs."
+        ),
+    ),
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationListResponse:
@@ -756,6 +763,8 @@ async def list_automations(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
+    if owner_id is not None:
+        base_query = base_query.where(Automation.user_id == owner_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())

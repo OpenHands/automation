@@ -1556,6 +1556,105 @@ class TestListAutomations:
         ids = [a["id"] for page in pages for a in page["automations"]]
         assert ids == sorted((str(a.id) for a in seeded), reverse=True)
 
+    async def test_list_automations_filters_by_owner_id(
+        self, async_client, async_session
+    ):
+        """owner_id keeps one owner's automations; total counts only those."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1?owner_id={OTHER_USER_ID}"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # "Other org" is also owned by OTHER_USER_ID but is not in the org.
+        assert [a["name"] for a in data["automations"]] == ["Teammate"]
+        assert data["total"] == 1
+
+    async def test_list_automations_owner_id_never_widens_the_listing(
+        self, readonly_client, async_session
+    ):
+        """A member filtering on an owner id sees no more than without it: not
+        another org's automations, not the soft-deleted ones."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+        deleted = await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="Deleted"
+        )
+        deleted.deleted_at = utcnow()
+        await async_session.commit()
+        unfiltered = (await readonly_client.get("/api/automation/v1")).json()
+
+        filtered = (
+            await readonly_client.get(f"/api/automation/v1?owner_id={OTHER_USER_ID}")
+        ).json()
+
+        assert {a["id"] for a in filtered["automations"]} <= {
+            a["id"] for a in unfiltered["automations"]
+        }
+        assert [a["name"] for a in filtered["automations"]] == ["Teammate"]
+        # An owner id that only exists in another org matches nothing here.
+        other_org_owner = uuid.uuid4()
+        await self._seed_automation(
+            async_session, user_id=other_org_owner, org_id=OTHER_ORG_ID, name="Theirs"
+        )
+        empty = (
+            await readonly_client.get(f"/api/automation/v1?owner_id={other_org_owner}")
+        ).json()
+        assert empty == {"automations": [], "total": 0}
+
+    async def test_list_automations_owner_id_combines_with_creator_filter(
+        self, async_client, async_session
+    ):
+        """Both filters apply: created_by=me with another owner's id is empty."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1?created_by=me&owner_id={OTHER_USER_ID}"
+        )
+
+        assert response.json() == {"automations": [], "total": 0}
+
+    async def test_list_automations_owner_id_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only the owner's automations across pages."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Theirs {i}",
+                age_minutes=i,
+            )
+        await self._seed_automation(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID, name="Mine"
+        )
+
+        url = f"/api/automation/v1?owner_id={OTHER_USER_ID}&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
+
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
+        assert names == ["Theirs 0", "Theirs 1", "Theirs 2"]
+
+    async def test_list_automations_rejects_malformed_owner_id(self, async_client):
+        response = await async_client.get("/api/automation/v1?owner_id=not-a-uuid")
+
+        assert response.status_code == 422
+
+    async def test_list_automations_owner_id_is_documented_in_openapi(
+        self, async_client
+    ):
+        spec = (await async_client.get("/api/automation/openapi.json")).json()
+        params = {
+            p["name"]: p
+            for p in spec["paths"]["/api/automation/v1"]["get"]["parameters"]
+        }
+
+        assert params["owner_id"]["description"]
+
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
         """An unknown created_by value is a 422, not a silently unfiltered list."""
         response = await async_client.get("/api/automation/v1?created_by=team")
