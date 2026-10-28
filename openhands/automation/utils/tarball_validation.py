@@ -85,10 +85,9 @@ async def get_org_upload(
 ) -> TarballUpload | None:
     """Load an upload by id, only if it belongs to ``org_id``.
 
-    Every reader that resolves an automation's ``oh-internal://`` tarball_path
-    passes the automation's org, so an automation can never reach another
-    org's upload, whatever its tarball_path holds. Deleted uploads are
-    returned; each caller decides how to treat them.
+    Pass the automation's org when resolving its ``oh-internal://``
+    tarball_path. Deleted uploads are returned; the caller decides how to
+    treat them.
     """
     result = await session.execute(
         select(TarballUpload).where(
