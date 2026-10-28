@@ -1,7 +1,10 @@
-"""Add automation_change_events, the audit trail of changes to an automation.
+"""Add service-account ownership and the change audit trail for automations.
 
-Revision ID: 037
-Revises: 036
+- automations.owner_kind tells service-account-owned automations apart.
+- automation_change_events records who changed an automation, and which fields.
+
+Revision ID: 036
+Revises: 035
 Create Date: 2026-10-26
 """
 
@@ -11,13 +14,26 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "037"
-down_revision: str = "036"
+revision: str = "036"
+down_revision: str = "035"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # server_default backfills every existing row as human-owned. The ORM
+    # stores enum member NAMES (native_enum=False), so the default is "USER",
+    # not the API value "user".
+    op.add_column(
+        "automations",
+        sa.Column(
+            "owner_kind",
+            sa.String(length=16),
+            nullable=False,
+            server_default="USER",
+        ),
+    )
+
     op.create_table(
         "automation_change_events",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -60,3 +76,4 @@ def downgrade() -> None:
         table_name="automation_change_events",
     )
     op.drop_table("automation_change_events")
+    op.drop_column("automations", "owner_kind")
