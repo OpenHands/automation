@@ -491,9 +491,9 @@ class AutomationChangeEvent(Base):
     leak through the audit trail. Written in the same transaction as the
     change (see ``utils/change_events.py:record_change``).
 
-    Not every change is audited. These paths write no row: the scheduler's
-    auto-disable of an invalid cron, Git sync's soft-delete of a removed
-    folder, draft delete, and draft re-materialize. The watchdog and unhealthy
+    Not every change is audited. These paths write no row: create, the
+    scheduler's auto-disable of an invalid cron, Git sync's soft-delete of a
+    removed folder, draft delete, and draft re-materialize. The watchdog and unhealthy
     auto-disable write an ``AutomationDisableEvent`` instead.
     """
 

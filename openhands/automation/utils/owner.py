@@ -1,4 +1,5 @@
-"""Resolve who owns a new automation: the caller, or a service account."""
+"""Who owns an automation: resolve the owner on create, check a service
+account on create and transfer, and hand an upload to the new owner."""
 
 import uuid
 from dataclasses import dataclass
@@ -70,7 +71,8 @@ async def resolve_owner(
 
 
 def require_service_owner_permission(user: AuthenticatedUser, detail: str) -> None:
-    """Only holders of ``manage_automations`` may make a service account an owner.
+    """Only holders of ``manage_automations`` may set a service account as owner,
+    or transfer an automation.
 
     Raises:
         HTTPException: 403 with ``detail`` without the permission.
