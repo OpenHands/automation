@@ -51,19 +51,19 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import (
+    COMMIT_SHA_RE,
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
     entrypoint_for_manifest,
     preflight_manifest,
+    require_pinned_plugin_refs,
     resolve_suggested_trigger,
     setup_script_for_manifest,
     validate_plugin_config,
     validate_required_plugins,
 )
 from openhands.automation.preset_router import (
-    _COMMIT_SHA_RE,
-    _require_pinned_plugin_refs,
     dump_repos,
     regenerate_preset_tarball,
     repos_config_json,
@@ -1190,7 +1190,7 @@ async def _pin_plugins_for_transfer(
         # A full SHA is already pinned; any other ref is resolved by lookup.
         pinned = []
         for item in plugins:
-            if _COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
+            if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
                 pinned.append(item)
                 continue
             try:
@@ -1200,13 +1200,18 @@ async def _pin_plugins_for_transfer(
                 )
             except PluginSpecError as exc:
                 raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
                 ) from exc
             ref = resolved.pop("resolved_ref", None)
             pinned.append({**resolved, **({"ref": ref} if ref else {})})
-        _require_pinned_plugin_refs(
-            [PluginSource.model_validate(item) for item in pinned], None
-        )
+        try:
+            require_pinned_plugin_refs(
+                [PluginSource.model_validate(item) for item in pinned]
+            )
+        except PluginSpecError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
         if pinned == plugins:
             return
         new_tarball_path = await regenerate_preset_tarball(
@@ -1260,18 +1265,12 @@ async def transfer_automation(
       its callbacks, until the watchdog times it out.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
+    require_service_owner_permission(
+        user, "Only admins and owners can transfer an automation"
+    )
     if body.to == "self":
-        if "manage_automations" not in user.permissions:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                detail="Only admins and owners can take ownership of an automation",
-            )
         new_owner = ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
     else:
-        require_service_owner_permission(
-            user,
-            "Only admins and owners can transfer an automation to a service account",
-        )
         assert body.service_account_id is not None  # guaranteed by the schema
         new_owner = ResolvedOwner(body.service_account_id, AutomationOwnerKind.SERVICE)
 

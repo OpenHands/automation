@@ -355,6 +355,27 @@ def validate_plugin_source_allowed(
         )
 
 
+COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
+    """Reject plugin refs that can move, for a service-account-owned automation.
+
+    The generated tarball stores the refs as given and the sandbox resolves them
+    on every run, so a branch, tag or missing ref would let anyone who can push
+    to the plugin repo change code that runs as the service account.
+
+    Raises:
+        PluginSpecError: when a ref is not a full 40-character commit SHA.
+    """
+    for plugin in plugins:
+        if plugin.ref is None or not COMMIT_SHA_RE.fullmatch(plugin.ref):
+            raise PluginSpecError(
+                f"Plugin {plugin.source!r} must set ref to a full 40-character "
+                "commit SHA for a service-account-owned automation"
+            )
+
+
 def _contained_path(root: Path, relative: str) -> Path:
     path = root / relative
     try:

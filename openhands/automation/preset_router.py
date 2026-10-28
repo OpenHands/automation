@@ -13,7 +13,6 @@ import io
 import json
 import logging
 import os
-import re
 import tarfile
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -48,6 +47,10 @@ from openhands.automation.models import (
 )
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
+)
+from openhands.automation.plugin_specs import (
+    PluginSpecError,
+    require_pinned_plugin_refs,
 )
 from openhands.automation.schemas import (
     OWNER_USER_ID_DESCRIPTION,
@@ -873,32 +876,6 @@ class CreatePluginAutomationRequest(BaseModel):
         return self
 
 
-_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
-
-
-def _require_pinned_plugin_refs(
-    plugins: list[PluginSource] | None, variants: list[ExperimentVariant] | None
-) -> None:
-    """Reject plugin refs that can move, for a service-account-owned automation.
-
-    The generated tarball stores the refs as given and the sandbox resolves them
-    on every run, so a branch, tag or missing ref would let anyone who can push
-    to the plugin repo change code that runs as the service account.
-    """
-    sources = list(plugins or [])
-    for variant in variants or []:
-        sources.extend(variant.plugins)
-    for plugin in sources:
-        if plugin.ref is None or not _COMMIT_SHA_RE.fullmatch(plugin.ref):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=(
-                    f"Plugin {plugin.source!r} must set ref to a full 40-character "
-                    "commit SHA for a service-account-owned automation"
-                ),
-            )
-
-
 def _resolve_experiment_variant_models(
     variants: list[ExperimentVariant] | None,
     user: AuthenticatedUser,
@@ -1035,7 +1012,15 @@ async def create_automation_from_plugin(
 
     owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
     if owner.kind == AutomationOwnerKind.SERVICE:
-        _require_pinned_plugin_refs(body.plugins, body.variants)
+        sources = list(body.plugins or [])
+        for variant in body.variants or []:
+            sources.extend(variant.plugins)
+        try:
+            require_pinned_plugin_refs(sources)
+        except PluginSpecError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
