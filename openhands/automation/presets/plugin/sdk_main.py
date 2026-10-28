@@ -157,6 +157,30 @@ def report_phase(message: str) -> None:
         pass  # phases are cosmetic; the run must never fail because of them
 
 
+def _clone_configured_repos(workspace, config_file: str):
+    """Clone the automation's repositories, or fail the run if any cannot be.
+
+    A run without its repository would work on nothing and still report
+    success, so a failed clone stops the run with the reason instead.
+    """
+    if not os.path.exists(config_file):
+        return None
+    print("\n=== CLONE REPOS ===")
+    with open(config_file) as f:
+        repos_config = json.load(f)
+    if not repos_config:
+        return None
+    report_phase("Cloning repositories")
+    clone_result = workspace.clone_repos(repos_config)
+    print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
+    if clone_result.failed_repos:
+        raise RuntimeError(
+            "Could not clone the automation's repositories: "
+            + ", ".join(clone_result.failed_repos)
+        )
+    return clone_result
+
+
 def _redact_phase(text: str) -> str:
     """Redact secrets from a phase; drop it entirely if redaction is missing."""
     try:
@@ -337,21 +361,13 @@ with workspace_ctx as workspace:
     # Clone repositories if repos_config.json exists
     SCRIPT_DIR = os.path.dirname(__file__)
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
-    clone_result = None
-    repo_dirs = []
-
-    if os.path.exists(REPOS_CONFIG_FILE):
-        print("\n=== CLONE REPOS ===")
-        with open(REPOS_CONFIG_FILE) as f:
-            repos_config = json.load(f)
-        if repos_config:
-            report_phase("Cloning repositories")
-            clone_result = workspace.clone_repos(repos_config)
-            print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
-            if clone_result.failed_repos:
-                print(f"  FAILED: {', '.join(clone_result.failed_repos)}")
-            # Collect cloned repo directories for skill loading
-            repo_dirs = [m.local_path for m in clone_result.repo_mappings.values()]
+    clone_result = _clone_configured_repos(workspace, REPOS_CONFIG_FILE)
+    # Collect cloned repo directories for skill loading
+    repo_dirs = (
+        [m.local_path for m in clone_result.repo_mappings.values()]
+        if clone_result
+        else []
+    )
 
     # Load ALL skills via workspace.load_skills_from_agent_server()
     # If repos were cloned, project skills are loaded from EACH cloned repo
