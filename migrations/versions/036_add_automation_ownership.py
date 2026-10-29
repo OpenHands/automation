@@ -61,19 +61,9 @@ def upgrade() -> None:
         "automation_change_events",
         ["automation_id", "created_at"],
     )
-    # Org-wide view and retention purges.
-    op.create_index(
-        "ix_automation_change_events_org_created",
-        "automation_change_events",
-        ["org_id", "created_at"],
-    )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_automation_change_events_org_created",
-        table_name="automation_change_events",
-    )
     op.drop_index(
         "ix_automation_change_events_automation_created",
         table_name="automation_change_events",

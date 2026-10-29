@@ -492,8 +492,8 @@ class AutomationChangeEvent(Base):
 
     Not every change is audited. These paths write no row: create, the
     scheduler's auto-disable of an invalid cron, Git sync's soft-delete of a
-    removed folder, draft delete, and draft re-materialize. The watchdog and unhealthy
-    auto-disable write an ``AutomationDisableEvent`` instead.
+    removed folder, draft delete, and draft re-materialize. The watchdog and
+    unhealthy auto-disable write an ``AutomationDisableEvent`` instead.
     """
 
     __tablename__ = "automation_change_events"
@@ -503,7 +503,6 @@ class AutomationChangeEvent(Base):
             "automation_id",
             "created_at",
         ),
-        Index("ix_automation_change_events_org_created", "org_id", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
