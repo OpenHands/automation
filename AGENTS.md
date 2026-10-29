@@ -96,6 +96,7 @@ automation/
 │       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
+│           ├── change_events.py  # Audit hook: one change row per automation write (before_flush)
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
 │           ├── enterprise_client.py  # Enterprise service API: org membership / account type
 │           ├── owner.py        # Automation owner: resolve on create, check on transfer, move uploads

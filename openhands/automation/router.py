@@ -96,7 +96,7 @@ from openhands.automation.utils.api_key import (
     get_api_key_for_automation_run,
 )
 from openhands.automation.utils.callback_error import format_callback_error
-from openhands.automation.utils.change_events import record_change
+from openhands.automation.utils.change_events import AuditActor, set_audit_actor
 from openhands.automation.utils.conversation_outcome import (
     fetch_latest_finish_tool_response_for_run,
 )
@@ -193,20 +193,6 @@ def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
             and update_data.get("enabled", False) is False
         )
     return update_data.get("enabled") is False
-
-
-def _update_action(update_data: dict[str, Any]) -> str:
-    """Audit action of a PATCH: enable or disable when it only flips the switch."""
-    lifecycle_fields = {
-        "enabled",
-        "state",
-        "disabled_reason",
-        "disabled_detail",
-        "disabled_at",
-    }
-    if "enabled" in update_data and set(update_data) <= lifecycle_fields:
-        return "enable" if update_data["enabled"] else "disable"
-    return "update"
 
 
 def _assert_can_update_fields(
@@ -1084,7 +1070,6 @@ async def update_automation(
     updated_fields = sorted(
         update_data.keys() | ({"repos"} if repos_requested else set())
     )
-    record_change(session, auto, user, _update_action(update_data), updated_fields)
     await capture_automation_event(
         "automation_updated",
         request=request,
@@ -1133,7 +1118,6 @@ async def delete_automation(
     )
     await session.flush()
     await mark_git_sync_dirty(session, auto)
-    record_change(session, auto, user, "delete", [])
     await capture_automation_event(
         "automation_deleted",
         request=request,
@@ -1268,6 +1252,9 @@ async def transfer_automation(
     require_service_owner_permission(
         user, "Only admins and owners can transfer an automation"
     )
+    # Pinning plugin refs flushes before the owner changes; label the whole
+    # request so its audit row reads as one transfer.
+    set_audit_actor(session, AuditActor.from_user(user), action="transfer")
     if body.to == "self":
         new_owner = ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
     else:
@@ -1349,21 +1336,6 @@ async def transfer_automation(
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
-    record_change(
-        session,
-        auto,
-        user,
-        "transfer",
-        [
-            "user_id",
-            "owner_kind",
-            "enabled",
-            "state",
-            "disabled_reason",
-            "disabled_detail",
-            "disabled_at",
-        ],
-    )
     await capture_automation_event(
         "automation_transferred",
         request=request,

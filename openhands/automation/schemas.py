@@ -1340,7 +1340,7 @@ class AutomationChangeResponse(BaseModel):
 
     id: uuid.UUID
     actor_user_id: uuid.UUID | None
-    actor_kind: Literal["user", "service", "git_sync"]
+    actor_kind: Literal["user", "service", "git_sync", "system"]
     action: str
     changed_fields: list[str]
     created_at: UtcDatetime

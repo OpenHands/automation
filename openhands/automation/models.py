@@ -71,6 +71,8 @@ class AutomationChangeActorKind(StrEnum):
     USER = "user"
     SERVICE = "service"
     GIT_SYNC = "git_sync"
+    # The service itself: the scheduler, the watchdog, the unhealthy check.
+    SYSTEM = "system"
 
 
 class Automation(Base):
@@ -483,17 +485,15 @@ class AutomationChangeEvent(Base):
     """Audit record of who changed an automation and which fields.
 
     Holds field NAMES only, never values, so a prompt, secret or URL cannot
-    leak through the audit trail. Written in the same transaction as the
-    change (see ``utils/change_events.py:record_change``).
+    leak through the audit trail. One row per automation per transaction,
+    written by the ``before_flush`` hook in ``utils/change_events.py``: every
+    ORM insert, update and soft delete is recorded, with no call at the write
+    site. Core ``update(Automation)`` statements bypass the hook; the two that
+    disable an automation call ``record_core_disable``.
 
     ``automation_id`` has no foreign key, so a row outlives its automation.
     ``org_id`` is copied from the automation, so reads stay org-scoped without
     a join.
-
-    Not every change is audited. These paths write no row: create, the
-    scheduler's auto-disable of an invalid cron, Git sync's soft-delete of a
-    removed folder, draft delete, and draft re-materialize. The watchdog and
-    unhealthy auto-disable write an ``AutomationDisableEvent`` instead.
     """
 
     __tablename__ = "automation_change_events"
@@ -514,7 +514,8 @@ class AutomationChangeEvent(Base):
         Enum(AutomationChangeActorKind, native_enum=False, length=16),
         nullable=False,
     )
-    # update | enable | disable | transfer | delete | git_sync_update
+    # create | update | enable | disable | transfer | delete, git_sync_ prefixed
+    # for Git sync, or the label a session set (utils/change_events.py)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

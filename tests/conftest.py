@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -26,6 +27,7 @@ from openhands.automation.auth import (  # noqa: E402
 from openhands.automation.config import Settings  # noqa: E402
 from openhands.automation.db import get_session  # noqa: E402
 from openhands.automation.models import Base  # noqa: E402
+from openhands.automation.utils.change_events import bind_request  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +130,9 @@ async def async_client(
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async test client with mocked auth and DB session."""
 
-    async def override_get_session():
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
         yield async_session
 
     async def override_authenticate():
@@ -305,7 +309,9 @@ async def service_account_client(
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async test client whose user is a service account."""
 
-    async def override_get_session():
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
         yield async_session
 
     async def override_authenticate():
@@ -331,7 +337,9 @@ async def readonly_client(
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async test client with a user lacking manage_automations permission."""
 
-    async def override_get_session():
+    async def override_get_session(request: Request):
+        # As get_session does: the audit hook reads the request's user.
+        bind_request(async_session, request)
         yield async_session
 
     async def override_authenticate():

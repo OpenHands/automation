@@ -318,8 +318,12 @@ def require_permission(permission: str):
     """
 
     async def _check(
+        request: Request,
         user: "AuthenticatedUser" = Depends(authenticate_request),
     ) -> "AuthenticatedUser":
+        # The audit hook reads the actor from here. authenticate_request stores
+        # it too, but a caller may override that dependency.
+        _store_authenticated_user(request, user)
         if permission not in user.permissions:
             logger.warning(
                 "Permission denied: user %s missing permission %s",

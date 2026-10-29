@@ -33,7 +33,7 @@ from openhands.automation.preset_router import (
 )
 from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.change_events import record_change
+from openhands.automation.utils.change_events import AuditActor, set_audit_actor
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
@@ -5274,11 +5274,16 @@ class TestCreateAsServiceAccount:
 class TestAutomationChangeEvents:
     """Audit rows in ``automation_change_events`` and ``GET /v1/{id}/changes``."""
 
-    async def _events(self, async_session, automation_id):
+    async def _events(self, async_session, automation_id, include_create=False):
+        """The automation's events, without the ``create`` row that seeding the
+        automation writes unless ``include_create``."""
+        query = select(AutomationChangeEvent).where(
+            AutomationChangeEvent.automation_id == automation_id
+        )
+        if not include_create:
+            query = query.where(AutomationChangeEvent.action != "create")
         result = await async_session.execute(
-            select(AutomationChangeEvent)
-            .where(AutomationChangeEvent.automation_id == automation_id)
-            .order_by(AutomationChangeEvent.created_at)
+            query.order_by(AutomationChangeEvent.created_at, AutomationChangeEvent.id)
         )
         return result.scalars().all()
 
@@ -5313,9 +5318,11 @@ class TestAutomationChangeEvents:
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        events = await self._events(async_session, automation.id)
-        assert [e.action for e in events] == ["disable", "enable"]
-        assert events[0].changed_fields == [
+        # Both PATCHes run in the test's one transaction, so the rows share
+        # created_at; match them by action instead of by order.
+        events = {e.action: e for e in await self._events(async_session, automation.id)}
+        assert set(events) == {"disable", "enable"}
+        assert events["disable"].changed_fields == [
             "disabled_at",
             "disabled_detail",
             "disabled_reason",
@@ -5345,7 +5352,8 @@ class TestAutomationChangeEvents:
         (event,) = await self._events(async_session, automation.id)
         assert event.action == "delete"
         assert event.actor_user_id == TEST_USER_ID
-        assert event.changed_fields == []
+        # The fields the soft delete changed, read from the ORM.
+        assert {"deleted_at", "enabled", "state"} <= set(event.changed_fields)
 
     async def test_changes_endpoint_lists_newest_first_with_paging(
         self, async_client, async_session
@@ -5362,7 +5370,7 @@ class TestAutomationChangeEvents:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["total"] == 3
+        assert body["total"] == 4  # the seed's create row and three updates
         assert len(body["changes"]) == 2
         assert body["changes"][0]["action"] == "update"
         assert body["changes"][0]["changed_fields"] == ["name"]
@@ -5431,9 +5439,8 @@ class TestAutomationChangeEvents:
 
         assert response.status_code == 404
 
-    async def test_record_change_marks_service_account_actor(self, async_session):
+    async def test_service_account_actor_is_recorded_as_service(self, async_session):
         from openhands.automation.auth import AuthenticatedUser, AuthMethod
-        from openhands.automation.utils.change_events import record_change
 
         automation = await _seed_s3_automation(async_session)
         service = AuthenticatedUser(
@@ -5445,38 +5452,34 @@ class TestAutomationChangeEvents:
             auth_method=AuthMethod.API_KEY,
         )
 
-        record_change(async_session, automation, service, "update", ["name"])
-        record_change(async_session, automation, None, "git_sync_update", [])
-        await async_session.commit()
-
-        user_event, git_event = await self._events(async_session, automation.id)
-        assert (user_event.actor_kind, user_event.actor_user_id) == (
-            "service",
-            OTHER_USER_ID,
-        )
-        assert (git_event.actor_kind, git_event.actor_user_id) == ("git_sync", None)
-
-    async def test_record_change_copies_the_automation_org(self, async_session):
-        automation = await _seed_s3_automation(async_session)
-
-        record_change(async_session, automation, None, "git_sync_update", [])
+        set_audit_actor(async_session, AuditActor.from_user(service))
+        automation.name = "Renamed by the service account"
         await async_session.commit()
 
         (event,) = await self._events(async_session, automation.id)
-        assert event.org_id == automation.org_id
+        assert (event.actor_kind, event.actor_user_id) == ("service", OTHER_USER_ID)
+
+    async def test_seed_writes_a_create_row_with_the_automation_org(
+        self, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        (event,) = await self._events(async_session, automation.id, include_create=True)
+        assert (event.action, event.org_id) == ("create", automation.org_id)
 
     async def test_change_events_outlive_a_hard_deleted_automation(self, async_session):
         # The audit trail must survive its automation, so there is no FK cascade.
         automation = await _seed_s3_automation(async_session)
-        record_change(async_session, automation, None, "git_sync_update", [])
-        await async_session.commit()
 
         await async_session.execute(
             delete(Automation).where(Automation.id == automation.id)
         )
         await async_session.commit()
 
-        assert len(await self._events(async_session, automation.id)) == 1
+        assert (
+            len(await self._events(async_session, automation.id, include_create=True))
+            == 1
+        )
 
 
 class TestTransferAutomation:
@@ -5567,7 +5570,8 @@ class TestTransferAutomation:
         change = (
             await async_session.execute(
                 select(AutomationChangeEvent).where(
-                    AutomationChangeEvent.automation_id == automation_id
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action != "create",
                 )
             )
         ).scalar_one()
@@ -5841,6 +5845,49 @@ class TestTransferPresetPluginPinning:
             member = tar.extractfile("plugins_config.json")
             assert member is not None
             assert json.loads(member.read()) == pinned
+
+    async def test_pinning_transfer_writes_one_row_with_the_pinned_columns(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        # Pinning flushes before the owner changes; the request still writes a
+        # single transfer row, and it lists what pinning rewrote.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        monkeypatch.setattr(
+            "openhands.automation.router.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
+                for p in plugins
+            ],
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/transfer",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 200
+        (change,) = (
+            await async_session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation.id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        ).all()
+        assert change.action == "transfer"
+        assert {"user_id", "owner_kind", "tarball_path", "preset_metadata"} <= set(
+            change.changed_fields
+        )
 
     async def test_unresolvable_ref_returns_422_and_keeps_owner(
         self, async_client, enterprise_api, async_session, preset_store, monkeypatch

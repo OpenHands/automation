@@ -75,7 +75,7 @@ from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.change_events import record_change
+from openhands.automation.utils.change_events import GIT_SYNC_ACTOR, set_audit_actor
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
@@ -631,21 +631,11 @@ async def _create_automation_from_git(
     )
 
 
-def _changed_columns(automation: Automation, values: dict) -> list[str]:
-    """Names of the columns `values` would change (names only, for the audit row)."""
-    # A stored trigger may lack defaults the validated one carries; compare the
-    # normalized form so an unchanged trigger does not read as changed.
-    current_trigger = automation.trigger
+def _same_trigger(stored: dict, validated: dict) -> bool:
     try:
-        current_trigger = _TRIGGER_ADAPTER.validate_python(current_trigger).model_dump()
+        return _TRIGGER_ADAPTER.validate_python(stored).model_dump() == validated
     except ValidationError:
-        pass
-    return [
-        column
-        for column, value in values.items()
-        if (current_trigger if column == "trigger" else getattr(automation, column))
-        != value
-    ]
+        return False
 
 
 async def _update_automation_from_git(
@@ -679,10 +669,12 @@ async def _update_automation_from_git(
         _Owner(automation.user_id, automation.org_id),
         existing=automation,
     )
-    changed_fields = _changed_columns(automation, values)
     for column, value in values.items():
+        if column == "trigger" and _same_trigger(automation.trigger, value):
+            # A stored trigger may lack defaults the validated one carries;
+            # do not rewrite it, so the audit row does not list it.
+            continue
         setattr(automation, column, value)
-    record_change(session, automation, None, "git_sync_update", changed_fields)
 
     state.content_hash = new_hash
     state.last_synced_commit = head
@@ -1261,6 +1253,8 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
+        # Imports, updates and deletes from the repo are audited as Git sync.
+        set_audit_actor(session, GIT_SYNC_ACTOR)
         org_config = await get_or_create_org_config(session, org_id)
         last_commit = org_config.last_synced_commit
         owner = _import_owner(org_config)

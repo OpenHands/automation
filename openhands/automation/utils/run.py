@@ -18,6 +18,7 @@ from openhands.automation.models import (
     AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
+from openhands.automation.utils.change_events import record_core_disable
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
@@ -101,6 +102,8 @@ async def disable_automation(
             automation = await session.get(Automation, automation_id)
             if automation is not None:
                 await mark_git_sync_dirty(session, automation)
+                # The Core update above is invisible to the audit hook.
+                record_core_disable(session, automation)
 
             session.add(
                 AutomationDisableEvent(

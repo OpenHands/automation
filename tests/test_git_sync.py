@@ -672,7 +672,8 @@ class TestRunSyncCycle:
                 (
                     await session.execute(
                         select(AutomationChangeEvent).where(
-                            AutomationChangeEvent.automation_id == automation_id
+                            AutomationChangeEvent.automation_id == automation_id,
+                            AutomationChangeEvent.action != "create",
                         )
                     )
                 )
@@ -866,6 +867,13 @@ class TestRunSyncCycle:
             automation = await session.get(Automation, automation_id)
             assert automation.deleted_at is not None
             assert automation.enabled is False
+            (event,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action == "git_sync_delete",
+                )
+            )
+            assert (event.actor_kind, event.actor_user_id) == ("git_sync", None)
 
     async def test_new_automation_authored_directly_in_git_is_imported(
         self, sqlite_session_factory, git_settings, service_settings, origin
