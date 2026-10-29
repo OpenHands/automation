@@ -611,3 +611,83 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
 
     assert exc_info.value.status_code == 403
     assert "changes profile requirements" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_returns_manifest(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_suggested_trigger_plugin(
+        tmp_path, {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"}
+    )
+
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": str(plugin)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    manifest = data["manifest"]
+    assert manifest["name"] == "hello-world-automation"
+    assert manifest["description"] == "test plugin"
+    assert manifest["config_schema"]["properties"] == {"message": {"type": "string"}}
+    assert manifest["runtime"]["agent_profile"]["required"] is True
+    assert data["suggested_trigger"] == {
+        "type": "cron",
+        "schedule": "0 9 * * *",
+        "timezone": "UTC",
+    }
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_no_suggested_trigger(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_conversation_plugin(tmp_path)
+
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": str(plugin)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suggested_trigger"] is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_invalid_source(
+    async_client, agent_profiles_api
+):
+    response = await async_client.get(
+        "/api/automation/v1/plugin-spec/preflight",
+        params={"source": "/nonexistent/plugin/path"},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "preflight" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_preflight_plugin_spec_no_side_effects(
+    async_client, tmp_path, agent_profiles_api
+):
+    plugin = write_plugin(tmp_path)
+
+    for _ in range(2):
+        response = await async_client.get(
+            "/api/automation/v1/plugin-spec/preflight",
+            params={"source": str(plugin)},
+            headers=agent_profiles_api.caller_auth,
+        )
+        assert response.status_code == 200
+
+    list_response = await async_client.get(
+        "/api/automation/v1",
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()["total"] == 0

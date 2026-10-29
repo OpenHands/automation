@@ -20,6 +20,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
+from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +48,7 @@ from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
+    PluginSpecPreflightResponse,
     entrypoint_for_manifest,
     preflight_manifest,
     resolve_suggested_trigger,
@@ -321,6 +323,59 @@ async def create_automation(
         properties=creation_properties,
     )
     return AutomationResponse.model_validate(auto)
+
+
+@router.get(
+    "/plugin-spec/preflight",
+)
+async def preflight_automation_plugin_spec(
+    source: str = Query(..., min_length=1),
+    ref: str | None = Query(default=None, min_length=1),
+    repo_path: str | None = Query(default=None, min_length=1),
+    user: AuthenticatedUser = Depends(_require_view_automations),
+) -> PluginSpecPreflightResponse:
+    """Read-only preflight for a plugin spec (issue #629).
+
+    Returns the parsed manifest, config schema, runtime profile requirements,
+    and the trigger an install would default to — with no side effects. Lets
+    a UI render and validate an install before creating anything.
+    """
+    try:
+        plugin = AutomationPluginSource(source=source, ref=ref, repo_path=repo_path)
+    except ValidationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Invalid plugin source: {exc}",
+        ) from exc
+
+    allow_local_sources = _allow_local_plugin_sources()
+    try:
+        resolved_ref, manifest = preflight_manifest(
+            plugin, allow_local_sources=allow_local_sources
+        )
+        validate_required_plugins(
+            manifest.runtime.plugins,
+            allow_local_sources=allow_local_sources,
+        )
+    except PluginSpecError as exc:
+        raise HTTPException(
+            exc.status_code if exc.status_code else status.HTTP_422_UNPROCESSABLE_ENTITY,
+            str(exc),
+        ) from exc
+
+    suggested: Trigger | None
+    try:
+        suggested = resolve_suggested_trigger(manifest, {})
+    except PluginSpecError:
+        # A template-based suggestion may not render without config; report
+        # the static one only, so preflight never fails where create could.
+        suggested = None
+
+    return PluginSpecPreflightResponse(
+        manifest=manifest,
+        resolved_ref=resolved_ref,
+        suggested_trigger=suggested.model_dump() if suggested is not None else None,
+    )
 
 
 @router.post(
