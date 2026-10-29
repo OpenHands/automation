@@ -1561,11 +1561,17 @@ async def list_automation_changes(
     total = await session.scalar(
         select(func.count())
         .select_from(AutomationChangeEvent)
-        .where(AutomationChangeEvent.automation_id == automation_id)
+        .where(
+            AutomationChangeEvent.org_id == user.org_id,
+            AutomationChangeEvent.automation_id == automation_id,
+        )
     )
     result = await session.execute(
         select(AutomationChangeEvent)
-        .where(AutomationChangeEvent.automation_id == automation_id)
+        .where(
+            AutomationChangeEvent.org_id == user.org_id,
+            AutomationChangeEvent.automation_id == automation_id,
+        )
         # id breaks ties: rows of one transaction share a timestamp, and SQLite
         # stores whole seconds, so paging would otherwise be unstable.
         .order_by(

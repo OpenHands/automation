@@ -12,7 +12,7 @@ from urllib.parse import unquote_to_bytes
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from openhands.automation.models import (
     Automation,
@@ -33,6 +33,7 @@ from openhands.automation.preset_router import (
 )
 from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import record_change
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
@@ -5379,6 +5380,7 @@ class TestAutomationChangeEvents:
                 AutomationChangeEvent(
                     id=event_id,
                     automation_id=automation.id,
+                    org_id=automation.org_id,
                     actor_user_id=TEST_USER_ID,
                     actor_kind="user",
                     action="update",
@@ -5453,6 +5455,28 @@ class TestAutomationChangeEvents:
             OTHER_USER_ID,
         )
         assert (git_event.actor_kind, git_event.actor_user_id) == ("git_sync", None)
+
+    async def test_record_change_copies_the_automation_org(self, async_session):
+        automation = await _seed_s3_automation(async_session)
+
+        record_change(async_session, automation, None, "git_sync_update", [])
+        await async_session.commit()
+
+        (event,) = await self._events(async_session, automation.id)
+        assert event.org_id == automation.org_id
+
+    async def test_change_events_outlive_a_hard_deleted_automation(self, async_session):
+        # The audit trail must survive its automation, so there is no FK cascade.
+        automation = await _seed_s3_automation(async_session)
+        record_change(async_session, automation, None, "git_sync_update", [])
+        await async_session.commit()
+
+        await async_session.execute(
+            delete(Automation).where(Automation.id == automation.id)
+        )
+        await async_session.commit()
+
+        assert len(await self._events(async_session, automation.id)) == 1
 
 
 class TestTransferAutomation:

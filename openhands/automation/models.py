@@ -204,11 +204,6 @@ class Automation(Base):
         back_populates="automation",
         cascade="all, delete-orphan",
     )
-    change_events: Mapped[list["AutomationChangeEvent"]] = relationship(
-        "AutomationChangeEvent",
-        back_populates="automation",
-        cascade="all, delete-orphan",
-    )
 
 
 class AutomationRun(Base):
@@ -491,6 +486,10 @@ class AutomationChangeEvent(Base):
     leak through the audit trail. Written in the same transaction as the
     change (see ``utils/change_events.py:record_change``).
 
+    ``automation_id`` has no foreign key, so a row outlives its automation.
+    ``org_id`` is copied from the automation, so reads stay org-scoped without
+    a join.
+
     Not every change is audited. These paths write no row: create, the
     scheduler's auto-disable of an invalid cron, Git sync's soft-delete of a
     removed folder, draft delete, and draft re-materialize. The watchdog and unhealthy
@@ -498,14 +497,18 @@ class AutomationChangeEvent(Base):
     """
 
     __tablename__ = "automation_change_events"
+    __table_args__ = (
+        Index(
+            "ix_automation_change_events_automation_created",
+            "automation_id",
+            "created_at",
+        ),
+        Index("ix_automation_change_events_org_created", "org_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    automation_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        ForeignKey("automations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    automation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     # NULL for Git sync, which has no acting user.
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     actor_kind: Mapped[AutomationChangeActorKind] = mapped_column(
@@ -519,11 +522,6 @@ class AutomationChangeEvent(Base):
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
-        index=True,
-    )
-
-    automation: Mapped["Automation"] = relationship(
-        "Automation", back_populates="change_events"
     )
 
 

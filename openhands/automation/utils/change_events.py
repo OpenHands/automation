@@ -38,6 +38,7 @@ def record_change(
     session.add(
         AutomationChangeEvent(
             automation_id=automation.id,
+            org_id=automation.org_id,
             actor_user_id=actor.user_id if actor is not None else None,
             actor_kind=actor_kind,
             action=action,
