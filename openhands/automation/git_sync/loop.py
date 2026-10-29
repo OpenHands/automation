@@ -83,6 +83,7 @@ from openhands.automation.utils.state import (
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
+    get_org_upload,
     is_valid_external_url,
     parse_internal_upload_id,
 )
@@ -331,10 +332,7 @@ async def _read_tarball_bytes(
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None:
         raise TarballUnavailableError(
             f"automation {automation.id} references missing upload {upload_id}"
@@ -403,7 +401,7 @@ async def _stored_tarball_matches(
 
 
 async def _delete_superseded_upload(
-    session: AsyncSession, tarball_path: str, pending_storage_deletes: list[str]
+    session: AsyncSession, automation: Automation, pending_storage_deletes: list[str]
 ) -> None:
     """Mark the upload an automation just stopped pointing at for removal.
 
@@ -417,13 +415,10 @@ async def _delete_superseded_upload(
     commit. Deleting before the commit destroyed the object irreversibly while
     a rollback revived the record, stranding it pointing at a missing object.
     """
-    upload_id = parse_internal_upload_id(tarball_path)
+    upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    upload = result.scalars().first()
+    upload = await get_org_upload(session, upload_id, automation.org_id)
     if upload is None or upload.deleted_at is not None:
         return
 
@@ -471,9 +466,7 @@ async def _resolve_tarball_path(
             slug,
         )
         if existing is not None:
-            await _delete_superseded_upload(
-                session, existing.tarball_path, pending_storage_deletes
-            )
+            await _delete_superseded_upload(session, existing, pending_storage_deletes)
         return new_path
 
     tarball_source = fields.get("tarball_source") or {}

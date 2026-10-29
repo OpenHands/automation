@@ -36,7 +36,11 @@ from openhands.automation.git_sync.config_override import (
     effective_settings_for,
     get_or_create_org_config,
 )
-from openhands.automation.git_sync.loop import _delete_superseded_upload
+from openhands.automation.git_sync.loop import (
+    TarballUnavailableError,
+    _delete_superseded_upload,
+    _read_tarball_bytes,
+)
 from openhands.automation.git_sync.serializer import (
     decrypt_file_tree,
     encrypt_file_tree,
@@ -2202,11 +2206,67 @@ class TestTarballUploadLifecycle:
         async with sqlite_session_factory() as session:
             automation = await session.get(Automation, automation_id)
             upload_id = parse_internal_upload_id(automation.tarball_path)
-            await _delete_superseded_upload(session, automation.tarball_path, pending)
+            await _delete_superseded_upload(session, automation, pending)
 
         # Assert — only the path was queued; the object is still readable.
         assert pending == [f"uploads/test/{upload_id}.tar"]
         assert file_store.read(pending[0])
+
+    async def _automation_pointing_at_other_org_upload(
+        self, session_factory, file_store
+    ) -> tuple[uuid.UUID, uuid.UUID]:
+        """A local-org automation whose tarball_path names another org's upload."""
+        other_id = await _create_internal_automation(
+            session_factory, file_store, org_id=uuid.uuid4()
+        )
+        async with session_factory() as session:
+            other = await session.get(Automation, other_id)
+            upload_id = parse_internal_upload_id(other.tarball_path)
+            automation = Automation(
+                id=uuid.uuid4(),
+                user_id=LOCAL_USER_ID,
+                org_id=LOCAL_ORG_ID,
+                name="Points elsewhere",
+                trigger={"type": "cron", "schedule": "0 9 * * 1"},
+                tarball_path=other.tarball_path,
+                entrypoint="python main.py",
+            )
+            session.add(automation)
+            await session.commit()
+        assert upload_id is not None
+        return automation.id, upload_id
+
+    async def test_export_does_not_read_other_org_upload(
+        self, sqlite_session_factory, file_store
+    ):
+        """Export treats an upload outside the automation's org as missing."""
+        automation_id, _ = await self._automation_pointing_at_other_org_upload(
+            sqlite_session_factory, file_store
+        )
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            with pytest.raises(TarballUnavailableError):
+                await _read_tarball_bytes(automation, session)
+
+    async def test_superseding_ignores_other_org_upload(
+        self, sqlite_session_factory, file_store
+    ):
+        """A git-side edit never deletes an upload outside the automation's org."""
+        automation_id, upload_id = await self._automation_pointing_at_other_org_upload(
+            sqlite_session_factory, file_store
+        )
+        pending: list[str] = []
+
+        async with sqlite_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            await _delete_superseded_upload(session, automation, pending)
+            await session.commit()
+
+        assert pending == []
+        async with sqlite_session_factory() as session:
+            upload = await session.get(TarballUpload, upload_id)
+            assert upload.deleted_at is None
 
 
 class TestEnabledKeyWithNullValue:

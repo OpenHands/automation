@@ -29,7 +29,6 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import (
@@ -69,6 +68,7 @@ from openhands.automation.utils.state import (
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
+    get_org_upload,
     parse_internal_upload_id,
 )
 from openhands.automation.utils.templates import (
@@ -417,18 +417,16 @@ async def regenerate_preset_tarball(
 
     Returns ``None`` — leaving the tarball unchanged — when the automation is not a
     regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
-    is missing, or the archive contains no ``prompt.txt``. The file store is resolved
-    lazily so that updates to non-preset automations never construct one.
+    is missing or outside the automation's org, or the archive contains no
+    ``prompt.txt``. The file store is resolved lazily so that updates to non-preset
+    automations never construct one.
     """
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
 
     file_store = get_file_store()
-    result = await session.execute(
-        select(TarballUpload).where(TarballUpload.id == upload_id)
-    )
-    source_upload = result.scalars().first()
+    source_upload = await get_org_upload(session, upload_id, automation.org_id)
     if source_upload is None:
         return None
 
