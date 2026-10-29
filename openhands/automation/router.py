@@ -716,9 +716,9 @@ async def update_automation(
 
     update_data = body.model_dump(exclude_unset=True)
     _assert_can_update_fields(auto, user, update_data)
-    # Same ownership check as create. Only a new value is checked: clients resend
-    # the stored path on save, and that upload can belong to another member (a
-    # Git Sync edit stores it as the user who configured Git Sync).
+    # Same ownership check as create. Only a new value is checked: resending the
+    # stored path cannot grant anything the row does not already have, and that
+    # upload need not be owned by the editor or still be live.
     requested_tarball_path = update_data.get("tarball_path")
     if (
         requested_tarball_path is not None

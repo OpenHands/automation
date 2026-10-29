@@ -2621,9 +2621,9 @@ class TestUpdateAutomation:
     ):
         """Sending back the stored tarball_path does not fail the edit.
 
-        Canvas resends the current tarball_path when it saves a custom
-        automation. That upload can belong to another org member: a Git Sync
-        edit stores the new tarball as the user who configured Git Sync.
+        An unchanged value grants nothing the row does not already have, so it
+        is not re-validated: the stored upload need not be owned by the editor
+        or still be live.
         """
         upload = await _seed_upload(
             async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID
