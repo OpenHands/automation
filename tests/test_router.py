@@ -5738,6 +5738,23 @@ class TestChangeRunAs:
 
         assert response.status_code == 403
 
+    async def test_change_to_self_refuses_a_service_account(
+        self, service_account_client, mock_service_account_user, async_session
+    ):
+        # Defence in depth: the role cannot hold manage_automations today. If
+        # it ever could, it must still not make an automation run as itself.
+        mock_service_account_user.permissions.append("manage_automations")
+        automation = await self._owned_by(
+            async_session, self.SA_ID, run_as_kind=AutomationRunAsKind.SERVICE
+        )
+
+        response = await service_account_client.post(
+            self._url(automation), json={"to": "self"}
+        )
+
+        assert response.status_code == 403
+        assert "service account" in response.json()["detail"]
+
     async def test_change_to_self_by_manager_runs_as_the_manager(
         self, async_client, async_session
     ):

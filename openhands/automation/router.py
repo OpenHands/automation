@@ -115,6 +115,7 @@ from openhands.automation.utils.run import (
 from openhands.automation.utils.run_as import (
     ResolvedRunAs,
     assign_upload_to_run_as,
+    refuse_service_account,
     require_automation_creator,
     require_run_as_permission,
     resolve_run_as,
@@ -1254,6 +1255,11 @@ async def change_run_as(
       403 on its callbacks, until the watchdog times it out.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
+    # As on create (``resolve_run_as``): a service account must not make an
+    # automation run as itself, whatever its permissions.
+    refuse_service_account(
+        user, "A service account cannot change who an automation runs as"
+    )
     require_run_as_permission(
         user, "Only admins and owners can change who an automation runs as"
     )

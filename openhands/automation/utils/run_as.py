@@ -64,18 +64,19 @@ async def resolve_run_as(
     return ResolvedRunAs(run_as_user_id, AutomationRunAsKind.SERVICE)
 
 
-def refuse_service_account(user: AuthenticatedUser) -> None:
-    """Refuse a service account caller: 403.
+def refuse_service_account(
+    user: AuthenticatedUser,
+    detail: str = "A service account cannot create automations",
+) -> None:
+    """Refuse a service account caller: 403 with ``detail``.
 
     Its key is a run's key, and every automation needs a human creator.
-    Without this, a run could start new automations that run as itself. Its
-    role (from the enterprise ``/users/me`` response) identifies it.
+    Without this, a run could start new automations that run as itself, or
+    make an existing one run as itself. Its role (from the enterprise
+    ``/users/me`` response) identifies it.
     """
     if user.role == SERVICE_ACCOUNT_ROLE:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail="A service account cannot create automations",
-        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 _require_view_automations = require_permission("view_automations")
