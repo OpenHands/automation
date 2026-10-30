@@ -1146,7 +1146,11 @@ async def _pin_plugins_for_run_as_change(
     branch refs, so the run-as change pins them the same way:
 
     - plugin spec: the manifest is resolved as on create, and the resolved SHAs
-      of the plugin and its secondary plugins replace the stored refs.
+      of the plugin and its secondary plugins replace the stored refs. The
+      stored ``entrypoint`` and ``setup_script_path`` are taken from that
+      manifest, so they match the pinned commit if the branch moved since
+      create. The agent profile is not checked here: each run re-reads the
+      manifest at the pin and validates the profile against it.
     - plugin preset: each ref in ``preset_metadata`` is resolved, and the
       tarball's ``plugins_config.json`` is rewritten with the SHAs.
 
@@ -1160,7 +1164,7 @@ async def _pin_plugins_for_run_as_change(
         config, manifest, resolved_ref, required_plugins = (
             _fetch_validated_plugin_manifest(plugin, auto.plugin_spec.get("config"))
         )
-        auto.plugin_spec = _plugin_runtime_fields(
+        runtime_fields = _plugin_runtime_fields(
             plugin=plugin,
             plugin_config=config,
             manifest=manifest,
@@ -1168,7 +1172,10 @@ async def _pin_plugins_for_run_as_change(
             agent_profile_id=None,
             pinned_ref=resolved_ref,
             pinned_required_plugins=required_plugins,
-        )["plugin_spec"]
+        )
+        auto.plugin_spec = runtime_fields["plugin_spec"]
+        auto.entrypoint = runtime_fields["entrypoint"]
+        auto.setup_script_path = runtime_fields["setup_script_path"]
     elif (auto.preset_metadata or {}).get("preset_type") == "plugin":
         plugins = (auto.preset_metadata or {}).get("plugins")
         if plugins is None:

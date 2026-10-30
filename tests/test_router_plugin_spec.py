@@ -930,6 +930,43 @@ async def test_change_to_service_account_pins_branch_ref(
 
 
 @pytest.mark.asyncio
+async def test_change_to_service_account_stores_the_pinned_manifest_fields(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    """The branch moved since create: the stored entrypoint follows the pin."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["entrypoint"] = {
+        "command": "python3 scripts/main_v2.py",
+        "setup_script": "scripts/setup.sh",
+    }
+    (plugin / "scripts" / "main_v2.py").write_text("print('v2')\n")
+    (plugin / "scripts" / "setup.sh").write_text("true\n")
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/run-as",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.json()["entrypoint"]
+        == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main_v2.py'
+    )
+    assert response.json()["setup_script_path"] == "scripts/setup.sh"
+
+
+@pytest.mark.asyncio
 async def test_change_to_service_account_accepts_full_sha_ref(
     async_client,
     tmp_path,
