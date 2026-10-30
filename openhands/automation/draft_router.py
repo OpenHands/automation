@@ -93,6 +93,7 @@ from openhands.automation.utils.run import (
 from openhands.automation.utils.run_as import (
     ResolvedRunAs,
     assign_upload_to_run_as,
+    require_automation_creator,
     resolve_run_as,
 )
 from openhands.automation.utils.tarball_validation import (
@@ -672,7 +673,7 @@ async def dispatch_draft(
     request: Request,
     background_tasks: BackgroundTasks,
     body: DraftDispatchRequest | None = None,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationRunResponse:

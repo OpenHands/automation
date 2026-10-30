@@ -59,7 +59,7 @@ class AutomationState(StrEnum):
 
 
 class AutomationRunAsKind(StrEnum):
-    """What kind of principal owns an automation (``Automation.user_id``)."""
+    """What kind of identity an automation runs as (``Automation.user_id``)."""
 
     USER = "user"
     SERVICE = "service"

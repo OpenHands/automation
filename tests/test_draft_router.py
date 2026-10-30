@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from openhands.automation.app import app
 from openhands.automation.models import (
@@ -638,6 +638,30 @@ async def test_sa_draft_dispatch_materializes_sa_owned_automation(
     upload = await async_session.get(TarballUpload, uuid.UUID(upload_id))
     assert upload is not None
     assert upload.user_id == SA_ID
+
+
+async def test_sa_caller_cannot_dispatch_a_draft(
+    service_account_client, async_session, draft_file_store
+):
+    created = await service_account_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Draft by a service account",
+                "prompt": "Write a short greeting.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    assert created.status_code == 201
+
+    response = await service_account_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 403
+    assert (await async_session.scalar(select(func.count(Automation.id)))) == 0
 
 
 async def test_redispatch_sa_draft_reuses_materialized_automation(

@@ -115,6 +115,7 @@ from openhands.automation.utils.run import (
 from openhands.automation.utils.run_as import (
     ResolvedRunAs,
     assign_upload_to_run_as,
+    require_automation_creator,
     require_run_as_permission,
     resolve_run_as,
     verify_service_account,
@@ -270,7 +271,7 @@ async def create_automation(
     body: CreateAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create a new automation.
@@ -375,7 +376,7 @@ async def create_automation_from_plugin_spec(
     body: CreatePluginSpecAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
     """Create an automation from an executable plugin specification."""

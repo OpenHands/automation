@@ -5197,6 +5197,58 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 403
 
+    async def test_sa_caller_cannot_create_a_plugin_preset_automation(
+        self, service_account_client
+    ):
+        response = await service_account_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA plugin preset",
+                "prompt": "Say hi",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "plugins": [{"source": "github:OpenHands/extensions", "ref": "a" * 40}],
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_create_a_plugin_spec_automation(
+        self, service_account_client
+    ):
+        response = await service_account_client.post(
+            "/api/automation/v1/plugin-spec",
+            json={
+                "name": "SA plugin spec",
+                "plugin": {"source": "github:OpenHands/extensions", "ref": "a" * 40},
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_gets_403_for_a_template_the_org_already_has(
+        self, service_account_client, async_session
+    ):
+        """The refusal comes before the template lookup, not a 200 replay."""
+        async_session.add(
+            Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="From template",
+                trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run script.py",
+                preset_metadata={"template": {"id": "tpl-known", "version": "1"}},
+            )
+        )
+        await async_session.commit()
+        body = self._body(template={"id": "tpl-known", "version": "1"})
+        del body["run_as_user_id"]
+
+        response = await service_account_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 403
+
     async def test_sa_caller_cannot_edit_the_automation_it_runs(
         self, service_account_client, async_session
     ):

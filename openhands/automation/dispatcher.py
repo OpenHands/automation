@@ -137,8 +137,8 @@ def _http_exception_status_detail(
 
 
 # The enterprise key mint answers these when the run-as identity can no longer
-# have a key
-# (disabled or removed from the org, or the org is gone). Retrying cannot help.
+# have a key (disabled or removed from the org, or the org is gone). Retrying
+# cannot help.
 _PERMANENT_API_KEY_STATUS_CODES = frozenset({401, 403, 404})
 
 

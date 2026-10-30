@@ -68,7 +68,10 @@ from openhands.automation.telemetry import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run_as import resolve_run_as
+from openhands.automation.utils.run_as import (
+    require_automation_creator,
+    resolve_run_as,
+)
 from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
@@ -534,7 +537,7 @@ async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -976,7 +979,7 @@ async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(_require_view_automations),
+    user: AuthenticatedUser = Depends(require_automation_creator),
     session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:

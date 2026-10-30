@@ -5,10 +5,10 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openhands.automation.auth import AuthenticatedUser
+from openhands.automation.auth import AuthenticatedUser, require_permission
 from openhands.automation.models import AutomationRunAsKind
 from openhands.automation.utils.enterprise_client import (
     EnterpriseClientError,
@@ -41,9 +41,7 @@ async def resolve_run_as(
 
     When omitted, the automation runs as the caller.
 
-    A service account caller is refused: its key is a run's key, and every
-    automation needs a human creator. Without this, a run could start new
-    automations that run as itself.
+    A service account caller is refused (see ``refuse_service_account``).
 
     Any other identity must be an active service account of the caller's org,
     and only holders of ``manage_automations`` may pick one. The enterprise API
@@ -55,12 +53,7 @@ async def resolve_run_as(
             ``manage_automations``; 422 when the identity is not an active
             service account of the org; 502 when enterprise cannot be asked.
     """
-    # Its role (from the enterprise ``/users/me`` response) identifies it.
-    if user.role == SERVICE_ACCOUNT_ROLE:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail="A service account cannot create automations",
-        )
+    refuse_service_account(user)
     if run_as_user_id is None:
         return ResolvedRunAs(user.user_id, AutomationRunAsKind.USER)
 
@@ -69,6 +62,35 @@ async def resolve_run_as(
     )
     await verify_service_account(run_as_user_id, user.org_id, client)
     return ResolvedRunAs(run_as_user_id, AutomationRunAsKind.SERVICE)
+
+
+def refuse_service_account(user: AuthenticatedUser) -> None:
+    """Refuse a service account caller: 403.
+
+    Its key is a run's key, and every automation needs a human creator.
+    Without this, a run could start new automations that run as itself. Its
+    role (from the enterprise ``/users/me`` response) identifies it.
+    """
+    if user.role == SERVICE_ACCOUNT_ROLE:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="A service account cannot create automations",
+        )
+
+
+_require_view_automations = require_permission("view_automations")
+
+
+async def require_automation_creator(
+    user: AuthenticatedUser = Depends(_require_view_automations),
+) -> AuthenticatedUser:
+    """Dependency for every route that creates an automation.
+
+    It runs before the handler, so a service account is refused before the
+    template replay or draft validation can answer instead.
+    """
+    refuse_service_account(user)
+    return user
 
 
 def require_run_as_permission(user: AuthenticatedUser, detail: str) -> None:
