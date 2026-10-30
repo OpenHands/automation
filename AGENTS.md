@@ -162,6 +162,7 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 - Cloud product events use the server-authoritative Cloud user ID as the PostHog `distinct_id`; never trust a client telemetry header as Cloud identity.
 - Local Agent Canvas requests carry their consented PostHog identity in `X-OpenHands-Telemetry-Distinct-Id`. Store that value on newly created automations and runs so asynchronous lifecycle events retain the same identity.
+- `AUTOMATION_TELEMETRY_DEPLOYMENT_MODE` (`local` | `cloud` | `self_hosted`) overrides the `deployment_mode` / `deployment_kind` event labels; self-hosted Enterprise runs in cloud mode but must report `self_hosted` / `local`. Every `automation_created` capture also carries `automation_name` and `is_first_automation_in_org` (see `automation_created_properties`).
 - Local events with no Canvas attribution fall back to the DB-backed automation backend ID. Keep `automation_backend_id` as an event property for installation analysis rather than substituting it for a known person identity.
 - Local consent is stored per frontend distinct ID. Attributed events require consent for their resolved identity; only unattributed backend-level events use the aggregate installation consent.
 

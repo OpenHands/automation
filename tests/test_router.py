@@ -602,6 +602,34 @@ class TestCreateAutomation:
         assert second.status_code == 200
         assert second.json()["id"] == first.json()["id"]
 
+    async def test_create_automation_reports_name_and_first_in_org(self, async_client):
+        """Telemetry names the automation and flags only the org's first one."""
+        payload = {
+            "trigger": {"type": "cron", "schedule": "*/5 * * * *"},
+            "tarball_path": "s3://bucket/path/to/bundle.tar.gz",
+            "entrypoint": "uv run main.py",
+        }
+
+        with patch(
+            "openhands.automation.router.capture_automation_event",
+            new_callable=AsyncMock,
+        ) as capture:
+            first = await async_client.post(
+                "/api/automation/v1", json={**payload, "name": "First"}
+            )
+            second = await async_client.post(
+                "/api/automation/v1", json={**payload, "name": "Second"}
+            )
+
+        assert (first.status_code, second.status_code) == (201, 201)
+        first_props, second_props = (
+            c.kwargs["properties"] for c in capture.call_args_list
+        )
+        assert first_props["automation_name"] == "First"
+        assert first_props["is_first_automation_in_org"] is True
+        assert second_props["automation_name"] == "Second"
+        assert second_props["is_first_automation_in_org"] is False
+
     async def test_deleted_bundle_automation_does_not_block_reenabling(
         self, async_client
     ):

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from fastapi import Request
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation import __version__
@@ -286,9 +286,14 @@ def _base_properties(
     backend_distinct_id: str,
 ) -> dict[str, Any]:
     settings = get_config().service
+    # A self-hosted (OHE) deployment runs in cloud mode but is not remote; the
+    # override labels its events correctly.
+    deployment_mode = settings.telemetry_deployment_mode or (
+        "local" if settings.is_local_mode else "cloud"
+    )
     properties: dict[str, Any] = {
-        "deployment_mode": "local" if settings.is_local_mode else "cloud",
-        "deployment_kind": "local" if settings.is_local_mode else "remote",
+        "deployment_mode": deployment_mode,
+        "deployment_kind": "remote" if deployment_mode == "cloud" else "local",
         "automation_service": "openhands_automation",
         **_server_version_properties(),
     }
@@ -347,6 +352,32 @@ def _base_properties(
             )
             properties["duration_ms"] = duration_ms
 
+    return properties
+
+
+async def automation_created_properties(
+    session: AsyncSession, automation: Automation
+) -> dict[str, Any]:
+    """Properties every ``automation_created`` capture carries.
+
+    ``is_first_automation_in_org`` is true when no other automation row exists
+    in the organization, so the first creation marks activation (OHE-3657).
+    Never raises: a failed count leaves the flag out rather than failing the
+    request.
+    """
+    properties: dict[str, Any] = {"automation_name": automation.name}
+    try:
+        others = await session.scalar(
+            select(func.count())
+            .select_from(Automation)
+            .where(
+                Automation.org_id == automation.org_id,
+                Automation.id != automation.id,
+            )
+        )
+        properties["is_first_automation_in_org"] = (others or 0) == 0
+    except Exception:
+        logger.debug("Failed to count automations for telemetry", exc_info=True)
     return properties
 
 
