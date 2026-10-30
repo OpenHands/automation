@@ -5370,6 +5370,28 @@ class TestCreateAsServiceAccount:
         await async_session.refresh(upload)
         assert upload.user_id == self.SA_ID
 
+    async def test_create_as_sa_with_an_upload_another_automation_uses_returns_409(
+        self, async_client, async_session, enterprise_api
+    ):
+        # Moving the shared upload would take it from the caller's automation.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 409
+        assert "another automation" in response.json()["detail"]
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
     async def test_upload_of_another_user_is_rejected_before_reassign(
         self, async_client, async_session, enterprise_api
     ):
@@ -5724,6 +5746,48 @@ class TestChangeRunAs:
         assert automation.user_id == creator_id
         assert automation.run_as_kind == AutomationRunAsKind.USER
         assert automation.enabled is True
+
+    async def test_run_as_change_with_an_upload_another_automation_uses_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        tarball_path = build_internal_url(upload.id)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, tarball_path=tarball_path
+        )
+        await _seed_s3_automation(async_session, tarball_path=tarball_path)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+        await async_session.refresh(automation)
+        await async_session.refresh(upload)
+        assert automation.user_id == TEST_USER_ID
+        assert upload.user_id == TEST_USER_ID
+
+    async def test_run_as_change_ignores_a_deleted_automation_on_the_same_upload(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        tarball_path = build_internal_url(upload.id)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, tarball_path=tarball_path
+        )
+        deleted = await _seed_s3_automation(async_session, tarball_path=tarball_path)
+        deleted.deleted_at = utcnow()
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
 
     async def test_change_to_self_requires_manage(self, readonly_client, async_session):
         automation = await self._owned_by(

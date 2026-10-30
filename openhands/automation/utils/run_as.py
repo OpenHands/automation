@@ -6,10 +6,11 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser, require_permission
-from openhands.automation.models import AutomationRunAsKind
+from openhands.automation.models import Automation, AutomationRunAsKind
 from openhands.automation.utils.enterprise_client import (
     EnterpriseClientError,
     get_org_member,
@@ -143,7 +144,12 @@ async def verify_service_account(
 
 
 async def assign_upload_to_run_as(
-    session: AsyncSession, tarball_path: str, org_id: uuid.UUID, run_as: ResolvedRunAs
+    session: AsyncSession,
+    tarball_path: str,
+    org_id: uuid.UUID,
+    run_as: ResolvedRunAs,
+    *,
+    automation_id: uuid.UUID | None = None,
 ) -> None:
     """Move the internal upload behind ``tarball_path`` to ``run_as``.
 
@@ -151,10 +157,31 @@ async def assign_upload_to_run_as(
     ``validate_tarball_path``); afterwards the upload belongs to the service
     account, so the caller can no longer delete it from under the automation.
     A path that is not an internal upload is left alone.
+
+    ``automation_id`` is the automation the upload moves with (None for one not
+    yet added to the session). An upload is not tied to one automation; moving
+    one that another live automation of the org uses would take it from them.
+
+    Raises:
+        HTTPException: 409 when another live automation uses the upload.
     """
     upload_id = parse_internal_upload_id(tarball_path)
     if upload_id is None:
         return
     upload = await get_org_upload(session, upload_id, org_id)
-    if upload is not None:
-        upload.user_id = run_as.user_id
+    if upload is None or upload.user_id == run_as.user_id:
+        return
+    shared = select(Automation.id).where(
+        Automation.org_id == org_id,
+        Automation.tarball_path == tarball_path,
+        Automation.deleted_at.is_(None),
+    )
+    if automation_id is not None:
+        shared = shared.where(Automation.id != automation_id)
+    if await session.scalar(shared.limit(1)) is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="The upload is used by another automation; upload the code "
+            "again for this one",
+        )
+    upload.user_id = run_as.user_id

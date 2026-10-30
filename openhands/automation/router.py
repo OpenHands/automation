@@ -347,8 +347,9 @@ async def create_automation(
             request
         ).frontend_distinct_id,
     )
-    session.add(auto)
+    # Before ``add``: the new row must not count as another user of the upload.
     await assign_upload_to_run_as(session, body.tarball_path, user.org_id, run_as)
+    session.add(auto)
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
@@ -842,6 +843,7 @@ async def update_automation(
                 requested_tarball_path,
                 user.org_id,
                 ResolvedRunAs(auto.user_id, auto.run_as_kind),
+                automation_id=auto.id,
             )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
@@ -1222,8 +1224,9 @@ async def change_run_as(
     Only holders of ``manage_automations`` may change it: to a service account
     (``to: service``) or to themselves (``to: self``). The automation keeps its
     id, KV store and creator, but ends INACTIVE: a person must re-enable it
-    under the new identity. Refused (409) while a run is PENDING or RUNNING or
-    the automation is a draft.
+    under the new identity. Refused (409) while a run is PENDING or RUNNING,
+    when the automation is a draft, or when its internal upload is used by
+    another automation.
 
     Conversation ids of subject-keyed runs include the service account for an
     automation that runs as one (``subjects.conversation_id_for``): after a
@@ -1295,6 +1298,11 @@ async def change_run_as(
             field="service_account_id",
         )
         await _pin_plugins_for_run_as_change(auto, session, background_tasks)
+    # After pinning (which may replace the tarball) and before the identity
+    # changes, so a 409 for a shared upload leaves the row as it was.
+    await assign_upload_to_run_as(
+        session, auto.tarball_path, user.org_id, new_run_as, automation_id=auto.id
+    )
 
     now = utcnow()
     disabled_detail = {"reason": "run_as_changed", "source": "run_as_change"}
@@ -1333,7 +1341,6 @@ async def change_run_as(
         )
         .values(subject_released_at=now)
     )
-    await assign_upload_to_run_as(session, auto.tarball_path, user.org_id, new_run_as)
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
