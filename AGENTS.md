@@ -560,3 +560,29 @@ When bumping `openhands-sdk` / `openhands-workspace` pins:
 2. Run `uv lock` to regenerate `uv.lock`.
 3. Open a Conventional Commit PR (e.g. `fix: bump SDK to <ver>`) and squash-merge it —
    release-please handles the version bump and release.
+
+## Dependency release-age policy
+
+- Wait at least seven days after publication before adding or updating a
+  third-party npm or PyPI version, including transitive lockfile changes.
+  A weekly update schedule alone does not enforce this minimum age.
+- Keep Dependabot `cooldown.default-days: 7` for npm and Python version
+  updates, and preserve `tool.uv.exclude-newer = "7 days"` where configured.
+  Existing named first-party exceptions do not exempt their third-party
+  dependencies. Do not add broad exemptions or disable the cutoff to make a
+  resolver succeed.
+- Verify the exact version's publication/upload time from npm or PyPI metadata
+  (or artifact `upload-time` in `uv.lock`), not the package's creation date.
+  If age cannot be established, report the missing evidence rather than guess.
+- Security updates can bypass Dependabot cooldown. An urgent exception needs
+  explicit maintainer approval recorded in the PR with the package, version,
+  advisory/reason, and publication time. Agents must not grant themselves an
+  exception. Keep overrides narrow and remove temporary exceptions afterward.
+- Use the committed lock for reproducible installs; review newly resolved
+  artifacts before committing a lock update.
+
+Use uv >= 0.9.25 for this policy. Older versions cannot parse the boolean
+first-party exemptions and can discard the entire `[tool.uv]` table, including
+`required-version`. The committed lock rejects those versions; the Makefile
+also checks the version before syncing. Check `uv --version` before direct
+`uv sync` or `uv lock` use, especially when recreating a missing lock.
