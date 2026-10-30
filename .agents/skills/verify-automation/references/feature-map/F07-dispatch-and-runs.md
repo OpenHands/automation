@@ -73,7 +73,8 @@ Preconditions:
 - **Manual dispatch (`F07.dispatch`).** A new run is PENDING with nothing started yet.
   ```sh
   DA=$(control-automation fixture automation --kind callback --name 'qa dispatch' --field id)
-  DR=$(control-automation api POST "/v1/$DA/dispatch" --expect 201 --check status eq PENDING --check trigger_source eq manual --check automation_id eq "$DA" --check started_at eq null --check timeout_at eq null --check bash_command_id eq null --check conversation_id eq null --save F07.dispatch/dispatch --field id)
+  ME=$(control-automation api GET "/v1/$DA" --field user_id)
+  DR=$(control-automation api POST "/v1/$DA/dispatch" --expect 201 --check status eq PENDING --check trigger_source eq manual --check triggered_by_user_id eq "$ME" --check automation_id eq "$DA" --check started_at eq null --check timeout_at eq null --check bash_command_id eq null --check conversation_id eq null --save F07.dispatch/dispatch --field id)
   control-automation api GET "/v1/$DA/runs" --expect 200 --check total eq 1 --check runs.0.id eq "$DR" --quiet
   control-automation run wait "$DA" --run-id "$DR" --status COMPLETED --timeout 60
   ```

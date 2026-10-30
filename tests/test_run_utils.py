@@ -6,6 +6,7 @@ import pytest
 
 from openhands.automation.models import Automation, AutomationRun
 from openhands.automation.utils.run import create_pending_run
+from openhands.automation.utils.webhook import create_automation_run
 
 
 class FakeSession:
@@ -74,3 +75,20 @@ async def test_create_pending_run_records_no_user_unless_given():
 
     assert cron_run.triggered_by_user_id is None
     assert manual_run.triggered_by_user_id == caller
+
+
+async def test_event_run_records_no_user():
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        name="On event",
+        trigger={"type": "event", "source": "github", "on": "push"},
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+    )
+
+    run = await create_automation_run(automation, FakeSession())  # type: ignore[arg-type]
+
+    assert run.trigger_source == "event"
+    assert run.triggered_by_user_id is None
