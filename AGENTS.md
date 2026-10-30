@@ -178,14 +178,13 @@ mkdir -p .pr
 └── notes.md        # Any other PR-specific content
 ```
 
-The `PR Artifacts` workflow warns reviewers when `.pr/` exists on a PR. After a PR merges to `main`, the workflow opens or updates a cleanup PR to remove the directory, for both same-repository and fork PRs. Approval does not modify the source PR or rerun its CI just to remove temporary artifacts.
+The `PR Artifacts` workflow warns reviewers when a PR adds or changes files under `.pr/`. After a same-repository or fork PR merges to `main`, the next release PR update removes the directory from `main` in the same push as its version bump (`cleanup-pr-artifacts` in `.github/workflows/release.yml`). No separate cleanup PR is opened, and the source PR is not modified.
 
 Important notes:
 
 - Do not put anything in `.pr/` that needs to be preserved.
 - The `.pr/` check is informational during development; it posts a notice rather than blocking the PR.
-- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Merge the cleanup PR and let release-please update the release PR before merging it.
-- Cleanup PRs follow the normal review and required-check protections for `main`.
+- Release-please PRs fail the required `unit-tests` check while their committed tree contains `.pr/`. Refresh the release PR by rerunning the latest `release` workflow on its target branch, then let the check rerun before merging.
 
 
 ## Dispatch Pipeline
