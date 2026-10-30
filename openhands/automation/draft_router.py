@@ -246,16 +246,21 @@ async def _validate_draft_body(
     request: Request,
     user: AuthenticatedUser,
     session: AsyncSession,
-) -> tuple[DraftModel | None, list[DraftValidationError]]:
+) -> tuple[DraftModel | None, ResolvedRunAs | None, list[DraftValidationError]]:
+    """Validate a draft body; returns the parsed body, its resolved run-as
+    identity (None when it does not resolve) and the validation errors."""
     try:
         normalized_draft = normalize_draft_body(endpoint, draft_body)
         draft = FINAL_DRAFT_MODELS[endpoint].model_validate(normalized_draft)
     except ValidationError as e:
-        return None, _schema_errors(e)
+        return None, None, _schema_errors(e)
 
     errors: list[DraftValidationError] = []
+    run_as: ResolvedRunAs | None = None
     try:
-        await resolve_run_as(draft.run_as_user_id, user, get_http_client(request))
+        run_as = await resolve_run_as(
+            draft.run_as_user_id, user, get_http_client(request)
+        )
     except HTTPException as e:
         errors.append(
             DraftValidationError(
@@ -327,7 +332,7 @@ async def _validate_draft_body(
         else:
             errors.extend(_event_type_errors(trigger))
 
-    return draft, errors
+    return draft, run_as, errors
 
 
 async def _refresh_validation(
@@ -335,13 +340,17 @@ async def _refresh_validation(
     request: Request,
     user: AuthenticatedUser,
     session: AsyncSession,
-) -> DraftModel | None:
-    parsed, errors = await _validate_draft_body(
+) -> tuple[DraftModel, ResolvedRunAs] | None:
+    """Store the draft's validation result; returns the parsed body and its
+    run-as identity when the draft is dispatchable."""
+    parsed, run_as, errors = await _validate_draft_body(
         cast(DraftEndpoint, draft.endpoint), draft.draft_body, request, user, session
     )
     draft.validation_errors = _errors_to_json(errors) if errors else None
     draft.dispatchable = not errors
-    return parsed if not errors else None
+    if errors or parsed is None or run_as is None:
+        return None
+    return parsed, run_as
 
 
 async def _write_generated_tarball(
@@ -519,14 +528,16 @@ async def _materialize_plugin_draft(
 async def _materialize_draft(
     draft: AutomationDraft,
     parsed: BaseModel,
+    run_as: ResolvedRunAs,
     user: AuthenticatedUser,
     request: Request,
     session: AsyncSession,
     file_store: FileStore,
 ) -> Automation:
-    run_as = await resolve_run_as(
-        cast(Any, parsed).run_as_user_id, user, get_http_client(request)
-    )
+    """Create or overwrite the draft's DRAFT-state automation.
+
+    ``run_as`` is the identity ``_refresh_validation`` resolved for ``parsed``.
+    """
     if isinstance(parsed, CreateAutomationRequest):
         values = await _materialize_raw_draft(parsed, user, run_as, session)
     elif isinstance(parsed, CreatePromptAutomationRequest):
@@ -713,8 +724,8 @@ async def dispatch_draft(
     del background_tasks
     draft = await _get_org_draft(session, draft_id, user.org_id)
     _assert_draft_creator(draft, user)
-    parsed = await _refresh_validation(draft, request, user, session)
-    if parsed is None:
+    validated = await _refresh_validation(draft, request, user, session)
+    if validated is None:
         await session.flush()
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -724,6 +735,7 @@ async def dispatch_draft(
             },
         )
 
+    parsed, run_as = validated
     event_payload = body.event_payload if body is not None else None
     if event_payload is not None and not isinstance(parsed.trigger, EventTrigger):
         raise HTTPException(
@@ -732,7 +744,7 @@ async def dispatch_draft(
         )
 
     automation = await _materialize_draft(
-        draft, parsed, user, request, session, file_store
+        draft, parsed, run_as, user, request, session, file_store
     )
     telemetry_context = get_request_telemetry_context(request)
     with span(

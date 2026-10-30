@@ -664,6 +664,21 @@ async def test_sa_caller_cannot_dispatch_a_draft(
     assert (await async_session.scalar(select(func.count(Automation.id)))) == 0
 
 
+async def test_sa_draft_dispatch_verifies_the_service_account_once(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    enterprise_api.requests.clear()
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 201
+    assert len(enterprise_api.requests) == 1
+
+
 async def test_redispatch_sa_draft_reuses_materialized_automation(
     async_client, async_session, draft_file_store, enterprise_api
 ):
