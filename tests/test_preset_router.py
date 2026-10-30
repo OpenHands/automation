@@ -2833,6 +2833,32 @@ class TestCreatePresetAsServiceAccount:
                 ]
                 assert refs == [self.FULL_SHA, self.FULL_SHA]
 
+    @pytest.mark.parametrize(
+        "plugin",
+        [
+            {"source": "https://u:p@github.com/o/r.git", "ref": "main"},
+            {"source": "github:owner/plugin", "ref": "main", "repo_path": "a\\b"},
+        ],
+    )
+    async def test_plugin_preset_as_sa_with_a_disallowed_source_returns_422(
+        self, async_client, enterprise_api, plugin
+    ):
+        # The SDK model accepts these; the automation plugin source model does not.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [plugin],
+            },
+        )
+
+        assert response.status_code == 422
+
     async def test_plugin_preset_as_sa_with_unresolvable_ref_returns_422(
         self, async_client, async_session, enterprise_api, monkeypatch
     ):

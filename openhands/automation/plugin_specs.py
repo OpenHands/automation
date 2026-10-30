@@ -23,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -386,17 +387,21 @@ def pin_plugin_refs(
     missing ref is resolved by preflight.
 
     Raises:
-        PluginSpecError: when a plugin cannot be preflighted, or a ref does
-            not resolve to a full commit SHA.
+        PluginSpecError: when a source is not allowed, a plugin cannot be
+            preflighted, or a ref does not resolve to a full commit SHA.
     """
     pinned = []
     for item in plugins:
         if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
             pinned.append(item)
             continue
+        try:
+            source = AutomationPluginSource.model_validate(item)
+        except ValidationError as exc:
+            # The SDK's PluginSource (preset bodies) accepts more than this.
+            raise PluginSpecError(f"Invalid plugin source: {exc}") from exc
         [resolved] = validate_required_plugins(
-            [AutomationPluginSource.model_validate(item)],
-            allow_local_sources=allow_local_sources,
+            [source], allow_local_sources=allow_local_sources
         )
         ref = resolved.pop("resolved_ref", None)
         pinned.append({**resolved, **({"ref": ref} if ref else {})})
