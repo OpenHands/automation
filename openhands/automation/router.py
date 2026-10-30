@@ -75,6 +75,7 @@ from openhands.automation.schemas import (
 from openhands.automation.storage import FileStore, get_file_store
 from openhands.automation.tags import normalize_tag
 from openhands.automation.telemetry import (
+    automation_created_properties,
     capture_automation_event,
     get_request_telemetry_context,
 )
@@ -313,6 +314,7 @@ async def create_automation(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
+    creation_properties.update(await automation_created_properties(session, auto))
     await capture_automation_event(
         "automation_created",
         request=request,
@@ -410,7 +412,10 @@ async def create_automation_from_plugin_spec(
         request=request,
         user=user,
         automation=automation,
-        properties={"creation_path": "plugin_spec"},
+        properties={
+            "creation_path": "plugin_spec",
+            **await automation_created_properties(session, automation),
+        },
     )
     return AutomationResponse.model_validate(automation)
 

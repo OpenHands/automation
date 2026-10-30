@@ -583,6 +583,8 @@ class ServiceSettings(BaseSettings):
         # Product telemetry (optional)
         AUTOMATION_POSTHOG_API_KEY: PostHog project key. Empty disables capture.
         AUTOMATION_POSTHOG_HOST: PostHog capture host (default: https://us.i.posthog.com)
+        AUTOMATION_TELEMETRY_DEPLOYMENT_MODE: Label events local, cloud, or self_hosted
+            (default: local in local mode, otherwise cloud)
     """
 
     # Database (PostgreSQL - Cloud mode)
@@ -711,6 +713,9 @@ class ServiceSettings(BaseSettings):
     # project key is configured by the deployment.
     posthog_api_key: str = ""
     posthog_host: str = "https://us.i.posthog.com"
+    # Overrides the deployment_mode / deployment_kind event labels. A self-hosted
+    # (OHE) deployment runs in cloud mode but is not remote.
+    telemetry_deployment_mode: Literal["local", "cloud", "self_hosted"] | None = None
 
     model_config = {"env_prefix": "AUTOMATION_"}
 
