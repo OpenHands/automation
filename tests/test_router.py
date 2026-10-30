@@ -3099,6 +3099,7 @@ class TestDispatchAutomation:
         assert data["automation_id"] == str(automation.id)
         assert data["status"] == "PENDING"
         assert data["trigger_source"] == "manual"
+        assert data["triggered_by_user_id"] == str(TEST_USER_ID)
 
     async def test_dispatch_automation_deleted(self, async_client, async_session):
         """Dispatching a soft-deleted automation returns 404."""

@@ -45,3 +45,32 @@ async def test_create_pending_run_stores_observability_parent_context():
     assert session.executed
     assert run.trigger_source == "manual"
     assert run.observability_parent_span_context == "serialized-manual-dispatch-context"
+
+
+async def test_create_pending_run_records_no_user_unless_given():
+    """A cron or event run has no human; a manual dispatch passes its caller."""
+    automation = Automation(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        name="Scheduled",
+        trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+        tarball_path="oh-internal://uploads/test.tar.gz",
+        entrypoint="python main.py",
+    )
+    caller = uuid.uuid4()
+
+    cron_run = await create_pending_run(
+        FakeSession(),  # type: ignore[arg-type]
+        automation,
+        trigger_source="cron",
+    )
+    manual_run = await create_pending_run(
+        FakeSession(),  # type: ignore[arg-type]
+        automation,
+        trigger_source="manual",
+        triggered_by_user_id=caller,
+    )
+
+    assert cron_run.triggered_by_user_id is None
+    assert manual_run.triggered_by_user_id == caller

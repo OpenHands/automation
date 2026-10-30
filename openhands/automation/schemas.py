@@ -1287,6 +1287,7 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     trigger_source: str | None = None
+    triggered_by_user_id: uuid.UUID | None = None
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
