@@ -2739,39 +2739,70 @@ class TestCreatePresetAsServiceAccount:
 
     FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
 
+    @pytest.fixture
+    def resolve_refs_to_full_sha(self, monkeypatch):
+        """Make plugin preflight resolve every ref to FULL_SHA."""
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.FULL_SHA}
+                for p in plugins
+            ],
+        )
+
     @pytest.mark.parametrize(
-        "plugin_body",
+        ("plugin_body", "stored_plugins"),
         [
-            {"plugins": [{"source": "github:owner/plugin"}]},
-            {"plugins": [{"source": "github:owner/plugin", "ref": "main"}]},
-            {
-                "variants": [
-                    {
-                        "name": "a",
-                        "weight": 1,
-                        "plugins": [
-                            {
-                                "source": "github:owner/plugin",
-                                "ref": "0123456789abcdef0123456789abcdef01234567",
-                            }
-                        ],
-                    },
-                    {
-                        "name": "b",
-                        "weight": 1,
-                        "plugins": [{"source": "github:owner/plugin", "ref": "v1"}],
-                    },
-                ],
-                "experiment_id": "exp",
-            },
+            (
+                {"plugins": [{"source": "github:owner/plugin"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {"plugins": [{"source": "github:owner/plugin", "ref": "main"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [
+                                {"source": "github:owner/plugin", "ref": FULL_SHA}
+                            ],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/plugin", "ref": "v1"}],
+                        },
+                    ],
+                    "experiment_id": "exp",
+                },
+                None,
+            ),
         ],
     )
-    async def test_plugin_preset_as_sa_rejects_mutable_refs(
-        self, async_client, async_session, enterprise_api, plugin_body
+    async def test_plugin_preset_as_sa_pins_mutable_refs(
+        self,
+        async_client,
+        enterprise_api,
+        file_store,
+        resolve_refs_to_full_sha,
+        plugin_body,
+        stored_plugins,
     ):
-        from sqlalchemy import select
-
+        # As on a run-as change: a branch, tag or missing ref is resolved to its
+        # commit, and the tarball and metadata store the SHA.
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        written: list[bytes] = []
+
+        async def write_stream(path, stream, max_size=None, content_type=""):
+            data = b"".join([chunk async for chunk in stream])
+            written.append(data)
+            return len(data)
+
+        file_store.write_stream.side_effect = write_stream
 
         response = await async_client.post(
             "/api/automation/v1/preset/plugin",
@@ -2784,8 +2815,53 @@ class TestCreatePresetAsServiceAccount:
             },
         )
 
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"].get("plugins") == stored_plugins
+        (tarball,) = written
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            if stored_plugins is not None:
+                member = tar.extractfile("plugins_config.json")
+                assert member is not None
+                assert json.loads(member.read()) == stored_plugins
+            else:
+                member = tar.extractfile("experiment_config.json")
+                assert member is not None
+                refs = [
+                    plugin["ref"]
+                    for variant in json.loads(member.read())["variants"]
+                    for plugin in variant["plugins"]
+                ]
+                assert refs == [self.FULL_SHA, self.FULL_SHA]
+
+    async def test_plugin_preset_as_sa_with_unresolvable_ref_returns_422(
+        self, async_client, async_session, enterprise_api, monkeypatch
+    ):
+        from sqlalchemy import select
+
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        def unreachable(plugins, **_):
+            raise PluginSpecError("Failed to preflight required plugin")
+
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins", unreachable
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            },
+        )
+
         assert response.status_code == 422
-        assert "40-character commit SHA" in response.json()["detail"]
+        assert "Failed to preflight" in response.json()["detail"]
         assert (await async_session.execute(select(TarballUpload))).first() is None
 
     async def test_plugin_preset_as_sa_accepts_a_full_sha_ref(

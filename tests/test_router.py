@@ -5945,7 +5945,7 @@ class TestRunAsChangePresetPluginPinning:
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
         monkeypatch.setattr(
-            "openhands.automation.router.validate_required_plugins",
+            "openhands.automation.plugin_specs.validate_required_plugins",
             lambda plugins, **_: [
                 {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
                 for p in plugins
@@ -5993,7 +5993,7 @@ class TestRunAsChangePresetPluginPinning:
         # single run_as_change row, and it lists what pinning rewrote.
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
         monkeypatch.setattr(
-            "openhands.automation.router.validate_required_plugins",
+            "openhands.automation.plugin_specs.validate_required_plugins",
             lambda plugins, **_: [
                 {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
                 for p in plugins
@@ -6040,7 +6040,7 @@ class TestRunAsChangePresetPluginPinning:
             raise PluginSpecError("Failed to preflight required plugin")
 
         monkeypatch.setattr(
-            "openhands.automation.router.validate_required_plugins", unreachable
+            "openhands.automation.plugin_specs.validate_required_plugins", unreachable
         )
         plugins = [{"source": "github:o/r", "ref": "main"}]
         automation = await _seed_prompt_preset_automation(

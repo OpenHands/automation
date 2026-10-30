@@ -51,13 +51,12 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import (
-    COMMIT_SHA_RE,
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
     PluginSpecError,
     entrypoint_for_manifest,
+    pin_plugin_refs,
     preflight_manifest,
-    require_pinned_plugin_refs,
     resolve_suggested_trigger,
     setup_script_for_manifest,
     validate_plugin_config,
@@ -143,7 +142,6 @@ from openhands.automation.utils.templates import (
 from openhands.automation.utils.timeout import default_automation_timeout
 from openhands.automation.utils.unhealthy import maybe_disable_unhealthy_automation
 from openhands.automation.utils.webhook import is_builtin_source
-from openhands.sdk.plugin import PluginSource
 
 
 logger = logging.getLogger(__name__)
@@ -1184,26 +1182,9 @@ async def _pin_plugins_for_run_as_change(
                 detail="Plugin refs cannot be checked for this automation, so it "
                 "cannot run as a service account",
             )
-        # A full SHA is already pinned; any other ref is resolved by lookup.
-        pinned = []
-        for item in plugins:
-            if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
-                pinned.append(item)
-                continue
-            try:
-                [resolved] = validate_required_plugins(
-                    [AutomationPluginSource.model_validate(item)],
-                    allow_local_sources=_allow_local_plugin_sources(),
-                )
-            except PluginSpecError as exc:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
-                ) from exc
-            ref = resolved.pop("resolved_ref", None)
-            pinned.append({**resolved, **({"ref": ref} if ref else {})})
         try:
-            require_pinned_plugin_refs(
-                [PluginSource.model_validate(item) for item in pinned]
+            pinned = pin_plugin_refs(
+                plugins, allow_local_sources=_allow_local_plugin_sources()
             )
         except PluginSpecError as exc:
             raise HTTPException(

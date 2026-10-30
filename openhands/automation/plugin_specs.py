@@ -376,6 +376,34 @@ def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
             )
 
 
+def pin_plugin_refs(
+    plugins: list[dict[str, Any]], *, allow_local_sources: bool
+) -> list[dict[str, Any]]:
+    """Return ``plugins`` with each ref replaced by its commit SHA.
+
+    Used for an automation that runs as a service account (see
+    ``require_pinned_plugin_refs``). A full SHA is kept as is; a branch, tag or
+    missing ref is resolved by preflight.
+
+    Raises:
+        PluginSpecError: when a plugin cannot be preflighted, or a ref does
+            not resolve to a full commit SHA.
+    """
+    pinned = []
+    for item in plugins:
+        if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
+            pinned.append(item)
+            continue
+        [resolved] = validate_required_plugins(
+            [AutomationPluginSource.model_validate(item)],
+            allow_local_sources=allow_local_sources,
+        )
+        ref = resolved.pop("resolved_ref", None)
+        pinned.append({**resolved, **({"ref": ref} if ref else {})})
+    require_pinned_plugin_refs([PluginSource.model_validate(item) for item in pinned])
+    return pinned
+
+
 def _contained_path(root: Path, relative: str) -> Path:
     path = root / relative
     try:

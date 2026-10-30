@@ -35,6 +35,7 @@ from openhands.automation.auth import (
     AuthenticatedUser,
     get_http_client,
 )
+from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -49,7 +50,7 @@ from openhands.automation.observability_associations import (
 )
 from openhands.automation.plugin_specs import (
     PluginSpecError,
-    require_pinned_plugin_refs,
+    pin_plugin_refs,
 )
 from openhands.automation.schemas import (
     RUN_AS_USER_ID_DESCRIPTION,
@@ -905,6 +906,44 @@ def _resolve_experiment_variant_models(
     ]
 
 
+def _pin_preset_plugin_refs(
+    body: CreatePluginAutomationRequest,
+) -> CreatePluginAutomationRequest:
+    """Return ``body`` with every plugin ref (variants too) pinned to its commit.
+
+    The generated tarball stores the refs as given, so an automation that runs
+    as a service account stores SHAs (see ``pin_plugin_refs``).
+
+    Raises:
+        HTTPException: 422 when a ref cannot be resolved to a commit SHA.
+    """
+    allow_local_sources = get_config().service.is_local_mode
+
+    def pin(plugins: list[PluginSource]) -> list[PluginSource]:
+        pinned = pin_plugin_refs(
+            [p.model_dump(exclude_none=True) for p in plugins],
+            allow_local_sources=allow_local_sources,
+        )
+        return [PluginSource.model_validate(item) for item in pinned]
+
+    try:
+        return body.model_copy(
+            update={
+                "plugins": pin(body.plugins) if body.plugins is not None else None,
+                "variants": [
+                    v.model_copy(update={"plugins": pin(v.plugins)})
+                    for v in body.variants
+                ]
+                if body.variants is not None
+                else None,
+            }
+        )
+    except PluginSpecError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
 def _generate_plugin_tarball(
     plugins: list[PluginSource] | None,
     prompt: str,
@@ -1013,15 +1052,7 @@ async def create_automation_from_plugin(
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     if run_as.kind == AutomationRunAsKind.SERVICE:
-        sources = list(body.plugins or [])
-        for variant in body.variants or []:
-            sources.extend(variant.plugins)
-        try:
-            require_pinned_plugin_refs(sources)
-        except PluginSpecError as exc:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
-            ) from exc
+        body = _pin_preset_plugin_refs(body)
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
