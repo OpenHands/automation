@@ -1,6 +1,8 @@
 """Let an automation run as a service account, and add its change audit trail.
 
 - automations.run_as_kind tells automations that run as a service account apart.
+- automations.created_by_user_id keeps the person who created an automation.
+  Every existing row ran as its creator, so it backfills from user_id.
 - automation_change_events records who changed an automation, and which fields.
 
 Revision ID: 036
@@ -33,6 +35,15 @@ def upgrade() -> None:
             server_default="USER",
         ),
     )
+
+    op.add_column(
+        "automations", sa.Column("created_by_user_id", sa.Uuid(), nullable=True)
+    )
+    op.execute("UPDATE automations SET created_by_user_id = user_id")
+    with op.batch_alter_table("automations") as batch:
+        batch.alter_column(
+            "created_by_user_id", existing_type=sa.Uuid(), nullable=False
+        )
 
     op.create_table(
         "automation_change_events",
@@ -69,4 +80,6 @@ def downgrade() -> None:
         table_name="automation_change_events",
     )
     op.drop_table("automation_change_events")
+    with op.batch_alter_table("automations") as batch:
+        batch.drop_column("created_by_user_id")
     op.drop_column("automations", "run_as_kind")

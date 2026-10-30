@@ -65,6 +65,8 @@ def test_legacy_row_backfills_to_a_loadable_user_run_as(tmp_path):
         loaded = session.scalars(select(Automation)).one()
     engine.dispose()
     assert loaded.run_as_kind is AutomationRunAsKind.USER
+    # Every row before 036 ran as its creator.
+    assert loaded.created_by_user_id == loaded.user_id
 
 
 def test_change_events_attach_to_a_legacy_automation(tmp_path):

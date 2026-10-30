@@ -90,6 +90,14 @@ class Automation(Base):
         default=AutomationRunAsKind.USER,
         server_default=AutomationRunAsKind.USER.name,  # ORM stores member names
     )
+    # The person who created the automation. Set once on create; a run-as
+    # change keeps it. Every create path sets it; the default (the run-as user)
+    # is right for an automation created to run as its creator.
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["user_id"],
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -2695,6 +2695,7 @@ class TestCreatePresetAsServiceAccount:
         assert response.status_code == 201
         assert response.json()["user_id"] == str(self.SA_ID)
         assert response.json()["run_as_kind"] == "service"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
         uploads = (await async_session.execute(select(TarballUpload))).scalars().all()
         assert [upload.user_id for upload in uploads] == [self.SA_ID]
 

@@ -706,6 +706,10 @@ async def test_sa_owned_plugin_stores_resolved_sha(
         "source": str(plugin),
         "ref": PINNED_SHA,
     }
+    # The caller (the default test user) created it; it runs as the SA.
+    assert response.json()["created_by_user_id"] == (
+        "12345678-1234-5678-1234-567812345678"
+    )
 
 
 @pytest.mark.asyncio

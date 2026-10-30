@@ -608,7 +608,14 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
+    # The admin who saved the Git Sync config both creates it and is its
+    # run-as identity.
+    automation = Automation(
+        user_id=owner.user_id,
+        created_by_user_id=owner.user_id,
+        org_id=owner.org_id,
+        **values,
+    )
     session.add(automation)
     await session.flush()
 

@@ -631,6 +631,7 @@ async def test_sa_draft_dispatch_materializes_sa_owned_automation(
     assert automation is not None
     assert automation.user_id == SA_ID
     assert automation.run_as_kind == AutomationRunAsKind.SERVICE
+    assert automation.created_by_user_id == TEST_USER_ID
     # The draft stays the caller's; only the automation belongs to the SA.
     assert draft.user_id == TEST_USER_ID
     upload_id = automation.tarball_path.rsplit("/", 1)[-1]

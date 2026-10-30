@@ -1127,6 +1127,7 @@ class AutomationResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
+    created_by_user_id: uuid.UUID
     org_id: uuid.UUID
     model: str | None
 

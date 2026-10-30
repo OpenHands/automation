@@ -5129,6 +5129,7 @@ class TestCreateAsServiceAccount:
         assert response.status_code == 201
         assert response.json()["user_id"] == str(self.SA_ID)
         assert response.json()["run_as_kind"] == "service"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
         lookup = enterprise_api.requests[0]
         assert lookup.url.path == (
             f"/api/service/users/{self.SA_ID}/orgs/{TEST_ORG_ID}/membership"
@@ -5144,6 +5145,7 @@ class TestCreateAsServiceAccount:
         assert response.status_code == 201
         assert response.json()["user_id"] == str(TEST_USER_ID)
         assert response.json()["run_as_kind"] == "user"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
         assert enterprise_api.requests == []
 
     async def test_create_as_sa_without_manage_returns_403(
@@ -5575,6 +5577,8 @@ class TestChangeRunAs:
         assert body["id"] == str(automation_id)
         assert body["user_id"] == str(self.SA_ID)
         assert body["run_as_kind"] == "service"
+        # The creator stays: a run-as change is not a new creation.
+        assert body["created_by_user_id"] == str(TEST_USER_ID)
         assert body["enabled"] is False
         assert body["state"] == "INACTIVE"
         assert body["disabled_reason"] == "run_as_changed"

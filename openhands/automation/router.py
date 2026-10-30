@@ -326,6 +326,7 @@ async def create_automation(
     auto = Automation(
         user_id=run_as.user_id,
         run_as_kind=run_as.kind,
+        created_by_user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         description=body.description,
@@ -427,6 +428,7 @@ async def create_automation_from_plugin_spec(
     automation = Automation(
         user_id=run_as.user_id,
         run_as_kind=run_as.kind,
+        created_by_user_id=user.user_id,
         org_id=user.org_id,
         name=body.name,
         prompt=None,

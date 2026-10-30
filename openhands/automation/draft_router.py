@@ -530,6 +530,7 @@ async def _materialize_draft(
             id=uuid.uuid4(),
             user_id=run_as.user_id,
             run_as_kind=run_as.kind,
+            created_by_user_id=user.user_id,
             org_id=user.org_id,
             telemetry_distinct_id=get_request_telemetry_context(
                 request

@@ -2516,6 +2516,7 @@ class TestOrgIsolation:
         async with sqlite_session_factory() as session:
             automation = (await session.execute(select(Automation))).scalars().one()
             assert automation.user_id == admin_id
+            assert automation.created_by_user_id == admin_id
             assert automation.org_id == LOCAL_ORG_ID
             upload = (await session.execute(select(TarballUpload))).scalars().one()
             assert upload.user_id == admin_id
