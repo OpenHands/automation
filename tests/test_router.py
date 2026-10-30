@@ -533,6 +533,21 @@ class TestServiceOwnedAutomations:
 
         assert response.status_code == 403
 
+    async def test_creator_demoted_to_member_cannot_edit_run_as_service(
+        self, readonly_client, async_session
+    ):
+        """Creating it gives no edit right: the role decides. A member could
+        otherwise change code that runs with the service account's secrets."""
+        automation = await self._sa_automation(async_session)
+        automation.created_by_user_id = TEST_USER_ID  # the readonly caller
+        await async_session.commit()
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
     async def test_service_principal_cannot_edit_own_automation(
         self, readonly_client, async_session
     ):
