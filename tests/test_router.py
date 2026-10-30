@@ -12,7 +12,7 @@ from urllib.parse import unquote_to_bytes
 
 import httpx
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from openhands.automation.models import (
     Automation,
@@ -5153,29 +5153,50 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 403
 
-    async def test_sa_caller_without_run_as_user_id_creates_a_run_as_service_row(
-        self, service_account_client
+    async def test_sa_caller_cannot_create_an_automation(
+        self, service_account_client, async_session
     ):
-        """A service account's own key never creates an automation it could manage."""
+        """A run's own key must not start new automations that run as itself:
+        every automation needs a human creator."""
         body = self._body()
         del body["run_as_user_id"]
 
         response = await service_account_client.post("/api/automation/v1", json=body)
 
-        assert response.status_code == 201
-        assert response.json()["user_id"] == str(TEST_USER_ID)
-        assert response.json()["run_as_kind"] == "service"
+        assert response.status_code == 403
+        assert (await async_session.scalar(select(func.count(Automation.id)))) == 0
 
-    async def test_sa_caller_cannot_edit_the_automation_it_created(
+    async def test_sa_caller_cannot_create_a_preset_automation(
         self, service_account_client
     ):
-        body = self._body()
-        del body["run_as_user_id"]
-        created = await service_account_client.post("/api/automation/v1", json=body)
-        automation_id = created.json()["id"]
+        response = await service_account_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Say hi",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_edit_the_automation_it_runs(
+        self, service_account_client, async_session
+    ):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Runs as SA",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
 
         response = await service_account_client.patch(
-            f"/api/automation/v1/{automation_id}", json={"name": "renamed"}
+            f"/api/automation/v1/{automation.id}", json={"name": "renamed"}
         )
 
         assert response.status_code == 403

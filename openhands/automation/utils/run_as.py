@@ -39,8 +39,11 @@ async def resolve_run_as(
 ) -> ResolvedRunAs:
     """Resolve the identity requested by ``run_as_user_id`` (omitted = the caller).
 
-    When omitted, the automation runs as the caller. If the caller is a service
-    account, the row runs as a service account.
+    When omitted, the automation runs as the caller.
+
+    A service account caller is refused: its key is a run's key, and every
+    automation needs a human creator. Without this, a run could start new
+    automations that run as itself.
 
     Any other identity must be an active service account of the caller's org,
     and only holders of ``manage_automations`` may pick one. The enterprise API
@@ -48,20 +51,18 @@ async def resolve_run_as(
     accounts, so a requested identity is rejected there.
 
     Raises:
-        HTTPException: 403 without ``manage_automations``; 422 when the
-            identity is not an active service account of the org; 502 when
-            enterprise cannot be asked.
+        HTTPException: 403 for a service account caller, or without
+            ``manage_automations``; 422 when the identity is not an active
+            service account of the org; 502 when enterprise cannot be asked.
     """
-    if run_as_user_id is None:
-        # A service account's own key must not hold the creator's edit rights
-        # over what it creates, or it could change what runs as itself. Its
-        # role (from the enterprise ``/users/me`` response) identifies it.
-        kind = (
-            AutomationRunAsKind.SERVICE
-            if user.role == SERVICE_ACCOUNT_ROLE
-            else AutomationRunAsKind.USER
+    # Its role (from the enterprise ``/users/me`` response) identifies it.
+    if user.role == SERVICE_ACCOUNT_ROLE:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="A service account cannot create automations",
         )
-        return ResolvedRunAs(user.user_id, kind)
+    if run_as_user_id is None:
+        return ResolvedRunAs(user.user_id, AutomationRunAsKind.USER)
 
     require_run_as_permission(
         user, "Only admins and owners can create an automation for a service account"
