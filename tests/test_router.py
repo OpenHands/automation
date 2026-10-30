@@ -1635,6 +1635,24 @@ class TestListAutomations:
 
         assert response.json() == {"automations": [], "total": 0}
 
+    async def test_created_by_filter_follows_the_creator_not_the_run_as(
+        self, async_client, async_session
+    ):
+        """An automation the caller created to run as a service account is
+        "mine", not "others"."""
+        sa_run = await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="For SA"
+        )
+        sa_run.run_as_kind = AutomationRunAsKind.SERVICE
+        sa_run.created_by_user_id = TEST_USER_ID
+        await async_session.commit()
+
+        mine = (await async_client.get("/api/automation/v1?created_by=me")).json()
+        others = (await async_client.get("/api/automation/v1?created_by=others")).json()
+
+        assert [a["name"] for a in mine["automations"]] == ["For SA"]
+        assert others == {"automations": [], "total": 0}
+
     async def test_list_automations_run_as_user_id_pages_the_filtered_set(
         self, async_client, async_session
     ):

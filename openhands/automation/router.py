@@ -741,10 +741,12 @@ async def list_automations(
         Automation.org_id == user.org_id,
         Automation.deleted_at.is_(None),
     )
+    # The creator, not the run-as identity: an automation the caller created to
+    # run as a service account is still "me".
     if created_by == "me":
-        base_query = base_query.where(Automation.user_id == user.user_id)
+        base_query = base_query.where(Automation.created_by_user_id == user.user_id)
     elif created_by == "others":
-        base_query = base_query.where(Automation.user_id != user.user_id)
+        base_query = base_query.where(Automation.created_by_user_id != user.user_id)
     if tag is not None:
         try:
             base_query = base_query.where(has_tag(normalize_tag(tag)))

@@ -35,7 +35,7 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.profile-model`: `agent_profile_id` together with `model` answers 422 `An agent profile already specifies the model`; a profile alone stores `model: null`; in local mode any pattern-valid `model` is stored as given.
 - `F05.keep-alive-continue`: an event trigger with `destination: continue_conversation` forces `keep_alive: true` on create; `keep_alive: false` with it answers 422.
 - `F05.template-idempotent`: a create with `template` answers 201 and records `preset_metadata.template`; a repeat with the same `template.id` answers 200 with the same automation unchanged (the new body is ignored).
-- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others`, and rejects out-of-range `limit` and unknown `created_by` with 422.
+- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others` on the creator (`created_by_user_id`), and rejects out-of-range `limit` and unknown `created_by` with 422.
 - `F05.tags`: `tags` on create and PATCH are trimmed, lowercased and hyphenated (`Software Factory` is stored as `software-factory`) and deduplicated; a non-slug tag, more than 10 tags or an explicit `null` answers 422; PATCH replaces the list and `[]` clears it. `GET /v1?tag=` filters the page and `total`; `GET /v1/tags` answers `{tags: [{tag, count}]}` for live automations, most-used first.
 - `F05.get`: an unknown id answers 404 `Automation not found`, a non-UUID 422.
 - `F05.patch-fields`: PATCH updates `name`, `trigger`, `timeout`, `entrypoint`, `setup_script_path` and bumps `updated_at`; unset fields are kept; a GET shows the stored values.
