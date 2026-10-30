@@ -7,6 +7,7 @@ run.
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Any, cast
 
 from fastapi import (
@@ -182,6 +183,35 @@ async def _get_live_materialized_draft_automation(
     ):
         return None
     return automation
+
+
+async def _delete_materialized_draft_automation(
+    session: AsyncSession,
+    draft: AutomationDraft,
+    run_as_user_id: uuid.UUID,
+    *,
+    deleted_at: datetime,
+    reason: str,
+) -> None:
+    """Soft-delete the draft's materialized automation and skip its runs.
+
+    Used when the draft is deleted, or when its run-as identity changes.
+    """
+    automation = await _get_live_materialized_draft_automation(
+        session, draft, run_as_user_id
+    )
+    if automation is None:
+        return
+    automation.enabled = False
+    automation.deleted_at = deleted_at
+    await skip_pending_runs_for_disabled_automation(
+        session,
+        automation.id,
+        reason=reason,
+        completed_at=deleted_at,
+        include_manual=True,
+    )
+    await mark_git_sync_dirty(session, automation)
 
 
 def _draft_name(name: str | None, draft_body: dict[str, Any]) -> str | None:
@@ -626,10 +656,22 @@ async def update_draft(
     endpoint = cast(DraftEndpoint, body.endpoint or draft.endpoint)
     draft_body = body.draft if body.draft is not None else draft.draft_body
     draft_body = _normalize_draft_body_or_422(endpoint, draft_body)
+    old_run_as_user_id = _draft_run_as_user_id(draft)
     if body.endpoint is not None:
         draft.endpoint = body.endpoint
     if body.draft is not None or body.endpoint is not None:
         draft.draft_body = draft_body
+    if _draft_run_as_user_id(draft) != old_run_as_user_id:
+        # The materialized automation runs as the old identity, so the next
+        # dispatch would not reuse it (``_get_live_materialized_draft_automation``).
+        await _delete_materialized_draft_automation(
+            session,
+            draft,
+            old_run_as_user_id,
+            deleted_at=utcnow(),
+            reason="Automation draft run-as identity changed",
+        )
+        draft.materialized_automation_id = None
     if body.name is not None or body.draft is not None:
         draft.name = _draft_name(body.name, draft_body)
     await _refresh_validation(draft, request, user, session)
@@ -648,22 +690,13 @@ async def delete_draft(
     _assert_draft_creator(draft, user)
     deleted_at = utcnow()
     draft.deleted_at = deleted_at
-
-    automation = await _get_live_materialized_draft_automation(
-        session, draft, _draft_run_as_user_id(draft)
+    await _delete_materialized_draft_automation(
+        session,
+        draft,
+        _draft_run_as_user_id(draft),
+        deleted_at=deleted_at,
+        reason="Automation draft deleted by user",
     )
-    if automation is not None:
-        automation.enabled = False
-        automation.deleted_at = deleted_at
-        await skip_pending_runs_for_disabled_automation(
-            session,
-            automation.id,
-            reason="Automation draft deleted by user",
-            completed_at=deleted_at,
-            include_manual=True,
-        )
-        await mark_git_sync_dirty(session, automation)
-
     await session.flush()
 
 

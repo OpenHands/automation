@@ -695,6 +695,42 @@ async def test_deleting_sa_draft_deletes_its_materialized_automation(
     assert automation.deleted_at is not None
 
 
+async def test_changing_run_as_on_a_dispatched_draft_deletes_the_old_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    # The materialized automation runs as the old identity and is no longer the
+    # draft's: it is soft-deleted, so a re-dispatch does not leave it behind.
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    old = (await async_session.execute(select(Automation))).scalars().one()
+    draft_body = {**created.json()["draft"]}
+    del draft_body["run_as_user_id"]
+
+    response = await async_client.patch(
+        f"/api/automation/v1/drafts/{draft_id}", json={"draft": draft_body}
+    )
+    redispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch"
+    )
+
+    assert response.status_code == 200
+    assert redispatched.status_code == 201
+    await async_session.refresh(old)
+    assert old.deleted_at is not None
+    live = (
+        (
+            await async_session.execute(
+                select(Automation).where(Automation.deleted_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [automation.user_id for automation in live] == [TEST_USER_ID]
+
+
 async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
     async_client, enterprise_api
 ):
