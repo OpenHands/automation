@@ -1,6 +1,6 @@
 FROM python:3.12-slim-trixie AS snapshot-base
 
-ARG DEBIAN_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_SNAPSHOT=20261019T000000Z
 
 RUN printf '%s\n' \
         'Types: deb' \
