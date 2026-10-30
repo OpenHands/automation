@@ -136,10 +136,11 @@ def _http_exception_status_detail(
     )
 
 
-# The enterprise key mint answers these when the run-as identity can no longer
-# have a key (disabled or removed from the org, or the org is gone). Retrying
-# cannot help.
-_PERMANENT_API_KEY_STATUS_CODES = frozenset({401, 403, 404})
+# The enterprise key mint answers 403/404 when the run-as identity can no
+# longer have a key (removed from the org, or the user is gone), and 401 when
+# the shared service key is wrong. Retrying cannot help.
+_RUN_AS_API_KEY_STATUS_CODES = frozenset({403, 404})
+_SERVICE_KEY_API_KEY_STATUS_CODES = frozenset({401})
 
 
 def _api_key_error_status_detail(
@@ -147,13 +148,17 @@ def _api_key_error_status_detail(
 ) -> dict[str, Any]:
     """Run status detail for a failed run-as key mint.
 
-    A permanent status is non-transient. It keeps kind ``unknown`` on purpose:
-    a kind the unhealthy-automation check counts would pause every automation
-    after three runs when the service key itself is wrong. A 5xx, 408, 429 or a
-    network error is transient.
+    A 403/404 concerns only this automation's run-as identity: kind ``auth``,
+    which the unhealthy-automation check counts, so the automation pauses after
+    the usual streak. A 401 is non-transient but keeps kind ``unknown`` on
+    purpose: the service key is shared, and a counted kind would pause every
+    automation when it is wrong. A 5xx, 408, 429 or a network error is
+    transient.
     """
     status_code = exc.status_code
-    if status_code in _PERMANENT_API_KEY_STATUS_CODES:
+    if status_code in _RUN_AS_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.AUTH, False
+    elif status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
         kind, transient = RunStatusDetailKind.UNKNOWN, False
     elif status_code is not None and _is_retryable_http_status(status_code):
         kind, transient = _run_status_kind_for_http_status(status_code), True
@@ -175,14 +180,14 @@ def _api_key_error_status_detail(
 
 def _api_key_error_message(exc: APIKeyError, what: str) -> str:
     """The failure message for ``exc``; permanent statuses get the likely cause."""
-    if exc.status_code == 401:
+    if exc.status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
         # Enterprise answers 401 only when the shared service key is missing or
         # wrong. That is an operator fault, not a run-as identity problem.
         return (
             f"Could not get an API key to {what} (HTTP 401). The service key "
             "for the OpenHands API was rejected."
         )
-    if exc.status_code in _PERMANENT_API_KEY_STATUS_CODES:
+    if exc.status_code in _RUN_AS_API_KEY_STATUS_CODES:
         return (
             f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
             "user or service account the automation runs as may be disabled or "

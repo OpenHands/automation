@@ -1758,8 +1758,8 @@ class TestExecuteRunConcurrencyLimit:
         ("status_code", "transient", "kind"),
         [
             (401, False, "unknown"),
-            (403, False, "unknown"),
-            (404, False, "unknown"),
+            (403, False, "auth"),
+            (404, False, "auth"),
             (500, True, "server_error"),
             (503, True, "server_error"),
             (429, True, "rate_limited"),
@@ -1776,7 +1776,9 @@ class TestExecuteRunConcurrencyLimit:
         kind,
     ):
         """A 401/403/404 from the key mint is a permanent run failure; a 5xx is
-        transient. The run fails either way and no sandbox is created."""
+        transient. The run fails either way and no sandbox is created. A 403/404
+        is kind ``auth`` (the run-as identity), which the unhealthy check counts;
+        a 401 (the shared service key) stays ``unknown``."""
         from openhands.automation.utils.api_key import APIKeyError
 
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
