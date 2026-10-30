@@ -18,7 +18,11 @@ from openhands.automation.models import (
     AutomationState,
 )
 from openhands.automation.telemetry import capture_automation_event
-from openhands.automation.utils.change_events import record_core_disable
+from openhands.automation.utils.change_events import (
+    SYSTEM_ACTOR,
+    record_core_disable,
+    set_audit_actor,
+)
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
@@ -63,6 +67,7 @@ async def disable_automation(
 
     try:
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             disabled_at = utcnow()
             # Use optimistic locking: only update if currently enabled
             result: CursorResult = await session.execute(  # type: ignore[assignment]
@@ -521,6 +526,9 @@ async def record_first_run_outcome(
             await _record_first_run_outcome_in_session(session, run, status, stage)
         elif session_factory is not None:
             async with session_factory() as local_session:
+                # Only background stages pass a factory; the callback passes its
+                # own request session, whose actor is the run's key.
+                set_audit_actor(local_session, SYSTEM_ACTOR)
                 recorded = await _record_first_run_outcome_in_session(
                     local_session, run, status, stage
                 )
@@ -565,6 +573,7 @@ async def mark_run_terminal(
 
     try:
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             db_result = await session.execute(
                 select(AutomationRun).where(AutomationRun.id == run.id)
             )

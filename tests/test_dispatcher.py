@@ -37,6 +37,7 @@ from openhands.automation.exceptions import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationOwnerKind,
     AutomationRun,
     AutomationRunStatus,
@@ -590,6 +591,37 @@ class TestMarkRunTerminalFirstRunOutcome:
             first_run = automation.preset_metadata["first_run"]
             assert first_run["status"] == "failure"
             assert first_run["failure_stage"] == "dispatch"
+
+    async def test_dispatch_failure_first_run_write_has_an_audit_actor(
+        self, async_session_factory, monkeypatch
+    ):
+        """The dispatcher's own session names SYSTEM, so strict mode does not
+        raise (and lose the write) when it records the first run."""
+        from openhands.automation.utils import change_events
+
+        automation_id, run = await self._seed_template_run(async_session_factory)
+        monkeypatch.setattr(change_events, "STRICT", True)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.preset_metadata["first_run"]["status"] == "failure"
+            (change,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        assert (change.actor_kind, change.changed_fields) == (
+            "system",
+            ["preset_metadata"],
+        )
 
     async def test_skipped_run_does_not_consume_the_first_run_slot(
         self, async_session_factory

@@ -160,6 +160,34 @@ async def test_git_sync_actor_prefixes_the_action(session_factory, strict):
     )
 
 
+async def test_folded_flushes_derive_the_action_from_all_their_fields(
+    session_factory, strict
+):
+    # A code edit then an enable in one transaction is an update, not an enable
+    # that hides the code change.
+    automation_id = await _create(session_factory)
+    await _update(
+        session_factory,
+        automation_id,
+        enabled=False,
+        state=AutomationState.INACTIVE,
+    )
+
+    async with session_factory() as session:
+        set_audit_actor(session, ACTOR)
+        automation = await session.get(Automation, automation_id)
+        automation.entrypoint = "uv run other.py"
+        await session.flush()
+        automation.enabled = True
+        automation.state = AutomationState.ACTIVE
+        await session.commit()
+
+    events = await _events(session_factory, automation_id)
+    (folded,) = [e for e in events if e.action not in ("create", "disable")]
+    assert folded.action == "update"
+    assert {"entrypoint", "enabled", "state"} <= set(folded.changed_fields)
+
+
 async def test_label_overrides_the_derived_action(session_factory, strict):
     automation_id = await _create(session_factory)
 

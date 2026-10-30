@@ -42,8 +42,9 @@ _REQUEST_KEY = "audit_request"
 # automation id -> (row, base action) written earlier in this transaction.
 _PENDING_KEY = "audit_pending"
 
-# When one transaction flushes several times, its row keeps the strongest action.
-_ACTION_RANK = {"update": 0, "enable": 1, "disable": 1, "transfer": 2, "delete": 3}
+# When one transaction flushes several times, these actions stay; any other is
+# derived again from all the fields its row lists.
+_STICKY_ACTIONS = frozenset({"create", "delete", "transfer"})
 
 # Columns the service updates for its own bookkeeping; a change to only these
 # is not a change anyone made to the automation.
@@ -196,8 +197,13 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
             # A handler may flush more than once (autoflush before a query, or
             # an explicit flush). Fold this flush into the transaction's row.
             row, earlier_base = earlier
-            base = _stronger(earlier_base, base)
             row.changed_fields = sorted(set(row.changed_fields) | set(fields))
+            if label is None and earlier_base in _STICKY_ACTIONS:
+                base = earlier_base
+            elif label is None:
+                base = _derive_action(
+                    set(row.changed_fields), is_new=False, enabled=automation.enabled
+                )
         else:
             row = _audit_row(automation.id, automation.org_id, actor, base, fields)
             session.add(row)
@@ -209,15 +215,10 @@ def _before_flush(session: Session, _flush_context: Any, _instances: Any) -> Non
         pending[automation.id] = (row, base)
 
 
-def _stronger(earlier: str, later: str) -> str:
-    if earlier == "create":
-        return earlier
-    if _ACTION_RANK.get(later, 0) >= _ACTION_RANK.get(earlier, 0):
-        return later
-    return earlier
-
-
 def _end_transaction(session: Session, *_args: Any) -> None:
+    # Also fires on a SAVEPOINT rollback. A row pending from before the savepoint
+    # is then forgotten, so a later flush adds a second row for that automation:
+    # an extra row, never a lost change.
     session.info.pop(_PENDING_KEY, None)
 
 

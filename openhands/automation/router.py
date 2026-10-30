@@ -1527,6 +1527,9 @@ async def list_automation_changes(
 
     Field names only, never values. A soft-deleted automation is a 404, so its
     history is not readable through the API.
+
+    Known limit: rows with the same ``created_at`` (one transaction, or one
+    second on SQLite) come back in a stable but not time order.
     """
     await _get_org_automation(session, automation_id, user.org_id)
 
