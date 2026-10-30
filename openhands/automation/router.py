@@ -1464,6 +1464,7 @@ async def dispatch_automation(
             auto,
             telemetry_distinct_id=telemetry_context.frontend_distinct_id,
             trigger_source="manual",
+            triggered_by_user_id=user.user_id,
             observability_parent_span_context=current_span_context(),
         )
         run_created_attributes = automation_attributes(auto, run)

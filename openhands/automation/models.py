@@ -305,6 +305,10 @@ class AutomationRun(Base):
         String(32), nullable=True, index=True
     )
 
+    # The person who started a manual run. Null for cron and event runs, and
+    # for runs from before it was recorded.
+    triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
     # Integration event row that created this run, for event-triggered runs.
     trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,

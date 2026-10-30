@@ -228,6 +228,8 @@ async def test_dispatchable_prompt_draft_materializes_disabled_draft_and_manual_
     assert run is not None
     assert run.automation_id == automation.id
     assert run.trigger_source == "manual"
+    assert run.triggered_by_user_id == TEST_USER_ID
+    assert run_data["triggered_by_user_id"] == str(TEST_USER_ID)
     assert draft_file_store.write_stream.await_count == 1
 
 

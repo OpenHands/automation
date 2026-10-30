@@ -763,6 +763,7 @@ async def dispatch_draft(
             automation,
             telemetry_distinct_id=telemetry_context.frontend_distinct_id,
             trigger_source="manual",
+            triggered_by_user_id=user.user_id,
             event_payload=event_payload,
             observability_parent_span_context=current_span_context(),
         )

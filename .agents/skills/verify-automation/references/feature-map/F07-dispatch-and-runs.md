@@ -1,7 +1,8 @@
 # Dispatch and run lifecycle
 
 How an automation becomes a run and how that run reaches a terminal state.
-`POST /v1/{id}/dispatch` creates a `PENDING` run with `trigger_source=manual`;
+`POST /v1/{id}/dispatch` creates a `PENDING` run with `trigger_source=manual`
+and `triggered_by_user_id` set to the caller;
 within one dispatcher interval the dispatcher marks it `RUNNING`, uploads the
 tarball and an env file to the Agent Server and starts one bash chain there
 (its id is the run's `bash_command_id`). The script inside the run reports
@@ -22,7 +23,7 @@ Routes: `POST /api/automation/v1/{automation_id}/dispatch`,
 
 ## Sub-features
 
-- `F07.dispatch`: dispatching an automation answers 201 with a `PENDING` run (`trigger_source=manual`, `started_at`, `timeout_at`, `bash_command_id`, `conversation_id` all null), and the runs list shows it.
+- `F07.dispatch`: dispatching an automation answers 201 with a `PENDING` run (`trigger_source=manual`, `triggered_by_user_id` the caller, `started_at`, `timeout_at`, `bash_command_id`, `conversation_id` all null), and the runs list shows it.
 - `F07.dispatch-errors`: dispatch and the runs list answer 404 `Automation not found` for an unknown id, and 401 without a key.
 - `F07.callback-lifecycle`: a run that calls back goes `PENDING` → `RUNNING` → `COMPLETED`; the stored run has `started_at`, `timeout_at`, `completed_at`, a `bash_command_id`, the last reported phase, `status_detail=null`, and `sandbox_id=null` (local mode).
 - `F07.run-env`: the bash chain receives `AUTOMATION_RUN_ID`, `AUTOMATION_CALLBACK_URL`, `AUTOMATION_PHASE_URL`, `AUTOMATION_API_URL`, `AUTOMATION_TRIGGER_SOURCE=manual`, `AUTOMATION_EVENT_PAYLOAD`, `WORKSPACE_BASE` (the run directory), `AGENT_SERVER_URL`, a callback key and a KV token; `AUTOMATION_MODEL` only when the automation sets `model`.
@@ -72,7 +73,8 @@ Preconditions:
 - **Manual dispatch (`F07.dispatch`).** A new run is PENDING with nothing started yet.
   ```sh
   DA=$(control-automation fixture automation --kind callback --name 'qa dispatch' --field id)
-  DR=$(control-automation api POST "/v1/$DA/dispatch" --expect 201 --check status eq PENDING --check trigger_source eq manual --check automation_id eq "$DA" --check started_at eq null --check timeout_at eq null --check bash_command_id eq null --check conversation_id eq null --save F07.dispatch/dispatch --field id)
+  ME=$(control-automation api GET "/v1/$DA" --field user_id)
+  DR=$(control-automation api POST "/v1/$DA/dispatch" --expect 201 --check status eq PENDING --check trigger_source eq manual --check triggered_by_user_id eq "$ME" --check automation_id eq "$DA" --check started_at eq null --check timeout_at eq null --check bash_command_id eq null --check conversation_id eq null --save F07.dispatch/dispatch --field id)
   control-automation api GET "/v1/$DA/runs" --expect 200 --check total eq 1 --check runs.0.id eq "$DR" --quiet
   control-automation run wait "$DA" --run-id "$DR" --status COMPLETED --timeout 60
   ```

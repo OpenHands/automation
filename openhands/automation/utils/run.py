@@ -185,6 +185,7 @@ async def create_pending_run(
     *,
     telemetry_distinct_id: str | None = None,
     trigger_source: str | None = None,
+    triggered_by_user_id: uuid.UUID | None = None,
     event_payload: dict[str, Any] | None = None,
     observability_parent_span_context: str | None = None,
 ) -> AutomationRun:
@@ -196,6 +197,8 @@ async def create_pending_run(
     Args:
         session: Database session
         automation: The automation to create a run for
+        triggered_by_user_id: The person who started a manual run; None for
+            cron and event runs.
         event_payload: Optional synthetic event payload for manual test
             dispatches of event-triggered automations. Bypasses webhook
             signature verification because the caller is authenticated.
@@ -210,6 +213,7 @@ async def create_pending_run(
         automation_id=automation.id,
         status=AutomationRunStatus.PENDING,
         trigger_source=trigger_source,
+        triggered_by_user_id=triggered_by_user_id,
         event_payload=event_payload,
         telemetry_distinct_id=(
             telemetry_distinct_id or automation.telemetry_distinct_id
