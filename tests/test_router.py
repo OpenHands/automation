@@ -469,6 +469,26 @@ class TestServiceOwnedAutomations:
         await async_session.refresh(upload)
         assert upload.user_id == self._SA_ID
 
+    async def test_patch_tarball_path_to_an_upload_another_automation_uses_returns_409(
+        self, async_client, async_session
+    ):
+        sa_owned = await self._sa_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{sa_owned.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
     async def test_patch_tarball_path_of_a_run_as_user_automation_keeps_the_upload_user(
         self, async_client, async_session
     ):

@@ -16,6 +16,7 @@ from openhands.automation.models import (
     AutomationRunStatus,
     AutomationState,
     TarballUpload,
+    UploadStatus,
 )
 from openhands.automation.storage import get_file_store
 
@@ -744,6 +745,60 @@ async def test_changing_run_as_on_a_dispatched_draft_deletes_the_old_automation(
         .all()
     )
     assert [automation.user_id for automation in live] == [TEST_USER_ID]
+
+
+async def test_raw_sa_draft_with_an_upload_another_automation_uses_returns_409(
+    async_client, async_session, enterprise_api
+):
+    from openhands.automation.utils.tarball_validation import (
+        build_internal_url,
+        build_upload_storage_path,
+    )
+
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    upload_id = uuid.uuid4()
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="shared-upload",
+        status=UploadStatus.COMPLETED,
+        storage_path=build_upload_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id),
+    )
+    tarball_path = build_internal_url(upload_id)
+    async_session.add(upload)
+    async_session.add(
+        Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Uses the upload",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=tarball_path,
+            entrypoint="python main.py",
+        )
+    )
+    await async_session.commit()
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1",
+            "draft": {
+                "name": "Raw SA draft",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "tarball_path": tarball_path,
+                "entrypoint": "python main.py",
+                "run_as_user_id": str(SA_ID),
+            },
+        },
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 409
+    await async_session.refresh(upload)
+    assert upload.user_id == TEST_USER_ID
 
 
 async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
