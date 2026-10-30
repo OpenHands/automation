@@ -19,7 +19,11 @@ from openhands.automation.middleware import (
     TelemetryRequestContext,
     build_telemetry_request_context,
 )
-from openhands.automation.models import Automation, AutomationRun
+from openhands.automation.models import (
+    Automation,
+    AutomationRun,
+    AutomationRunAsKind,
+)
 from openhands.automation.utils.service_metadata import (
     get_service_metadata,
     set_service_metadata,
@@ -307,6 +311,10 @@ def _base_properties(
             {
                 "automation_id": str(automation.id),
                 "automation_enabled": automation.enabled,
+                # None on a row not flushed yet: the column default is not applied.
+                "run_as_kind": (
+                    automation.run_as_kind or AutomationRunAsKind.USER
+                ).value,
                 "trigger_type": _trigger_type(automation),
                 "timeout_seconds": automation.timeout,
             }

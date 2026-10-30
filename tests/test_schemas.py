@@ -307,6 +307,7 @@ class TestAutomationResponseUtcSerialisation:
         defaults: dict[str, Any] = dict(
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
+            created_by_user_id=uuid.uuid4(),
             org_id=uuid.uuid4(),
             model=None,
             name="Test",

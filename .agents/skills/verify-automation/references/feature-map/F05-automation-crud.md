@@ -18,7 +18,9 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 `GET /api/automation/v1/tags`,
 `GET /api/automation/v1/{automation_id}`, `PATCH /api/automation/v1/{automation_id}`,
 `DELETE /api/automation/v1/{automation_id}`,
-`GET /api/automation/v1/{automation_id}/tarball`
+`GET /api/automation/v1/{automation_id}/tarball`,
+`POST /api/automation/v1/{automation_id}/run-as`,
+`GET /api/automation/v1/{automation_id}/changes`
 
 ## Sub-features
 
@@ -33,7 +35,7 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.profile-model`: `agent_profile_id` together with `model` answers 422 `An agent profile already specifies the model`; a profile alone stores `model: null`; in local mode any pattern-valid `model` is stored as given.
 - `F05.keep-alive-continue`: an event trigger with `destination: continue_conversation` forces `keep_alive: true` on create; `keep_alive: false` with it answers 422.
 - `F05.template-idempotent`: a create with `template` answers 201 and records `preset_metadata.template`; a repeat with the same `template.id` answers 200 with the same automation unchanged (the new body is ignored).
-- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others`, and rejects out-of-range `limit` and unknown `created_by` with 422.
+- `F05.list`: `GET /v1` answers `{automations, total}` newest first, pages with `limit`/`offset`, filters `created_by=me|others` on the creator (`created_by_user_id`), and rejects out-of-range `limit` and unknown `created_by` with 422.
 - `F05.tags`: `tags` on create and PATCH are trimmed, lowercased and hyphenated (`Software Factory` is stored as `software-factory`) and deduplicated; a non-slug tag, more than 10 tags or an explicit `null` answers 422; PATCH replaces the list and `[]` clears it. `GET /v1?tag=` filters the page and `total`; `GET /v1/tags` answers `{tags: [{tag, count}]}` for live automations, most-used first.
 - `F05.get`: an unknown id answers 404 `Automation not found`, a non-UUID 422.
 - `F05.patch-fields`: PATCH updates `name`, `trigger`, `timeout`, `entrypoint`, `setup_script_path` and bumps `updated_at`; unset fields are kept; a GET shows the stored values.
@@ -44,6 +46,8 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.tarball-download`: `GET /v1/{id}/tarball` for an internal upload answers 200 `application/x-tar` with `Content-Disposition: attachment; filename="<name>.tar"` and the uploaded bytes unchanged.
 - `F05.tarball-filename`: a non-ASCII name gets an ASCII `filename` fallback plus an RFC 5987 `filename*`; quotes and slashes are stripped.
 - `F05.tarball-external`: an `https://` tarball answers 302 to the URL; `s3://` and `gs://` answer 422 `Cannot proxy s3:// tarball URLs...`.
+- `F05.changes`: create, PATCH, enable, disable, run-as change and DELETE each add one audit row (`create`, `update`, `enable`, `disable`, `run_as_change`, `delete`) holding field names only, with `actor_kind` `user`, `service`, `git_sync` or `system`; `GET /v1/{id}/changes` answers `{changes, total}` newest first and pages with `limit`/`offset`; after a DELETE it answers 404.
+- `F05.run-as`: `POST /v1/{id}/run-as` with `{to: "self"}` on an automation that already runs as the caller answers 409, `{to: "service", service_account_id}` answers 422 in local mode (no service accounts), and a body missing `service_account_id` answers 422.
 - `F05.auth`: every route answers 401 without a key or with a wrong key.
 
 ## How to get to it (agent POV)
@@ -291,6 +295,25 @@ Preconditions:
   ```
   The CLI does not follow redirects, so the 302 and its `Location` are
   visible. `{automation_id}` is literal text in the 422 message.
+- **Change audit (`F05.changes`).** One row per change, the create included, field names only, readable until the automation is deleted.
+  ```sh
+  CHID=$(control-automation api POST /v1 --json '{"name":"qa-changes","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api PATCH "/v1/$CHID" --json '{"name":"qa-changes-renamed"}' --expect 200
+  control-automation api PATCH "/v1/$CHID" --json '{"enabled":false}' --expect 200
+  control-automation api GET "/v1/$CHID/changes" --expect 200 --check total eq 3 --check changes.0.action eq disable --check changes.1.action eq update --check changes.1.changed_fields.0 eq name --check changes.1.actor_kind eq user --check changes.2.action eq create --save F05.changes/list
+  control-automation api GET "/v1/$CHID/changes" --query limit=1 --query offset=1 --expect 200 --check total eq 3 --check changes.0.action eq update
+  control-automation api DELETE "/v1/$CHID" --expect 204
+  control-automation api GET "/v1/$CHID/changes" --expect 404 --check detail eq 'Automation not found' --save F05.changes/deleted
+  ```
+  The audit row stores names, never values: the new `name` is not in it.
+- **Run-as change (`F05.run-as`).** Local mode has no service accounts, so only the refusals can be driven.
+  ```sh
+  TRID=$(control-automation api POST /v1 --json '{"name":"qa-run-as","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"self"}' --expect 409 --check detail eq 'The automation already runs as this identity' --save F05.run-as/self
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service","service_account_id":"00000000-0000-4000-8000-000000000001"}' --expect 422 --check detail contains 'must be an active service account' --save F05.run-as/service
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service"}' --expect 422
+  control-automation api GET "/v1/$TRID" --expect 200 --check state eq ACTIVE --check run_as_kind eq user
+  ```
 - **Key required (`F05.auth`).** No key or a wrong key gets 401 on every route.
   ```sh
   control-automation api GET /v1 --auth none --expect 401 --check detail contains 'Authentication required' --save F05.auth/list

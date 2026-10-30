@@ -31,6 +31,7 @@ from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.models import (
     Automation,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
 )
 from openhands.automation.schemas import (
@@ -77,9 +78,11 @@ def make_automation(
     user_id: uuid.UUID,
     trigger: dict,
     name: str = "Test Automation",
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
 ) -> Automation:
     return Automation(
         user_id=user_id,
+        run_as_kind=run_as_kind,
         org_id=org_id,
         name=name,
         trigger=trigger,
@@ -159,7 +162,7 @@ async def start_run(session, run_id, sandbox_id: str | None = "sandbox-1") -> No
 
 
 def expected_conversation(org_id, automation_id, subject_key, source="slack") -> str:
-    return conversation_id_for(org_id, automation_id, source, subject_key)
+    return conversation_id_for(org_id, automation_id, source, subject_key, None)
 
 
 @pytest.fixture
@@ -587,6 +590,39 @@ async def test_an_event_arriving_mid_run_continues_that_conversation(
 
 
 @pytest.mark.asyncio
+async def test_a_run_as_service_automation_continues_its_account_keyed_conversation(
+    org_id, async_session, mock_authenticated_user, delivered_turns
+):
+    """The routing side of the run-as rule: the follow-up goes to the id the
+    dispatcher gave the run, which carries the service account."""
+    automation = make_automation(
+        org_id,
+        mock_authenticated_user.user_id,
+        continuing_trigger(),
+        run_as_kind=AutomationRunAsKind.SERVICE,
+    )
+    async_session.add(automation)
+    await async_session.commit()
+
+    first = await _mention(async_session, org_id, slack_envelope(), "Ev1")
+    await start_run(async_session, uuid.UUID(first.run_ids[0]), "sandbox-live")
+    follow_up = slack_envelope(
+        ts="1755000002.000200", thread_ts="1755000000.000100", text="<@U999> also"
+    )
+    second = await _mention(async_session, org_id, follow_up, "Ev2")
+
+    key = f"{TEAM}/C123/1755000000.000100"
+    assert second.conversation_ids == [
+        conversation_id_for(
+            org_id, automation.id, "slack", key, mock_authenticated_user.user_id
+        )
+    ]
+    assert second.conversation_ids != [
+        expected_conversation(org_id, automation.id, key)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_an_event_on_a_queued_run_is_folded_into_it(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
@@ -874,7 +910,9 @@ async def test_github_threads_on_the_documented_expression(
 
     assert second.run_ids == []
     assert second.conversation_ids == [
-        conversation_id_for(org_id, automation.id, "github", "OpenHands/automation#362")
+        conversation_id_for(
+            org_id, automation.id, "github", "OpenHands/automation#362", None
+        )
     ]
 
 
@@ -1097,12 +1135,13 @@ async def test_continue_conversation_loads_the_run_s_automation(
             source="slack",
             subject_key=subject_key,
             automation_id=automation_id,
+            service_account_id=None,
             event_key="app_mention",
             event_payload={"hello": "world"},
         )
         await session.commit()
 
-    derived = conversation_id_for(org_id, automation_id, "slack", subject_key)
+    derived = conversation_id_for(org_id, automation_id, "slack", subject_key, None)
     assert result.conversation_id == derived
     assert result.coalesced is False
     assert key_urls, "the API key was never minted, so run.automation failed"
@@ -1151,7 +1190,7 @@ async def test_concurrent_follow_ups_all_continue_one_conversation(
     results = await asyncio.gather(*(deliver(f"Later{n}") for n in range(5)))
 
     derived = conversation_id_for(
-        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100", None
     )
     assert sent == [derived] * 5
     assert all(r.conversation_ids == [derived] for r in results)
@@ -1236,7 +1275,7 @@ async def test_a_burst_on_one_subject_creates_exactly_one_run(
     results = await asyncio.gather(*(deliver(f"Ev{n}") for n in range(5)))
 
     derived = conversation_id_for(
-        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100"
+        org_id, automation_id, "slack", f"{TEAM}/C123/1755000000.000100", None
     )
     assert [run_id for r in results for run_id in r.run_ids] != []
     assert sum(len(r.run_ids) for r in results) == 1

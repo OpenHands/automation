@@ -1,4 +1,5 @@
 import json
+import shutil
 import uuid
 from pathlib import Path
 
@@ -611,3 +612,438 @@ def test_plugin_spec_update_fallback_rejects_profile_requirement_changes(tmp_pat
 
     assert exc_info.value.status_code == 403
     assert "changes profile requirements" in exc_info.value.detail
+
+
+SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_as_service_account(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["user_id"] == str(SA_ID)
+    assert response.json()["run_as_kind"] == "service"
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_spec_as_non_sa_user_returns_422(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID, account_type="human", role="member")
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "active service account" in response.json()["detail"]
+
+
+PINNED_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture
+def resolve_plugin_refs_to_pinned_sha(monkeypatch):
+    """Make preflight report PINNED_SHA as the commit a branch ref resolves to."""
+    from openhands.automation import plugin_specs
+
+    real_preflight = plugin_specs.preflight_manifest
+
+    def preflight(plugin, **kwargs):
+        _resolved_ref, manifest = real_preflight(plugin, **kwargs)
+        return PINNED_SHA, manifest
+
+    monkeypatch.setattr("openhands.automation.router.preflight_manifest", preflight)
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_stores_resolved_sha(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"] == {
+        "source": str(plugin),
+        "ref": PINNED_SHA,
+    }
+    # The caller (the default test user) created it; it runs as the SA.
+    assert response.json()["created_by_user_id"] == (
+        "12345678-1234-5678-1234-567812345678"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_without_ref_stores_resolved_sha(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+
+
+@pytest.mark.asyncio
+async def test_run_as_user_plugin_keeps_the_requested_ref(
+    async_client, tmp_path, agent_profiles_api, resolve_plugin_refs_to_pinned_sha
+):
+    plugin = write_plugin(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_patch_sa_owned_plugin_source_stores_resolved_sha(
+    async_client,
+    async_session,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    """A manager changing the ref of an SA-owned plugin pins the new one too."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+    assert created.status_code == 201
+
+    response = await async_client.patch(
+        f"/api/automation/v1/{created.json()['id']}",
+        json={"plugin": {"source": str(plugin), "ref": "release"}},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+
+
+SECONDARY_SHA = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+
+
+@pytest.fixture
+def resolve_secondary_plugin_refs_to_sha(monkeypatch, tmp_path):
+    """Make preflight report SECONDARY_SHA as the commit a secondary ref resolves to."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from openhands.automation import plugin_specs
+
+    real_preflight = plugin_specs.preflight_plugin
+    secondary_source = str(tmp_path / "secondary" / "plugin")
+
+    @contextmanager
+    def preflight(**kwargs):
+        if kwargs["source"] != secondary_source:
+            with real_preflight(**kwargs) as checked:
+                yield checked
+            return
+        with real_preflight(**{**kwargs, "ref": None}):
+            yield SimpleNamespace(resolved_ref=SECONDARY_SHA)
+
+    monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
+
+
+def _write_plugin_with_secondary(tmp_path: Path) -> tuple[Path, Path]:
+    plugin = write_plugin(tmp_path)
+    secondary = write_plugin(tmp_path / "secondary")
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest.setdefault("runtime", {})["plugins"] = [
+        {"source": str(secondary), "ref": "main"}
+    ]
+    _write_plugin_automation(plugin, manifest)
+    return plugin, secondary
+
+
+@pytest.mark.asyncio
+async def test_sa_owned_plugin_stores_resolved_sha_of_secondary_plugins(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin, secondary = _write_plugin_with_secondary(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "SA Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["plugin_spec"]["required_plugins"] == [
+        {"source": str(secondary), "ref": SECONDARY_SHA}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_as_user_plugin_stores_no_secondary_pins(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    plugin, _secondary = _write_plugin_with_secondary(tmp_path)
+
+    response = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin)},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 201
+    assert "required_plugins" not in response.json()["plugin_spec"]
+
+
+async def _create_human_plugin_spec(client, plugin, headers, ref="main"):
+    created = await client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": ref},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    return created.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_change_to_service_account_pins_branch_ref(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+    resolve_secondary_plugin_refs_to_sha,
+):
+    """A human-owned plugin on a branch is pinned to its commit at the run-as change."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin, secondary = _write_plugin_with_secondary(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/run-as",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    plugin_spec = response.json()["plugin_spec"]
+    assert plugin_spec["plugin"]["ref"] == PINNED_SHA
+    assert plugin_spec["required_plugins"] == [
+        {"source": str(secondary), "ref": SECONDARY_SHA}
+    ]
+    stored = await async_client.get(
+        f"/api/automation/v1/{automation_id}", headers=agent_profiles_api.caller_auth
+    )
+    assert stored.json()["plugin_spec"] == plugin_spec
+
+
+@pytest.mark.asyncio
+async def test_change_to_service_account_stores_the_pinned_manifest_fields(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    """The branch moved since create: the stored entrypoint follows the pin."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
+    manifest = json.loads((plugin / "automation-plugin.json").read_text())
+    manifest["entrypoint"] = {
+        "command": "python3 scripts/main_v2.py",
+        "setup_script": "scripts/setup.sh",
+    }
+    (plugin / "scripts" / "main_v2.py").write_text("print('v2')\n")
+    (plugin / "scripts" / "setup.sh").write_text("true\n")
+    _write_plugin_automation(plugin, manifest)
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/run-as",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.json()["entrypoint"]
+        == 'cd "$AUTOMATION_PLUGIN_ROOT" && python3 scripts/main_v2.py'
+    )
+    assert response.json()["setup_script_path"] == "scripts/setup.sh"
+
+
+@pytest.mark.asyncio
+async def test_change_to_service_account_accepts_full_sha_ref(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth, ref=PINNED_SHA
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/run-as",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA
+    assert response.json()["plugin_spec"]["required_plugins"] == []
+
+
+@pytest.mark.asyncio
+async def test_change_to_service_account_fails_when_manifest_unavailable(
+    async_client, tmp_path, agent_profiles_api, enterprise_api
+):
+    """No manifest, no pin: the run-as change is refused and the identity stays."""
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    automation_id = await _create_human_plugin_spec(
+        async_client, plugin, agent_profiles_api.caller_auth
+    )
+    shutil.rmtree(plugin)
+
+    response = await async_client.post(
+        f"/api/automation/v1/{automation_id}/run-as",
+        json={"to": "service", "service_account_id": str(SA_ID)},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 422
+    assert "preflight automation plugin" in response.json()["detail"]
+    stored = await async_client.get(
+        f"/api/automation/v1/{automation_id}", headers=agent_profiles_api.caller_auth
+    )
+    assert stored.json()["run_as_kind"] == "user"
+    assert stored.json()["plugin_spec"]["plugin"]["ref"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_change_to_self_keeps_plugin_spec(
+    async_client,
+    tmp_path,
+    agent_profiles_api,
+    enterprise_api,
+    resolve_plugin_refs_to_pinned_sha,
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    plugin = write_plugin(tmp_path)
+    created = await async_client.post(
+        "/api/automation/v1/plugin-spec",
+        json={
+            "name": "Plugin",
+            "plugin": {"source": str(plugin), "ref": "main"},
+            "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            "run_as_user_id": str(SA_ID),
+        },
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/{created.json()['id']}/run-as",
+        json={"to": "self"},
+        headers=agent_profiles_api.caller_auth,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plugin_spec"]["plugin"]["ref"] == PINNED_SHA

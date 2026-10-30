@@ -58,6 +58,23 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
+class AutomationRunAsKind(StrEnum):
+    """What kind of identity an automation runs as (``Automation.user_id``)."""
+
+    USER = "user"
+    SERVICE = "service"
+
+
+class AutomationChangeActorKind(StrEnum):
+    """Who made a recorded change to an automation."""
+
+    USER = "user"
+    SERVICE = "service"
+    GIT_SYNC = "git_sync"
+    # The service itself: the scheduler, the watchdog, the unhealthy check.
+    SYSTEM = "system"
+
+
 class Automation(Base):
     """An automation definition: what to run and when to trigger it."""
 
@@ -65,6 +82,22 @@ class Automation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # SERVICE: user_id is a service account of the org. Managers (not the
+    # service account itself) may then edit and enable the automation.
+    run_as_kind: Mapped[AutomationRunAsKind] = mapped_column(
+        Enum(AutomationRunAsKind, native_enum=False, length=16),
+        nullable=False,
+        default=AutomationRunAsKind.USER,
+        server_default=AutomationRunAsKind.USER.name,  # ORM stores member names
+    )
+    # The person who created the automation. Set once on create; a run-as
+    # change keeps it. Every create path sets it; the default (the run-as user)
+    # is right for an automation created to run as its creator.
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["user_id"],
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -454,6 +487,50 @@ class AutomationDisableEvent(Base):
         back_populates="disable_events",
     )
     run: Mapped["AutomationRun | None"] = relationship("AutomationRun")
+
+
+class AutomationChangeEvent(Base):
+    """Audit record of who changed an automation and which fields.
+
+    Holds field NAMES only, never values, so a prompt, secret or URL cannot
+    leak through the audit trail. One row per automation per transaction,
+    written by the ``before_flush`` hook in ``utils/change_events.py``: every
+    ORM insert, update and soft delete is recorded, with no call at the write
+    site. Core ``update(Automation)`` statements bypass the hook; the two that
+    disable an automation call ``record_core_disable``.
+
+    ``automation_id`` has no foreign key, so a row outlives its automation.
+    ``org_id`` is copied from the automation, so reads stay org-scoped without
+    a join.
+    """
+
+    __tablename__ = "automation_change_events"
+    __table_args__ = (
+        Index(
+            "ix_automation_change_events_automation_created",
+            "automation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    automation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # NULL for Git sync, which has no acting user.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    actor_kind: Mapped[AutomationChangeActorKind] = mapped_column(
+        Enum(AutomationChangeActorKind, native_enum=False, length=16),
+        nullable=False,
+    )
+    # create | update | enable | disable | run_as_change | delete, git_sync_ prefixed
+    # for Git sync, or the label a session set (utils/change_events.py)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
 
 
 class TarballUpload(Base):

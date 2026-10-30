@@ -12,12 +12,16 @@ from urllib.parse import unquote_to_bytes
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationDisableEvent,
+    AutomationGitSyncState,
     AutomationRun,
+    AutomationRunAsKind,
+    AutomationRunStatus,
     AutomationState,
     TarballUpload,
     UploadStatus,
@@ -29,6 +33,7 @@ from openhands.automation.preset_router import (
 )
 from openhands.automation.storage import ObjectNotFoundError
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import AuditActor, set_audit_actor
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     parse_internal_upload_id,
@@ -411,6 +416,198 @@ class TestPermissionEnforcement:
         )
 
         assert response.status_code == 403
+
+
+class TestServiceOwnedAutomations:
+    """Edit rule for automations owned by a service account (SA).
+
+    ``readonly_client`` is a member with ``view_automations`` only;
+    ``async_client`` holds ``manage_automations``. Both act as TEST_USER_ID.
+    """
+
+    _SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    async def _sa_automation(
+        self, async_session, *, user_id=None, enabled: bool = True
+    ) -> Automation:
+        automation = Automation(
+            user_id=user_id or self._SA_ID,
+            run_as_kind=AutomationRunAsKind.SERVICE,
+            org_id=TEST_ORG_ID,
+            name="SA Automation",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            enabled=enabled,
+            state=AutomationState.ACTIVE if enabled else AutomationState.INACTIVE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_response_has_run_as_kind(self, async_client, async_session):
+        sa_owned = await self._sa_automation(async_session)
+
+        response = await async_client.get(f"/api/automation/v1/{sa_owned.id}")
+
+        assert response.json()["run_as_kind"] == "service"
+
+    async def test_patch_tarball_path_reassigns_upload_to_the_sa(
+        self, async_client, async_session
+    ):
+        sa_owned = await self._sa_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{sa_owned.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == self._SA_ID
+
+    async def test_patch_tarball_path_to_an_upload_another_automation_uses_returns_409(
+        self, async_client, async_session
+    ):
+        sa_owned = await self._sa_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{sa_owned.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 409
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
+    async def test_patch_tarball_path_of_a_run_as_user_automation_keeps_the_upload_user(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
+    async def test_human_caller_defaults_to_user_run_as_kind(
+        self, async_client, local_mode
+    ):
+        response = await async_client.post(
+            "/api/automation/v1",
+            json={
+                "name": "Mine",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "tarball_path": "s3://bucket/code.tar.gz",
+                "entrypoint": "uv run script.py",
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["run_as_kind"] == "user"
+
+    async def test_manager_can_edit_run_as_service(self, async_client, async_session):
+        automation = await self._sa_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "Renamed"
+
+    async def test_manager_can_enable_run_as_service(self, async_client, async_session):
+        automation = await self._sa_automation(async_session, enabled=False)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "ACTIVE"
+
+    async def test_member_cannot_edit_run_as_service(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session)
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_creator_demoted_to_member_cannot_edit_run_as_service(
+        self, readonly_client, async_session
+    ):
+        """Creating it gives no edit right: the role decides. A member could
+        otherwise change code that runs with the service account's secrets."""
+        automation = await self._sa_automation(async_session)
+        automation.created_by_user_id = TEST_USER_ID  # the readonly caller
+        await async_session.commit()
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_edit_own_automation(
+        self, readonly_client, async_session
+    ):
+        """The SA's own run key must not edit the automation it runs."""
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "Renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_delete_own_automation(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 403
+
+    async def test_service_principal_cannot_dispatch_own_automation(
+        self, readonly_client, async_session
+    ):
+        automation = await self._sa_automation(async_session, user_id=TEST_USER_ID)
+
+        response = await readonly_client.post(
+            f"/api/automation/v1/{automation.id}/dispatch"
+        )
+
+        assert response.status_code == 403
+
+    async def test_patch_run_as_kind_returns_422(self, async_client, async_session):
+        automation = await self._sa_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"run_as_kind": "user"}
+        )
+
+        assert response.status_code == 422
 
 
 class TestCreateAutomation:
@@ -1394,6 +1591,131 @@ class TestListAutomations:
 
         ids = [a["id"] for page in pages for a in page["automations"]]
         assert ids == sorted((str(a.id) for a in seeded), reverse=True)
+
+    async def test_list_automations_filters_by_run_as_user_id(
+        self, async_client, async_session
+    ):
+        """run_as_user_id keeps one identity's automations; total counts only those."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        # "Other org" is also owned by OTHER_USER_ID but is not in the org.
+        assert [a["name"] for a in data["automations"]] == ["Teammate"]
+        assert data["total"] == 1
+
+    async def test_list_automations_run_as_user_id_never_widens_the_listing(
+        self, readonly_client, async_session
+    ):
+        """A member filtering on a run-as id sees no more than without it: not
+        another org's automations, not the soft-deleted ones."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+        deleted = await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="Deleted"
+        )
+        deleted.deleted_at = utcnow()
+        await async_session.commit()
+        unfiltered = (await readonly_client.get("/api/automation/v1")).json()
+
+        filtered = (
+            await readonly_client.get(
+                f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}"
+            )
+        ).json()
+
+        assert {a["id"] for a in filtered["automations"]} <= {
+            a["id"] for a in unfiltered["automations"]
+        }
+        assert [a["name"] for a in filtered["automations"]] == ["Teammate"]
+        # An owner id that only exists in another org matches nothing here.
+        other_org_owner = uuid.uuid4()
+        await self._seed_automation(
+            async_session, user_id=other_org_owner, org_id=OTHER_ORG_ID, name="Theirs"
+        )
+        empty = (
+            await readonly_client.get(
+                f"/api/automation/v1?run_as_user_id={other_org_owner}"
+            )
+        ).json()
+        assert empty == {"automations": [], "total": 0}
+
+    async def test_list_automations_run_as_user_id_combines_with_creator_filter(
+        self, async_client, async_session
+    ):
+        """Both filters apply: created_by=me with another user's run-as id is empty."""
+        await self._seed_mine_teammate_and_other_org(async_session)
+
+        response = await async_client.get(
+            f"/api/automation/v1?created_by=me&run_as_user_id={OTHER_USER_ID}"
+        )
+
+        assert response.json() == {"automations": [], "total": 0}
+
+    async def test_created_by_filter_follows_the_creator_not_the_run_as(
+        self, async_client, async_session
+    ):
+        """An automation the caller created to run as a service account is
+        "mine", not "others"."""
+        sa_run = await self._seed_automation(
+            async_session, user_id=OTHER_USER_ID, org_id=TEST_ORG_ID, name="For SA"
+        )
+        sa_run.run_as_kind = AutomationRunAsKind.SERVICE
+        sa_run.created_by_user_id = TEST_USER_ID
+        await async_session.commit()
+
+        mine = (await async_client.get("/api/automation/v1?created_by=me")).json()
+        others = (await async_client.get("/api/automation/v1?created_by=others")).json()
+
+        assert [a["name"] for a in mine["automations"]] == ["For SA"]
+        assert others == {"automations": [], "total": 0}
+
+    async def test_list_automations_run_as_user_id_pages_the_filtered_set(
+        self, async_client, async_session
+    ):
+        """total counts only that identity's automations across pages."""
+        for i in range(3):
+            await self._seed_automation(
+                async_session,
+                user_id=OTHER_USER_ID,
+                org_id=TEST_ORG_ID,
+                name=f"Theirs {i}",
+                age_minutes=i,
+            )
+        await self._seed_automation(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID, name="Mine"
+        )
+
+        url = f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}&limit=2"
+        first = (await async_client.get(url)).json()
+        second = (await async_client.get(f"{url}&offset=2")).json()
+
+        assert first["total"] == second["total"] == 3
+        names = [a["name"] for a in first["automations"] + second["automations"]]
+        assert names == ["Theirs 0", "Theirs 1", "Theirs 2"]
+
+    async def test_list_automations_rejects_malformed_run_as_user_id(
+        self, async_client
+    ):
+        response = await async_client.get(
+            "/api/automation/v1?run_as_user_id=not-a-uuid"
+        )
+
+        assert response.status_code == 422
+
+    async def test_list_automations_run_as_user_id_is_documented_in_openapi(
+        self, async_client
+    ):
+        spec = (await async_client.get("/api/automation/openapi.json")).json()
+        params = {
+            p["name"]: p
+            for p in spec["paths"]["/api/automation/v1"]["get"]["parameters"]
+        }
+
+        assert params["run_as_user_id"]["description"]
 
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
         """An unknown created_by value is a 422, not a silently unfiltered list."""
@@ -4829,3 +5151,998 @@ class TestDownloadTarball:
 
         assert response.status_code == 500
         assert "retrieve" in response.json()["detail"].lower()
+
+
+class TestCreateAsServiceAccount:
+    """POST /v1 with ``run_as_user_id``: the automation is owned by a service account.
+
+    ``async_client`` holds ``manage_automations``; ``enterprise_api`` answers the
+    membership lookup the service makes before accepting the owner.
+    """
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    def _body(self, **overrides):
+        return {
+            "name": "SA automation",
+            "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "entrypoint": "uv run script.py",
+            "run_as_user_id": str(self.SA_ID),
+            **overrides,
+        }
+
+    async def test_create_as_service_account_sets_run_as(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(self.SA_ID)
+        assert response.json()["run_as_kind"] == "service"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
+        lookup = enterprise_api.requests[0]
+        assert lookup.url.path == (
+            f"/api/service/users/{self.SA_ID}/orgs/{TEST_ORG_ID}/membership"
+        )
+        assert lookup.headers["X-Service-API-Key"] == "test-service-key"
+
+    async def test_omitted_run_as_is_the_caller(self, async_client, enterprise_api):
+        body = self._body()
+        del body["run_as_user_id"]
+
+        response = await async_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+        assert response.json()["run_as_kind"] == "user"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
+        assert enterprise_api.requests == []
+
+    async def test_create_as_sa_without_manage_returns_403(
+        self, readonly_client, async_session
+    ):
+        response = await readonly_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_create_an_automation(
+        self, service_account_client, async_session
+    ):
+        """A run's own key must not start new automations that run as itself:
+        every automation needs a human creator."""
+        body = self._body()
+        del body["run_as_user_id"]
+
+        response = await service_account_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 403
+        assert (await async_session.scalar(select(func.count(Automation.id)))) == 0
+
+    async def test_sa_caller_cannot_create_a_preset_automation(
+        self, service_account_client
+    ):
+        response = await service_account_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Say hi",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_create_a_plugin_preset_automation(
+        self, service_account_client
+    ):
+        response = await service_account_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA plugin preset",
+                "prompt": "Say hi",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "plugins": [{"source": "github:OpenHands/extensions", "ref": "a" * 40}],
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_create_a_plugin_spec_automation(
+        self, service_account_client
+    ):
+        response = await service_account_client.post(
+            "/api/automation/v1/plugin-spec",
+            json={
+                "name": "SA plugin spec",
+                "plugin": {"source": "github:OpenHands/extensions", "ref": "a" * 40},
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_gets_403_for_a_template_the_org_already_has(
+        self, service_account_client, async_session
+    ):
+        """The refusal comes before the template lookup, not a 200 replay."""
+        async_session.add(
+            Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="From template",
+                trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run script.py",
+                preset_metadata={"template": {"id": "tpl-known", "version": "1"}},
+            )
+        )
+        await async_session.commit()
+        body = self._body(template={"id": "tpl-known", "version": "1"})
+        del body["run_as_user_id"]
+
+        response = await service_account_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 403
+
+    async def test_sa_caller_cannot_edit_the_automation_it_runs(
+        self, service_account_client, async_session
+    ):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Runs as SA",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+
+        response = await service_account_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"name": "renamed"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_human_caller_without_run_as_user_id_runs_as_the_caller(
+        self, async_client
+    ):
+        body = self._body()
+        del body["run_as_user_id"]
+
+        response = await async_client.post("/api/automation/v1", json=body)
+
+        assert response.status_code == 201
+        assert response.json()["run_as_kind"] == "user"
+
+    async def test_create_as_non_sa_user_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_non_member_returns_422(self, async_client, enterprise_api):
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_disabled_sa_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID, status="disabled")
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_sa_of_another_org_returns_422(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, OTHER_ORG_ID)
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_enterprise_failure_returns_502_and_creates_nothing(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.error = 500
+
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 502
+        assert (await async_session.execute(select(Automation))).first() is None
+
+    async def test_local_mode_returns_422(self, async_client, local_mode):
+        response = await async_client.post("/api/automation/v1", json=self._body())
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+
+    async def test_create_as_sa_reassigns_upload(
+        self, async_client, async_session, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 201
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
+
+    async def test_create_as_sa_with_an_upload_another_automation_uses_returns_409(
+        self, async_client, async_session, enterprise_api
+    ):
+        # Moving the shared upload would take it from the caller's automation.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        await _seed_s3_automation(
+            async_session, tarball_path=build_internal_url(upload.id)
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 409
+        assert "another automation" in response.json()["detail"]
+        await async_session.refresh(upload)
+        assert upload.user_id == TEST_USER_ID
+
+    async def test_upload_of_another_user_is_rejected_before_reassign(
+        self, async_client, async_session, enterprise_api
+    ):
+        """The tarball is validated against the caller, not the service account."""
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=self.SA_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1",
+            json=self._body(tarball_path=build_internal_url(upload.id)),
+        )
+
+        assert response.status_code == 403
+
+
+class TestAutomationChangeEvents:
+    """Audit rows in ``automation_change_events`` and ``GET /v1/{id}/changes``."""
+
+    async def _events(self, async_session, automation_id, include_create=False):
+        """The automation's events, without the ``create`` row that seeding the
+        automation writes unless ``include_create``."""
+        query = select(AutomationChangeEvent).where(
+            AutomationChangeEvent.automation_id == automation_id
+        )
+        if not include_create:
+            query = query.where(AutomationChangeEvent.action != "create")
+        result = await async_session.execute(
+            query.order_by(AutomationChangeEvent.created_at, AutomationChangeEvent.id)
+        )
+        return result.scalars().all()
+
+    async def test_patch_writes_change_event_with_field_names(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Secret new name", "entrypoint": "uv run other.py"},
+        )
+
+        assert response.status_code == 200
+        (event,) = await self._events(async_session, automation.id)
+        assert event.action == "update"
+        assert event.actor_user_id == TEST_USER_ID
+        assert event.actor_kind == "user"
+        assert event.changed_fields == ["entrypoint", "name"]
+        # Names only: no value is stored anywhere on the row.
+        assert "Secret new name" not in repr(event.changed_fields)
+
+    async def test_patch_enable_and_disable_write_their_own_action(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": False}
+        )
+        await async_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"enabled": True}
+        )
+
+        # Both PATCHes run in the test's one transaction, so the rows share
+        # created_at; match them by action instead of by order.
+        events = {e.action: e for e in await self._events(async_session, automation.id)}
+        assert set(events) == {"disable", "enable"}
+        assert events["disable"].changed_fields == [
+            "disabled_at",
+            "disabled_detail",
+            "disabled_reason",
+            "enabled",
+            "state",
+        ]
+
+    async def test_failed_patch_writes_no_change_event(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": "ftp://bucket/code.tar.gz"},
+        )
+
+        assert response.status_code == 422
+        assert await self._events(async_session, automation.id) == []
+
+    async def test_delete_writes_change_event(self, async_client, async_session):
+        automation = await _seed_s3_automation(async_session)
+
+        response = await async_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 204
+        (event,) = await self._events(async_session, automation.id)
+        assert event.action == "delete"
+        assert event.actor_user_id == TEST_USER_ID
+        # The fields the soft delete changed, read from the ORM.
+        assert {"deleted_at", "enabled", "state"} <= set(event.changed_fields)
+
+    async def test_changes_endpoint_lists_newest_first_with_paging(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+        for name in ("one", "two", "three"):
+            await async_client.patch(
+                f"/api/automation/v1/{automation.id}", json={"name": name}
+            )
+
+        response = await async_client.get(
+            f"/api/automation/v1/{automation.id}/changes?limit=2&offset=1"
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 4  # the seed's create row and three updates
+        assert len(body["changes"]) == 2
+        assert body["changes"][0]["action"] == "update"
+        assert body["changes"][0]["changed_fields"] == ["name"]
+        assert body["changes"][0]["actor_kind"] == "user"
+        assert body["changes"][0]["actor_user_id"] == str(TEST_USER_ID)
+
+    async def test_changes_endpoint_orders_equal_timestamps_by_id(
+        self, async_client, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+        same_time = utcnow()
+        ids = [uuid.UUID(int=n) for n in (3, 1, 2)]  # inserted out of id order
+        for event_id in ids:
+            async_session.add(
+                AutomationChangeEvent(
+                    id=event_id,
+                    automation_id=automation.id,
+                    org_id=automation.org_id,
+                    actor_user_id=TEST_USER_ID,
+                    actor_kind="user",
+                    action="update",
+                    changed_fields=[],
+                    created_at=same_time,
+                )
+            )
+        await async_session.commit()
+
+        seen = []
+        for offset in range(3):
+            response = await async_client.get(
+                f"/api/automation/v1/{automation.id}/changes?limit=1&offset={offset}"
+            )
+            seen.append(response.json()["changes"][0]["id"])
+
+        assert seen == [str(uuid.UUID(int=n)) for n in (3, 2, 1)]
+
+    async def test_changes_endpoint_other_org_404(self, async_client, async_session):
+        automation = Automation(
+            user_id=OTHER_USER_ID,
+            org_id=OTHER_ORG_ID,
+            name="Other org",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="uv run script.py",
+        )
+        own = await _seed_s3_automation(async_session)
+        async_session.add(automation)
+        await async_session.commit()
+
+        assert (
+            await async_client.get(f"/api/automation/v1/{own.id}/changes")
+        ).status_code == 200
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        assert response.status_code == 404
+
+    async def test_changes_unreadable_after_delete(self, async_client, async_session):
+        # History of a soft-deleted automation stays unreadable through the API.
+        automation = await _seed_s3_automation(async_session)
+        assert (
+            await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+        ).status_code == 200
+        await async_client.delete(f"/api/automation/v1/{automation.id}")
+
+        response = await async_client.get(f"/api/automation/v1/{automation.id}/changes")
+
+        assert response.status_code == 404
+
+    async def test_service_account_actor_is_recorded_as_service(self, async_session):
+        from openhands.automation.auth import AuthenticatedUser, AuthMethod
+
+        automation = await _seed_s3_automation(async_session)
+        service = AuthenticatedUser(
+            user_id=OTHER_USER_ID,
+            org_id=TEST_ORG_ID,
+            email="",
+            role="service_account",
+            permissions=["view_automations"],
+            auth_method=AuthMethod.API_KEY,
+        )
+
+        set_audit_actor(async_session, AuditActor.from_user(service))
+        automation.name = "Renamed by the service account"
+        await async_session.commit()
+
+        (event,) = await self._events(async_session, automation.id)
+        assert (event.actor_kind, event.actor_user_id) == ("service", OTHER_USER_ID)
+
+    async def test_seed_writes_a_create_row_with_the_automation_org(
+        self, async_session
+    ):
+        automation = await _seed_s3_automation(async_session)
+
+        (event,) = await self._events(async_session, automation.id, include_create=True)
+        assert (event.action, event.org_id) == ("create", automation.org_id)
+
+    async def test_change_events_outlive_a_hard_deleted_automation(self, async_session):
+        # The audit trail must survive its automation, so there is no FK cascade.
+        automation = await _seed_s3_automation(async_session)
+
+        await async_session.execute(
+            delete(Automation).where(Automation.id == automation.id)
+        )
+        await async_session.commit()
+
+        assert (
+            len(await self._events(async_session, automation.id, include_create=True))
+            == 1
+        )
+
+
+class TestChangeRunAs:
+    """POST /v1/{id}/run-as: move an automation to or from a service account.
+
+    ``async_client`` holds ``manage_automations``; ``readonly_client`` is a
+    view-only member. Both act as TEST_USER_ID.
+    """
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    def _url(self, automation) -> str:
+        return f"/api/automation/v1/{automation.id}/run-as"
+
+    def _to_sa(self) -> dict:
+        return {"to": "service", "service_account_id": str(self.SA_ID)}
+
+    async def _owned_by(self, async_session, user_id, **overrides) -> Automation:
+        fields = {
+            "tarball_path": "s3://bucket/code.tar.gz",
+            "enabled": True,
+            "state": AutomationState.ACTIVE,
+            **overrides,
+        }
+        automation = Automation(
+            user_id=user_id,
+            org_id=TEST_ORG_ID,
+            name="Transferable",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            entrypoint="uv run script.py",
+            **fields,
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return automation
+
+    async def test_run_as_change_creator_to_sa_sets_run_as_and_inactive(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        automation = await self._owned_by(
+            async_session,
+            TEST_USER_ID,
+            tarball_path=build_internal_url(upload.id),
+        )
+        async_session.add(
+            AutomationGitSyncState(
+                automation_id=automation.id,
+                org_id=TEST_ORG_ID,
+                slug="transferable",
+                dirty=False,
+            )
+        )
+        await async_session.commit()
+        automation_id = automation.id
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == str(automation_id)
+        assert body["user_id"] == str(self.SA_ID)
+        assert body["run_as_kind"] == "service"
+        # The creator stays: a run-as change is not a new creation.
+        assert body["created_by_user_id"] == str(TEST_USER_ID)
+        assert body["enabled"] is False
+        assert body["state"] == "INACTIVE"
+        assert body["disabled_reason"] == "run_as_changed"
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
+        sync_state = (
+            await async_session.execute(
+                select(AutomationGitSyncState).where(
+                    AutomationGitSyncState.automation_id == automation_id
+                )
+            )
+        ).scalar_one()
+        assert sync_state.dirty is True
+        disable_event = (
+            await async_session.execute(
+                select(AutomationDisableEvent).where(
+                    AutomationDisableEvent.automation_id == automation_id
+                )
+            )
+        ).scalar_one()
+        assert disable_event.reason == "run_as_changed"
+        change = (
+            await async_session.execute(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        ).scalar_one()
+        assert change.action == "run_as_change"
+        assert change.actor_user_id == TEST_USER_ID
+        assert "user_id" in change.changed_fields
+        assert str(self.SA_ID) not in repr(change.changed_fields)
+
+    async def test_run_as_change_by_manager_moves_another_members_automation(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, OTHER_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == str(self.SA_ID)
+
+    @pytest.mark.parametrize("creator_id", [TEST_USER_ID, OTHER_USER_ID])
+    async def test_change_to_service_requires_manage_automations(
+        self, readonly_client, member_enterprise_api, async_session, creator_id
+    ):
+        """Not even the creator may hand their automation to a service account."""
+        member_enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, creator_id)
+
+        response = await readonly_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 403
+        await async_session.refresh(automation)
+        assert automation.user_id == creator_id
+        assert automation.run_as_kind == AutomationRunAsKind.USER
+        assert automation.enabled is True
+
+    async def test_run_as_change_with_an_upload_another_automation_uses_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        tarball_path = build_internal_url(upload.id)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, tarball_path=tarball_path
+        )
+        await _seed_s3_automation(async_session, tarball_path=tarball_path)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+        await async_session.refresh(automation)
+        await async_session.refresh(upload)
+        assert automation.user_id == TEST_USER_ID
+        assert upload.user_id == TEST_USER_ID
+
+    async def test_run_as_change_ignores_a_deleted_automation_on_the_same_upload(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+        tarball_path = build_internal_url(upload.id)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, tarball_path=tarball_path
+        )
+        deleted = await _seed_s3_automation(async_session, tarball_path=tarball_path)
+        deleted.deleted_at = utcnow()
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        await async_session.refresh(upload)
+        assert upload.user_id == self.SA_ID
+
+    async def test_change_to_self_requires_manage(self, readonly_client, async_session):
+        automation = await self._owned_by(
+            async_session,
+            TestServiceOwnedAutomations._SA_ID,
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+
+        response = await readonly_client.post(
+            self._url(automation), json={"to": "self"}
+        )
+
+        assert response.status_code == 403
+
+    async def test_change_to_self_refuses_a_service_account(
+        self, service_account_client, mock_service_account_user, async_session
+    ):
+        # Defence in depth: the role cannot hold manage_automations today. If
+        # it ever could, it must still not make an automation run as itself.
+        mock_service_account_user.permissions.append("manage_automations")
+        automation = await self._owned_by(
+            async_session, self.SA_ID, run_as_kind=AutomationRunAsKind.SERVICE
+        )
+
+        response = await service_account_client.post(
+            self._url(automation), json={"to": "self"}
+        )
+
+        assert response.status_code == 403
+        assert "service account" in response.json()["detail"]
+
+    async def test_change_to_self_by_manager_runs_as_the_manager(
+        self, async_client, async_session
+    ):
+        automation = await self._owned_by(
+            async_session,
+            self.SA_ID,
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+
+        response = await async_client.post(self._url(automation), json={"to": "self"})
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == str(TEST_USER_ID)
+        assert response.json()["run_as_kind"] == "user"
+        assert response.json()["enabled"] is False
+
+    @pytest.mark.parametrize(
+        "run_status", [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
+    )
+    async def test_run_as_change_with_live_run_returns_409(
+        self, async_client, enterprise_api, async_session, run_status
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        async_session.add(
+            AutomationRun(
+                automation_id=automation.id, status=run_status, trigger_source="manual"
+            )
+        )
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+        assert automation.enabled is True
+
+    async def test_run_as_change_draft_state_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(
+            async_session, TEST_USER_ID, enabled=False, state=AutomationState.DRAFT
+        )
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+
+    async def test_run_as_change_releases_subjects(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.COMPLETED,
+            subject_key="slack:C1:1.0",
+        )
+        async_session.add(run)
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 200
+        await async_session.refresh(run)
+        assert run.subject_released_at is not None
+        assert run.subject_key == "slack:C1:1.0"
+
+    async def test_change_to_human_target_returns_422(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+
+    async def test_run_as_change_enterprise_failure_returns_502(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.error = 500
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 502
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID
+
+    async def test_change_to_current_run_as_returns_409(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(
+            async_session, self.SA_ID, run_as_kind=AutomationRunAsKind.SERVICE
+        )
+
+        response = await async_client.post(self._url(automation), json=self._to_sa())
+
+        assert response.status_code == 409
+
+    async def test_run_as_change_other_org_returns_404(
+        self, async_client, async_session
+    ):
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+        automation.org_id = OTHER_ORG_ID
+        await async_session.commit()
+
+        response = await async_client.post(self._url(automation), json={"to": "self"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Automation not found"
+
+    async def test_run_as_change_emits_telemetry_event(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        with patch(
+            "openhands.automation.router.capture_automation_event",
+            new_callable=AsyncMock,
+        ) as capture:
+            response = await async_client.post(
+                self._url(automation), json=self._to_sa()
+            )
+
+        assert response.status_code == 200
+        assert capture.await_args is not None
+        assert capture.await_args.args[0] == "automation_run_as_changed"
+
+    async def test_run_as_change_rejects_malformed_body(
+        self, async_client, async_session
+    ):
+        automation = await self._owned_by(async_session, TEST_USER_ID)
+
+        for body in ({"to": "service"}, {"to": "nobody"}, {}):
+            response = await async_client.post(self._url(automation), json=body)
+            assert response.status_code == 422
+
+
+class TestRunAsChangePresetPluginPinning:
+    """A preset plugin bakes its refs into its tarball; a moving ref blocks a
+    run-as change."""
+
+    SA_ID = TestChangeRunAs.SA_ID
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    async def _run_as_change(self, client, async_session, plugins):
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Plugin preset",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path="s3://bucket/code.tar.gz",
+            entrypoint="python3 main.py",
+            enabled=True,
+            state=AutomationState.ACTIVE,
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        async_session.add(automation)
+        await async_session.commit()
+        return await client.post(
+            f"/api/automation/v1/{automation.id}/run-as",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+    async def test_sha_ref_allows_the_run_as_change(
+        self, async_client, enterprise_api, async_session
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await self._run_as_change(
+            async_client, async_session, [{"source": "github:o/r", "ref": self.SHA}]
+        )
+
+        assert response.status_code == 200
+
+    async def test_branch_ref_is_pinned_at_run_as_change(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
+                for p in plugins
+            ],
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        automation_id = automation.id
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation_id}/run-as",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 200
+        pinned = [{"source": "github:o/r", "ref": self.SHA}]
+        assert response.json()["preset_metadata"]["plugins"] == pinned
+        upload = await async_session.scalar(
+            select(TarballUpload).where(
+                TarballUpload.id
+                == uuid.UUID(response.json()["tarball_path"].rsplit("/", 1)[-1])
+            )
+        )
+        assert upload is not None
+        assert upload.user_id == self.SA_ID
+        with tarfile.open(
+            fileobj=io.BytesIO(preset_store._storage[upload.storage_path]), mode="r:gz"
+        ) as tar:
+            member = tar.extractfile("plugins_config.json")
+            assert member is not None
+            assert json.loads(member.read()) == pinned
+
+    async def test_pinning_run_as_change_writes_one_row_with_the_pinned_columns(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        # Pinning flushes before the identity changes; the request still writes a
+        # single run_as_change row, and it lists what pinning rewrote.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.SHA}
+                for p in plugins
+            ],
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation.id}/run-as",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 200
+        (change,) = (
+            await async_session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation.id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        ).all()
+        assert change.action == "run_as_change"
+        assert {"user_id", "run_as_kind", "tarball_path", "preset_metadata"} <= set(
+            change.changed_fields
+        )
+
+    async def test_unresolvable_ref_returns_422_and_keeps_run_as(
+        self, async_client, enterprise_api, async_session, preset_store, monkeypatch
+    ):
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        def unreachable(plugins, **_):
+            raise PluginSpecError("Failed to preflight required plugin")
+
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins", unreachable
+        )
+        plugins = [{"source": "github:o/r", "ref": "main"}]
+        automation = await _seed_prompt_preset_automation(
+            async_session,
+            preset_store,
+            "Do it",
+            tarball=_generate_plugin_tarball(
+                [PluginSource.model_validate(p) for p in plugins], "Do it"
+            ),
+            preset_metadata={"preset_type": "plugin", "plugins": plugins},
+        )
+        automation_id = automation.id
+
+        response = await async_client.post(
+            f"/api/automation/v1/{automation_id}/run-as",
+            json={"to": "service", "service_account_id": str(self.SA_ID)},
+        )
+
+        assert response.status_code == 422
+        await async_session.refresh(automation)
+        assert automation.user_id == TEST_USER_ID

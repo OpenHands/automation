@@ -31,6 +31,7 @@ from openhands.automation.observability import (
 )
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import get_next_fire_time, is_automation_due, utcnow
+from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
 from openhands.automation.utils.run import create_pending_run
 
 
@@ -183,6 +184,7 @@ async def poll_and_schedule(
     created_runs: list[AutomationRun] = []
 
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         automations = await _fetch_enabled_automations(
             session, batch_size, poll_threshold
         )

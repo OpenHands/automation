@@ -77,6 +77,9 @@ _STATIC_FEATURES = (
     "repoClone",
     # A preset's repositories can be changed with PATCH after creation.
     "repoUpdate",
+    # An automation can run as a service account, and its run-as kind is
+    # reported; admins may edit and enable those.
+    "serviceAccountRunAs",
 )
 
 # Tags Pydantic inserts into an error location for the trigger union.

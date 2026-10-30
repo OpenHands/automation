@@ -5,14 +5,18 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import func, select
 
 from openhands.automation.app import app
 from openhands.automation.models import (
     Automation,
     AutomationDraft,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    TarballUpload,
+    UploadStatus,
 )
 from openhands.automation.storage import get_file_store
 
@@ -588,3 +592,224 @@ async def test_member_cannot_change_another_users_draft(readonly_client, async_s
     await async_session.refresh(draft)
     assert draft.name == "Another user's draft"
     assert draft.deleted_at is None
+
+
+SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+
+async def _create_sa_prompt_draft(async_client, **draft_overrides):
+    return await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "SA draft",
+                "prompt": "Write a short greeting.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "run_as_user_id": str(SA_ID),
+                **draft_overrides,
+            },
+        },
+    )
+
+
+async def test_sa_draft_dispatch_materializes_sa_owned_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is True
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 201
+    draft = await async_session.get(AutomationDraft, uuid.UUID(created.json()["id"]))
+    assert draft is not None
+    automation = await async_session.get(Automation, draft.materialized_automation_id)
+    assert automation is not None
+    assert automation.user_id == SA_ID
+    assert automation.run_as_kind == AutomationRunAsKind.SERVICE
+    assert automation.created_by_user_id == TEST_USER_ID
+    # The draft stays the caller's; only the automation belongs to the SA.
+    assert draft.user_id == TEST_USER_ID
+    upload_id = automation.tarball_path.rsplit("/", 1)[-1]
+    upload = await async_session.get(TarballUpload, uuid.UUID(upload_id))
+    assert upload is not None
+    assert upload.user_id == SA_ID
+
+
+async def test_sa_caller_cannot_dispatch_a_draft(
+    service_account_client, async_session, draft_file_store
+):
+    created = await service_account_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1/preset/prompt",
+            "draft": {
+                "name": "Draft by a service account",
+                "prompt": "Write a short greeting.",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+            },
+        },
+    )
+    assert created.status_code == 201
+
+    response = await service_account_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 403
+    assert (await async_session.scalar(select(func.count(Automation.id)))) == 0
+
+
+async def test_sa_draft_dispatch_verifies_the_service_account_once(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    enterprise_api.requests.clear()
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 201
+    assert len(enterprise_api.requests) == 1
+
+
+async def test_redispatch_sa_draft_reuses_materialized_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    first = await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    assert first.status_code == 201
+    second = await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    assert second.status_code == 201
+
+    rows = (await async_session.execute(select(Automation))).scalars().all()
+    assert len(rows) == 1
+
+
+async def test_deleting_sa_draft_deletes_its_materialized_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+
+    response = await async_client.delete(f"/api/automation/v1/drafts/{draft_id}")
+
+    assert response.status_code == 204
+    automation = (await async_session.execute(select(Automation))).scalars().one()
+    await async_session.refresh(automation)
+    assert automation.deleted_at is not None
+
+
+async def test_changing_run_as_on_a_dispatched_draft_deletes_the_old_automation(
+    async_client, async_session, draft_file_store, enterprise_api
+):
+    # The materialized automation runs as the old identity and is no longer the
+    # draft's: it is soft-deleted, so a re-dispatch does not leave it behind.
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    created = await _create_sa_prompt_draft(async_client)
+    draft_id = created.json()["id"]
+    await async_client.post(f"/api/automation/v1/drafts/{draft_id}/dispatch")
+    old = (await async_session.execute(select(Automation))).scalars().one()
+    draft_body = {**created.json()["draft"]}
+    del draft_body["run_as_user_id"]
+
+    response = await async_client.patch(
+        f"/api/automation/v1/drafts/{draft_id}", json={"draft": draft_body}
+    )
+    redispatched = await async_client.post(
+        f"/api/automation/v1/drafts/{draft_id}/dispatch"
+    )
+
+    assert response.status_code == 200
+    assert redispatched.status_code == 201
+    await async_session.refresh(old)
+    assert old.deleted_at is not None
+    live = (
+        (
+            await async_session.execute(
+                select(Automation).where(Automation.deleted_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [automation.user_id for automation in live] == [TEST_USER_ID]
+
+
+async def test_raw_sa_draft_with_an_upload_another_automation_uses_returns_409(
+    async_client, async_session, enterprise_api
+):
+    from openhands.automation.utils.tarball_validation import (
+        build_internal_url,
+        build_upload_storage_path,
+    )
+
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID)
+    upload_id = uuid.uuid4()
+    upload = TarballUpload(
+        id=upload_id,
+        user_id=TEST_USER_ID,
+        org_id=TEST_ORG_ID,
+        name="shared-upload",
+        status=UploadStatus.COMPLETED,
+        storage_path=build_upload_storage_path(TEST_ORG_ID, TEST_USER_ID, upload_id),
+    )
+    tarball_path = build_internal_url(upload_id)
+    async_session.add(upload)
+    async_session.add(
+        Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Uses the upload",
+            trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
+            tarball_path=tarball_path,
+            entrypoint="python main.py",
+        )
+    )
+    await async_session.commit()
+    created = await async_client.post(
+        "/api/automation/v1/drafts",
+        json={
+            "endpoint": "/v1",
+            "draft": {
+                "name": "Raw SA draft",
+                "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+                "tarball_path": tarball_path,
+                "entrypoint": "python main.py",
+                "run_as_user_id": str(SA_ID),
+            },
+        },
+    )
+
+    response = await async_client.post(
+        f"/api/automation/v1/drafts/{created.json()['id']}/dispatch"
+    )
+
+    assert response.status_code == 409
+    await async_session.refresh(upload)
+    assert upload.user_id == TEST_USER_ID
+
+
+async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
+    async_client, enterprise_api
+):
+    enterprise_api.add_member(SA_ID, TEST_ORG_ID, account_type="human", role="member")
+
+    created = await _create_sa_prompt_draft(async_client)
+
+    assert created.status_code == 201
+    assert created.json()["dispatchable"] is False
+    assert [e["code"] for e in created.json()["validation_errors"]] == [
+        "run_as_user_id_422"
+    ]

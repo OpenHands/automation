@@ -1183,7 +1183,7 @@ class TestRequirePermission:
         )
 
         checker = require_permission("manage_automations")
-        result = await checker(user=user)
+        result = await checker(request=MagicMock(), user=user)
 
         assert result is user
 
@@ -1202,7 +1202,7 @@ class TestRequirePermission:
         checker = require_permission("manage_automations")
 
         with pytest.raises(HTTPException) as exc_info:
-            await checker(user=user)
+            await checker(request=MagicMock(), user=user)
 
         assert exc_info.value.status_code == 403
         assert "manage_automations" in exc_info.value.detail
@@ -1222,7 +1222,7 @@ class TestRequirePermission:
         checker = require_permission("manage_automations")
 
         with pytest.raises(HTTPException) as exc_info:
-            await checker(user=user)
+            await checker(request=MagicMock(), user=user)
 
         assert exc_info.value.status_code == 403
 

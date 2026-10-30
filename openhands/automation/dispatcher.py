@@ -59,7 +59,7 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
-from openhands.automation.subjects import conversation_id_for
+from openhands.automation.subjects import conversation_id_for, service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -134,6 +134,66 @@ def _http_exception_status_detail(
         code=type(exc).__name__,
         status_code=status_code,
     )
+
+
+# The enterprise key mint answers 403/404 when the run-as identity can no
+# longer have a key (removed from the org, or the user is gone), and 401 when
+# the shared service key is wrong. Retrying cannot help.
+_RUN_AS_API_KEY_STATUS_CODES = frozenset({403, 404})
+_SERVICE_KEY_API_KEY_STATUS_CODES = frozenset({401})
+
+
+def _api_key_error_status_detail(
+    exc: APIKeyError, *, operation: str, error: str
+) -> dict[str, Any]:
+    """Run status detail for a failed run-as key mint.
+
+    A 403/404 concerns only this automation's run-as identity: kind ``auth``,
+    which the unhealthy-automation check counts, so the automation pauses after
+    the usual streak. A 401 is non-transient but keeps kind ``unknown`` on
+    purpose: the service key is shared, and a counted kind would pause every
+    automation when it is wrong. A 5xx, 408, 429 or a network error is
+    transient.
+    """
+    status_code = exc.status_code
+    if status_code in _RUN_AS_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.AUTH, False
+    elif status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    elif status_code is not None and _is_retryable_http_status(status_code):
+        kind, transient = _run_status_kind_for_http_status(status_code), True
+    elif isinstance(exc.__cause__, httpx.RequestError):
+        kind, transient = RunStatusDetailKind.TRANSPORT, True
+    else:
+        kind, transient = RunStatusDetailKind.UNKNOWN, False
+    return make_run_status_detail(
+        phase=RunStatusPhase.DISPATCH,
+        kind=kind,
+        detail=error,
+        transient=transient,
+        source="openhands_api",
+        operation=operation,
+        code=type(exc).__name__,
+        status_code=status_code,
+    )
+
+
+def _api_key_error_message(exc: APIKeyError, what: str) -> str:
+    """The failure message for ``exc``; permanent statuses get the likely cause."""
+    if exc.status_code in _SERVICE_KEY_API_KEY_STATUS_CODES:
+        # Enterprise answers 401 only when the shared service key is missing or
+        # wrong. That is an operator fault, not a run-as identity problem.
+        return (
+            f"Could not get an API key to {what} (HTTP 401). The service key "
+            "for the OpenHands API was rejected."
+        )
+    if exc.status_code in _RUN_AS_API_KEY_STATUS_CODES:
+        return (
+            f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
+            "user or service account the automation runs as may be disabled or "
+            "no longer in the organization."
+        )
+    return f"Failed to get API key to {what}: {exc}"
 
 
 def _plugin_agent_profile_requirement(
@@ -617,17 +677,11 @@ async def _execute_run(
             exc_info=True,
             extra=_log_ctx(),
         )
-        error = f"Failed to get API key for plugin preflight: {exc}"
+        error = _api_key_error_message(exc, "run the plugin preflight")
         await _fail(
             error,
-            status_detail=make_run_status_detail(
-                phase=RunStatusPhase.DISPATCH,
-                kind=RunStatusDetailKind.UNKNOWN,
-                detail=error,
-                transient=False,
-                source="openhands_api",
-                operation="preflight_plugin",
-                code=type(exc).__name__,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="preflight_plugin", error=error
             ),
         )
         return
@@ -725,6 +779,21 @@ async def _execute_run(
             ),
         )
         return
+    except APIKeyError as exc:
+        logger.error(
+            "Could not get the run-as API key: %s",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(),
+        )
+        error = _api_key_error_message(exc, "create the sandbox")
+        await _fail(
+            error,
+            status_detail=_api_key_error_status_detail(
+                exc, operation="get_execution_context", error=error
+            ),
+        )
+        return
     except Exception as exc:
         logger.exception("Failed to get execution context", extra=_log_ctx())
         source = "agent_server" if backend.is_local_mode else "sandbox_api"
@@ -776,6 +845,7 @@ async def _execute_run(
                 automation.id,
                 trigger_source,
                 run.subject_key,
+                service_account_id_of(automation),
             )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model

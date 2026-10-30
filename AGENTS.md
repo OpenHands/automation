@@ -96,7 +96,10 @@ automation/
 │       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
+│           ├── change_events.py  # Audit hook: one change row per automation write (before_flush)
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
+│           ├── enterprise_client.py  # Enterprise service API: org membership / account type
+│           ├── run_as.py       # Run-as identity: resolve on create, check on change, move uploads
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
@@ -423,14 +426,18 @@ exactly one org, the deterministic local org from `auth.py`'s
   rather than reporting success against an empty repo.
 - Automations created directly in git (e.g. via a PR) are imported into the org
   and stamped with the user who last saved the org's Git Sync config
-  (`configured_by_user_id`). They run as that user — in cloud mode that means
-  minting their API key, so they must stay a member of the org; re-saving the
-  config re-stamps the owner. Local mode falls back to `_get_local_user()`.
+  (`configured_by_user_id`), who is also their `created_by_user_id`. They run
+  as that user — in cloud mode that means minting their API key, so they must
+  stay a member of the org; re-saving the config re-stamps the owner. Local mode falls back to `_get_local_user()`.
   Outside local mode an org row that was never saved from the UI has no such
   user, so new directories are skipped (logged) while already-synced
   automations keep updating. Anything pushed to the configured repo becomes an
   automation that runs under that user: treat write access to the repo like
   admin access to the org.
+- Known limit: Git Sync updates do not check `run_as_kind`. A push to the repo
+  can enable an automation that runs as a service account, or change its plugin
+  refs, and the automation then runs with the service account's API key. The
+  `manage_automations` check covers the API only.
 - **Encryption**: set the org's encryption key (or, in local mode,
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're

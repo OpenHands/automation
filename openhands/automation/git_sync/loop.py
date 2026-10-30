@@ -11,6 +11,7 @@ import logging
 import shutil
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from openhands.automation.git_sync.client import (
     commit_and_push,
     diff_names,
     ensure_repo,
+    last_commit_author,
     pull,
 )
 from openhands.automation.git_sync.config_override import (
@@ -73,6 +75,7 @@ from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
 from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.change_events import GIT_SYNC_ACTOR, set_audit_actor
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
@@ -278,6 +281,14 @@ def _remove_exported_automation(directory: Path) -> None:
     _prune_generated_files(directory)
     if directory.is_dir() and not any(directory.iterdir()):
         directory.rmdir()
+
+
+# Resolves the author of the commit behind an imported directory, for the log.
+CommitAuthor = Callable[[], Awaitable[str]]
+
+
+async def _unknown_author() -> str:
+    return "unknown author"
 
 
 # --- Import owner -------------------------------------------------------------
@@ -522,9 +533,17 @@ async def _validate_and_resolve_fields(
     raw_enabled = fields.get("enabled")
 
     requested_enabled = parse_automation_enabled(raw_enabled)
-    if requested_enabled is None:
-        requested_enabled = True
-    state = model_automation_state(raw_state, requested_enabled)
+    if raw_state is None and raw_enabled is None:
+        # Neither key given (or both empty in YAML): an update keeps the current
+        # value, and a new folder imports INACTIVE so a person turns it on.
+        # Anyone who can push to the repo could otherwise start an automation
+        # as its owner.
+        state = existing.state if existing is not None else AutomationState.INACTIVE
+        requested_enabled = automation_state_enabled(state)
+    else:
+        if requested_enabled is None:
+            requested_enabled = True
+        state = model_automation_state(raw_state, requested_enabled)
     enabled = automation_state_enabled(state)
 
     if existing is not None and state == AutomationState.DRAFT != existing.state:
@@ -577,6 +596,7 @@ async def _create_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -588,7 +608,14 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
+    # The admin who saved the Git Sync config both creates it and is its
+    # run-as identity.
+    automation = Automation(
+        user_id=owner.user_id,
+        created_by_user_id=owner.user_id,
+        org_id=owner.org_id,
+        **values,
+    )
     session.add(automation)
     await session.flush()
 
@@ -603,7 +630,19 @@ async def _create_automation_from_git(
             dirty=False,
         )
     )
-    logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
+    logger.info(
+        "Imported new automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        slug,
+        await commit_author(),
+    )
+
+
+def _same_trigger(stored: dict, validated: dict) -> bool:
+    try:
+        return _TRIGGER_ADAPTER.validate_python(stored).model_dump() == validated
+    except ValidationError:
+        return False
 
 
 async def _update_automation_from_git(
@@ -613,6 +652,7 @@ async def _update_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
+    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -637,12 +677,21 @@ async def _update_automation_from_git(
         existing=automation,
     )
     for column, value in values.items():
+        if column == "trigger" and _same_trigger(automation.trigger, value):
+            # A stored trigger may lack defaults the validated one carries;
+            # do not rewrite it, so the audit row does not list it.
+            continue
         setattr(automation, column, value)
 
     state.content_hash = new_hash
     state.last_synced_commit = head
     state.last_synced_at = utcnow()
-    logger.info("Updated automation %s from git (slug=%r)", automation.id, state.slug)
+    logger.info(
+        "Updated automation %s from git (slug=%r, last commit by %s)",
+        automation.id,
+        state.slug,
+        await commit_author(),
+    )
 
 
 async def _changed_slugs_since(
@@ -751,6 +800,13 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
+
+        # Looked up only when a create or update logs it, not for every
+        # directory the diff touched.
+        async def commit_author(directory: Path = directory) -> str:
+            author = await last_commit_author(workdir, directory, timeout)
+            return author or "unknown author"
+
         # A rolled-back savepoint revives the soft-deleted upload rows queued
         # inside it, so their storage paths must not stay pending for deletion.
         pending_snapshot = len(pending_storage_deletes)
@@ -774,6 +830,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
                     result.imported += 1
                 else:
@@ -784,6 +841,7 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
+                        commit_author,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]
@@ -1202,6 +1260,8 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
+        # Imports, updates and deletes from the repo are audited as Git sync.
+        set_audit_actor(session, GIT_SYNC_ACTOR)
         org_config = await get_or_create_org_config(session, org_id)
         last_commit = org_config.last_synced_commit
         owner = _import_owner(org_config)
