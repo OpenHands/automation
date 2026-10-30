@@ -34,7 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openhands.automation.auth import (
     AuthenticatedUser,
     get_http_client,
-    require_permission,
 )
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
@@ -98,8 +97,6 @@ from openhands.workspace import RepoSource
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
-
-_require_view_automations = require_permission("view_automations")
 
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
