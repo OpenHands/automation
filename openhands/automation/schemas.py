@@ -20,7 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.models import AutomationOwnerKind, AutomationState
+from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -488,19 +488,19 @@ TAGS_DESCRIPTION: Final[str] = (
 )
 
 
-OWNER_USER_ID_DESCRIPTION = (
-    "Create the automation as this service account of the organization instead "
-    "of as the caller. Requires manage_automations. The automation, and its "
-    "upload, then belong to the service account, whose API key its runs use. "
-    "Omitted: the caller owns it."
+RUN_AS_USER_ID_DESCRIPTION = (
+    "Run the automation as this service account of the organization instead "
+    "of as the caller. Requires manage_automations. Its runs use the service "
+    "account's API key, and its upload moves to the service account. "
+    "Omitted: it runs as the caller."
 )
 
 
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    owner_user_id: uuid.UUID | None = Field(
-        default=None, description=OWNER_USER_ID_DESCRIPTION
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
 
     agent_profile_id: uuid.UUID | None = Field(
@@ -1126,7 +1126,7 @@ class AutomationResponse(BaseModel):
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
-    owner_kind: AutomationOwnerKind = AutomationOwnerKind.USER
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
     org_id: uuid.UUID
     model: str | None
 
@@ -1314,8 +1314,8 @@ class AutomationRunListResponse(BaseModel):
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
 
 
-class TransferAutomationRequest(BaseModel):
-    """Move an automation to a service account, or back to the caller."""
+class ChangeRunAsRequest(BaseModel):
+    """Make an automation run as a service account, or as the caller."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1326,7 +1326,7 @@ class TransferAutomationRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _service_account_matches_target(self) -> "TransferAutomationRequest":
+    def _service_account_matches_target(self) -> "ChangeRunAsRequest":
         if (self.to == "service") != (self.service_account_id is not None):
             raise ValueError(
                 "service_account_id is required when to is 'service' and "

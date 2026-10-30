@@ -99,7 +99,7 @@ automation/
 │           ├── change_events.py  # Audit hook: one change row per automation write (before_flush)
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
 │           ├── enterprise_client.py  # Enterprise service API: org membership / account type
-│           ├── owner.py        # Automation owner: resolve on create, check on transfer, move uploads
+│           ├── run_as.py       # Run-as identity: resolve on create, check on change, move uploads
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
@@ -434,7 +434,7 @@ exactly one org, the deterministic local org from `auth.py`'s
   automations keep updating. Anything pushed to the configured repo becomes an
   automation that runs under that user: treat write access to the repo like
   admin access to the org.
-- Known limit: Git Sync updates do not check `owner_kind`. A push to the repo
+- Known limit: Git Sync updates do not check `run_as_kind`. A push to the repo
   can enable a service-owned automation or change its plugin refs, and the
   automation then runs with the service account's API key. The
   `manage_automations` check covers the API only.

@@ -86,14 +86,14 @@ from openhands.automation.utils.model_profiles import (
     resolve_model_profile_for_user,
     validate_model_profile_for_user,
 )
-from openhands.automation.utils.owner import (
-    ResolvedOwner,
-    assign_upload_to_owner,
-    resolve_owner,
-)
 from openhands.automation.utils.run import (
     create_pending_run,
     skip_pending_runs_for_disabled_automation,
+)
+from openhands.automation.utils.run_as import (
+    ResolvedRunAs,
+    assign_upload_to_run_as,
+    resolve_run_as,
 )
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
@@ -154,20 +154,20 @@ def _assert_draft_creator(draft: AutomationDraft, user: AuthenticatedUser) -> No
     )
 
 
-def _draft_owner_user_id(draft: AutomationDraft) -> uuid.UUID:
-    """The user the draft's automation belongs to: its service account, if any."""
-    owner = draft.draft_body.get("owner_user_id")
-    return uuid.UUID(owner) if owner else draft.user_id
+def _draft_run_as_user_id(draft: AutomationDraft) -> uuid.UUID:
+    """The user the draft's automation runs as: its service account, if any."""
+    run_as = draft.draft_body.get("run_as_user_id")
+    return uuid.UUID(run_as) if run_as else draft.user_id
 
 
 async def _get_live_materialized_draft_automation(
-    session: AsyncSession, draft: AutomationDraft, owner_user_id: uuid.UUID
+    session: AsyncSession, draft: AutomationDraft, run_as_user_id: uuid.UUID
 ) -> Automation | None:
     """The draft's materialized automation, if it is still the draft's own.
 
-    ``owner_user_id`` is the owner the automation is materialized under (the
-    caller, or the draft's service account): an automation owned by someone
-    else is not reused.
+    ``run_as_user_id`` is the identity the automation is materialized under
+    (the caller, or the draft's service account): an automation that runs as
+    someone else is not reused.
     """
     if draft.materialized_automation_id is None:
         return None
@@ -176,7 +176,7 @@ async def _get_live_materialized_draft_automation(
         automation is None
         or automation.org_id != draft.org_id
         or automation.deleted_at is not None
-        or automation.user_id != owner_user_id
+        or automation.user_id != run_as_user_id
         or automation.state != AutomationState.DRAFT
     ):
         return None
@@ -224,12 +224,12 @@ async def _validate_draft_body(
 
     errors: list[DraftValidationError] = []
     try:
-        await resolve_owner(draft.owner_user_id, user, get_http_client(request))
+        await resolve_run_as(draft.run_as_user_id, user, get_http_client(request))
     except HTTPException as e:
         errors.append(
             DraftValidationError(
-                field="owner_user_id",
-                code=f"owner_user_id_{e.status_code}",
+                field="run_as_user_id",
+                code=f"run_as_user_id_{e.status_code}",
                 message=str(e.detail),
             )
         )
@@ -318,17 +318,17 @@ async def _write_generated_tarball(
     session: AsyncSession,
     file_store: FileStore,
     user: AuthenticatedUser,
-    owner: ResolvedOwner,
+    run_as: ResolvedRunAs,
     name: str,
     prefix: str,
     description: str,
     tarball_content: bytes,
 ) -> str:
     upload_id = uuid.uuid4()
-    storage_path = build_upload_storage_path(user.org_id, owner.user_id, upload_id)
+    storage_path = build_upload_storage_path(user.org_id, run_as.user_id, upload_id)
     upload = TarballUpload(
         id=upload_id,
-        user_id=owner.user_id,
+        user_id=run_as.user_id,
         org_id=user.org_id,
         name=f"{prefix}-{_safe_truncate(name, 50)}",
         description=_safe_truncate(description, 200),
@@ -361,17 +361,17 @@ async def _write_generated_tarball(
 async def _materialize_raw_draft(
     body: CreateAutomationRequest,
     user: AuthenticatedUser,
-    owner: ResolvedOwner,
+    run_as: ResolvedRunAs,
     session: AsyncSession,
 ) -> dict[str, Any]:
-    # Validated against the caller; the upload then moves to the owner.
+    # Validated against the caller; the upload then moves to the run-as identity.
     await validate_tarball_path(
         tarball_path=body.tarball_path,
         user_id=user.user_id,
         org_id=user.org_id,
         session=session,
     )
-    await assign_upload_to_owner(session, body.tarball_path, user.org_id, owner)
+    await assign_upload_to_run_as(session, body.tarball_path, user.org_id, run_as)
     preset_metadata = None
     if body.template is not None:
         preset_metadata = {"template": body.template.model_dump(exclude_none=True)}
@@ -394,7 +394,7 @@ async def _materialize_raw_draft(
 async def _materialize_prompt_draft(
     body: CreatePromptAutomationRequest,
     user: AuthenticatedUser,
-    owner: ResolvedOwner,
+    run_as: ResolvedRunAs,
     session: AsyncSession,
     file_store: FileStore,
 ) -> dict[str, Any]:
@@ -403,7 +403,7 @@ async def _materialize_prompt_draft(
         session=session,
         file_store=file_store,
         user=user,
-        owner=owner,
+        run_as=run_as,
         name=body.name,
         prefix="draft-prompt-automation",
         description=(
@@ -435,7 +435,7 @@ async def _materialize_prompt_draft(
 async def _materialize_plugin_draft(
     body: CreatePluginAutomationRequest,
     user: AuthenticatedUser,
-    owner: ResolvedOwner,
+    run_as: ResolvedRunAs,
     session: AsyncSession,
     file_store: FileStore,
 ) -> dict[str, Any]:
@@ -454,7 +454,7 @@ async def _materialize_plugin_draft(
         session=session,
         file_store=file_store,
         user=user,
-        owner=owner,
+        run_as=run_as,
         name=body.name,
         prefix="draft-plugin-automation",
         description=f"Draft plugin automation test: {_safe_truncate(body.name, 100)}",
@@ -493,18 +493,18 @@ async def _materialize_draft(
     session: AsyncSession,
     file_store: FileStore,
 ) -> Automation:
-    owner = await resolve_owner(
-        cast(Any, parsed).owner_user_id, user, get_http_client(request)
+    run_as = await resolve_run_as(
+        cast(Any, parsed).run_as_user_id, user, get_http_client(request)
     )
     if isinstance(parsed, CreateAutomationRequest):
-        values = await _materialize_raw_draft(parsed, user, owner, session)
+        values = await _materialize_raw_draft(parsed, user, run_as, session)
     elif isinstance(parsed, CreatePromptAutomationRequest):
         values = await _materialize_prompt_draft(
-            parsed, user, owner, session, file_store
+            parsed, user, run_as, session, file_store
         )
     elif isinstance(parsed, CreatePluginAutomationRequest):
         values = await _materialize_plugin_draft(
-            parsed, user, owner, session, file_store
+            parsed, user, run_as, session, file_store
         )
     else:
         raise HTTPException(
@@ -513,7 +513,7 @@ async def _materialize_draft(
         )
 
     automation = await _get_live_materialized_draft_automation(
-        session, draft, owner.user_id
+        session, draft, run_as.user_id
     )
 
     values.update(
@@ -528,8 +528,8 @@ async def _materialize_draft(
     if automation is None:
         automation = Automation(
             id=uuid.uuid4(),
-            user_id=owner.user_id,
-            owner_kind=owner.kind,
+            user_id=run_as.user_id,
+            run_as_kind=run_as.kind,
             org_id=user.org_id,
             telemetry_distinct_id=get_request_telemetry_context(
                 request
@@ -648,7 +648,7 @@ async def delete_draft(
     draft.deleted_at = deleted_at
 
     automation = await _get_live_materialized_draft_automation(
-        session, draft, _draft_owner_user_id(draft)
+        session, draft, _draft_run_as_user_id(draft)
     )
     if automation is not None:
         automation.enabled = False

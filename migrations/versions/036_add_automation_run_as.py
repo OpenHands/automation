@@ -1,6 +1,6 @@
-"""Add service-account ownership and the change audit trail for automations.
+"""Let an automation run as a service account, and add its change audit trail.
 
-- automations.owner_kind tells service-account-owned automations apart.
+- automations.run_as_kind tells automations that run as a service account apart.
 - automation_change_events records who changed an automation, and which fields.
 
 Revision ID: 036
@@ -21,13 +21,13 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # server_default backfills every existing row as human-owned. The ORM
+    # server_default backfills every existing row as run-as-user. The ORM
     # stores enum member NAMES (native_enum=False), so the default is "USER",
     # not the API value "user".
     op.add_column(
         "automations",
         sa.Column(
-            "owner_kind",
+            "run_as_kind",
             sa.String(length=16),
             nullable=False,
             server_default="USER",
@@ -69,4 +69,4 @@ def downgrade() -> None:
         table_name="automation_change_events",
     )
     op.drop_table("automation_change_events")
-    op.drop_column("automations", "owner_kind")
+    op.drop_column("automations", "run_as_kind")

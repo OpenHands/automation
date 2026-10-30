@@ -630,14 +630,14 @@ async def test_create_plugin_spec_as_service_account(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
 
     assert response.status_code == 201
     assert response.json()["user_id"] == str(SA_ID)
-    assert response.json()["owner_kind"] == "service"
+    assert response.json()["run_as_kind"] == "service"
 
 
 @pytest.mark.asyncio
@@ -653,7 +653,7 @@ async def test_create_plugin_spec_as_non_sa_user_returns_422(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -696,7 +696,7 @@ async def test_sa_owned_plugin_stores_resolved_sha(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin), "ref": "main"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -725,7 +725,7 @@ async def test_sa_owned_plugin_without_ref_stores_resolved_sha(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -735,7 +735,7 @@ async def test_sa_owned_plugin_without_ref_stores_resolved_sha(
 
 
 @pytest.mark.asyncio
-async def test_human_owned_plugin_keeps_the_requested_ref(
+async def test_run_as_user_plugin_keeps_the_requested_ref(
     async_client, tmp_path, agent_profiles_api, resolve_plugin_refs_to_pinned_sha
 ):
     plugin = write_plugin(tmp_path)
@@ -772,7 +772,7 @@ async def test_patch_sa_owned_plugin_source_stores_resolved_sha(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin), "ref": "main"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -843,7 +843,7 @@ async def test_sa_owned_plugin_stores_resolved_sha_of_secondary_plugins(
             "name": "SA Plugin",
             "plugin": {"source": str(plugin)},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
@@ -855,7 +855,7 @@ async def test_sa_owned_plugin_stores_resolved_sha_of_secondary_plugins(
 
 
 @pytest.mark.asyncio
-async def test_human_owned_plugin_stores_no_secondary_pins(
+async def test_run_as_user_plugin_stores_no_secondary_pins(
     async_client,
     tmp_path,
     agent_profiles_api,
@@ -892,7 +892,7 @@ async def _create_human_plugin_spec(client, plugin, headers, ref="main"):
 
 
 @pytest.mark.asyncio
-async def test_transfer_to_service_account_pins_branch_ref(
+async def test_change_to_service_account_pins_branch_ref(
     async_client,
     tmp_path,
     agent_profiles_api,
@@ -900,7 +900,7 @@ async def test_transfer_to_service_account_pins_branch_ref(
     resolve_plugin_refs_to_pinned_sha,
     resolve_secondary_plugin_refs_to_sha,
 ):
-    """A human-owned plugin on a branch is pinned to its commit at transfer."""
+    """A human-owned plugin on a branch is pinned to its commit at the run-as change."""
     enterprise_api.add_member(SA_ID, TEST_ORG_ID)
     plugin, secondary = _write_plugin_with_secondary(tmp_path)
     automation_id = await _create_human_plugin_spec(
@@ -908,7 +908,7 @@ async def test_transfer_to_service_account_pins_branch_ref(
     )
 
     response = await async_client.post(
-        f"/api/automation/v1/{automation_id}/transfer",
+        f"/api/automation/v1/{automation_id}/run-as",
         json={"to": "service", "service_account_id": str(SA_ID)},
         headers=agent_profiles_api.caller_auth,
     )
@@ -926,7 +926,7 @@ async def test_transfer_to_service_account_pins_branch_ref(
 
 
 @pytest.mark.asyncio
-async def test_transfer_to_service_account_accepts_full_sha_ref(
+async def test_change_to_service_account_accepts_full_sha_ref(
     async_client,
     tmp_path,
     agent_profiles_api,
@@ -940,7 +940,7 @@ async def test_transfer_to_service_account_accepts_full_sha_ref(
     )
 
     response = await async_client.post(
-        f"/api/automation/v1/{automation_id}/transfer",
+        f"/api/automation/v1/{automation_id}/run-as",
         json={"to": "service", "service_account_id": str(SA_ID)},
         headers=agent_profiles_api.caller_auth,
     )
@@ -951,10 +951,10 @@ async def test_transfer_to_service_account_accepts_full_sha_ref(
 
 
 @pytest.mark.asyncio
-async def test_transfer_to_service_account_fails_when_manifest_unavailable(
+async def test_change_to_service_account_fails_when_manifest_unavailable(
     async_client, tmp_path, agent_profiles_api, enterprise_api
 ):
-    """No manifest, no pin: the transfer is refused and the owner stays."""
+    """No manifest, no pin: the run-as change is refused and the identity stays."""
     enterprise_api.add_member(SA_ID, TEST_ORG_ID)
     plugin = write_plugin(tmp_path)
     automation_id = await _create_human_plugin_spec(
@@ -963,7 +963,7 @@ async def test_transfer_to_service_account_fails_when_manifest_unavailable(
     shutil.rmtree(plugin)
 
     response = await async_client.post(
-        f"/api/automation/v1/{automation_id}/transfer",
+        f"/api/automation/v1/{automation_id}/run-as",
         json={"to": "service", "service_account_id": str(SA_ID)},
         headers=agent_profiles_api.caller_auth,
     )
@@ -973,12 +973,12 @@ async def test_transfer_to_service_account_fails_when_manifest_unavailable(
     stored = await async_client.get(
         f"/api/automation/v1/{automation_id}", headers=agent_profiles_api.caller_auth
     )
-    assert stored.json()["owner_kind"] == "user"
+    assert stored.json()["run_as_kind"] == "user"
     assert stored.json()["plugin_spec"]["plugin"]["ref"] == "main"
 
 
 @pytest.mark.asyncio
-async def test_transfer_to_self_keeps_plugin_spec(
+async def test_change_to_self_keeps_plugin_spec(
     async_client,
     tmp_path,
     agent_profiles_api,
@@ -993,13 +993,13 @@ async def test_transfer_to_self_keeps_plugin_spec(
             "name": "Plugin",
             "plugin": {"source": str(plugin), "ref": "main"},
             "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-            "owner_user_id": str(SA_ID),
+            "run_as_user_id": str(SA_ID),
         },
         headers=agent_profiles_api.caller_auth,
     )
 
     response = await async_client.post(
-        f"/api/automation/v1/{created.json()['id']}/transfer",
+        f"/api/automation/v1/{created.json()['id']}/run-as",
         json={"to": "self"},
         headers=agent_profiles_api.caller_auth,
     )

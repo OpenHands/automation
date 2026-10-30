@@ -30,8 +30,8 @@ from openhands.automation.db import using_sqlite
 from openhands.automation.ingest import AcceptedEvent, accept_event
 from openhands.automation.models import (
     Automation,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
 )
 from openhands.automation.schemas import (
@@ -78,11 +78,11 @@ def make_automation(
     user_id: uuid.UUID,
     trigger: dict,
     name: str = "Test Automation",
-    owner_kind: AutomationOwnerKind = AutomationOwnerKind.USER,
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
 ) -> Automation:
     return Automation(
         user_id=user_id,
-        owner_kind=owner_kind,
+        run_as_kind=run_as_kind,
         org_id=org_id,
         name=name,
         trigger=trigger,
@@ -590,16 +590,16 @@ async def test_an_event_arriving_mid_run_continues_that_conversation(
 
 
 @pytest.mark.asyncio
-async def test_a_service_owned_automation_continues_its_owner_keyed_conversation(
+async def test_a_run_as_service_automation_continues_its_account_keyed_conversation(
     org_id, async_session, mock_authenticated_user, delivered_turns
 ):
-    """The routing side of the owner rule: the follow-up goes to the id the
-    dispatcher gave the run, which carries the service owner."""
+    """The routing side of the run-as rule: the follow-up goes to the id the
+    dispatcher gave the run, which carries the service account."""
     automation = make_automation(
         org_id,
         mock_authenticated_user.user_id,
         continuing_trigger(),
-        owner_kind=AutomationOwnerKind.SERVICE,
+        run_as_kind=AutomationRunAsKind.SERVICE,
     )
     async_session.add(automation)
     await async_session.commit()
@@ -1135,7 +1135,7 @@ async def test_continue_conversation_loads_the_run_s_automation(
             source="slack",
             subject_key=subject_key,
             automation_id=automation_id,
-            service_owner_id=None,
+            service_account_id=None,
             event_key="app_mention",
             event_payload={"hello": "world"},
         )

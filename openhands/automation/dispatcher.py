@@ -59,7 +59,7 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
-from openhands.automation.subjects import conversation_id_for, service_owner_id_of
+from openhands.automation.subjects import conversation_id_for, service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
@@ -136,7 +136,8 @@ def _http_exception_status_detail(
     )
 
 
-# The enterprise key mint answers these when the owner can no longer have a key
+# The enterprise key mint answers these when the run-as identity can no longer
+# have a key
 # (disabled or removed from the org, or the org is gone). Retrying cannot help.
 _PERMANENT_API_KEY_STATUS_CODES = frozenset({401, 403, 404})
 
@@ -144,7 +145,7 @@ _PERMANENT_API_KEY_STATUS_CODES = frozenset({401, 403, 404})
 def _api_key_error_status_detail(
     exc: APIKeyError, *, operation: str, error: str
 ) -> dict[str, Any]:
-    """Run status detail for a failed owner key mint.
+    """Run status detail for a failed run-as key mint.
 
     A permanent status is non-transient. It keeps kind ``unknown`` on purpose:
     a kind the unhealthy-automation check counts would pause every automation
@@ -176,7 +177,7 @@ def _api_key_error_message(exc: APIKeyError, what: str) -> str:
     """The failure message for ``exc``; permanent statuses get the likely cause."""
     if exc.status_code == 401:
         # Enterprise answers 401 only when the shared service key is missing or
-        # wrong. That is an operator fault, not an owner problem.
+        # wrong. That is an operator fault, not a run-as identity problem.
         return (
             f"Could not get an API key to {what} (HTTP 401). The service key "
             "for the OpenHands API was rejected."
@@ -184,7 +185,8 @@ def _api_key_error_message(exc: APIKeyError, what: str) -> str:
     if exc.status_code in _PERMANENT_API_KEY_STATUS_CODES:
         return (
             f"Could not get an API key to {what} (HTTP {exc.status_code}). The "
-            "automation owner may be disabled or no longer in the organization."
+            "user or service account the automation runs as may be disabled or "
+            "no longer in the organization."
         )
     return f"Failed to get API key to {what}: {exc}"
 
@@ -774,7 +776,7 @@ async def _execute_run(
         return
     except APIKeyError as exc:
         logger.error(
-            "Could not get the owner's API key: %s",
+            "Could not get the run-as API key: %s",
             exc,
             exc_info=True,
             extra=_log_ctx(),
@@ -838,7 +840,7 @@ async def _execute_run(
                 automation.id,
                 trigger_source,
                 run.subject_key,
-                service_owner_id_of(automation),
+                service_account_id_of(automation),
             )
     if automation.model:
         env_vars["AUTOMATION_MODEL"] = automation.model

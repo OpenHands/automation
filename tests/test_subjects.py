@@ -2,8 +2,8 @@
 
 import uuid
 
-from openhands.automation.models import Automation, AutomationOwnerKind
-from openhands.automation.subjects import conversation_id_for, service_owner_id_of
+from openhands.automation.models import Automation, AutomationRunAsKind
+from openhands.automation.subjects import conversation_id_for, service_account_id_of
 
 
 ORG_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
@@ -19,7 +19,7 @@ def test_user_owned_id_is_pinned():
     )
 
 
-def test_service_owner_changes_the_id():
+def test_service_account_changes_the_id():
     user_owned = conversation_id_for(ORG_ID, AUTOMATION_ID, "slack", "T1/C1/1.1", None)
     service_owned = conversation_id_for(
         ORG_ID, AUTOMATION_ID, "slack", "T1/C1/1.1", OWNER_ID
@@ -31,14 +31,14 @@ def test_service_owner_changes_the_id():
     assert len({user_owned, service_owned, other_service}) == 3
 
 
-def test_service_owner_id_of_follows_owner_kind():
-    """A transfer to a service account re-keys; a transfer back restores."""
-    automation = Automation(user_id=OWNER_ID, owner_kind=AutomationOwnerKind.USER)
-    assert service_owner_id_of(automation) is None
+def test_service_account_id_of_follows_run_as_kind():
+    """A change to a service account re-keys; a change back restores."""
+    automation = Automation(user_id=OWNER_ID, run_as_kind=AutomationRunAsKind.USER)
+    assert service_account_id_of(automation) is None
 
-    automation.owner_kind = AutomationOwnerKind.SERVICE
-    assert service_owner_id_of(automation) == OWNER_ID
+    automation.run_as_kind = AutomationRunAsKind.SERVICE
+    assert service_account_id_of(automation) == OWNER_ID
 
-    automation.owner_kind = AutomationOwnerKind.USER
+    automation.run_as_kind = AutomationRunAsKind.USER
     automation.user_id = uuid.uuid4()
-    assert service_owner_id_of(automation) is None
+    assert service_account_id_of(automation) is None

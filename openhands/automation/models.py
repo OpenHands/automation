@@ -58,7 +58,7 @@ class AutomationState(StrEnum):
     DRAFT = "DRAFT"
 
 
-class AutomationOwnerKind(StrEnum):
+class AutomationRunAsKind(StrEnum):
     """What kind of principal owns an automation (``Automation.user_id``)."""
 
     USER = "user"
@@ -84,11 +84,11 @@ class Automation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     # SERVICE: user_id is a service account of the org. Managers (not the
     # service account itself) may then edit and enable the automation.
-    owner_kind: Mapped[AutomationOwnerKind] = mapped_column(
-        Enum(AutomationOwnerKind, native_enum=False, length=16),
+    run_as_kind: Mapped[AutomationRunAsKind] = mapped_column(
+        Enum(AutomationRunAsKind, native_enum=False, length=16),
         nullable=False,
-        default=AutomationOwnerKind.USER,
-        server_default=AutomationOwnerKind.USER.name,  # ORM stores member names
+        default=AutomationRunAsKind.USER,
+        server_default=AutomationRunAsKind.USER.name,  # ORM stores member names
     )
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -514,7 +514,7 @@ class AutomationChangeEvent(Base):
         Enum(AutomationChangeActorKind, native_enum=False, length=16),
         nullable=False,
     )
-    # create | update | enable | disable | transfer | delete, git_sync_ prefixed
+    # create | update | enable | disable | run_as_change | delete, git_sync_ prefixed
     # for Git sync, or the label a session set (utils/change_events.py)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     changed_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)

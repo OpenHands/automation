@@ -1,5 +1,5 @@
-"""Who owns an automation: resolve the owner on create, check a service
-account on create and transfer, and hand an upload to the new owner."""
+"""Who an automation runs as: resolve the identity on create, check a service
+account on create and on a run-as change, and hand an upload to it."""
 
 import uuid
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import AuthenticatedUser
-from openhands.automation.models import AutomationOwnerKind
+from openhands.automation.models import AutomationRunAsKind
 from openhands.automation.utils.enterprise_client import (
     EnterpriseClientError,
     get_org_member,
@@ -25,54 +25,54 @@ SERVICE_ACCOUNT_ROLE = "service_account"
 
 
 @dataclass(frozen=True)
-class ResolvedOwner:
-    """The ``user_id`` and ``owner_kind`` a new automation is stored with."""
+class ResolvedRunAs:
+    """The ``user_id`` and ``run_as_kind`` a new automation is stored with."""
 
     user_id: uuid.UUID
-    kind: AutomationOwnerKind
+    kind: AutomationRunAsKind
 
 
-async def resolve_owner(
-    owner_user_id: uuid.UUID | None,
+async def resolve_run_as(
+    run_as_user_id: uuid.UUID | None,
     user: AuthenticatedUser,
     client: httpx.AsyncClient,
-) -> ResolvedOwner:
-    """Resolve the owner requested by ``owner_user_id`` (omitted = the caller).
+) -> ResolvedRunAs:
+    """Resolve the identity requested by ``run_as_user_id`` (omitted = the caller).
 
-    When omitted, the caller owns the automation. If the caller is a service
-    account, the row is service-owned.
+    When omitted, the automation runs as the caller. If the caller is a service
+    account, the row runs as a service account.
 
-    Another owner must be an active service account of the caller's org, and
-    only holders of ``manage_automations`` may pick one. The enterprise API is
-    the source of truth for the account type; local mode has no service
-    accounts, so a requested owner is rejected there.
+    Any other identity must be an active service account of the caller's org,
+    and only holders of ``manage_automations`` may pick one. The enterprise API
+    is the source of truth for the account type; local mode has no service
+    accounts, so a requested identity is rejected there.
 
     Raises:
-        HTTPException: 403 without ``manage_automations``; 422 when the owner
-            is not an active service account of the org; 502 when enterprise
-            cannot be asked.
+        HTTPException: 403 without ``manage_automations``; 422 when the
+            identity is not an active service account of the org; 502 when
+            enterprise cannot be asked.
     """
-    if owner_user_id is None:
+    if run_as_user_id is None:
         # A service account's own key must not hold the creator's edit rights
         # over what it creates, or it could change what runs as itself. Its
         # role (from the enterprise ``/users/me`` response) identifies it.
         kind = (
-            AutomationOwnerKind.SERVICE
+            AutomationRunAsKind.SERVICE
             if user.role == SERVICE_ACCOUNT_ROLE
-            else AutomationOwnerKind.USER
+            else AutomationRunAsKind.USER
         )
-        return ResolvedOwner(user.user_id, kind)
+        return ResolvedRunAs(user.user_id, kind)
 
-    require_service_owner_permission(
+    require_run_as_permission(
         user, "Only admins and owners can create an automation for a service account"
     )
-    await verify_service_account(owner_user_id, user.org_id, client)
-    return ResolvedOwner(owner_user_id, AutomationOwnerKind.SERVICE)
+    await verify_service_account(run_as_user_id, user.org_id, client)
+    return ResolvedRunAs(run_as_user_id, AutomationRunAsKind.SERVICE)
 
 
-def require_service_owner_permission(user: AuthenticatedUser, detail: str) -> None:
-    """Only holders of ``manage_automations`` may set a service account as owner,
-    or transfer an automation.
+def require_run_as_permission(user: AuthenticatedUser, detail: str) -> None:
+    """Only holders of ``manage_automations`` may make an automation run as a
+    service account, or change who it runs as.
 
     Raises:
         HTTPException: 403 with ``detail`` without the permission.
@@ -85,7 +85,7 @@ async def verify_service_account(
     service_account_id: uuid.UUID,
     org_id: uuid.UUID,
     client: httpx.AsyncClient,
-    field: str = "owner_user_id",
+    field: str = "run_as_user_id",
 ) -> None:
     """Check that ``service_account_id`` is an active service account of ``org_id``.
 
@@ -118,10 +118,10 @@ async def verify_service_account(
         )
 
 
-async def assign_upload_to_owner(
-    session: AsyncSession, tarball_path: str, org_id: uuid.UUID, owner: ResolvedOwner
+async def assign_upload_to_run_as(
+    session: AsyncSession, tarball_path: str, org_id: uuid.UUID, run_as: ResolvedRunAs
 ) -> None:
-    """Move the internal upload behind ``tarball_path`` to ``owner``.
+    """Move the internal upload behind ``tarball_path`` to ``run_as``.
 
     The caller's ownership of the upload is checked first (by
     ``validate_tarball_path``); afterwards the upload belongs to the service
@@ -133,4 +133,4 @@ async def assign_upload_to_owner(
         return
     upload = await get_org_upload(session, upload_id, org_id)
     if upload is not None:
-        upload.user_id = owner.user_id
+        upload.user_id = run_as.user_id

@@ -10,7 +10,7 @@ from openhands.automation.models import (
     Automation,
     AutomationChangeActorKind,
     AutomationChangeEvent,
-    AutomationOwnerKind,
+    AutomationRunAsKind,
     AutomationState,
     Base,
 )
@@ -129,7 +129,7 @@ async def test_same_value_or_bookkeeping_change_records_nothing(
     [
         ({"enabled": False, "state": AutomationState.INACTIVE}, "disable"),
         ({"deleted_at": utcnow()}, "delete"),
-        ({"owner_kind": AutomationOwnerKind.SERVICE}, "transfer"),
+        ({"run_as_kind": AutomationRunAsKind.SERVICE}, "run_as_change"),
     ],
 )
 async def test_action_follows_from_the_changed_columns(

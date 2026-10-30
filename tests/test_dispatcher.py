@@ -38,8 +38,8 @@ from openhands.automation.exceptions import (
 from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
 )
@@ -1766,7 +1766,7 @@ class TestExecuteRunConcurrencyLimit:
             (None, False, "unknown"),
         ],
     )
-    async def test_owner_key_mint_failure_is_classified_by_status_code(
+    async def test_run_as_key_mint_failure_is_classified_by_status_code(
         self,
         async_session_factory,
         mock_settings,
@@ -1804,13 +1804,13 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail.get("status_code") == status_code
             if status_code == 401:
                 assert "service key" in updated.error_detail
-                assert "owner may be disabled" not in updated.error_detail
+                assert "runs as may be disabled" not in updated.error_detail
             if status_code in (403, 404):
-                assert "owner may be disabled" in updated.error_detail
+                assert "runs as may be disabled" in updated.error_detail
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
 
-    async def test_owner_key_mint_network_error_is_transient(
+    async def test_run_as_key_mint_network_error_is_transient(
         self, async_session_factory, mock_settings, mock_client
     ):
         """A network failure reaching the key mint has no status and is transient."""
@@ -2216,13 +2216,13 @@ class TestExecuteRunDerivedConversationId:
         trigger: dict,
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
-        owner_kind: AutomationOwnerKind = AutomationOwnerKind.USER,
+        run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
-                owner_kind=owner_kind,
+                run_as_kind=run_as_kind,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
@@ -2300,10 +2300,10 @@ class TestExecuteRunDerivedConversationId:
         )
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
-    async def test_service_owned_subject_run_gets_an_owner_keyed_id(
+    async def test_run_as_service_subject_run_gets_an_account_keyed_id(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """A service-owned run's id carries its owner, so a transfer re-keys it."""
+        """A run-as-service run's id carries the account; a run-as change re-keys it."""
         env_vars, org_id, automation_id = await self._dispatch(
             mock_execute,
             async_session_factory,
@@ -2311,7 +2311,7 @@ class TestExecuteRunDerivedConversationId:
             mock_client,
             trigger={"type": "event", "source": "github-events", "on": "*"},
             subject_key="OpenHands/OpenHands/16997",
-            owner_kind=AutomationOwnerKind.SERVICE,
+            run_as_kind=AutomationRunAsKind.SERVICE,
         )
 
         user_owned_id = conversation_id_for(

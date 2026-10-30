@@ -27,7 +27,7 @@ from openhands.automation.models import (
     AutomationChangeActorKind,
     AutomationChangeEvent,
 )
-from openhands.automation.utils.owner import SERVICE_ACCOUNT_ROLE
+from openhands.automation.utils.run_as import SERVICE_ACCOUNT_ROLE
 
 
 logger = logging.getLogger(__name__)
@@ -44,14 +44,14 @@ _PENDING_KEY = "audit_pending"
 
 # When one transaction flushes several times, these actions stay; any other is
 # derived again from all the fields its row lists.
-_STICKY_ACTIONS = frozenset({"create", "delete", "transfer"})
+_STICKY_ACTIONS = frozenset({"create", "delete", "run_as_change"})
 
 # Columns the service updates for its own bookkeeping; a change to only these
 # is not a change anyone made to the automation.
 _UNAUDITED_COLUMNS = frozenset(
     {"updated_at", "last_polled_at", "last_triggered_at", "created_at"}
 )
-_OWNER_COLUMNS = frozenset({"user_id", "owner_kind"})
+_RUN_AS_COLUMNS = frozenset({"user_id", "run_as_kind"})
 _LIFECYCLE_COLUMNS = frozenset(
     {"enabled", "state", "disabled_reason", "disabled_detail", "disabled_at"}
 )
@@ -147,8 +147,8 @@ def _derive_action(changed: set[str], *, is_new: bool, enabled: bool) -> str:
         return "create"
     if "deleted_at" in changed:
         return "delete"
-    if changed & _OWNER_COLUMNS:
-        return "transfer"
+    if changed & _RUN_AS_COLUMNS:
+        return "run_as_change"
     if "enabled" in changed and changed <= _LIFECYCLE_COLUMNS:
         return "enable" if enabled else "disable"
     return "update"

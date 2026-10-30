@@ -21,8 +21,8 @@ from openhands.automation.middleware import (
 )
 from openhands.automation.models import (
     Automation,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
 )
 from openhands.automation.utils.service_metadata import (
     get_service_metadata,
@@ -312,7 +312,9 @@ def _base_properties(
                 "automation_id": str(automation.id),
                 "automation_enabled": automation.enabled,
                 # None on a row not flushed yet: the column default is not applied.
-                "owner_kind": (automation.owner_kind or AutomationOwnerKind.USER).value,
+                "run_as_kind": (
+                    automation.run_as_kind or AutomationRunAsKind.USER
+                ).value,
                 "trigger_type": _trigger_type(automation),
                 "timeout_seconds": automation.timeout,
             }

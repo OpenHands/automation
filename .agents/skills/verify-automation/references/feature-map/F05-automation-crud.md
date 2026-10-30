@@ -19,7 +19,7 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 `GET /api/automation/v1/{automation_id}`, `PATCH /api/automation/v1/{automation_id}`,
 `DELETE /api/automation/v1/{automation_id}`,
 `GET /api/automation/v1/{automation_id}/tarball`,
-`POST /api/automation/v1/{automation_id}/transfer`,
+`POST /api/automation/v1/{automation_id}/run-as`,
 `GET /api/automation/v1/{automation_id}/changes`
 
 ## Sub-features
@@ -46,8 +46,8 @@ Routes: `POST /api/automation/v1`, `GET /api/automation/v1`,
 - `F05.tarball-download`: `GET /v1/{id}/tarball` for an internal upload answers 200 `application/x-tar` with `Content-Disposition: attachment; filename="<name>.tar"` and the uploaded bytes unchanged.
 - `F05.tarball-filename`: a non-ASCII name gets an ASCII `filename` fallback plus an RFC 5987 `filename*`; quotes and slashes are stripped.
 - `F05.tarball-external`: an `https://` tarball answers 302 to the URL; `s3://` and `gs://` answer 422 `Cannot proxy s3:// tarball URLs...`.
-- `F05.changes`: create, PATCH, enable, disable, transfer and DELETE each add one audit row (`create`, `update`, `enable`, `disable`, `transfer`, `delete`) holding field names only, with `actor_kind` `user`, `service`, `git_sync` or `system`; `GET /v1/{id}/changes` answers `{changes, total}` newest first and pages with `limit`/`offset`; after a DELETE it answers 404.
-- `F05.transfer`: `POST /v1/{id}/transfer` with `{to: "self"}` on an automation the caller already owns answers 409, `{to: "service", service_account_id}` answers 422 in local mode (no service accounts), and a body missing `service_account_id` answers 422.
+- `F05.changes`: create, PATCH, enable, disable, run-as change and DELETE each add one audit row (`create`, `update`, `enable`, `disable`, `run_as_change`, `delete`) holding field names only, with `actor_kind` `user`, `service`, `git_sync` or `system`; `GET /v1/{id}/changes` answers `{changes, total}` newest first and pages with `limit`/`offset`; after a DELETE it answers 404.
+- `F05.run-as`: `POST /v1/{id}/run-as` with `{to: "self"}` on an automation that already runs as the caller answers 409, `{to: "service", service_account_id}` answers 422 in local mode (no service accounts), and a body missing `service_account_id` answers 422.
 - `F05.auth`: every route answers 401 without a key or with a wrong key.
 
 ## How to get to it (agent POV)
@@ -306,13 +306,13 @@ Preconditions:
   control-automation api GET "/v1/$CHID/changes" --expect 404 --check detail eq 'Automation not found' --save F05.changes/deleted
   ```
   The audit row stores names, never values: the new `name` is not in it.
-- **Transfer (`F05.transfer`).** Local mode has no service accounts, so only the refusals can be driven.
+- **Run-as change (`F05.run-as`).** Local mode has no service accounts, so only the refusals can be driven.
   ```sh
-  TRID=$(control-automation api POST /v1 --json '{"name":"qa-transfer","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
-  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"self"}' --expect 409 --check detail eq 'The automation already has this owner' --save F05.transfer/self
-  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"service","service_account_id":"00000000-0000-4000-8000-000000000001"}' --expect 422 --check detail contains 'must be an active service account' --save F05.transfer/service
-  control-automation api POST "/v1/$TRID/transfer" --json '{"to":"service"}' --expect 422
-  control-automation api GET "/v1/$TRID" --expect 200 --check state eq ACTIVE --check owner_kind eq user
+  TRID=$(control-automation api POST /v1 --json '{"name":"qa-run-as","trigger":{"type":"cron","schedule":"0 0 1 1 *"},"tarball_path":"https://qa.invalid/x.tgz","entrypoint":"bash run.sh"}' --expect 201 --field id)
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"self"}' --expect 409 --check detail eq 'The automation already runs as this identity' --save F05.run-as/self
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service","service_account_id":"00000000-0000-4000-8000-000000000001"}' --expect 422 --check detail contains 'must be an active service account' --save F05.run-as/service
+  control-automation api POST "/v1/$TRID/run-as" --json '{"to":"service"}' --expect 422
+  control-automation api GET "/v1/$TRID" --expect 200 --check state eq ACTIVE --check run_as_kind eq user
   ```
 - **Key required (`F05.auth`).** No key or a wrong key gets 401 on every route.
   ```sh

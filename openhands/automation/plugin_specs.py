@@ -31,7 +31,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
-    OWNER_USER_ID_DESCRIPTION,
+    RUN_AS_USER_ID_DESCRIPTION,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -287,8 +287,8 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    owner_user_id: uuid.UUID | None = Field(
-        default=None, description=OWNER_USER_ID_DESCRIPTION
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
@@ -359,7 +359,7 @@ COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
-    """Reject plugin refs that can move, for a service-account-owned automation.
+    """Reject plugin refs that can move, for an automation run as a service account.
 
     The generated tarball stores the refs as given and the sandbox resolves them
     on every run, so a branch, tag or missing ref would let anyone who can push
@@ -372,7 +372,7 @@ def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
         if plugin.ref is None or not COMMIT_SHA_RE.fullmatch(plugin.ref):
             raise PluginSpecError(
                 f"Plugin {plugin.source!r} must set ref to a full 40-character "
-                "commit SHA for a service-account-owned automation"
+                "commit SHA for an automation that runs as a service account"
             )
 
 
@@ -653,8 +653,8 @@ def build_execution_payload(
         source, allow_local_sources=allow_local_sources
     )
     config = validate_plugin_config(manifest, requested_config)
-    # A stored list pins the secondary plugins (service-account-owned
-    # automations); otherwise they follow the manifest's refs.
+    # A stored list pins the secondary plugins (automations that run as a
+    # service account); otherwise they follow the manifest's refs.
     stored_required = plugin_spec.get("required_plugins")
     required_plugins = validate_required_plugins(
         [AutomationPluginSource.model_validate(item) for item in stored_required]

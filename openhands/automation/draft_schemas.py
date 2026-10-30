@@ -21,7 +21,7 @@ from openhands.automation.preset_router import (
     CreatePromptAutomationRequest,
 )
 from openhands.automation.schemas import (
-    OWNER_USER_ID_DESCRIPTION,
+    RUN_AS_USER_ID_DESCRIPTION,
     AutomationState,
     CreateAutomationRequest,
     DraftEndpoint,
@@ -98,8 +98,8 @@ DraftTrigger = Annotated[
 class _BaseDraftBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    owner_user_id: uuid.UUID | None = Field(
-        default=None, description=OWNER_USER_ID_DESCRIPTION
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
     name: str | None = Field(default=None, min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=2000)
@@ -263,7 +263,7 @@ def normalize_draft_body(
     endpoint: DraftEndpoint, draft_body: dict[str, Any]
 ) -> dict[str, Any]:
     """Return the canonical JSON body stored for a structurally valid draft."""
-    # JSON mode: the body is stored in a JSON column and owner_user_id is a UUID.
+    # JSON mode: the body is stored in a JSON column and run_as_user_id is a UUID.
     return parse_draft_body_shape(endpoint, draft_body).model_dump(
         mode="json", exclude_none=True
     )

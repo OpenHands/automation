@@ -11,8 +11,8 @@ from openhands.automation.app import app
 from openhands.automation.models import (
     Automation,
     AutomationDraft,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
     TarballUpload,
@@ -605,7 +605,7 @@ async def _create_sa_prompt_draft(async_client, **draft_overrides):
                 "name": "SA draft",
                 "prompt": "Write a short greeting.",
                 "trigger": {"type": "cron", "schedule": "0 9 * * *"},
-                "owner_user_id": str(SA_ID),
+                "run_as_user_id": str(SA_ID),
                 **draft_overrides,
             },
         },
@@ -630,7 +630,7 @@ async def test_sa_draft_dispatch_materializes_sa_owned_automation(
     automation = await async_session.get(Automation, draft.materialized_automation_id)
     assert automation is not None
     assert automation.user_id == SA_ID
-    assert automation.owner_kind == AutomationOwnerKind.SERVICE
+    assert automation.run_as_kind == AutomationRunAsKind.SERVICE
     # The draft stays the caller's; only the automation belongs to the SA.
     assert draft.user_id == TEST_USER_ID
     upload_id = automation.tarball_path.rsplit("/", 1)[-1]
@@ -670,7 +670,7 @@ async def test_deleting_sa_draft_deletes_its_materialized_automation(
     assert automation.deleted_at is not None
 
 
-async def test_sa_draft_with_non_sa_owner_is_not_dispatchable(
+async def test_sa_draft_with_non_sa_run_as_is_not_dispatchable(
     async_client, enterprise_api
 ):
     enterprise_api.add_member(SA_ID, TEST_ORG_ID, account_type="human", role="member")
@@ -680,5 +680,5 @@ async def test_sa_draft_with_non_sa_owner_is_not_dispatchable(
     assert created.status_code == 201
     assert created.json()["dispatchable"] is False
     assert [e["code"] for e in created.json()["validation_errors"]] == [
-        "owner_user_id_422"
+        "run_as_user_id_422"
     ]

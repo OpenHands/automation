@@ -41,7 +41,7 @@ from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
-    AutomationOwnerKind,
+    AutomationRunAsKind,
     TarballUpload,
     UploadStatus,
 )
@@ -53,7 +53,7 @@ from openhands.automation.plugin_specs import (
     require_pinned_plugin_refs,
 )
 from openhands.automation.schemas import (
-    OWNER_USER_ID_DESCRIPTION,
+    RUN_AS_USER_ID_DESCRIPTION,
     AutomationResponse,
     PublicAutomationState,
     TemplateProvenance,
@@ -68,7 +68,7 @@ from openhands.automation.telemetry import (
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.owner import resolve_owner
+from openhands.automation.utils.run_as import resolve_run_as
 from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
@@ -167,8 +167,8 @@ class CreatePromptAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    owner_user_id: uuid.UUID | None = Field(
-        default=None, description=OWNER_USER_ID_DESCRIPTION
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
 
     name: str = Field(..., min_length=1, max_length=500)
@@ -562,7 +562,7 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
 
@@ -571,13 +571,13 @@ async def create_automation_from_prompt(
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, owner.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
 
     # Create upload record with safe UTF-8 truncation
     truncated_prompt = _safe_truncate(body.prompt, 100)
     upload = TarballUpload(
         id=upload_id,
-        user_id=owner.user_id,
+        user_id=run_as.user_id,
         org_id=user.org_id,
         name=f"prompt-automation-{_safe_truncate(body.name, 50)}",
         description=f"Auto-generated from prompt: {truncated_prompt}...",
@@ -622,8 +622,8 @@ async def create_automation_from_prompt(
 
     try:
         automation = Automation(
-            user_id=owner.user_id,
-            owner_kind=owner.kind,
+            user_id=run_as.user_id,
+            run_as_kind=run_as.kind,
             org_id=user.org_id,
             name=body.name,
             description=body.description,
@@ -715,8 +715,8 @@ class CreatePluginAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    owner_user_id: uuid.UUID | None = Field(
-        default=None, description=OWNER_USER_ID_DESCRIPTION
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
     )
 
     name: str = Field(..., min_length=1, max_length=500)
@@ -1010,8 +1010,8 @@ async def create_automation_from_plugin(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
-    if owner.kind == AutomationOwnerKind.SERVICE:
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
+    if run_as.kind == AutomationRunAsKind.SERVICE:
         sources = list(body.plugins or [])
         for variant in body.variants or []:
             sources.extend(variant.plugins)
@@ -1038,7 +1038,7 @@ async def create_automation_from_plugin(
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, owner.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
 
     # Create upload record
     if body.variants is not None:
@@ -1054,7 +1054,7 @@ async def create_automation_from_plugin(
 
     upload = TarballUpload(
         id=upload_id,
-        user_id=owner.user_id,
+        user_id=run_as.user_id,
         org_id=user.org_id,
         name=f"plugin-automation-{_safe_truncate(body.name, 50)}",
         description=description,
@@ -1103,8 +1103,8 @@ async def create_automation_from_plugin(
 
     try:
         automation = Automation(
-            user_id=owner.user_id,
-            owner_kind=owner.kind,
+            user_id=run_as.user_id,
+            run_as_kind=run_as.kind,
             org_id=user.org_id,
             name=body.name,
             description=body.description,

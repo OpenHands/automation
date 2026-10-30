@@ -33,7 +33,7 @@ from openhands.automation.observability_associations import (
     evaluate_observability_associations,
 )
 from openhands.automation.schemas import EventTrigger
-from openhands.automation.subjects import service_owner_id_of
+from openhands.automation.subjects import service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.trigger_matcher import matches_trigger
 from openhands.automation.utils.webhook import (
@@ -237,7 +237,7 @@ async def accept_event(
                 source=source,
                 subject_key=subject_key,
                 automation_id=automation.id,
-                service_owner_id=service_owner_id_of(automation),
+                service_account_id=service_account_id_of(automation),
                 event_key=event.event_key,
                 event_payload=event_payload,
                 turn_text=resolve_turn_text(trigger, webhook_payload),

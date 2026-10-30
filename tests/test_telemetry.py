@@ -17,8 +17,8 @@ from openhands.automation.middleware import (
 )
 from openhands.automation.models import (
     Automation,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationServiceMetadata,
     Base,
@@ -112,14 +112,14 @@ def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     assert properties["duration_ms"] == 2000
 
 
-def test_base_properties_report_owner_kind(monkeypatch):
+def test_base_properties_report_run_as_kind(monkeypatch):
     monkeypatch.setattr(
         telemetry,
         "get_server_version_info",
         lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
     )
     automation = _automation()
-    automation.owner_kind = AutomationOwnerKind.SERVICE
+    automation.run_as_kind = AutomationRunAsKind.SERVICE
 
     properties = telemetry._base_properties(
         request_context=TelemetryRequestContext(),
@@ -129,7 +129,7 @@ def test_base_properties_report_owner_kind(monkeypatch):
         backend_distinct_id="automation-backend:test",
     )
 
-    assert properties["owner_kind"] == "service"
+    assert properties["run_as_kind"] == "service"
 
 
 @pytest.mark.asyncio

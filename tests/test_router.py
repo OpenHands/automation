@@ -19,8 +19,8 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationGitSyncState,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
     TarballUpload,
@@ -432,7 +432,7 @@ class TestServiceOwnedAutomations:
     ) -> Automation:
         automation = Automation(
             user_id=user_id or self._SA_ID,
-            owner_kind=AutomationOwnerKind.SERVICE,
+            run_as_kind=AutomationRunAsKind.SERVICE,
             org_id=TEST_ORG_ID,
             name="SA Automation",
             trigger={"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
@@ -445,12 +445,12 @@ class TestServiceOwnedAutomations:
         await async_session.commit()
         return automation
 
-    async def test_response_has_owner_kind(self, async_client, async_session):
+    async def test_response_has_run_as_kind(self, async_client, async_session):
         sa_owned = await self._sa_automation(async_session)
 
         response = await async_client.get(f"/api/automation/v1/{sa_owned.id}")
 
-        assert response.json()["owner_kind"] == "service"
+        assert response.json()["run_as_kind"] == "service"
 
     async def test_patch_tarball_path_reassigns_upload_to_the_sa(
         self, async_client, async_session
@@ -469,7 +469,7 @@ class TestServiceOwnedAutomations:
         await async_session.refresh(upload)
         assert upload.user_id == self._SA_ID
 
-    async def test_patch_tarball_path_of_human_owned_keeps_upload_owner(
+    async def test_patch_tarball_path_of_a_run_as_user_automation_keeps_the_upload_user(
         self, async_client, async_session
     ):
         automation = await _seed_s3_automation(async_session)
@@ -486,7 +486,7 @@ class TestServiceOwnedAutomations:
         await async_session.refresh(upload)
         assert upload.user_id == TEST_USER_ID
 
-    async def test_human_owned_defaults_to_user_owner_kind(
+    async def test_human_caller_defaults_to_user_run_as_kind(
         self, async_client, local_mode
     ):
         response = await async_client.post(
@@ -500,9 +500,9 @@ class TestServiceOwnedAutomations:
         )
 
         assert response.status_code == 201
-        assert response.json()["owner_kind"] == "user"
+        assert response.json()["run_as_kind"] == "user"
 
-    async def test_manager_can_edit_service_owned(self, async_client, async_session):
+    async def test_manager_can_edit_run_as_service(self, async_client, async_session):
         automation = await self._sa_automation(async_session)
 
         response = await async_client.patch(
@@ -512,7 +512,7 @@ class TestServiceOwnedAutomations:
         assert response.status_code == 200
         assert response.json()["name"] == "Renamed"
 
-    async def test_manager_can_enable_service_owned(self, async_client, async_session):
+    async def test_manager_can_enable_run_as_service(self, async_client, async_session):
         automation = await self._sa_automation(async_session, enabled=False)
 
         response = await async_client.patch(
@@ -522,7 +522,7 @@ class TestServiceOwnedAutomations:
         assert response.status_code == 200
         assert response.json()["state"] == "ACTIVE"
 
-    async def test_member_cannot_edit_service_owned(
+    async def test_member_cannot_edit_run_as_service(
         self, readonly_client, async_session
     ):
         automation = await self._sa_automation(async_session)
@@ -565,11 +565,11 @@ class TestServiceOwnedAutomations:
 
         assert response.status_code == 403
 
-    async def test_patch_owner_kind_returns_422(self, async_client, async_session):
+    async def test_patch_run_as_kind_returns_422(self, async_client, async_session):
         automation = await self._sa_automation(async_session)
 
         response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"owner_kind": "user"}
+            f"/api/automation/v1/{automation.id}", json={"run_as_kind": "user"}
         )
 
         assert response.status_code == 422
@@ -1557,14 +1557,14 @@ class TestListAutomations:
         ids = [a["id"] for page in pages for a in page["automations"]]
         assert ids == sorted((str(a.id) for a in seeded), reverse=True)
 
-    async def test_list_automations_filters_by_owner_id(
+    async def test_list_automations_filters_by_run_as_user_id(
         self, async_client, async_session
     ):
-        """owner_id keeps one owner's automations; total counts only those."""
+        """run_as_user_id keeps one identity's automations; total counts only those."""
         await self._seed_mine_teammate_and_other_org(async_session)
 
         response = await async_client.get(
-            f"/api/automation/v1?owner_id={OTHER_USER_ID}"
+            f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}"
         )
 
         assert response.status_code == 200
@@ -1573,10 +1573,10 @@ class TestListAutomations:
         assert [a["name"] for a in data["automations"]] == ["Teammate"]
         assert data["total"] == 1
 
-    async def test_list_automations_owner_id_never_widens_the_listing(
+    async def test_list_automations_run_as_user_id_never_widens_the_listing(
         self, readonly_client, async_session
     ):
-        """A member filtering on an owner id sees no more than without it: not
+        """A member filtering on a run-as id sees no more than without it: not
         another org's automations, not the soft-deleted ones."""
         await self._seed_mine_teammate_and_other_org(async_session)
         deleted = await self._seed_automation(
@@ -1587,7 +1587,9 @@ class TestListAutomations:
         unfiltered = (await readonly_client.get("/api/automation/v1")).json()
 
         filtered = (
-            await readonly_client.get(f"/api/automation/v1?owner_id={OTHER_USER_ID}")
+            await readonly_client.get(
+                f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}"
+            )
         ).json()
 
         assert {a["id"] for a in filtered["automations"]} <= {
@@ -1600,26 +1602,28 @@ class TestListAutomations:
             async_session, user_id=other_org_owner, org_id=OTHER_ORG_ID, name="Theirs"
         )
         empty = (
-            await readonly_client.get(f"/api/automation/v1?owner_id={other_org_owner}")
+            await readonly_client.get(
+                f"/api/automation/v1?run_as_user_id={other_org_owner}"
+            )
         ).json()
         assert empty == {"automations": [], "total": 0}
 
-    async def test_list_automations_owner_id_combines_with_creator_filter(
+    async def test_list_automations_run_as_user_id_combines_with_creator_filter(
         self, async_client, async_session
     ):
-        """Both filters apply: created_by=me with another owner's id is empty."""
+        """Both filters apply: created_by=me with another user's run-as id is empty."""
         await self._seed_mine_teammate_and_other_org(async_session)
 
         response = await async_client.get(
-            f"/api/automation/v1?created_by=me&owner_id={OTHER_USER_ID}"
+            f"/api/automation/v1?created_by=me&run_as_user_id={OTHER_USER_ID}"
         )
 
         assert response.json() == {"automations": [], "total": 0}
 
-    async def test_list_automations_owner_id_pages_the_filtered_set(
+    async def test_list_automations_run_as_user_id_pages_the_filtered_set(
         self, async_client, async_session
     ):
-        """total counts only the owner's automations across pages."""
+        """total counts only that identity's automations across pages."""
         for i in range(3):
             await self._seed_automation(
                 async_session,
@@ -1632,7 +1636,7 @@ class TestListAutomations:
             async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID, name="Mine"
         )
 
-        url = f"/api/automation/v1?owner_id={OTHER_USER_ID}&limit=2"
+        url = f"/api/automation/v1?run_as_user_id={OTHER_USER_ID}&limit=2"
         first = (await async_client.get(url)).json()
         second = (await async_client.get(f"{url}&offset=2")).json()
 
@@ -1640,12 +1644,16 @@ class TestListAutomations:
         names = [a["name"] for a in first["automations"] + second["automations"]]
         assert names == ["Theirs 0", "Theirs 1", "Theirs 2"]
 
-    async def test_list_automations_rejects_malformed_owner_id(self, async_client):
-        response = await async_client.get("/api/automation/v1?owner_id=not-a-uuid")
+    async def test_list_automations_rejects_malformed_run_as_user_id(
+        self, async_client
+    ):
+        response = await async_client.get(
+            "/api/automation/v1?run_as_user_id=not-a-uuid"
+        )
 
         assert response.status_code == 422
 
-    async def test_list_automations_owner_id_is_documented_in_openapi(
+    async def test_list_automations_run_as_user_id_is_documented_in_openapi(
         self, async_client
     ):
         spec = (await async_client.get("/api/automation/openapi.json")).json()
@@ -1654,7 +1662,7 @@ class TestListAutomations:
             for p in spec["paths"]["/api/automation/v1"]["get"]["parameters"]
         }
 
-        assert params["owner_id"]["description"]
+        assert params["run_as_user_id"]["description"]
 
     async def test_list_automations_rejects_unknown_creator_filter(self, async_client):
         """An unknown created_by value is a 422, not a silently unfiltered list."""
@@ -5093,7 +5101,7 @@ class TestDownloadTarball:
 
 
 class TestCreateAsServiceAccount:
-    """POST /v1 with ``owner_user_id``: the automation is owned by a service account.
+    """POST /v1 with ``run_as_user_id``: the automation is owned by a service account.
 
     ``async_client`` holds ``manage_automations``; ``enterprise_api`` answers the
     membership lookup the service makes before accepting the owner.
@@ -5107,11 +5115,11 @@ class TestCreateAsServiceAccount:
             "trigger": {"type": "cron", "schedule": "0 9 * * *", "timezone": "UTC"},
             "tarball_path": "s3://bucket/code.tar.gz",
             "entrypoint": "uv run script.py",
-            "owner_user_id": str(self.SA_ID),
+            "run_as_user_id": str(self.SA_ID),
             **overrides,
         }
 
-    async def test_create_as_service_account_sets_owner(
+    async def test_create_as_service_account_sets_run_as(
         self, async_client, enterprise_api
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5120,22 +5128,22 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 201
         assert response.json()["user_id"] == str(self.SA_ID)
-        assert response.json()["owner_kind"] == "service"
+        assert response.json()["run_as_kind"] == "service"
         lookup = enterprise_api.requests[0]
         assert lookup.url.path == (
             f"/api/service/users/{self.SA_ID}/orgs/{TEST_ORG_ID}/membership"
         )
         assert lookup.headers["X-Service-API-Key"] == "test-service-key"
 
-    async def test_omitted_owner_is_the_caller(self, async_client, enterprise_api):
+    async def test_omitted_run_as_is_the_caller(self, async_client, enterprise_api):
         body = self._body()
-        del body["owner_user_id"]
+        del body["run_as_user_id"]
 
         response = await async_client.post("/api/automation/v1", json=body)
 
         assert response.status_code == 201
         assert response.json()["user_id"] == str(TEST_USER_ID)
-        assert response.json()["owner_kind"] == "user"
+        assert response.json()["run_as_kind"] == "user"
         assert enterprise_api.requests == []
 
     async def test_create_as_sa_without_manage_returns_403(
@@ -5145,24 +5153,24 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 403
 
-    async def test_sa_caller_without_owner_user_id_creates_a_service_owned_row(
+    async def test_sa_caller_without_run_as_user_id_creates_a_run_as_service_row(
         self, service_account_client
     ):
         """A service account's own key never creates an automation it could manage."""
         body = self._body()
-        del body["owner_user_id"]
+        del body["run_as_user_id"]
 
         response = await service_account_client.post("/api/automation/v1", json=body)
 
         assert response.status_code == 201
         assert response.json()["user_id"] == str(TEST_USER_ID)
-        assert response.json()["owner_kind"] == "service"
+        assert response.json()["run_as_kind"] == "service"
 
     async def test_sa_caller_cannot_edit_the_automation_it_created(
         self, service_account_client
     ):
         body = self._body()
-        del body["owner_user_id"]
+        del body["run_as_user_id"]
         created = await service_account_client.post("/api/automation/v1", json=body)
         automation_id = created.json()["id"]
 
@@ -5172,16 +5180,16 @@ class TestCreateAsServiceAccount:
 
         assert response.status_code == 403
 
-    async def test_human_caller_without_owner_user_id_still_owns_the_row(
+    async def test_human_caller_without_run_as_user_id_runs_as_the_caller(
         self, async_client
     ):
         body = self._body()
-        del body["owner_user_id"]
+        del body["run_as_user_id"]
 
         response = await async_client.post("/api/automation/v1", json=body)
 
         assert response.status_code == 201
-        assert response.json()["owner_kind"] == "user"
+        assert response.json()["run_as_kind"] == "user"
 
     async def test_create_as_non_sa_user_returns_422(
         self, async_client, enterprise_api
@@ -5482,8 +5490,8 @@ class TestAutomationChangeEvents:
         )
 
 
-class TestTransferAutomation:
-    """POST /v1/{id}/transfer: move an automation to or from a service account.
+class TestChangeRunAs:
+    """POST /v1/{id}/run-as: move an automation to or from a service account.
 
     ``async_client`` holds ``manage_automations``; ``readonly_client`` is a
     view-only member. Both act as TEST_USER_ID.
@@ -5492,7 +5500,7 @@ class TestTransferAutomation:
     SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
 
     def _url(self, automation) -> str:
-        return f"/api/automation/v1/{automation.id}/transfer"
+        return f"/api/automation/v1/{automation.id}/run-as"
 
     def _to_sa(self) -> dict:
         return {"to": "service", "service_account_id": str(self.SA_ID)}
@@ -5516,7 +5524,7 @@ class TestTransferAutomation:
         await async_session.commit()
         return automation
 
-    async def test_transfer_creator_to_sa_sets_owner_and_inactive(
+    async def test_run_as_change_creator_to_sa_sets_run_as_and_inactive(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5545,10 +5553,10 @@ class TestTransferAutomation:
         body = response.json()
         assert body["id"] == str(automation_id)
         assert body["user_id"] == str(self.SA_ID)
-        assert body["owner_kind"] == "service"
+        assert body["run_as_kind"] == "service"
         assert body["enabled"] is False
         assert body["state"] == "INACTIVE"
-        assert body["disabled_reason"] == "owner_changed"
+        assert body["disabled_reason"] == "run_as_changed"
         await async_session.refresh(upload)
         assert upload.user_id == self.SA_ID
         sync_state = (
@@ -5566,7 +5574,7 @@ class TestTransferAutomation:
                 )
             )
         ).scalar_one()
-        assert disable_event.reason == "owner_changed"
+        assert disable_event.reason == "run_as_changed"
         change = (
             await async_session.execute(
                 select(AutomationChangeEvent).where(
@@ -5575,12 +5583,12 @@ class TestTransferAutomation:
                 )
             )
         ).scalar_one()
-        assert change.action == "transfer"
+        assert change.action == "run_as_change"
         assert change.actor_user_id == TEST_USER_ID
         assert "user_id" in change.changed_fields
         assert str(self.SA_ID) not in repr(change.changed_fields)
 
-    async def test_transfer_by_manager_moves_another_members_automation(
+    async def test_run_as_change_by_manager_moves_another_members_automation(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5592,7 +5600,7 @@ class TestTransferAutomation:
         assert response.json()["user_id"] == str(self.SA_ID)
 
     @pytest.mark.parametrize("creator_id", [TEST_USER_ID, OTHER_USER_ID])
-    async def test_transfer_to_service_requires_manage_automations(
+    async def test_change_to_service_requires_manage_automations(
         self, readonly_client, member_enterprise_api, async_session, creator_id
     ):
         """Not even the creator may hand their automation to a service account."""
@@ -5604,16 +5612,14 @@ class TestTransferAutomation:
         assert response.status_code == 403
         await async_session.refresh(automation)
         assert automation.user_id == creator_id
-        assert automation.owner_kind == AutomationOwnerKind.USER
+        assert automation.run_as_kind == AutomationRunAsKind.USER
         assert automation.enabled is True
 
-    async def test_transfer_to_self_requires_manage(
-        self, readonly_client, async_session
-    ):
+    async def test_change_to_self_requires_manage(self, readonly_client, async_session):
         automation = await self._owned_by(
             async_session,
             TestServiceOwnedAutomations._SA_ID,
-            owner_kind=AutomationOwnerKind.SERVICE,
+            run_as_kind=AutomationRunAsKind.SERVICE,
         )
 
         response = await readonly_client.post(
@@ -5622,26 +5628,26 @@ class TestTransferAutomation:
 
         assert response.status_code == 403
 
-    async def test_transfer_to_self_by_manager_takes_ownership(
+    async def test_change_to_self_by_manager_runs_as_the_manager(
         self, async_client, async_session
     ):
         automation = await self._owned_by(
             async_session,
             self.SA_ID,
-            owner_kind=AutomationOwnerKind.SERVICE,
+            run_as_kind=AutomationRunAsKind.SERVICE,
         )
 
         response = await async_client.post(self._url(automation), json={"to": "self"})
 
         assert response.status_code == 200
         assert response.json()["user_id"] == str(TEST_USER_ID)
-        assert response.json()["owner_kind"] == "user"
+        assert response.json()["run_as_kind"] == "user"
         assert response.json()["enabled"] is False
 
     @pytest.mark.parametrize(
         "run_status", [AutomationRunStatus.PENDING, AutomationRunStatus.RUNNING]
     )
-    async def test_transfer_with_live_run_returns_409(
+    async def test_run_as_change_with_live_run_returns_409(
         self, async_client, enterprise_api, async_session, run_status
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5660,7 +5666,7 @@ class TestTransferAutomation:
         assert automation.user_id == TEST_USER_ID
         assert automation.enabled is True
 
-    async def test_transfer_draft_state_returns_409(
+    async def test_run_as_change_draft_state_returns_409(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5672,7 +5678,7 @@ class TestTransferAutomation:
 
         assert response.status_code == 409
 
-    async def test_transfer_releases_subjects(
+    async def test_run_as_change_releases_subjects(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5692,7 +5698,7 @@ class TestTransferAutomation:
         assert run.subject_released_at is not None
         assert run.subject_key == "slack:C1:1.0"
 
-    async def test_transfer_to_human_target_returns_422(
+    async def test_change_to_human_target_returns_422(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(
@@ -5706,7 +5712,7 @@ class TestTransferAutomation:
         await async_session.refresh(automation)
         assert automation.user_id == TEST_USER_ID
 
-    async def test_transfer_enterprise_failure_returns_502(
+    async def test_run_as_change_enterprise_failure_returns_502(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.error = 500
@@ -5718,19 +5724,21 @@ class TestTransferAutomation:
         await async_session.refresh(automation)
         assert automation.user_id == TEST_USER_ID
 
-    async def test_transfer_to_current_owner_returns_409(
+    async def test_change_to_current_run_as_returns_409(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
         automation = await self._owned_by(
-            async_session, self.SA_ID, owner_kind=AutomationOwnerKind.SERVICE
+            async_session, self.SA_ID, run_as_kind=AutomationRunAsKind.SERVICE
         )
 
         response = await async_client.post(self._url(automation), json=self._to_sa())
 
         assert response.status_code == 409
 
-    async def test_transfer_other_org_returns_404(self, async_client, async_session):
+    async def test_run_as_change_other_org_returns_404(
+        self, async_client, async_session
+    ):
         automation = await self._owned_by(async_session, TEST_USER_ID)
         automation.org_id = OTHER_ORG_ID
         await async_session.commit()
@@ -5740,7 +5748,7 @@ class TestTransferAutomation:
         assert response.status_code == 404
         assert response.json()["detail"] == "Automation not found"
 
-    async def test_transfer_emits_telemetry_event(
+    async def test_run_as_change_emits_telemetry_event(
         self, async_client, enterprise_api, async_session
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5756,9 +5764,11 @@ class TestTransferAutomation:
 
         assert response.status_code == 200
         assert capture.await_args is not None
-        assert capture.await_args.args[0] == "automation_transferred"
+        assert capture.await_args.args[0] == "automation_run_as_changed"
 
-    async def test_transfer_rejects_malformed_body(self, async_client, async_session):
+    async def test_run_as_change_rejects_malformed_body(
+        self, async_client, async_session
+    ):
         automation = await self._owned_by(async_session, TEST_USER_ID)
 
         for body in ({"to": "service"}, {"to": "nobody"}, {}):
@@ -5766,13 +5776,14 @@ class TestTransferAutomation:
             assert response.status_code == 422
 
 
-class TestTransferPresetPluginPinning:
-    """A preset plugin bakes its refs into its tarball; a moving ref blocks transfer."""
+class TestRunAsChangePresetPluginPinning:
+    """A preset plugin bakes its refs into its tarball; a moving ref blocks a
+    run-as change."""
 
-    SA_ID = TestTransferAutomation.SA_ID
+    SA_ID = TestChangeRunAs.SA_ID
     SHA = "0123456789abcdef0123456789abcdef01234567"
 
-    async def _transfer(self, client, async_session, plugins):
+    async def _run_as_change(self, client, async_session, plugins):
         automation = Automation(
             user_id=TEST_USER_ID,
             org_id=TEST_ORG_ID,
@@ -5787,20 +5798,22 @@ class TestTransferPresetPluginPinning:
         async_session.add(automation)
         await async_session.commit()
         return await client.post(
-            f"/api/automation/v1/{automation.id}/transfer",
+            f"/api/automation/v1/{automation.id}/run-as",
             json={"to": "service", "service_account_id": str(self.SA_ID)},
         )
 
-    async def test_sha_ref_transfers(self, async_client, enterprise_api, async_session):
+    async def test_sha_ref_allows_the_run_as_change(
+        self, async_client, enterprise_api, async_session
+    ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
 
-        response = await self._transfer(
+        response = await self._run_as_change(
             async_client, async_session, [{"source": "github:o/r", "ref": self.SHA}]
         )
 
         assert response.status_code == 200
 
-    async def test_branch_ref_is_pinned_at_transfer(
+    async def test_branch_ref_is_pinned_at_run_as_change(
         self, async_client, enterprise_api, async_session, preset_store, monkeypatch
     ):
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
@@ -5824,7 +5837,7 @@ class TestTransferPresetPluginPinning:
         automation_id = automation.id
 
         response = await async_client.post(
-            f"/api/automation/v1/{automation_id}/transfer",
+            f"/api/automation/v1/{automation_id}/run-as",
             json={"to": "service", "service_account_id": str(self.SA_ID)},
         )
 
@@ -5846,11 +5859,11 @@ class TestTransferPresetPluginPinning:
             assert member is not None
             assert json.loads(member.read()) == pinned
 
-    async def test_pinning_transfer_writes_one_row_with_the_pinned_columns(
+    async def test_pinning_run_as_change_writes_one_row_with_the_pinned_columns(
         self, async_client, enterprise_api, async_session, preset_store, monkeypatch
     ):
-        # Pinning flushes before the owner changes; the request still writes a
-        # single transfer row, and it lists what pinning rewrote.
+        # Pinning flushes before the identity changes; the request still writes a
+        # single run_as_change row, and it lists what pinning rewrote.
         enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
         monkeypatch.setattr(
             "openhands.automation.router.validate_required_plugins",
@@ -5871,7 +5884,7 @@ class TestTransferPresetPluginPinning:
         )
 
         response = await async_client.post(
-            f"/api/automation/v1/{automation.id}/transfer",
+            f"/api/automation/v1/{automation.id}/run-as",
             json={"to": "service", "service_account_id": str(self.SA_ID)},
         )
 
@@ -5884,12 +5897,12 @@ class TestTransferPresetPluginPinning:
                 )
             )
         ).all()
-        assert change.action == "transfer"
-        assert {"user_id", "owner_kind", "tarball_path", "preset_metadata"} <= set(
+        assert change.action == "run_as_change"
+        assert {"user_id", "run_as_kind", "tarball_path", "preset_metadata"} <= set(
             change.changed_fields
         )
 
-    async def test_unresolvable_ref_returns_422_and_keeps_owner(
+    async def test_unresolvable_ref_returns_422_and_keeps_run_as(
         self, async_client, enterprise_api, async_session, preset_store, monkeypatch
     ):
         from openhands.automation.plugin_specs import PluginSpecError
@@ -5915,7 +5928,7 @@ class TestTransferPresetPluginPinning:
         automation_id = automation.id
 
         response = await async_client.post(
-            f"/api/automation/v1/{automation_id}/transfer",
+            f"/api/automation/v1/{automation_id}/run-as",
             json={"to": "service", "service_account_id": str(self.SA_ID)},
         )
 

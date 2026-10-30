@@ -12,7 +12,7 @@ from openhands.automation.models import (
     Automation,
     AutomationChangeActorKind,
     AutomationChangeEvent,
-    AutomationOwnerKind,
+    AutomationRunAsKind,
 )
 
 
@@ -34,7 +34,7 @@ def _alembic(db_url: str, *args: str) -> None:
 
 def _upgrade_with_legacy_row(tmp_path) -> tuple[str, uuid.UUID, uuid.UUID]:
     """Insert an automation at revision 035, then upgrade to head."""
-    db_path = str(tmp_path / "ownership.db")
+    db_path = str(tmp_path / "run_as.db")
     db_url = f"sqlite:///{db_path}"
     _alembic(db_url, "upgrade", "035")
     automation_id = uuid.uuid4()
@@ -57,14 +57,14 @@ def _upgrade_with_legacy_row(tmp_path) -> tuple[str, uuid.UUID, uuid.UUID]:
     return db_url, automation_id, org_id
 
 
-def test_legacy_row_backfills_to_a_loadable_user_owner(tmp_path):
+def test_legacy_row_backfills_to_a_loadable_user_run_as(tmp_path):
     db_url, _, _ = _upgrade_with_legacy_row(tmp_path)
 
     engine = create_engine(db_url)
     with Session(engine) as session:
         loaded = session.scalars(select(Automation)).one()
     engine.dispose()
-    assert loaded.owner_kind is AutomationOwnerKind.USER
+    assert loaded.run_as_kind is AutomationRunAsKind.USER
 
 
 def test_change_events_attach_to_a_legacy_automation(tmp_path):

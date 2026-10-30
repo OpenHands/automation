@@ -2630,7 +2630,7 @@ class TestCreateAutomationFromPlugin:
 
 
 class TestCreatePresetAsServiceAccount:
-    """``owner_user_id`` on preset creation: the generated upload follows it."""
+    """``run_as_user_id`` on preset creation: the generated upload follows it."""
 
     SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
 
@@ -2687,14 +2687,14 @@ class TestCreatePresetAsServiceAccount:
             json={
                 "name": "SA preset",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
-                "owner_user_id": str(self.SA_ID),
+                "run_as_user_id": str(self.SA_ID),
                 **body,
             },
         )
 
         assert response.status_code == 201
         assert response.json()["user_id"] == str(self.SA_ID)
-        assert response.json()["owner_kind"] == "service"
+        assert response.json()["run_as_kind"] == "service"
         uploads = (await async_session.execute(select(TarballUpload))).scalars().all()
         assert [upload.user_id for upload in uploads] == [self.SA_ID]
 
@@ -2707,7 +2707,7 @@ class TestCreatePresetAsServiceAccount:
                 "name": "SA preset",
                 "prompt": "Do something",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
-                "owner_user_id": str(self.SA_ID),
+                "run_as_user_id": str(self.SA_ID),
             },
         )
 
@@ -2728,7 +2728,7 @@ class TestCreatePresetAsServiceAccount:
                 "name": "SA preset",
                 "prompt": "Do something",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
-                "owner_user_id": str(self.SA_ID),
+                "run_as_user_id": str(self.SA_ID),
             },
         )
 
@@ -2778,7 +2778,7 @@ class TestCreatePresetAsServiceAccount:
                 "name": "SA preset",
                 "prompt": "Do something",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
-                "owner_user_id": str(self.SA_ID),
+                "run_as_user_id": str(self.SA_ID),
                 **plugin_body,
             },
         )
@@ -2798,7 +2798,7 @@ class TestCreatePresetAsServiceAccount:
                 "name": "SA preset",
                 "prompt": "Do something",
                 "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
-                "owner_user_id": str(self.SA_ID),
+                "run_as_user_id": str(self.SA_ID),
                 "plugins": [{"source": "github:owner/plugin", "ref": self.FULL_SHA}],
             },
         )

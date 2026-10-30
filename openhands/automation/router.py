@@ -39,8 +39,8 @@ from openhands.automation.models import (
     AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationDraft,
-    AutomationOwnerKind,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState as ModelAutomationState,
 )
@@ -77,11 +77,11 @@ from openhands.automation.schemas import (
     AutomationRunResponse,
     AutomationTagCount,
     AutomationTagsResponse,
+    ChangeRunAsRequest,
     CreateAutomationRequest,
     EventTrigger,
     RunCompleteRequest,
     RunPhaseRequest,
-    TransferAutomationRequest,
     UpdateAutomationRequest,
 )
 from openhands.automation.storage import FileStore, get_file_store
@@ -107,17 +107,17 @@ from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists,
     validate_agent_profile_combination,
 )
-from openhands.automation.utils.owner import (
-    ResolvedOwner,
-    assign_upload_to_owner,
-    require_service_owner_permission,
-    resolve_owner,
-    verify_service_account,
-)
 from openhands.automation.utils.run import (
     create_pending_run,
     record_first_run_outcome,
     skip_pending_runs_for_disabled_automation,
+)
+from openhands.automation.utils.run_as import (
+    ResolvedRunAs,
+    assign_upload_to_run_as,
+    require_run_as_permission,
+    resolve_run_as,
+    verify_service_account,
 )
 from openhands.automation.utils.run_status_detail import (
     run_status_detail_from_callback_error,
@@ -162,9 +162,9 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     access to the automation row, so the check lives here in the handler
     path instead of in the dependency.
 
-    A service-account-owned automation has no creator escape: only holders of
-    ``manage_automations`` pass, so the service account's own run key cannot
-    edit, delete, dispatch or cancel the automation it runs.
+    An automation that runs as a service account has no creator escape: only
+    holders of ``manage_automations`` pass, so the service account's own run
+    key cannot edit, delete, dispatch or cancel the automation it runs.
 
     Callers must have already passed a ``view_automations`` dependency so
     the user is at least a member of the org.
@@ -172,7 +172,7 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     if "manage_automations" in user.permissions:
         return
     if (
-        automation.owner_kind != AutomationOwnerKind.SERVICE
+        automation.run_as_kind != AutomationRunAsKind.SERVICE
         and automation.user_id == user.user_id
     ):
         return
@@ -198,12 +198,12 @@ def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
 def _assert_can_update_fields(
     automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
 ) -> None:
-    """Allow a full edit by the creator, or by a manager of a service-owned one.
+    """Allow a full edit by the creator, or by a manager of a run-as-service one.
 
-    ``_assert_can_manage`` has already run: a service-owned automation reaches
+    ``_assert_can_manage`` has already run: a run-as-service automation reaches
     here only for a ``manage_automations`` holder, so no permission recheck.
     """
-    if automation.owner_kind == AutomationOwnerKind.SERVICE:
+    if automation.run_as_kind == AutomationRunAsKind.SERVICE:
         return
     if automation.user_id == user.user_id:
         return
@@ -282,7 +282,7 @@ async def create_automation(
     An entry shipping its own tarball creates here rather than through a
     preset, so it may carry the same ``template`` provenance those accept.
 
-    ``owner_user_id`` creates it as a service account of the org (managers only).
+    ``run_as_user_id`` creates it as a service account of the org (managers only).
     """
     validate_agent_profile_combination(body.agent_profile_id, body.model)
 
@@ -301,7 +301,7 @@ async def create_automation(
     # not depend on the OpenHands API, and before the rest of the transaction.
     await ensure_agent_profile_exists(body.agent_profile_id, request, user)
 
-    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
 
     # Validate tarball_path (checks ownership for internal uploads). Always
     # against the caller: a service account owns an upload only after creation.
@@ -324,8 +324,8 @@ async def create_automation(
     state = model_automation_state(body.state, body.enabled)
 
     auto = Automation(
-        user_id=owner.user_id,
-        owner_kind=owner.kind,
+        user_id=run_as.user_id,
+        run_as_kind=run_as.kind,
         org_id=user.org_id,
         name=body.name,
         description=body.description,
@@ -347,7 +347,7 @@ async def create_automation(
         ).frontend_distinct_id,
     )
     session.add(auto)
-    await assign_upload_to_owner(session, body.tarball_path, user.org_id, owner)
+    await assign_upload_to_run_as(session, body.tarball_path, user.org_id, run_as)
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
@@ -386,14 +386,14 @@ async def create_automation_from_plugin_spec(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    owner = await resolve_owner(body.owner_user_id, user, get_http_client(request))
+    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
 
     runtime_fields = await _resolve_plugin_spec_runtime_fields(
         plugin=body.plugin,
         plugin_config=body.config,
         request=request,
         user=user,
-        pin_ref=owner.kind == AutomationOwnerKind.SERVICE,
+        pin_ref=run_as.kind == AutomationRunAsKind.SERVICE,
     )
     trigger = await _resolve_plugin_spec_trigger(
         requested_trigger=body.trigger,
@@ -425,8 +425,8 @@ async def create_automation_from_plugin_spec(
         preset_metadata["template"] = body.template.model_dump(exclude_none=True)
 
     automation = Automation(
-        user_id=owner.user_id,
-        owner_kind=owner.kind,
+        user_id=run_as.user_id,
+        run_as_kind=run_as.kind,
         org_id=user.org_id,
         name=body.name,
         prompt=None,
@@ -587,8 +587,8 @@ async def _resolve_plugin_spec_runtime_fields(
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it.
 
-    ``pin_ref`` stores the resolved commit SHA as the plugin ref, for a
-    service-account-owned automation: a moving branch or tag would otherwise
+    ``pin_ref`` stores the resolved commit SHA as the plugin ref, for an
+    automation that runs as a service account: a moving branch or tag would
     let anyone who can push to the plugin repo change code that runs as the
     service account, with no edit visible here. The manifest's secondary
     plugins are pinned the same way.
@@ -703,15 +703,15 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
                 "new plugin manifest changes profile requirements"
             ),
         )
-    is_service_owned = automation.owner_kind == AutomationOwnerKind.SERVICE
+    runs_as_service = automation.run_as_kind == AutomationRunAsKind.SERVICE
     return _plugin_runtime_fields(
         plugin=plugin,
         plugin_config=plugin_config,
         manifest=manifest,
         model=automation.model,
         agent_profile_id=automation.agent_profile_id,
-        pinned_ref=resolved_ref if is_service_owned else None,
-        pinned_required_plugins=required_plugins if is_service_owned else None,
+        pinned_ref=resolved_ref if runs_as_service else None,
+        pinned_required_plugins=required_plugins if runs_as_service else None,
     )
 
 
@@ -723,10 +723,10 @@ async def list_automations(
     tag: str | None = Query(
         default=None, description="Only automations carrying this tag"
     ),
-    owner_id: uuid.UUID | None = Query(
+    run_as_user_id: uuid.UUID | None = Query(
         default=None,
         description=(
-            "Only automations owned by this user or service account id. "
+            "Only automations that run as this user or service account id. "
             "Narrows the caller's org listing; it never reaches other orgs."
         ),
     ),
@@ -749,8 +749,8 @@ async def list_automations(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
-    if owner_id is not None:
-        base_query = base_query.where(Automation.user_id == owner_id)
+    if run_as_user_id is not None:
+        base_query = base_query.where(Automation.user_id == run_as_user_id)
 
     count_result = await session.execute(
         select(func.count()).select_from(base_query.subquery())
@@ -830,14 +830,14 @@ async def update_automation(
             org_id=user.org_id,
             session=session,
         )
-        if auto.owner_kind == AutomationOwnerKind.SERVICE:
+        if auto.run_as_kind == AutomationRunAsKind.SERVICE:
             # Validated against the caller above; the service account owns it
             # from now on, as on create.
-            await assign_upload_to_owner(
+            await assign_upload_to_run_as(
                 session,
                 requested_tarball_path,
                 user.org_id,
-                ResolvedOwner(auto.user_id, auto.owner_kind),
+                ResolvedRunAs(auto.user_id, auto.run_as_kind),
             )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
@@ -891,7 +891,7 @@ async def update_automation(
                 else None,
                 request=request,
                 user=user,
-                pin_ref=auto.owner_kind == AutomationOwnerKind.SERVICE,
+                pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
             )
         except HTTPException as exc:
             if (
@@ -1126,7 +1126,7 @@ async def delete_automation(
     )
 
 
-async def _pin_plugins_for_transfer(
+async def _pin_plugins_for_run_as_change(
     auto: Automation,
     session: AsyncSession,
     background_tasks: BackgroundTasks,
@@ -1136,8 +1136,8 @@ async def _pin_plugins_for_transfer(
     An automation runs the plugin code its ref points at. Under a service
     account that code would change, with no edit visible here, whenever anyone
     pushes to the plugin repo. Create and update pin the refs for a
-    service-account-owned automation; a human-owned one may hold branch refs,
-    so the transfer pins them the same way:
+    run-as-service-account automation; one that runs as a person may hold
+    branch refs, so the run-as change pins them the same way:
 
     - plugin spec: the manifest is resolved as on create, and the resolved SHAs
       of the plugin and its secondary plugins replace the stored refs.
@@ -1169,7 +1169,7 @@ async def _pin_plugins_for_transfer(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Plugin refs cannot be checked for this automation, so it "
-                "cannot be transferred to a service account",
+                "cannot run as a service account",
             )
         # A full SHA is already pinned; any other ref is resolved by lookup.
         pinned = []
@@ -1208,66 +1208,68 @@ async def _pin_plugins_for_transfer(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="The plugin refs of this automation cannot be pinned, so it "
-                "cannot be transferred to a service account",
+                "cannot run as a service account",
             )
         auto.tarball_path = new_tarball_path
         auto.preset_metadata = {**(auto.preset_metadata or {}), "plugins": pinned}
 
 
-@router.post("/{automation_id}/transfer")
-async def transfer_automation(
+@router.post("/{automation_id}/run-as")
+async def change_run_as(
     automation_id: uuid.UUID,
-    body: TransferAutomationRequest,
+    body: ChangeRunAsRequest,
     request: Request,
     background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AutomationResponse:
-    """Move an automation to a service account of the org, or back to the caller.
+    """Make an automation run as a service account of the org, or as the caller.
 
-    Only holders of ``manage_automations`` may transfer: to a service account
+    Only holders of ``manage_automations`` may change it: to a service account
     (``to: service``) or to themselves (``to: self``). The automation keeps its
-    id and KV store, but ends INACTIVE: a person must re-enable it under the new
-    owner. Refused (409) while a run is PENDING or RUNNING or the automation is
-    a draft.
+    id, KV store and creator, but ends INACTIVE: a person must re-enable it
+    under the new identity. Refused (409) while a run is PENDING or RUNNING or
+    the automation is a draft.
 
-    Conversation ids of subject-keyed runs include the owner for a
-    service-owned automation (``subjects.conversation_id_for``): after a
-    transfer to a service account, new events start new conversations, and a
-    transfer back to a user restores the old ids.
+    Conversation ids of subject-keyed runs include the service account for an
+    automation that runs as one (``subjects.conversation_id_for``): after a
+    change to a service account, new events start new conversations, and a
+    change back to a user restores the old ids.
 
-    Plugin refs are pinned to commit SHAs on a transfer to a service account
-    (see ``_pin_plugins_for_transfer``).
+    Plugin refs are pinned to commit SHAs on a change to a service account
+    (see ``_pin_plugins_for_run_as_change``).
 
     Known limits:
 
     - ``keep_alive`` and deferred-cleanup sandboxes of runs that already
-      finished are cleaned up with the NEW owner's key after a transfer. They
-      can outlive the transfer until the runtime TTL.
+      finished are cleaned up with the NEW identity's key after the change.
+      They can outlive the change until the runtime TTL.
     - The live-run check and the commit are not under a row lock. A run
-      dispatched in between can finish under the old owner's key and get 403 on
-      its callbacks, until the watchdog times it out.
+      dispatched in between can finish under the old identity's key and get
+      403 on its callbacks, until the watchdog times it out.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
-    require_service_owner_permission(
-        user, "Only admins and owners can transfer an automation"
+    require_run_as_permission(
+        user, "Only admins and owners can change who an automation runs as"
     )
-    # Pinning plugin refs flushes before the owner changes; label the whole
-    # request so its audit row reads as one transfer.
-    set_audit_actor(session, AuditActor.from_user(user), action="transfer")
+    # Pinning plugin refs flushes before the identity changes; label the whole
+    # request so its audit row reads as one run-as change.
+    set_audit_actor(session, AuditActor.from_user(user), action="run_as_change")
     if body.to == "self":
-        new_owner = ResolvedOwner(user.user_id, AutomationOwnerKind.USER)
+        new_run_as = ResolvedRunAs(user.user_id, AutomationRunAsKind.USER)
     else:
         assert body.service_account_id is not None  # guaranteed by the schema
-        new_owner = ResolvedOwner(body.service_account_id, AutomationOwnerKind.SERVICE)
+        new_run_as = ResolvedRunAs(body.service_account_id, AutomationRunAsKind.SERVICE)
 
-    if (auto.user_id, auto.owner_kind) == (new_owner.user_id, new_owner.kind):
+    if (auto.user_id, auto.run_as_kind) == (new_run_as.user_id, new_run_as.kind):
         raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="The automation already has this owner"
+            status.HTTP_409_CONFLICT,
+            detail="The automation already runs as this identity",
         )
     if auto.state == ModelAutomationState.DRAFT:
         raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="A draft automation cannot be transferred"
+            status.HTTP_409_CONFLICT,
+            detail="A draft automation cannot change who it runs as",
         )
     live_run = await session.scalar(
         select(AutomationRun.id)
@@ -1286,43 +1288,43 @@ async def transfer_automation(
             "finish or cancel it",
         )
 
-    if new_owner.kind == AutomationOwnerKind.SERVICE:
+    if new_run_as.kind == AutomationRunAsKind.SERVICE:
         await verify_service_account(
-            new_owner.user_id,
+            new_run_as.user_id,
             user.org_id,
             get_http_client(request),
             field="service_account_id",
         )
-        await _pin_plugins_for_transfer(auto, session, background_tasks)
+        await _pin_plugins_for_run_as_change(auto, session, background_tasks)
 
     now = utcnow()
-    disabled_detail = {"reason": "owner_changed", "source": "transfer"}
-    auto.user_id = new_owner.user_id
-    auto.owner_kind = new_owner.kind
+    disabled_detail = {"reason": "run_as_changed", "source": "run_as_change"}
+    auto.user_id = new_run_as.user_id
+    auto.run_as_kind = new_run_as.kind
     auto.enabled = False
     auto.state = ModelAutomationState.INACTIVE
-    auto.disabled_reason = "owner_changed"
+    auto.disabled_reason = "run_as_changed"
     auto.disabled_detail = disabled_detail
     auto.disabled_at = now
     session.add(
         AutomationDisableEvent(
             automation_id=auto.id,
-            reason="owner_changed",
+            reason="run_as_changed",
             detail=disabled_detail,
-            source="transfer",
+            source="run_as_change",
         )
     )
     # No run is live (409 above); this covers one accepted since that check.
     await skip_pending_runs_for_disabled_automation(
         session,
         auto.id,
-        reason="Automation transferred to a new owner",
+        reason="Automation now runs as a new identity",
         disabled_detail=disabled_detail,
         completed_at=now,
         include_manual=True,
     )
-    # Conversations started under the old owner must not be continued as the new
-    # one: stop routing events to them. The run rows keep their subject keys.
+    # Conversations started under the old identity must not be continued as the
+    # new one: stop routing events to them. The run rows keep their subject keys.
     await session.execute(
         update(AutomationRun)
         .where(
@@ -1332,12 +1334,12 @@ async def transfer_automation(
         )
         .values(subject_released_at=now)
     )
-    await assign_upload_to_owner(session, auto.tarball_path, user.org_id, new_owner)
+    await assign_upload_to_run_as(session, auto.tarball_path, user.org_id, new_run_as)
     await session.flush()
     await session.refresh(auto)
     await mark_git_sync_dirty(session, auto)
     await capture_automation_event(
-        "automation_transferred",
+        "automation_run_as_changed",
         request=request,
         user=user,
         automation=auto,
