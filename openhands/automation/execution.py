@@ -6,9 +6,11 @@ extract it, run setup, run the entrypoint, tear down.
 
 import asyncio
 import io
+import json
 import logging
 import re
 import tarfile
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import httpx
@@ -32,6 +34,10 @@ from openhands.sdk.workspace import AsyncRemoteWorkspace
 
 # Default working directory for cloud/container mode
 DEFAULT_WORK_DIR = "/workspace/project"
+
+# Uploaded into the run's work directory when the agent server runs on
+# Windows; see windows_runner.py.
+_WINDOWS_RUNNER_SOURCE = Path(__file__).with_name("windows_runner.py")
 
 logger = logging.getLogger(__name__)
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -309,6 +315,8 @@ async def execute_in_context(
 
     1. Get tarball into environment (upload bytes OR download from URL).
     2. Extract it, run ``setup.sh`` (if present), then start *entrypoint*.
+       When *work_dir* is a Windows path, ``windows_runner.py`` does this
+       step instead and runs ``setup.py`` (if present).
     3. Return immediately without waiting for the entrypoint to complete.
 
     Args:
@@ -334,14 +342,22 @@ async def execute_in_context(
     def _log_ctx() -> dict[str, Any]:
         return log_extra(run_id=run_id, sandbox_id=sandbox_id)
 
-    # Use a per-run tarball path to avoid collisions when multiple automations
-    # run concurrently on a shared filesystem (sandboxless/local mode).
-    # Guard against path separators in run_id before embedding it in a shell command.
-    tarball_path = (
-        f"/tmp/automation-{run_id}.tar.gz"
-        if run_id and "/" not in run_id
-        else TARBALL_PATH
-    )
+    # Local mode hands us a host path. A drive-qualified one means the agent
+    # server runs on Windows, where /tmp is not absolute and commands run in
+    # cmd.exe, so the run is staged in its own work directory instead.
+    windows = _is_windows_path(work_dir)
+    if windows:
+        tarball_path = str(PureWindowsPath(work_dir, ".automation-run.tar.gz"))
+    else:
+        # Use a per-run tarball path to avoid collisions when multiple
+        # automations run concurrently on a shared filesystem (sandboxless/local
+        # mode). Guard against path separators in run_id before embedding it in
+        # a shell command.
+        tarball_path = (
+            f"/tmp/automation-{run_id}.tar.gz"
+            if run_id and "/" not in run_id
+            else TARBALL_PATH
+        )
     env_path: str | None = None
     workspace = AsyncRemoteWorkspace(
         host=agent_url,
@@ -354,28 +370,51 @@ async def execute_in_context(
         if isinstance(tarball_source, bytes):
             logger.info("Uploading tarball", extra=_log_ctx())
             await _upload(workspace, tarball_source, tarball_path)
+        elif windows:
+            raise ValueError(
+                "Tarball URLs are not supported on a Windows agent server; "
+                "upload the tarball instead"
+            )
         else:
             logger.info("Downloading tarball from URL", extra=_log_ctx())
             await _download_in_sandbox(workspace, tarball_source, tarball_path)
 
-        env_prefix = ""
-        if env_vars:
-            env_path = f"{tarball_path}.env"
-            await _upload(
-                workspace,
-                _serialize_env_vars(env_vars),
-                env_path,
+        if windows:
+            # Same steps as the POSIX chain below, done by a Python runner.
+            # Secrets travel in the spec file, never in the command text.
+            env_path = str(PureWindowsPath(work_dir, ".automation-run.json"))
+            spec = {
+                "work_dir": work_dir,
+                "tarball": tarball_path,
+                "entrypoint": entrypoint,
+                "env": env_vars,
+            }
+            await _upload(workspace, json.dumps(spec).encode(), env_path)
+            runner_path = str(PureWindowsPath(work_dir, ".automation-run.py"))
+            await _upload(workspace, _WINDOWS_RUNNER_SOURCE.read_bytes(), runner_path)
+            cmd = (
+                f'uv run --no-project --python ">=3.12" python'
+                f' "{runner_path}" "{env_path}"'
             )
-            env_prefix = _env_command_prefix(env_path)
+        else:
+            env_prefix = ""
+            if env_vars:
+                env_path = f"{tarball_path}.env"
+                await _upload(
+                    workspace,
+                    _serialize_env_vars(env_vars),
+                    env_path,
+                )
+                env_prefix = _env_command_prefix(env_path)
 
-        cmd = (
-            f"{env_prefix}mkdir -p {work_dir}"
-            f" && tar xzf {tarball_path} -C {work_dir}"
-            f" && rm -f {tarball_path}"
-            f" && cd {work_dir}"
-            f" && ([ ! -f setup.sh ] || bash setup.sh)"
-            f" && {entrypoint}"
-        )
+            cmd = (
+                f"{env_prefix}mkdir -p {work_dir}"
+                f" && tar xzf {tarball_path} -C {work_dir}"
+                f" && rm -f {tarball_path}"
+                f" && cd {work_dir}"
+                f" && ([ ! -f setup.sh ] || bash setup.sh)"
+                f" && {entrypoint}"
+            )
 
         logger.info("Starting entrypoint: %s", entrypoint, extra=_log_ctx())
         command_id = await _start_bash(workspace, cmd, timeout=timeout)
@@ -400,10 +439,15 @@ async def execute_in_context(
         return DispatchResult(success=False, sandbox_id=sandbox_id, error=str(e))
     finally:
         if env_path is not None:
+            remove_cmd = (
+                f'del /f /q "{env_path}"'
+                if windows
+                else f"rm -f -- {_shell_quote(env_path)}"
+            )
             try:
                 exit_code, _, stderr = await _bash(
                     workspace,
-                    f"rm -f -- {_shell_quote(env_path)}",
+                    remove_cmd,
                     timeout=int(get_config().http.http_timeout),
                 )
                 if exit_code != 0:
@@ -574,6 +618,11 @@ async def run_automation(
             if not keep_sandbox:
                 logger.info("Deleting sandbox", extra=_log_ctx())
                 await delete_sandbox(client, api_url, api_key, sandbox_id)
+
+
+def _is_windows_path(path: str) -> bool:
+    """Return True for a drive-qualified or UNC path such as ``C:\\runs\\1``."""
+    return not path.startswith("/") and bool(PureWindowsPath(path).drive)
 
 
 def _shell_quote(s: str) -> str:

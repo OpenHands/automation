@@ -203,6 +203,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
 6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
+   - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
 7. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
@@ -313,6 +314,7 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 
 - The `presets/` directory is excluded from ruff and pyright linting since it contains SDK code that runs in the sandbox, not application code
 - Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
+- Prompt and plugin preset tarballs created on Windows also carry `presets/setup.py`, the Python counterpart of their `setup.sh`; keep the two in step
 - Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
 
 ## Catalog Bundles

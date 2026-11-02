@@ -5,12 +5,15 @@ Only tests pure logic that can run without a network.  The e2e flow
 """
 
 import io
+import json
 import subprocess
 import tarfile
+from pathlib import Path, PureWindowsPath
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from openhands.automation import windows_runner
 from openhands.automation.config import get_config
 from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
@@ -19,6 +22,7 @@ from openhands.automation.execution import (
     AutomationResult,
     DispatchResult,
     _env_command_prefix,
+    _is_windows_path,
     _serialize_env_vars,
     _shell_quote,
     _upload,
@@ -669,3 +673,120 @@ class TestPerRunTarballPath:
         uploaded_dest = mock_upload.call_args.args[2]
         assert uploaded_dest == TARBALL_PATH
         assert "etc/passwd" not in uploaded_dest
+
+
+class TestWindowsAgentServer:
+    """A Windows work dir routes the run through windows_runner.py.
+
+    On Windows the agent server rejects /tmp/... as not absolute and runs
+    commands with cmd.exe, so neither the /tmp tarball path nor the POSIX
+    chain can be used there.
+    """
+
+    WORK_DIR = (
+        "C:\\Users\\runner\\.openhands\\workspaces\\automation-runs\\"
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    )
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("C:\\Users\\runner\\runs\\1", True),
+            ("C:/Users/runner/runs/1", True),
+            ("\\\\server\\share\\runs\\1", True),
+            (DEFAULT_WORK_DIR, False),
+            ("/tmp/automation-runs/1", False),
+            ("runs/1", False),
+        ],
+    )
+    def test_is_windows_path(self, path, expected):
+        assert _is_windows_path(path) is expected
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_stages_run_in_work_dir_and_starts_runner(
+        self, mock_upload, mock_start_bash
+    ):
+        secret = "token_" + "a" * 80
+        mock_start_bash.return_value = "cmd-123"
+
+        result = await execute_in_context(
+            agent_url="http://127.0.0.1:18000",
+            session_key="session-key",
+            entrypoint=".venv/Scripts/python.exe main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=self.WORK_DIR,
+            env_vars={"PRIVATE_TOKEN": secret},
+            run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+
+        assert result.success is True
+        assert result.bash_command_id == "cmd-123"
+        uploads = {c.args[2]: c.args[1] for c in mock_upload.await_args_list}
+        tarball_path = f"{self.WORK_DIR}\\.automation-run.tar.gz"
+        spec_path = f"{self.WORK_DIR}\\.automation-run.json"
+        runner_path = f"{self.WORK_DIR}\\.automation-run.py"
+        assert set(uploads) == {tarball_path, spec_path, runner_path}
+        assert all(PureWindowsPath(path).is_absolute() for path in uploads)
+        assert uploads[tarball_path] == b"fake tarball bytes"
+        assert json.loads(uploads[spec_path]) == {
+            "work_dir": self.WORK_DIR,
+            "tarball": tarball_path,
+            "entrypoint": ".venv/Scripts/python.exe main.py",
+            "env": {"PRIVATE_TOKEN": secret},
+        }
+        assert uploads[runner_path] == Path(windows_runner.__file__).read_bytes()
+
+        command = mock_start_bash.await_args.args[1]
+        assert command == (
+            f'uv run --no-project --python ">=3.12" python'
+            f' "{runner_path}" "{spec_path}"'
+        )
+        assert secret not in command
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._download_in_sandbox")
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    async def test_tarball_url_fails_without_downloading(
+        self, mock_start_bash, mock_download
+    ):
+        result = await execute_in_context(
+            agent_url="http://127.0.0.1:18000",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source="https://example.com/automation.tar.gz",
+            work_dir=self.WORK_DIR,
+        )
+
+        assert result.success is False
+        assert "Windows" in (result.error or "")
+        mock_download.assert_not_called()
+        mock_start_bash.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_start_failure_removes_spec_with_cmd_syntax(
+        self, mock_upload, mock_start_bash, mock_bash
+    ):
+        mock_start_bash.side_effect = RuntimeError("command startup failed")
+        mock_bash.return_value = (0, "", "")
+
+        result = await execute_in_context(
+            agent_url="http://127.0.0.1:18000",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=self.WORK_DIR,
+            env_vars={"PRIVATE_VALUE": "secret"},
+        )
+
+        assert result.success is False
+        mock_upload.assert_awaited()
+        mock_bash.assert_awaited_once_with(
+            ANY,
+            f'del /f /q "{self.WORK_DIR}\\.automation-run.json"',
+            timeout=int(get_config().http.http_timeout),
+        )

@@ -104,6 +104,7 @@ router = APIRouter(prefix="/v1/preset", tags=["Presets"])
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
 SHARED_FINISH_TOOL_HOOK = PRESETS_DIR / "finish_tool_hook.py"
+SHARED_SETUP_PY = PRESETS_DIR / "setup.py"
 PROMPT_PRESET_DIR = PRESETS_DIR / "prompt"
 PLUGIN_PRESET_DIR = PRESETS_DIR / "plugin"
 
@@ -134,6 +135,7 @@ def _load_prompt_preset_files() -> dict[str, str]:
         _PROMPT_PRESET_CACHE = {
             "main.py": (PROMPT_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PROMPT_PRESET_DIR / "setup.sh").read_text(),
+            "setup.py": SHARED_SETUP_PY.read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PROMPT_PRESET_CACHE
@@ -149,6 +151,7 @@ def _load_plugin_preset_files() -> dict[str, str]:
         _PLUGIN_PRESET_CACHE = {
             "main.py": (PLUGIN_PRESET_DIR / "sdk_main.py").read_text(),
             "setup.sh": (PLUGIN_PRESET_DIR / "setup.sh").read_text(),
+            "setup.py": SHARED_SETUP_PY.read_text(),
             "finish_tool_hook.py": SHARED_FINISH_TOOL_HOOK.read_text(),
         }
     return _PLUGIN_PRESET_CACHE
@@ -288,6 +291,18 @@ def _add_file_to_tar(
     tar.addfile(info, io.BytesIO(content_bytes))
 
 
+def _add_setup_scripts(tar: tarfile.TarFile, preset_files: dict[str, str]) -> None:
+    """Add the preset setup scripts to *tar*.
+
+    A Windows agent server runs commands with cmd.exe and has no POSIX shell
+    for ``setup.sh``, so tarballs created on Windows also carry ``setup.py``,
+    which the Windows runner prefers.
+    """
+    _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+    if os.name == "nt":
+        _add_file_to_tar(tar, "setup.py", preset_files["setup.py"])
+
+
 def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> bytes:
     """Generate a tarball containing SDK code and the user's prompt.
 
@@ -317,7 +332,7 @@ def _generate_tarball(prompt: str, repos: list[RepoSource] | None = None) -> byt
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )
         _add_file_to_tar(tar, "prompt.txt", prompt)
-        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+        _add_setup_scripts(tar, preset_files)
 
         # Add repos config if repos specified (SDK workspace handles cloning)
         if repos:
@@ -970,7 +985,7 @@ def _generate_plugin_tarball(
             tar, "finish_tool_hook.py", preset_files["finish_tool_hook.py"]
         )
         _add_file_to_tar(tar, "prompt.txt", prompt)
-        _add_file_to_tar(tar, "setup.sh", preset_files["setup.sh"], mode=0o755)
+        _add_setup_scripts(tar, preset_files)
 
         if variants is not None:
             experiment_config = {
