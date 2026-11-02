@@ -355,6 +355,17 @@ def _base_properties(
     return properties
 
 
+def automation_created_event() -> str:
+    """Name of the automation-created event on this deployment.
+
+    Self-hosted Enterprise reports it as ``ohe_automation_created`` (OHE-3657);
+    every other deployment keeps ``automation_created``.
+    """
+    if get_config().service.telemetry_deployment_mode == "self_hosted":
+        return "ohe_automation_created"
+    return "automation_created"
+
+
 async def automation_created_properties(
     session: AsyncSession, automation: Automation
 ) -> dict[str, Any]:
