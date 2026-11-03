@@ -343,9 +343,8 @@ Preconditions:
 - `enabled` is deprecated in favor of `state` but still accepted on create
   and PATCH (with a server-side `DeprecationWarning`).
 - In local mode the only user owns everything and holds both permissions,
-  so the 403 paths (`Only admins, owners, or the automation creator can
-  modify it`, `Only the automation creator can edit it; admins and owners
-  can only turn it off or delete it`) and cloud model/profile lookups
+  so the 403 path (`Only admins, owners, or the automation creator can
+  modify it`) and cloud model/profile lookups
   (`Model profile ... not found`, 502s) cannot be driven here.
 - The tarball route serves preset tarballs too (F06); they are gzip
   archives served as `application/x-tar`, so use `tar tzf`, not `tar tf`.
