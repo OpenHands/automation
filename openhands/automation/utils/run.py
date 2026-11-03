@@ -37,6 +37,18 @@ FIRST_RUN_OUTCOME_STATUSES = (
 )
 
 
+class DeferredRunRequeueError(RuntimeError):
+    """The requeue write for a limit-blocked run failed.
+
+    Raised instead of returning False: a caller that cannot tell a write
+    failure from a rejected conditional update would treat it as a lost
+    terminal race and return, leaving the run stranded as RUNNING with no
+    sandbox until the watchdog reaps it. The caller lets this propagate so
+    ``_execute_run_safe`` records the failure and the run reaches a terminal
+    state immediately.
+    """
+
+
 async def disable_automation(
     session_factory: async_sessionmaker[AsyncSession],
     automation_id: uuid.UUID,
@@ -483,7 +495,11 @@ async def requeue_deferred_run(
     is never resurrected, and requeueing cannot double-execute a run. Stamps
     deferred_until so the dispatch poll skips it until the backoff elapses.
 
-    Returns True when the run was requeued.
+    Returns True when the run was requeued and False when the guarded update
+    matched no row (the run left RUNNING). A write failure raises
+    ``DeferredRunRequeueError`` rather than returning False, so the caller can
+    tell a lost race from an unreachable database and fail the run instead of
+    leaving it stranded as RUNNING.
     """
     try:
         async with session_factory() as session:
@@ -513,9 +529,72 @@ async def requeue_deferred_run(
                 run.deferral_count = (run.deferral_count or 0) + 1
                 run.status_detail = status_detail
             return requeued
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to requeue deferred run %s", run.id)
-        return False
+        raise DeferredRunRequeueError(
+            f"Could not requeue run {run.id} after a transient limit"
+        ) from exc
+
+
+async def expire_aged_deferred_runs(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    max_age_seconds: int,
+    status_detail: dict,
+    limit: int = 100,
+) -> int:
+    """Terminally SKIP deferred runs whose max deferral age has passed.
+
+    Runs independently of admission capacity. A run deferred by a transient
+    limit is normally expired by ``_defer_or_skip_blocked_run`` on its next
+    dispatch attempt, but a poll that finds every slot occupied returns before
+    polling, so a deferred run can sit PENDING indefinitely behind a full cap.
+    This sweep reaps those rows on every poll regardless of available capacity.
+
+    Selects PENDING runs whose retry date and max age have both passed and
+    updates them in one guarded statement, so a run cancelled or claimed
+    concurrently is left alone. Uses FOR UPDATE SKIP LOCKED on PostgreSQL so
+    competing replicas never double-skip; SQLite runs single-process. Returns
+    the number of runs skipped.
+    """
+    deadline = utcnow() - timedelta(seconds=max_age_seconds)
+    now = utcnow()
+    async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
+        select_query = (
+            select(AutomationRun.id)
+            .where(
+                AutomationRun.status == AutomationRunStatus.PENDING,
+                AutomationRun.deferred_until.is_not(None),
+                AutomationRun.deferred_until <= now,
+                AutomationRun.created_at <= deadline,
+            )
+            .order_by(AutomationRun.created_at.asc())
+            .limit(limit)
+        )
+        if not using_sqlite():
+            select_query = select_query.with_for_update(skip_locked=True)
+        run_ids = list((await session.execute(select_query)).scalars().all())
+        if not run_ids:
+            return 0
+        result: CursorResult = await session.execute(  # type: ignore[assignment]
+            update(AutomationRun)
+            .where(
+                AutomationRun.id.in_(run_ids),
+                AutomationRun.status == AutomationRunStatus.PENDING,
+            )
+            .values(
+                status=AutomationRunStatus.SKIPPED,
+                completed_at=now,
+                deferred_until=None,
+                status_detail=status_detail,
+            )
+        )
+        await session.commit()
+        skipped = result.rowcount or 0
+    if skipped:
+        logger.warning("Expired %d deferred run(s) past max deferral age", skipped)
+    return skipped
 
 
 async def _record_first_run_outcome_in_session(

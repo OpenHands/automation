@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -70,6 +70,7 @@ from openhands.automation.utils.model_profiles import (
 from openhands.automation.utils.run import (
     count_running_runs,
     disable_automation,
+    expire_aged_deferred_runs,
     mark_run_status,
     mark_run_terminal,
     requeue_deferred_run,
@@ -392,6 +393,31 @@ async def _poll_pending_runs(
     return list(result.scalars().all())
 
 
+# Fixed key for the admission advisory lock. Namespaced away from the hashed
+# per-subject keys in conversations.py so the two can never collide.
+DISPATCH_ADMISSION_LOCK_ID = -0x4F48_4155_544F_0001  # "-OHAUTO-0001"
+
+
+async def _lock_dispatch_admission(session: AsyncSession) -> None:
+    """Serialize the count-and-claim admission step across replicas.
+
+    Under read-committed isolation two replicas each read the same RUNNING
+    count, compute the same free capacity, and then claim *distinct* pending
+    rows under SKIP LOCKED, so their combined admissions exceed the configured
+    cap. A transaction-scoped advisory lock held across the count and the
+    commit closes that gap: the second replica waits until the first commits
+    its RUNNING rows, then sees them. Released by the caller's commit. SQLite
+    runs single-process and skips it (the same pattern as conversations.py).
+    """
+    if using_sqlite():
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+            key=DISPATCH_ADMISSION_LOCK_ID
+        )
+    )
+
+
 def _build_event_payload(
     automation: Automation,
     run: AutomationRun,
@@ -527,13 +553,14 @@ async def _defer_or_skip_blocked_run(
     created_at = run.created_at or now
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=now.tzinfo)
+    age_seconds = (now - created_at).total_seconds()
 
-    if max_age > 0 and now - created_at < timedelta(seconds=max_age):
+    if max_age > 0 and age_seconds < max_age:
         attempts = run.deferral_count or 0
-        delay = min(
-            config.defer_backoff_base_seconds * (2**attempts),
-            max_age,
-        )
+        # Bound the backoff by the time left before the deadline: a run near
+        # max_age must not wait another full backoff and start after its age.
+        remaining = max_age - age_seconds
+        delay = min(config.defer_backoff_base_seconds * (2**attempts), remaining)
         deferred_until = now + timedelta(seconds=max(1, delay))
         status_detail = make_run_status_detail(
             phase=RunStatusPhase.DISPATCH,
@@ -578,17 +605,31 @@ async def _defer_or_skip_blocked_run(
         )
         return
 
-    logger.warning(
-        "Run deferred past max age; marking SKIPPED: %s", detail, extra=log_ctx
-    )
+    # Past the deadline (or deferral disabled): the run is terminal SKIPPED.
+    # With deferral disabled the original limit reason is preserved, so
+    # existing consumers of the status kind and skip_reason are unchanged.
+    if max_age > 0:
+        logger.warning(
+            "Run deferred past max age; marking SKIPPED: %s", detail, extra=log_ctx
+        )
+        skip_kind = RunStatusDetailKind.DEFER_EXPIRED
+        skip_extra = {"blocked_by": kind.value}
+    else:
+        logger.warning(
+            "Run skipped — transient limit (deferral disabled): %s",
+            detail,
+            extra=log_ctx,
+        )
+        skip_kind = kind
+        skip_extra = None
     status_detail = make_run_status_detail(
         phase=RunStatusPhase.DISPATCH,
-        kind=RunStatusDetailKind.DEFER_EXPIRED,
+        kind=skip_kind,
         detail=detail,
         transient=False,
         source="sandbox_api",
         operation="get_execution_context",
-        extra={"blocked_by": kind.value},
+        extra=skip_extra,
     )
     await mark_run_terminal(
         session_factory,
@@ -603,7 +644,7 @@ async def _defer_or_skip_blocked_run(
         session_factory=session_factory,
         properties={
             "trigger_source": "dispatcher",
-            "skip_reason": RunStatusDetailKind.DEFER_EXPIRED.value,
+            "skip_reason": skip_kind.value,
         },
     )
 
@@ -1193,9 +1234,29 @@ async def dispatch_pending_runs(
         batch_size = config.service.dispatcher_batch_size
     max_concurrent = config.service.max_concurrent_runs
 
+    # Expire deferred runs past their max age on every poll, independent of
+    # available capacity: a poll that finds every slot occupied returns before
+    # claiming, so it must still reap aged deferred rows.
+    if config.service.defer_max_age_seconds > 0:
+        await expire_aged_deferred_runs(
+            session_factory,
+            max_age_seconds=config.service.defer_max_age_seconds,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=RunStatusDetailKind.DEFER_EXPIRED,
+                detail="Deferred past the maximum deferral age",
+                transient=False,
+                source="automation_service",
+                operation="expire_deferred_run",
+            ),
+        )
+
     async with session_factory() as session:
         capacity: int | None = None
         if max_concurrent > 0:
+            # Serialize the count-and-claim across replicas so two simultaneous
+            # polls cannot each admit the full apparent capacity.
+            await _lock_dispatch_admission(session)
             running = await count_running_runs(session)
             capacity = max(0, max_concurrent - running)
             if capacity == 0:
