@@ -550,7 +550,7 @@ async def expire_aged_deferred_runs(
     Runs independently of admission capacity. A run deferred by a transient
     limit is normally expired by ``_defer_or_skip_blocked_run`` on its next
     dispatch attempt, but a poll that finds every slot occupied returns before
-    polling, so a deferred run can sit PENDING indefinitely behind a full cap.
+    claiming, so a deferred run can sit PENDING indefinitely behind a full cap.
     This sweep reaps those rows on every poll regardless of available capacity.
 
     Selects PENDING runs whose retry date and max age have both passed and
