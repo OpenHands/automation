@@ -6,7 +6,7 @@ automation could match. A source without a catalog (Azure DevOps, a custom
 webhook) accepts any event key.
 """
 
-from openhands.automation.event_schemas import github
+from openhands.automation.event_schemas import github, gitlab
 from openhands.automation.event_schemas.bitbucket_data_center import (
     BITBUCKET_DATA_CENTER_EVENT_TYPES,
 )
@@ -23,19 +23,22 @@ _KEYED_CATALOGS: dict[str, tuple[str, tuple[str, ...]]] = {
 SOURCE_LABELS: dict[str, str] = {
     "bitbucket_data_center": "Bitbucket Data Center",
     "github": "GitHub",
+    "gitlab": "GitLab",
     "jira_dc": "Jira Data Center",
 }
 
 
 def catalog_sources() -> list[str]:
     """Sources that publish an event catalog."""
-    return sorted(["github", *_KEYED_CATALOGS])
+    return sorted(["github", "gitlab", *_KEYED_CATALOGS])
 
 
 def supported_event_types(source: str) -> list[str] | None:
     """Event types a source delivers, or None when it has no catalog."""
     if source == "github":
         return github.get_supported_event_types()
+    if source == "gitlab":
+        return list(gitlab.GITLAB_EVENT_TYPES)
     keyed = _KEYED_CATALOGS.get(source)
     return list(keyed[1]) if keyed else None
 
@@ -44,6 +47,8 @@ def supported_event_patterns(source: str) -> list[str] | None:
     """The ``on`` patterns a setup UI can offer for a source."""
     if source == "github":
         return github.get_supported_event_patterns()
+    if source == "gitlab":
+        return gitlab.get_supported_event_patterns()
     return supported_event_types(source)
 
 
@@ -51,6 +56,8 @@ def event_detection_rules(source: str) -> list[dict[str, str]]:
     """Ordered rules detecting a payload's event type, empty without a catalog."""
     if source == "github":
         return github.get_event_detection_rules()
+    if source == "gitlab":
+        return gitlab.get_event_detection_rules()
     keyed = _KEYED_CATALOGS.get(source)
     if keyed is None:
         return []

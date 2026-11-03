@@ -53,7 +53,7 @@ from openhands.automation.utils.webhook import get_webhook_config
 
 
 BUILTIN_PROVIDER_SOURCES = frozenset(
-    {"azure_devops", "bitbucket_data_center", "github", "jira_dc"}
+    {"azure_devops", "bitbucket_data_center", "github", "gitlab", "jira_dc"}
 )
 
 # Header bytes reach an app latin-1 decoded, so a signature header can carry a
@@ -485,18 +485,18 @@ class TestProviderRegistry:
         assert RESERVED_SOURCES == BUILTIN_PROVIDER_SOURCES
 
     def test_registering_a_provider_reserves_its_source(self, temp_provider):
-        assert not is_builtin_source("gitlab")
-        temp_provider(Provider(source="gitlab", parse=lambda p: parse_event("x", p)))
-        assert is_builtin_source("gitlab")
-        assert "gitlab" in reserved_sources()
+        assert not is_builtin_source("forgejo")
+        temp_provider(Provider(source="forgejo", parse=lambda p: parse_event("x", p)))
+        assert is_builtin_source("forgejo")
+        assert "forgejo" in reserved_sources()
 
     def test_a_late_registered_source_cannot_be_claimed_by_a_custom_webhook(
         self, temp_provider
     ):
         """Validation asks the registry, not a snapshot taken at import time."""
-        temp_provider(Provider(source="gitlab", parse=lambda p: parse_event("x", p)))
+        temp_provider(Provider(source="forgejo", parse=lambda p: parse_event("x", p)))
         with pytest.raises(ValueError, match="reserved source name"):
-            CustomWebhookCreate(name="GitLab", source="gitlab")
+            CustomWebhookCreate(name="Forgejo", source="forgejo")
 
     def test_builtin_sources_cannot_be_claimed_by_a_custom_webhook(self):
         for source in sorted(BUILTIN_PROVIDER_SOURCES):
@@ -859,14 +859,14 @@ async def test_standard_webhooks_rejects_a_replayed_delivery(
     assert response.json()["detail"] == "Invalid signature"
 
 
-class _GitLabEvent(WebhookEvent):
+class _ForgejoEvent(WebhookEvent):
     """Stands in for a real provider's event class, so the wiring is tested."""
 
     object_kind: str = ""
 
     @property
     def source(self) -> str:
-        return "gitlab"
+        return "forgejo"
 
     @property
     def event_key(self) -> str:
@@ -890,8 +890,8 @@ async def test_adding_a_provider_takes_a_registry_entry_and_nothing_else(
     monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "shared")
     temp_provider(
         Provider(
-            source="gitlab",
-            parse=lambda payload: _GitLabEvent(**payload),
+            source="forgejo",
+            parse=lambda payload: _ForgejoEvent(**payload),
             verifier="slack_v0",
             signature_header="X-Slack-Signature",
             secret_from_settings=lambda s: s.webhook_secret or None,
@@ -900,7 +900,7 @@ async def test_adding_a_provider_takes_a_registry_entry_and_nothing_else(
     )
 
     async_session.add(
-        _make_automation(org_id, mock_authenticated_user.user_id, "gitlab")
+        _make_automation(org_id, mock_authenticated_user.user_id, "forgejo")
     )
     await async_session.commit()
 
@@ -910,7 +910,7 @@ async def test_adding_a_provider_takes_a_registry_entry_and_nothing_else(
     digest = hmac.new(b"shared", signed, hashlib.sha256).hexdigest()
 
     response = await async_client.post(
-        f"/api/automation/v1/events/{org_id}/gitlab",
+        f"/api/automation/v1/events/{org_id}/forgejo",
         content=body,
         headers={
             "X-Slack-Signature": f"v0={digest}",
@@ -923,7 +923,7 @@ async def test_adding_a_provider_takes_a_registry_entry_and_nothing_else(
     assert response.json()["matched"] == 1
 
     # The descriptor's capability flag is what phase 3 will read.
-    provider = get_provider("gitlab")
+    provider = get_provider("forgejo")
     assert provider is not None
     assert provider.capabilities.tolerates_multiple_connections is True
 

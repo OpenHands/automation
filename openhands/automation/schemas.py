@@ -817,6 +817,9 @@ class WebhookConfig(BaseModel):
     # source does not identify its deliveries. Built-in providers take it from
     # their descriptor; a custom webhook takes it from its row.
     event_id_header: str | None = None
+    # A custom webhook registered under a source name that is now built in.
+    # It keeps precedence for its org, so built-in deliveries are ignored.
+    shadows_builtin: bool = False
 
 
 class EventResponse(BaseModel):
