@@ -30,6 +30,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    CronTrigger,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -414,18 +415,40 @@ def preflight_manifest(
     *,
     allow_local_sources: bool = True,
 ) -> tuple[str | None, AutomationPluginManifest]:
-    """Strictly resolve a plugin source and parse its automation metadata."""
+    """Strictly resolve a plugin source and parse its automation metadata.
+
+    Supports three manifest formats found at the resolved plugin path:
+    .plugin/plugin.json with an ``automation`` key, a legacy
+    automation-plugin.json, and a catalog manifest.json (with a ``setup``
+    key) whose setup.form.args are converted to a JSON Schema config_schema.
+    """
     validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
     try:
-        with preflight_plugin(
-            source=plugin.source,
-            ref=plugin.ref,
-            repo_path=plugin.repo_path,
-            allow_local=allow_local_sources,
-        ) as checked:
-            manifest = _read_manifest_from_plugin_metadata(checked.manifest)
-            _validate_manifest_paths(checked.path, manifest)
-            return checked.resolved_ref, manifest
+        try:
+            with preflight_plugin(
+                source=plugin.source,
+                ref=plugin.ref,
+                repo_path=plugin.repo_path,
+                allow_local=allow_local_sources,
+            ) as checked:
+                if checked.manifest.get(PLUGIN_AUTOMATION_KEY) is not None:
+                    manifest = _read_manifest_from_plugin_metadata(checked.manifest)
+                else:
+                    manifest = _read_manifest(checked.path)
+                _validate_manifest_paths(checked.path, manifest)
+                return checked.resolved_ref, manifest
+        except PluginSourceError as exc:
+            if exc.code != "invalid_plugin":
+                raise
+            plugin_path, resolved_ref = fetch_plugin_with_resolution(
+                source=plugin.source,
+                cache_dir=_cache_dir_for_plugin(plugin),
+                ref=plugin.ref,
+                repo_path=plugin.repo_path,
+            )
+            manifest = _read_manifest(plugin_path)
+            _validate_manifest_paths(plugin_path, manifest)
+            return resolved_ref, manifest
     except PluginSourceError as exc:
         raise PluginSpecError(
             f"Failed to preflight automation plugin: {exc}",
@@ -474,17 +497,149 @@ def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
             return _read_manifest_from_plugin_metadata(plugin_metadata)
 
     legacy_manifest_path = _contained_path(plugin_path, MANIFEST_NAME)
-    if not legacy_manifest_path.is_file():
-        raise PluginSpecError(
-            "Automation plugin manifest not found: "
-            f"{PLUGIN_MANIFEST_NAME} with `{PLUGIN_AUTOMATION_KEY}` or {MANIFEST_NAME}"
+    if legacy_manifest_path.is_file():
+        try:
+            return AutomationPluginManifest.model_validate_json(
+                legacy_manifest_path.read_text()
+            )
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Invalid automation plugin manifest: {exc}"
+            ) from exc
+
+    catalog_manifest_path = _contained_path(plugin_path, "manifest.json")
+    if catalog_manifest_path.is_file():
+        try:
+            catalog = json.loads(catalog_manifest_path.read_text())
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Invalid catalog manifest: manifest.json: {exc}"
+            ) from exc
+        if isinstance(catalog.get("setup"), dict):
+            return _convert_catalog_manifest(catalog)
+
+    raise PluginSpecError(
+        "Automation plugin manifest not found: "
+        f"{PLUGIN_MANIFEST_NAME} with `{PLUGIN_AUTOMATION_KEY}`, "
+        f"{MANIFEST_NAME}, or a catalog manifest.json with a `setup` key"
+    )
+
+
+_CATALOG_FIELD_TYPE_MAP: dict[str, str] = {
+    "textarea": "string",
+    "text": "string",
+    "string": "string",
+    "number": "number",
+    "integer": "integer",
+    "boolean": "boolean",
+    "checkbox": "boolean",
+}
+
+
+def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
+    """Convert a catalog setup.form.args entry to a JSON Schema property."""
+    catalog_type = arg.get("type", "string")
+    schema: dict[str, Any] = {"type": _CATALOG_FIELD_TYPE_MAP.get(catalog_type, "string")}
+
+    if catalog_type == "textarea":
+        schema["format"] = "textarea"
+    elif catalog_type == "timezone":
+        schema["format"] = "timezone"
+    elif catalog_type in ("select", "enum") and arg.get("options"):
+        schema["enum"] = [
+            opt.get("value", opt) if isinstance(opt, dict) else opt
+            for opt in arg["options"]
+        ]
+
+    if arg.get("label"):
+        schema["title"] = arg["label"]
+    if arg.get("help"):
+        schema["description"] = arg["help"]
+    if "default" in arg:
+        schema["default"] = arg["default"]
+
+    constraints = arg.get("constraints") or {}
+    if "minLength" in constraints:
+        schema["minLength"] = constraints["minLength"]
+    if "maxLength" in constraints:
+        schema["maxLength"] = constraints["maxLength"]
+    if "minimum" in constraints:
+        schema["minimum"] = constraints["minimum"]
+    if "maximum" in constraints:
+        schema["maximum"] = constraints["maximum"]
+
+    if arg.get("options") and "enum" not in schema:
+        schema["enum"] = [
+            opt.get("value", opt) if isinstance(opt, dict) else opt
+            for opt in arg["options"]
+        ]
+
+    return schema
+
+
+def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManifest:
+    """Convert an automations/catalog manifest to an AutomationPluginManifest."""
+    setup = catalog.get("setup") or {}
+    form = setup.get("form") or {}
+    args = form.get("args") or {}
+    triggers = form.get("triggers") or {}
+    bundle = setup.get("bundle") or {}
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, arg in args.items():
+        if not isinstance(arg, dict):
+            continue
+        properties[name] = _convert_catalog_arg_to_schema(arg)
+        if arg.get("required"):
+            required.append(name)
+
+    config_schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        config_schema["required"] = required
+
+    suggested_trigger: Trigger | None = None
+    cron = triggers.get("cron") or {}
+    schedule = cron.get("schedule") or {}
+    if isinstance(schedule, dict) and schedule.get("default"):
+        tz = cron.get("timezone") or {}
+        suggested_trigger = CronTrigger(
+            type="cron",
+            schedule=schedule["default"],
+            timezone=tz.get("default", "UTC") if isinstance(tz, dict) else "UTC",
         )
+
+    entrypoint_command = bundle.get("entrypoint") or "python3 main.py"
     try:
-        return AutomationPluginManifest.model_validate_json(
-            legacy_manifest_path.read_text()
+        entrypoint = AutomationPluginEntrypoint(
+            runner="script",
+            command=entrypoint_command,
+            working_dir=".",
         )
     except Exception as exc:
-        raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
+        raise PluginSpecError(
+            f"Catalog manifest has invalid entrypoint: {exc}"
+        ) from exc
+
+    description = catalog.get("description")
+    if description and len(description) > 500:
+        description = description[:497] + "..."
+
+    data = {
+        "schema_version": "openhands.automation.plugin.v1",
+        "name": catalog.get("name") or catalog.get("id") or "catalog-automation",
+        "description": description,
+        "entrypoint": entrypoint.model_dump(),
+        "config_schema": config_schema,
+        "suggested_trigger": suggested_trigger.model_dump() if suggested_trigger else None,
+    }
+
+    try:
+        return AutomationPluginManifest.model_validate(data)
+    except Exception as exc:
+        raise PluginSpecError(
+            f"Failed to convert catalog manifest: {exc}"
+        ) from exc
 
 
 def _validate_manifest_paths(

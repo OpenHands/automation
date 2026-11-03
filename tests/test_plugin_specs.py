@@ -467,3 +467,116 @@ def test_fetch_manifest_rejects_invalid_suggested_cron(tmp_path):
 
     with pytest.raises(PluginSpecError, match="Invalid automation plugin manifest"):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))
+
+
+def _write_catalog_manifest(root: Path) -> Path:
+    """Write a catalog-style manifest.json (setup.form.args format)."""
+    catalog_dir = root / "catalog-plugin"
+    catalog_dir.mkdir()
+    (catalog_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "description": "A catalog entry for testing.",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {
+                            "cron": {
+                                "schedule": {
+                                    "type": "cron",
+                                    "label": "Schedule",
+                                    "default": "0 8 * * *",
+                                    "required": True,
+                                },
+                                "timezone": {
+                                    "type": "timezone",
+                                    "label": "Timezone",
+                                    "default": "UTC",
+                                    "required": True,
+                                },
+                            }
+                        },
+                        "args": {
+                            "feeds": {
+                                "type": "textarea",
+                                "label": "Feeds",
+                                "help": "One feed URL per line.",
+                                "default": "https://example.com/rss",
+                                "required": True,
+                                "constraints": {"minLength": 8, "maxLength": 4000},
+                            },
+                            "topics": {
+                                "type": "textarea",
+                                "label": "Topics of interest",
+                                "help": "One topic per line.",
+                                "default": "ai, open source",
+                                "required": False,
+                                "constraints": {"maxLength": 2000},
+                            },
+                        },
+                    },
+                    "bundle": {
+                        "entrypoint": "python3 main.py",
+                        "timeout": 900,
+                        "files": {"main.py": "scripts/main.py"},
+                        "config": {
+                            "feeds": "{{form.feeds}}",
+                            "topics": "{{form.topics}}",
+                        },
+                    },
+                },
+            }
+        )
+    )
+    return catalog_dir
+
+
+def test_preflight_converts_catalog_manifest(tmp_path):
+    catalog_dir = _write_catalog_manifest(tmp_path)
+
+    resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(catalog_dir)),
+        allow_local_sources=True,
+    )
+
+    assert manifest.name == "Test Catalog Automation"
+    assert manifest.description == "A catalog entry for testing."
+    assert manifest.entrypoint.runner == "script"
+    assert manifest.entrypoint.command == "python3 main.py"
+    assert manifest.entrypoint.working_dir == "."
+
+    props = manifest.config_schema["properties"]
+    assert set(props.keys()) == {"feeds", "topics"}
+    assert props["feeds"]["type"] == "string"
+    assert props["feeds"]["format"] == "textarea"
+    assert props["feeds"]["title"] == "Feeds"
+    assert props["feeds"]["description"] == "One feed URL per line."
+    assert props["feeds"]["default"] == "https://example.com/rss"
+    assert props["feeds"]["minLength"] == 8
+    assert props["feeds"]["maxLength"] == 4000
+    assert props["topics"]["title"] == "Topics of interest"
+
+    assert manifest.config_schema["required"] == ["feeds"]
+
+    assert manifest.suggested_trigger is not None
+    assert manifest.suggested_trigger.type == "cron"
+    assert manifest.suggested_trigger.schedule == "0 8 * * *"
+    assert manifest.suggested_trigger.timezone == "UTC"
+
+
+def test_preflight_catalog_manifest_validates_config(tmp_path):
+    catalog_dir = _write_catalog_manifest(tmp_path)
+
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(catalog_dir)),
+        allow_local_sources=True,
+    )
+
+    valid_config = validate_plugin_config(manifest, {"feeds": "https://example.com/rss"})
+    assert valid_config["feeds"] == "https://example.com/rss"
+
+    with pytest.raises(PluginSpecError, match="invalid"):
+        validate_plugin_config(manifest, {"feeds": "short"})
