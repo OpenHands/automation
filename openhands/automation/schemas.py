@@ -1291,6 +1291,8 @@ class AutomationRunResponse(BaseModel):
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
+    # Set only while a run blocked by a transient limit waits to be retried.
+    deferred_until: UtcDatetime | None = None
     conversation_id: str | None
     cost: float | None = None
     timeout_at: UtcDatetime | None

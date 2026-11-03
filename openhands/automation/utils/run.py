@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.automation.db import using_sqlite
@@ -296,6 +296,13 @@ async def mark_run_status(
         values["current_phase"] = current_phase
         run.current_phase = current_phase
 
+    # Clear the deferral marker once a run is claimed: the dispatcher's poll
+    # skips PENDING runs whose deferred_until is in the future, and a claimed
+    # run must be immediately eligible again if it is later deferred anew.
+    if status == AutomationRunStatus.RUNNING:
+        values["deferred_until"] = None
+        run.deferred_until = None
+
     await session.execute(
         update(AutomationRun).where(AutomationRun.id == run.id).values(**values)
     )
@@ -443,6 +450,72 @@ async def update_run_current_phase(
             await session.commit()
     except Exception:
         logger.exception("Failed to update current_phase for run %s", run_id)
+
+
+async def count_running_runs(session: AsyncSession) -> int:
+    """Count runs currently RUNNING across the service.
+
+    Backs the optional dispatch capacity gate. Only RUNNING counts: PENDING
+    runs are the queue waiting for a slot, so counting them would deadlock the
+    gate against itself.
+    """
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(AutomationRun)
+            .where(AutomationRun.status == AutomationRunStatus.RUNNING)
+        )
+        or 0
+    )
+
+
+async def requeue_deferred_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    run: AutomationRun,
+    *,
+    deferred_until: datetime,
+    status_detail: dict | None = None,
+) -> bool:
+    """Return a claimed run blocked by a transient limit to the PENDING queue.
+
+    Guarded by status == RUNNING and clears started_at/timeout_at/completed_at,
+    so a run that already reached a terminal state (callback, cancel, watchdog)
+    is never resurrected, and requeueing cannot double-execute a run. Stamps
+    deferred_until so the dispatch poll skips it until the backoff elapses.
+
+    Returns True when the run was requeued.
+    """
+    try:
+        async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
+            result: CursorResult = await session.execute(  # type: ignore[assignment]
+                update(AutomationRun)
+                .where(
+                    AutomationRun.id == run.id,
+                    AutomationRun.status == AutomationRunStatus.RUNNING,
+                )
+                .values(
+                    status=AutomationRunStatus.PENDING,
+                    started_at=None,
+                    timeout_at=None,
+                    completed_at=None,
+                    deferred_until=deferred_until,
+                    deferral_count=AutomationRun.deferral_count + 1,
+                    status_detail=status_detail,
+                    current_phase=None,
+                )
+            )
+            await session.commit()
+            requeued = result.rowcount != 0
+            if requeued:
+                run.status = AutomationRunStatus.PENDING
+                run.deferred_until = deferred_until
+                run.deferral_count = (run.deferral_count or 0) + 1
+                run.status_detail = status_detail
+            return requeued
+    except Exception:
+        logger.exception("Failed to requeue deferred run %s", run.id)
+        return False
 
 
 async def _record_first_run_outcome_in_session(

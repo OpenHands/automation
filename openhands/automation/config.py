@@ -543,6 +543,14 @@ class ServiceSettings(BaseSettings):
         AUTOMATION_DISPATCHER_INTERVAL_SECONDS: Dispatcher poll interval (default: 10)
         AUTOMATION_DISPATCHER_BATCH_SIZE: Dispatcher batch size (default: 10)
         AUTOMATION_WATCHDOG_INTERVAL_SECONDS: Watchdog poll interval (default: 60)
+        AUTOMATION_MAX_CONCURRENT_RUNS: Cap on concurrently RUNNING runs across
+            the service (default: 0 = unlimited). At the cap, further PENDING
+            runs wait in the queue until a slot frees.
+        AUTOMATION_DEFER_MAX_AGE_SECONDS: Longest a run blocked by a transient
+            limit stays deferred before it is SKIPPED (default: 21600; 0
+            disables deferral and restores immediate skip)
+        AUTOMATION_DEFER_BACKOFF_BASE_SECONDS: Base delay of the bounded
+            exponential backoff between deferrals (default: 60)
         AUTOMATION_FAILURE_DISABLE_THRESHOLD: Consecutive permanent failures before
             auto-disabling an automation (default: 3, <=0 disables auto-disable)
         AUTOMATION_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD: Consecutive failures
@@ -650,6 +658,25 @@ class ServiceSettings(BaseSettings):
     dispatcher_interval_seconds: int = 10
     dispatcher_batch_size: int = 10
     watchdog_interval_seconds: int = 60
+
+    # Maximum number of automation runs allowed to be RUNNING at once across the
+    # whole service. 0 (the default) disables the gate: every claimed run is
+    # launched, preserving today's behavior. When set, the dispatcher admits at
+    # most this many runs per poll and leaves the rest PENDING (the table is the
+    # queue) until a slot frees. The gate bounds total in-flight sandboxes.
+    max_concurrent_runs: int = Field(default=0, ge=0)
+
+    # A run blocked by a transient limit (organization concurrency cap, daily
+    # sandbox quota) is returned to PENDING with deferred_until instead of being
+    # marked terminal SKIPPED. This is the longest a run may stay deferred; past
+    # it the run is SKIPPED with a `defer_expired` status detail. 0 disables
+    # deferral and restores the immediate-skip behavior.
+    defer_max_age_seconds: int = Field(default=21600, ge=0)  # 6 hours
+
+    # Base delay of the bounded exponential backoff between deferrals. The nth
+    # consecutive deferral waits defer_backoff_base_seconds * 2**(n-1), capped
+    # at defer_max_age_seconds.
+    defer_backoff_base_seconds: int = Field(default=60, ge=0)
 
     # Auto-disable rules. `failure_disable_threshold` is the fast path for
     # unambiguous config faults (bad key, revoked token) and needs no time

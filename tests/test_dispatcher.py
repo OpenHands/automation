@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from openhands.automation.config import get_config
@@ -46,8 +46,10 @@ from openhands.automation.models import (
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.run import (
+    count_running_runs,
     mark_run_status,
     mark_run_terminal,
+    requeue_deferred_run,
     update_run_current_phase,
     update_run_timeout_at,
 )
@@ -1532,10 +1534,11 @@ class TestExecuteRunConcurrencyLimit:
             (DailySandboxLimitReachedError, "daily_sandbox_limit"),
         ],
     )
-    async def test_quota_limit_marks_skipped_and_keeps_enabled(
+    async def test_quota_limit_defers_run_and_keeps_enabled(
         self, async_session_factory, mock_settings, mock_client, error_type, kind
     ):
-        """Persist the quota skip and emit its reason without disabling the job."""
+        """A quota-blocked run is returned to PENDING with a retry deadline,
+        not dropped, and its automation is left enabled."""
         run, run_id, automation_id = await self._make_running_run(async_session_factory)
 
         backend = MagicMock()
@@ -1564,8 +1567,12 @@ class TestExecuteRunConcurrencyLimit:
                 .scalars()
                 .first()
             )
-            assert updated.status == AutomationRunStatus.SKIPPED
-            assert updated.completed_at is not None
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.deferred_until is not None
+            assert updated.deferral_count == 1
+            assert updated.started_at is None  # claim rolled back
+            assert updated.completed_at is None
+            assert updated.timeout_at is None
             assert updated.status_detail is not None
             assert updated.status_detail["phase"] == "dispatch"
             assert updated.status_detail["kind"] == kind
@@ -1573,7 +1580,8 @@ class TestExecuteRunConcurrencyLimit:
             assert updated.status_detail["detail"] == "Sandbox quota reached."
             assert updated.status_detail["source"] == "sandbox_api"
             assert updated.status_detail["operation"] == "get_execution_context"
-            assert updated.error_detail is None  # SKIPPED is not a failure
+            assert updated.status_detail["deferral_attempts"] == 1
+            assert updated.error_detail is None  # deferral is not a failure
 
             auto = (
                 (
@@ -1586,13 +1594,11 @@ class TestExecuteRunConcurrencyLimit:
             )
             assert auto.enabled is True  # transient org-level condition: not disabled
 
-        capture_event.assert_awaited_once_with(
-            "automation_run_skipped",
-            automation=run.automation,
-            run=run,
-            session_factory=async_session_factory,
-            properties={"trigger_source": "dispatcher", "skip_reason": kind},
-        )
+        capture_event.assert_awaited_once()
+        args, kwargs = capture_event.await_args
+        assert args[0] == "automation_run_deferred"
+        assert kwargs["properties"]["defer_reason"] == kind
+        assert kwargs["properties"]["deferral_attempts"] == 1
 
         # No execution context was acquired, so there is nothing to release.
         backend.release_context.assert_not_called()
@@ -1945,6 +1951,469 @@ class TestExecuteRunConcurrencyLimit:
             assert auto.enabled is True
 
 
+class TestExecuteRunDeferralExpiry:
+    """A run blocked by a transient limit past its max deferral age is dropped.
+
+    Deferral is bounded: an automation that can never get a slot must not
+    queue forever, so past `defer_max_age_seconds` the run is marked SKIPPED
+    with a `defer_expired` status detail.
+    """
+
+    async def _make_running_run(self, async_session_factory, *, age_seconds: int):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                created_at=utcnow() - timedelta(seconds=age_seconds),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id
+
+    async def test_run_past_max_defer_age_is_skipped(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A run older than defer_max_age_seconds is terminal SKIPPED, not requeued."""
+        # Older than the default 6h max deferral age.
+        run, run_id = await self._make_running_run(
+            async_session_factory, age_seconds=7 * 3600
+        )
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_execution_context = AsyncMock(
+            side_effect=ConcurrencyLimitReachedError("limit")
+        )
+        backend.release_context = AsyncMock()
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.deferred_until is None
+            assert updated.completed_at is not None
+            assert updated.status_detail is not None
+            assert updated.status_detail["kind"] == "defer_expired"
+            assert updated.status_detail["transient"] is False
+            assert updated.status_detail["blocked_by"] == "concurrency_limit"
+
+        args, kwargs = capture_event.await_args
+        assert args[0] == "automation_run_skipped"
+        assert kwargs["properties"]["skip_reason"] == "defer_expired"
+
+    async def test_deferral_disabled_skips_immediately(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """With defer_max_age_seconds=0 a blocked run is skipped at once."""
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_MAX_AGE_SECONDS", "0")
+        clear_config_cache()
+        try:
+            run, run_id = await self._make_running_run(
+                async_session_factory, age_seconds=1
+            )
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=DailySandboxLimitReachedError("quota")
+            )
+            backend.release_context = AsyncMock()
+
+            with patch(
+                "openhands.automation.dispatcher.get_backend", return_value=backend
+            ):
+                await _execute_run(
+                    run, mock_settings, async_session_factory, mock_client
+                )
+
+            async with async_session_factory() as session:
+                updated = await session.get(AutomationRun, run_id)
+                assert updated.status == AutomationRunStatus.SKIPPED
+                assert updated.deferred_until is None
+                assert updated.status_detail["kind"] == "defer_expired"
+                assert updated.status_detail["blocked_by"] == "daily_sandbox_limit"
+        finally:
+            clear_config_cache()
+
+
+class TestDispatchConcurrencyGate:
+    """The optional max_concurrent_runs cap admits only up to the limit.
+
+    The table is the queue: over-cap PENDING runs stay PENDING and are picked
+    up by a later poll as slots free.
+    """
+
+    async def _seed_pending(
+        self, async_session_factory, count: int, *, running: int = 0
+    ):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            automation_id = automation.id
+
+            for _ in range(running):
+                session.add(
+                    AutomationRun(
+                        automation_id=automation_id,
+                        status=AutomationRunStatus.RUNNING,
+                        started_at=utcnow(),
+                    )
+                )
+            pending_ids = []
+            for _ in range(count):
+                run = AutomationRun(
+                    automation_id=automation_id,
+                    status=AutomationRunStatus.PENDING,
+                )
+                session.add(run)
+                await session.flush()
+                pending_ids.append(run.id)
+            await session.commit()
+        return pending_ids
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_admits_only_up_to_capacity(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "2")
+        clear_config_cache()
+        try:
+            await self._seed_pending(async_session_factory, 3)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert len(dispatched) == 2
+
+            async with async_session_factory() as session:
+                remaining = (
+                    (
+                        await session.execute(
+                            select(AutomationRun).where(
+                                AutomationRun.status == AutomationRunStatus.PENDING
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert len(remaining) == 1
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_counts_existing_running_runs(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "2")
+        clear_config_cache()
+        try:
+            # One slot already taken by a RUNNING run: only one more admitted.
+            await self._seed_pending(async_session_factory, 3, running=1)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert len(dispatched) == 1
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_returns_empty_at_capacity(
+        self,
+        mock_execute,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        monkeypatch,
+    ):
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_MAX_CONCURRENT_RUNS", "1")
+        clear_config_cache()
+        try:
+            await self._seed_pending(async_session_factory, 2, running=1)
+            dispatched = await dispatch_pending_runs(
+                async_session_factory, mock_settings, mock_client
+            )
+            assert dispatched == []
+        finally:
+            clear_config_cache()
+
+    @patch("openhands.automation.dispatcher._execute_run_safe", new_callable=AsyncMock)
+    async def test_gate_skips_deferred_pending_runs(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A PENDING run whose deferred_until is in the future is not admitted."""
+        ids = await self._seed_pending(async_session_factory, 1)
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == ids[0])
+                .values(deferred_until=utcnow() + timedelta(minutes=5))
+            )
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+        assert dispatched == []
+
+        # Once the deferral elapses it becomes eligible again.
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == ids[0])
+                .values(deferred_until=utcnow() - timedelta(seconds=1))
+            )
+            await session.commit()
+
+        dispatched = await dispatch_pending_runs(
+            async_session_factory, mock_settings, mock_client
+        )
+        assert len(dispatched) == 1
+
+
+class TestRequeueDeferredRun:
+    """The requeue write is guarded and drives the backoff counter."""
+
+    async def _make_running_run(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            run = AutomationRun(
+                automation_id=automation.id,
+                status=AutomationRunStatus.RUNNING,
+                started_at=utcnow(),
+                timeout_at=utcnow() + timedelta(hours=1),
+            )
+            session.add(run)
+            await session.commit()
+            run_id = run.id
+
+        async with async_session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(AutomationRun)
+                        .options(selectinload(AutomationRun.automation))
+                        .where(AutomationRun.id == run_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return run, run_id
+
+    async def test_requeue_returns_run_to_pending(self, async_session_factory):
+        run, run_id = await self._make_running_run(async_session_factory)
+        when = utcnow() + timedelta(minutes=2)
+
+        ok = await requeue_deferred_run(
+            async_session_factory,
+            run,
+            deferred_until=when,
+            status_detail={"kind": "concurrency_limit"},
+        )
+        assert ok is True
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.started_at is None
+            assert updated.timeout_at is None
+            assert updated.completed_at is None
+            assert updated.deferred_until is not None
+            assert updated.deferral_count == 1
+            assert updated.status_detail == {"kind": "concurrency_limit"}
+
+    async def test_requeue_is_idempotent_and_never_resurrects_terminal(
+        self, async_session_factory
+    ):
+        """A second requeue after the run left RUNNING is a no-op."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=1)
+        )
+
+        # The run is now PENDING; a stale requeue must not move it again.
+        ok = await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=5)
+        )
+        assert ok is False
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.PENDING
+            assert updated.deferral_count == 1  # not double-incremented
+
+    async def test_requeue_leaves_terminal_run_untouched(self, async_session_factory):
+        """A run that completed (callback) while deferred is not resurrected."""
+        run, run_id = await self._make_running_run(async_session_factory)
+        async with async_session_factory() as session:
+            await session.execute(
+                update(AutomationRun)
+                .where(AutomationRun.id == run_id)
+                .values(status=AutomationRunStatus.COMPLETED, completed_at=utcnow())
+            )
+            await session.commit()
+
+        ok = await requeue_deferred_run(
+            async_session_factory, run, deferred_until=utcnow() + timedelta(minutes=1)
+        )
+        assert ok is False
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.COMPLETED
+
+    async def test_backoff_delay_grows_per_attempt(
+        self, async_session_factory, mock_settings, mock_client, monkeypatch
+    ):
+        """Consecutive deferrals wait progressively longer (bounded).
+
+        Drives the real dispatch path twice so the delay is read from the
+        run's persisted deferral_count, not re-derived from the formula.
+        """
+        from openhands.automation.config import clear_config_cache
+
+        monkeypatch.setenv("AUTOMATION_DEFER_BACKOFF_BASE_SECONDS", "10")
+        clear_config_cache()
+        try:
+            _, run_id = await self._make_running_run(async_session_factory)
+            backend = MagicMock()
+            backend.is_local_mode = False
+            backend.get_execution_context = AsyncMock(
+                side_effect=ConcurrencyLimitReachedError("limit")
+            )
+            backend.release_context = AsyncMock()
+
+            delays = []
+            for _ in range(3):
+                async with async_session_factory() as session:
+                    run = (
+                        (
+                            await session.execute(
+                                select(AutomationRun)
+                                .options(selectinload(AutomationRun.automation))
+                                .where(AutomationRun.id == run_id)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                before = utcnow()
+                with patch(
+                    "openhands.automation.dispatcher.get_backend", return_value=backend
+                ):
+                    await _execute_run(
+                        run, mock_settings, async_session_factory, mock_client
+                    )
+                async with async_session_factory() as session:
+                    current = await session.get(AutomationRun, run_id)
+                    delays.append((current.deferred_until - before).total_seconds())
+                    # Put the run back in RUNNING so it can be deferred again.
+                    await session.execute(
+                        update(AutomationRun)
+                        .where(AutomationRun.id == run_id)
+                        .values(status=AutomationRunStatus.RUNNING, deferred_until=None)
+                    )
+                    await session.commit()
+
+            assert delays[0] < delays[1] < delays[2]
+        finally:
+            clear_config_cache()
+
+    async def test_count_running_runs_counts_only_running(self, async_session_factory):
+        async with async_session_factory() as session:
+            automation = Automation(
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="Test",
+                trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+                tarball_path="s3://bucket/code.tar.gz",
+                entrypoint="uv run main.py",
+                enabled=True,
+            )
+            session.add(automation)
+            await session.commit()
+            for status in (
+                AutomationRunStatus.RUNNING,
+                AutomationRunStatus.RUNNING,
+                AutomationRunStatus.PENDING,
+                AutomationRunStatus.COMPLETED,
+            ):
+                session.add(AutomationRun(automation_id=automation.id, status=status))
+            await session.commit()
+
+            assert await count_running_runs(session) == 2
+
+
 class TestExecuteRunProvisioningRetry:
     """A sandbox that fails to start before the entrypoint runs is retried with
     a fresh sandbox, as long as the run is still RUNNING."""
@@ -2172,7 +2641,7 @@ class TestExecuteRunProvisioningRetry:
         assert updated.status == AutomationRunStatus.CANCELLED
         assert updated.sandbox_id is None
 
-    async def test_concurrency_limit_on_retry_is_skipped(
+    async def test_concurrency_limit_on_retry_is_deferred(
         self, async_session_factory, mock_settings, mock_client
     ):
         run, run_id = await self._make_running_run(async_session_factory)
@@ -2185,7 +2654,8 @@ class TestExecuteRunProvisioningRetry:
 
         assert backend.get_execution_context.await_count == 2
         updated = await self._load(async_session_factory, run_id)
-        assert updated.status == AutomationRunStatus.SKIPPED
+        assert updated.status == AutomationRunStatus.PENDING
+        assert updated.deferred_until is not None
         assert updated.status_detail is not None
         assert updated.status_detail["kind"] == "concurrency_limit"
 
