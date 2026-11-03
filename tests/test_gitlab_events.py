@@ -13,7 +13,7 @@ from sqlalchemy import select
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
 from openhands.automation.event_schemas import parse_event
-from openhands.automation.event_schemas.gitlab import parse_gitlab_event
+from openhands.automation.event_schemas.gitlab import GitLabEvent, parse_gitlab_event
 from openhands.automation.models import Automation, AutomationRun, CustomWebhook
 
 
@@ -122,6 +122,7 @@ class TestParseGitLabEvent:
     )
     def test_event_key_is_kind_and_action(self, payload, event_key):
         event = parse_event("gitlab", payload)
+        assert isinstance(event, GitLabEvent)
         assert event.source == "gitlab"
         assert event.event_key == event_key
         assert event.payload == payload
