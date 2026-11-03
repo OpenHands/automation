@@ -1,6 +1,7 @@
 """Tests for the capabilities and preflight validation endpoints."""
 
 import dataclasses
+import json
 import uuid
 
 import httpx
@@ -38,6 +39,38 @@ EVENT_DRAFT = {
         "filter": "icontains(comment.body, '@openhands')",
     },
 }
+
+SLACK_TEAM_ID = "T12345678"
+SLACK_BOT_USER_ID = "U87654321"
+
+
+def slack_apps_env(org_id: uuid.UUID = TEST_ORG_ID) -> str:
+    return json.dumps(
+        [
+            {
+                "org_id": str(org_id),
+                "app_token": "xapp-1",
+                "bot_token": "xoxb-1",
+                "team_id": SLACK_TEAM_ID,
+                "bot_user_id": SLACK_BOT_USER_ID,
+            }
+        ]
+    )
+
+
+def slack_mention_event(text: str = "<@U87654321> hello") -> dict:
+    return {
+        "team_id": SLACK_TEAM_ID,
+        "event_id": "Ev123",
+        "event": {
+            "type": "app_mention",
+            "user": "U111",
+            "channel": "C222",
+            "ts": "1700000000.000100",
+            "text": text,
+        },
+    }
+
 
 BUNDLE_DRAFT = {
     "name": "PR reviewer",
@@ -140,6 +173,7 @@ class TestGetCapabilities:
             "azure_devops",
             "bitbucket_data_center",
             "github",
+            "gitlab",
             "jira_dc",
         ]
         assert body["eventTypes"] == [
@@ -150,6 +184,25 @@ class TestGetCapabilities:
             "push",
             "release.*",
         ]
+        by_source = body["eventTypesBySource"]
+        assert set(by_source) == {
+            "bitbucket_data_center",
+            "github",
+            "gitlab",
+            "jira_dc",
+        }
+        assert by_source["gitlab"] == [
+            "build.*",
+            "issue.*",
+            "merge_request.*",
+            "note",
+            "pipeline.*",
+        ]
+        assert by_source["github"] == body["eventTypes"]
+        assert "comment_created" in by_source["jira_dc"]
+        assert "jira:issue_updated" in by_source["jira_dc"]
+        assert "pr:opened" in by_source["bitbucket_data_center"]
+        assert "pr:comment:added" in by_source["bitbucket_data_center"]
         assert body["triggers"]["event"]["filterLanguage"] == "jmespath"
         assert "icontains" in body["triggers"]["event"]["filterFunctions"]
         assert "UTC" in body["triggers"]["cron"]["timezones"]
@@ -158,6 +211,7 @@ class TestGetCapabilities:
         assert "customTarball" in body["features"]
         assert "automationDescription" in body["features"]
         assert "repoUpdate" in body["features"]
+        assert "serviceAccountRunAs" in body["features"]
         # The list follows the pinned SDK's providers, so an SDK bump that adds
         # one (Azure DevOps in 1.58.0) is advertised without a change here.
         assert body["repoProviders"] == sorted(p.value for p in GitProvider)
@@ -179,6 +233,44 @@ class TestGetCapabilities:
         assert response.status_code == 200
         assert response.json()["maxAutomationTimeoutSeconds"] == 900
 
+    async def test_configured_stream_source_advertises_event_support(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """A Slack Socket Mode app can deliver events without webhook config."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+
+        response = await async_client.get(CAPABILITIES_URL)
+
+        body = response.json()
+        assert body["triggerKinds"] == ["cron", "event"]
+        assert body["eventSources"] == ["slack"]
+        assert "webhookDelivery" not in body["features"]
+
+    async def test_validate_accepts_configured_stream_source(
+        self, async_client, ready_deployment, monkeypatch
+    ):
+        """Preflight uses the stream event key shape for Slack Socket Mode."""
+        monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "")
+        monkeypatch.setenv("AUTOMATION_SLACK_APPS", slack_apps_env())
+        clear_config_cache()
+        draft = with_trigger(
+            EVENT_DRAFT,
+            source="slack",
+            on="app_mention",
+            filter=f"team_id == '{SLACK_TEAM_ID}'",
+        )
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(draft, sampleEvent=slack_mention_event()),
+        )
+
+        body = response.json()
+        assert body["valid"] is True
+        assert body["sampleEventMatched"] is True
+
     async def test_deployment_without_webhook_secret_withdraws_event_support(
         self, async_client, ready_deployment, monkeypatch
     ):
@@ -192,6 +284,7 @@ class TestGetCapabilities:
         assert body["triggerKinds"] == ["cron"]
         assert body["eventSources"] == []
         assert body["eventTypes"] == []
+        assert body["eventTypesBySource"] == {}
         assert "event" not in body["triggers"]
         assert "webhookDelivery" not in body["features"]
 
@@ -225,6 +318,7 @@ class TestGetCapabilities:
         body = response.json()
         assert body["eventSources"] == ["linear"]
         assert body["triggerKinds"] == ["cron", "event"]
+        assert "webhookDelivery" in body["features"]
 
     async def test_cloud_deployment_without_service_key_is_not_ready(
         self, async_client, monkeypatch
@@ -351,6 +445,86 @@ class TestValidateDraft:
         body = response.json()
         assert addressed_errors(body) == expected_errors
         assert body["valid"] == (expected_errors == [])
+
+    @pytest.mark.parametrize(
+        ("source", "event_pattern", "expected_errors"),
+        [
+            pytest.param("jira_dc", "comment_created", [], id="jira-dc-comment"),
+            pytest.param("jira_dc", "jira:issue_*", [], id="jira-dc-wildcard"),
+            pytest.param(
+                "jira_dc",
+                "jira:worklog_updated",
+                [("trigger.on", "event_type_not_delivered")],
+                id="jira-dc-unsubscribed",
+            ),
+            pytest.param(
+                "bitbucket_data_center", "pr:opened", [], id="bitbucket-dc-pr"
+            ),
+            pytest.param(
+                "bitbucket_data_center",
+                "pull_request.opened",
+                [("trigger.on", "event_type_not_delivered")],
+                id="bitbucket-dc-github-key",
+            ),
+            pytest.param("gitlab", "merge_request.open", [], id="gitlab-mr"),
+            pytest.param("gitlab", "note", [], id="gitlab-note"),
+            pytest.param(
+                "gitlab",
+                "push",
+                [("trigger.on", "event_type_not_delivered")],
+                id="gitlab-unsubscribed",
+            ),
+            pytest.param("azure_devops", "anything", [], id="no-catalog"),
+        ],
+    )
+    async def test_data_center_event_types_are_checked_against_their_catalog(
+        self,
+        async_client,
+        configured_deployment,
+        source,
+        event_pattern,
+        expected_errors,
+    ):
+        """Each source's own catalog decides which event keys can fire."""
+        draft = with_trigger(EVENT_DRAFT, source=source, on=event_pattern)
+
+        response = await async_client.post(VALIDATE_URL, json=preflight(draft))
+
+        body = response.json()
+        assert addressed_errors(body) == expected_errors
+        assert body["valid"] == (expected_errors == [])
+
+    async def test_an_orgs_own_gitlab_webhook_keeps_its_event_keys(
+        self, async_client, async_session, configured_deployment
+    ):
+        """A custom webhook registered as `gitlab` before it was built in."""
+        async_session.add(
+            CustomWebhook(
+                org_id=TEST_ORG_ID,
+                name="GitLab",
+                source="gitlab",
+                webhook_secret="gitlab-secret",
+                event_key_expr="object_kind",
+            )
+        )
+        await async_session.commit()
+        draft = with_trigger(EVENT_DRAFT, source="gitlab", on="merge_request")
+        draft["trigger"].pop("filter")
+
+        response = await async_client.post(
+            VALIDATE_URL,
+            json=preflight(
+                draft,
+                sampleEvent={
+                    "object_kind": "merge_request",
+                    "object_attributes": {"action": "open"},
+                },
+            ),
+        )
+
+        body = response.json()
+        assert addressed_errors(body) == []
+        assert body["sampleEventMatched"] is True
 
     async def test_event_trigger_for_an_undeliverable_source_is_rejected(
         self, async_client, monkeypatch

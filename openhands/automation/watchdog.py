@@ -46,6 +46,7 @@ from openhands.automation.models import (
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.agent_server import VerificationOutcome
+from openhands.automation.utils.change_events import SYSTEM_ACTOR, set_audit_actor
 from openhands.automation.utils.run import record_first_run_outcome
 from openhands.automation.utils.run_status_detail import (
     RunStatusDetailKind,
@@ -574,6 +575,7 @@ async def mark_stale_runs(
     marked = 0
 
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         # Fetch stale run IDs only — close this session before doing any
         # per-run work so we don't hold locks across slow verify calls.
         result = await session.execute(
@@ -587,6 +589,7 @@ async def mark_stale_runs(
 
     for run_id in stale_run_ids:
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             # Re-fetch with automation relationship inside a fresh session.
             result = await session.execute(
                 select(AutomationRun)
@@ -778,6 +781,7 @@ async def purge_terminal_workspaces(
         # The single query is safe because the candidate list is bounded by
         # the classification window (150 entries with the default settings).
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             stmt = select(
                 AutomationRun.id,
                 AutomationRun.status,
@@ -888,6 +892,7 @@ async def prune_integration_events(
     cutoff = utcnow() - timedelta(days=settings.integration_event_retention_days)
 
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         result: CursorResult = await session.execute(  # type: ignore[assignment]
             delete(IntegrationEvent).where(
                 IntegrationEvent.id.in_(
@@ -916,6 +921,7 @@ async def cleanup_due_sandboxes(
     """
     now = utcnow()
     async with session_factory() as session:
+        set_audit_actor(session, SYSTEM_ACTOR)
         result = await session.execute(
             select(AutomationRun.id)
             .where(
@@ -930,6 +936,7 @@ async def cleanup_due_sandboxes(
     cleaned = 0
     for run_id in due_run_ids:
         async with session_factory() as session:
+            set_audit_actor(session, SYSTEM_ACTOR)
             # Re-fetch with the automation relationship so the backend can
             # mint the per-user API key it deletes with.
             result = await session.execute(

@@ -37,7 +37,9 @@ from openhands.automation.exceptions import (
 )
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationRun,
+    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
 )
@@ -307,6 +309,38 @@ class TestIsHttpUrl:
         assert is_http_url("gs://bucket/key.tar.gz") is False
 
 
+async def test_download_internal_tarball_ignores_other_org_upload(
+    async_session_factory,
+):
+    """An upload outside the automation's org is treated as missing."""
+    from openhands.automation.dispatcher import _download_internal_tarball
+    from openhands.automation.exceptions import TarballNotFoundError
+    from openhands.automation.models import TarballUpload, UploadStatus
+
+    upload_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        session.add(
+            TarballUpload(
+                id=upload_id,
+                user_id=TEST_USER_ID,
+                org_id=uuid.uuid4(),
+                name="other-org-upload",
+                status=UploadStatus.COMPLETED,
+                storage_path=f"uploads/other/{upload_id}.tar",
+            )
+        )
+        await session.commit()
+    store = MagicMock()
+    store.read.return_value = b"other org tarball"
+
+    with patch("openhands.automation.storage.get_file_store", return_value=store):
+        async with async_session_factory() as session:
+            with pytest.raises(TarballNotFoundError):
+                await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
+
+    store.read.assert_not_called()
+
+
 class TestMarkRunStatus:
     """Tests for mark_run_status function."""
 
@@ -557,6 +591,37 @@ class TestMarkRunTerminalFirstRunOutcome:
             first_run = automation.preset_metadata["first_run"]
             assert first_run["status"] == "failure"
             assert first_run["failure_stage"] == "dispatch"
+
+    async def test_dispatch_failure_first_run_write_has_an_audit_actor(
+        self, async_session_factory, monkeypatch
+    ):
+        """The dispatcher's own session names SYSTEM, so strict mode does not
+        raise (and lose the write) when it records the first run."""
+        from openhands.automation.utils import change_events
+
+        automation_id, run = await self._seed_template_run(async_session_factory)
+        monkeypatch.setattr(change_events, "STRICT", True)
+
+        await mark_run_terminal(
+            async_session_factory,
+            run,
+            AutomationRunStatus.FAILED,
+            "sandbox creation failed",
+        )
+
+        async with async_session_factory() as session:
+            automation = await session.get(Automation, automation_id)
+            assert automation.preset_metadata["first_run"]["status"] == "failure"
+            (change,) = await session.scalars(
+                select(AutomationChangeEvent).where(
+                    AutomationChangeEvent.automation_id == automation_id,
+                    AutomationChangeEvent.action != "create",
+                )
+            )
+        assert (change.actor_kind, change.changed_fields) == (
+            "system",
+            ["preset_metadata"],
+        )
 
     async def test_skipped_run_does_not_consume_the_first_run_slot(
         self, async_session_factory
@@ -1609,6 +1674,220 @@ class TestExecuteRunConcurrencyLimit:
             auto = await session.get(Automation, automation_id)
             assert auto.enabled is True
 
+    async def test_plugin_preflight_api_key_error_fails_run_with_dispatch_detail(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A failed owner key mint in the plugin preflight fails the run as a
+        dispatch error, runs the unhealthy check, and creates no sandbox."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP 403: user is not a member of the org")
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+            patch(
+                "openhands.automation.dispatcher.maybe_disable_unhealthy_automation_after_run",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as maybe_disable,
+            patch(
+                "openhands.automation.dispatcher.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        maybe_disable.assert_awaited_once_with(async_session_factory, automation_id)
+        capture_event.assert_awaited_once_with(
+            "automation_run_failed",
+            automation=run.automation,
+            run=run,
+            session_factory=async_session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "failure_kind": "dispatch_error",
+                "automation_disabled": False,
+            },
+        )
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert "API key" in updated.error_detail
+            assert "HTTP 403" in updated.error_detail
+            assert updated.status_detail is not None
+            assert updated.status_detail["phase"] == "dispatch"
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == "unknown"
+            assert updated.status_detail["transient"] is False
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    @pytest.mark.parametrize(
+        ("status_code", "transient", "kind"),
+        [
+            (401, False, "unknown"),
+            (403, False, "auth"),
+            (404, False, "auth"),
+            (500, True, "server_error"),
+            (503, True, "server_error"),
+            (429, True, "rate_limited"),
+            (None, False, "unknown"),
+        ],
+    )
+    async def test_run_as_key_mint_failure_is_classified_by_status_code(
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        status_code,
+        transient,
+        kind,
+    ):
+        """A 401/403/404 from the key mint is a permanent run failure; a 5xx is
+        transient. The run fails either way and no sandbox is created. A 403/404
+        is kind ``auth`` (the run-as identity), which the unhealthy check counts;
+        a 401 (the shared service key) stays ``unknown``."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, automation_id = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_execution_context = AsyncMock(
+            side_effect=APIKeyError("HTTP error: body", status_code=status_code)
+        )
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.release_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail is not None
+            assert updated.status_detail["operation"] == "get_execution_context"
+            assert updated.status_detail["source"] == "openhands_api"
+            assert updated.status_detail["code"] == "APIKeyError"
+            assert updated.status_detail["kind"] == kind
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail.get("status_code") == status_code
+            if status_code == 401:
+                assert "service key" in updated.error_detail
+                assert "runs as may be disabled" not in updated.error_detail
+            if status_code in (403, 404):
+                assert "runs as may be disabled" in updated.error_detail
+            auto = await session.get(Automation, automation_id)
+            assert auto.enabled is True
+
+    async def test_run_as_key_mint_network_error_is_transient(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """A network failure reaching the key mint has no status and is transient."""
+        import httpx
+
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        error = APIKeyError("Request failed: connect error")
+        error.__cause__ = httpx.ConnectError("connect failed")
+        backend.get_execution_context = AsyncMock(side_effect=error)
+        backend.release_context = AsyncMock()
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["kind"] == "transport"
+            assert updated.status_detail["transient"] is True
+
+    @pytest.mark.parametrize(("status_code", "transient"), [(403, False), (503, True)])
+    async def test_plugin_preflight_key_mint_failure_uses_status_code(
+        self, async_session_factory, mock_settings, mock_client, status_code, transient
+    ):
+        """The plugin preflight path classifies the key mint the same way."""
+        from openhands.automation.utils.api_key import APIKeyError
+
+        run, run_id, _ = await self._make_running_run(async_session_factory)
+        run.automation.plugin_spec = {
+            "plugin": {"source": "github:org/plugin"},
+            "config": {},
+        }
+        run.automation.tarball_path = "plugin-spec://runtime"
+        run.automation.agent_profile_id = uuid.UUID(
+            "0a1b2c3d-0000-4000-8000-000000000012"
+        )
+        backend = MagicMock()
+        backend.is_local_mode = False
+        backend.get_work_dir = MagicMock(return_value="/workspace")
+        backend.get_api_key = AsyncMock(
+            side_effect=APIKeyError("HTTP error", status_code=status_code)
+        )
+        payload = (
+            b"tarball",
+            {},
+            {
+                "kind": "plugin_spec",
+                "entrypoint": "python main.py",
+                "manifest": {"runtime": {"agent_profile": {"required": True}}},
+            },
+            [{"source": "github:org/plugin"}],
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher.build_execution_payload",
+                return_value=payload,
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.get_execution_context.assert_not_called()
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.FAILED
+            assert updated.status_detail["operation"] == "preflight_plugin"
+            assert updated.status_detail["transient"] is transient
+            assert updated.status_detail["status_code"] == status_code
+
     async def test_plugin_fetch_transport_failure_releases_context(
         self, async_session_factory, mock_settings
     ):
@@ -1939,11 +2218,13 @@ class TestExecuteRunDerivedConversationId:
         trigger: dict,
         subject_key: str | None,
         agent_profile_id: uuid.UUID | None = None,
+        run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER,
     ):
         """Drive _execute_run once; returns (env_vars, org_id, automation_id)."""
         async with async_session_factory() as session:
             automation = Automation(
                 user_id=TEST_USER_ID,
+                run_as_kind=run_as_kind,
                 org_id=TEST_ORG_ID,
                 name="Mention Responder",
                 agent_profile_id=agent_profile_id,
@@ -2017,8 +2298,35 @@ class TestExecuteRunDerivedConversationId:
         )
 
         assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
-            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997"
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
         )
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_run_as_service_subject_run_gets_an_account_keyed_id(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """A run-as-service run's id carries the account; a run-as change re-keys it."""
+        env_vars, org_id, automation_id = await self._dispatch(
+            mock_execute,
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            trigger={"type": "event", "source": "github-events", "on": "*"},
+            subject_key="OpenHands/OpenHands/16997",
+            run_as_kind=AutomationRunAsKind.SERVICE,
+        )
+
+        user_owned_id = conversation_id_for(
+            org_id, automation_id, "github-events", "OpenHands/OpenHands/16997", None
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] == conversation_id_for(
+            org_id,
+            automation_id,
+            "github-events",
+            "OpenHands/OpenHands/16997",
+            TEST_USER_ID,
+        )
+        assert env_vars["AUTOMATION_CONVERSATION_ID"] != user_owned_id
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_run_without_a_subject_gets_no_id(

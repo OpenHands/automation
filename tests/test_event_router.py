@@ -5,6 +5,7 @@ import hmac
 import json
 import uuid
 
+import jmespath
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -225,6 +226,98 @@ async def test_requested_github_event_types_rejects_invalid_signature(
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid signature"
+
+
+@pytest.mark.asyncio
+async def test_requested_bitbucket_data_center_event_types_detect_each_key(
+    async_client: AsyncClient,
+    bitbucket_data_center_pr_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The forwarder can filter Bitbucket DC events instead of sending all."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    source = "bitbucket_data_center"
+
+    response = await async_client.get(
+        f"/api/automation/v1/events/{source}/requested-types",
+        headers={"X-Hub-Signature-256": sign_text(source, "test-secret")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "pr:opened" in data["event_types"]
+    assert "repo:refs_changed" in data["event_types"]
+    assert [rule["event_type"] for rule in data["event_detection_rules"]] == (
+        data["event_types"]
+    )
+    detected = [
+        rule["event_type"]
+        for rule in data["event_detection_rules"]
+        if jmespath.search(
+            rule["jmespath"], bitbucket_data_center_pr_payload["payload"]
+        )
+    ]
+    assert detected == ["pr:opened"]
+    assert not any(
+        jmespath.search(rule["jmespath"], {"eventKey": "diagnostics:ping"})
+        for rule in data["event_detection_rules"]
+    )
+    assert data["org_ids"] is None
+
+
+@pytest.mark.asyncio
+async def test_requested_jira_dc_event_types_name_orgs_with_automations(
+    async_client: AsyncClient,
+    async_session,
+    jira_dc_comment_payload: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_authenticated_user,
+):
+    """Jira DC events reach every org with an enabled Jira DC automation."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    jira_org, other_jira_org, github_org, disabled_org = (
+        uuid.uuid4() for _ in range(4)
+    )
+
+    def automation(org: uuid.UUID, source: str, enabled: bool = True) -> Automation:
+        return Automation(
+            id=uuid.uuid4(),
+            user_id=mock_authenticated_user.user_id,
+            org_id=org,
+            name=f"{source} automation",
+            tarball_path="oh-internal://uploads/test.tar.gz",
+            entrypoint="python main.py",
+            enabled=enabled,
+            trigger={"type": "event", "source": source, "on": "comment_created"},
+        )
+
+    async_session.add_all(
+        [
+            automation(jira_org, "jira_dc"),
+            automation(jira_org, "jira_dc"),
+            automation(other_jira_org, "jira_dc"),
+            automation(github_org, "github"),
+            automation(disabled_org, "jira_dc", enabled=False),
+        ]
+    )
+    await async_session.commit()
+
+    response = await async_client.get(
+        "/api/automation/v1/events/jira_dc/requested-types",
+        headers={"X-Hub-Signature-256": sign_text("jira_dc", "test-secret")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["org_ids"] == sorted([str(jira_org), str(other_jira_org)])
+    assert "comment_created" in data["event_types"]
+    assert "jira:issue_created" in data["event_types"]
+    detected = [
+        rule["event_type"]
+        for rule in data["event_detection_rules"]
+        if jmespath.search(rule["jmespath"], jira_dc_comment_payload["payload"])
+    ]
+    assert detected == ["comment_created"]
 
 
 @pytest.mark.asyncio

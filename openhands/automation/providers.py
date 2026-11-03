@@ -79,6 +79,10 @@ class Provider:
     # None means the provider does not identify deliveries, so its events are
     # recorded but never deduplicated.
     event_id_header: str | None = None
+    # The source name was open to custom webhooks before this provider was
+    # built in, so an org may still have an enabled custom webhook under it.
+    # That webhook keeps precedence for its org (see get_webhook_config).
+    custom_webhook_precedence: bool = False
     # Reserved. Deliberately not wired: no provider on the roadmap performs an
     # HTTP handshake, and Socket Mode is our Slack path.
     handshake: HandshakeFunc | None = None
@@ -286,16 +290,18 @@ def _register_builtin_providers() -> None:
         parse_bitbucket_data_center_event,
     )
     from openhands.automation.event_schemas.github import parse_github_event_auto
+    from openhands.automation.event_schemas.gitlab import parse_gitlab_event
     from openhands.automation.event_schemas.jira_dc import parse_jira_dc_event
 
     # All forwarded by the OpenHands server, which signs with the single shared
     # AUTOMATION_WEBHOOK_SECRET into GitHub's header name. Only GitHub names its
     # deliveries; the others are recorded without being deduplicated.
-    for source, parse, event_id_header in (
-        ("azure_devops", parse_azure_devops_event, None),
-        ("bitbucket_data_center", parse_bitbucket_data_center_event, None),
-        ("github", parse_github_event_auto, "X-GitHub-Delivery"),
-        ("jira_dc", parse_jira_dc_event, None),
+    for source, parse, event_id_header, custom_webhook_precedence in (
+        ("azure_devops", parse_azure_devops_event, None, False),
+        ("bitbucket_data_center", parse_bitbucket_data_center_event, None, False),
+        ("github", parse_github_event_auto, "X-GitHub-Delivery", False),
+        ("gitlab", parse_gitlab_event, None, True),
+        ("jira_dc", parse_jira_dc_event, None, False),
     ):
         register_provider(
             Provider(
@@ -303,6 +309,7 @@ def _register_builtin_providers() -> None:
                 parse=parse,
                 secret_from_settings=lambda s: s.webhook_secret or None,
                 event_id_header=event_id_header,
+                custom_webhook_precedence=custom_webhook_precedence,
             )
         )
 

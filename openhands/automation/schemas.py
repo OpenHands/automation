@@ -20,7 +20,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
-from openhands.automation.models import AutomationState
+from openhands.automation.models import AutomationRunAsKind, AutomationState
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
@@ -30,6 +30,7 @@ from openhands.automation.providers import (
     reserved_sources,
     verifier_schemes,
 )
+from openhands.automation.tags import normalize_tags
 from openhands.automation.utils.cron import (
     validate_cron_schedule as validate_cron_schedule_value,
     validate_timezone_name,
@@ -480,9 +481,27 @@ class TemplateProvenance(BaseModel):
 
 # --- Requests ---
 
+TAGS_DESCRIPTION: Final[str] = (
+    "Labels for grouping and filtering automations, e.g. 'software-factory'. "
+    "Each is trimmed, lowercased, and has whitespace replaced by '-'; at most "
+    "10 tags of up to 50 characters."
+)
+
+
+RUN_AS_USER_ID_DESCRIPTION = (
+    "Run the automation as this service account of the organization instead "
+    "of as the caller. Requires manage_automations. Its runs use the service "
+    "account's API key, and its upload moves to the service account. "
+    "Omitted: it runs as the caller."
+)
+
 
 class CreateAutomationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
 
     agent_profile_id: uuid.UUID | None = Field(
         default=None,
@@ -513,6 +532,7 @@ class CreateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] = Field(default_factory=list, description=TAGS_DESCRIPTION)
     tarball_path: str = Field(
         ..., description="Path to SDK code tarball (e.g., S3 or GCS URL)"
     )
@@ -574,7 +594,7 @@ class CreateAutomationRequest(BaseModel):
     def validate_tarball_path(cls, v: str) -> str:
         if not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, or https://"
             )
         return v
 
@@ -596,6 +616,11 @@ class CreateAutomationRequest(BaseModel):
         cls, v: dict[str, str] | None
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str]) -> list[str]:
+        return normalize_tags(v)
 
     @field_validator("timeout")
     @classmethod
@@ -697,6 +722,10 @@ class UpdateAutomationRequest(BaseModel):
             "evaluated against the incoming event payload."
         ),
     )
+    tags: list[str] | None = Field(
+        default=None,
+        description=f"{TAGS_DESCRIPTION} Replaces the whole list; [] clears it.",
+    )
     tarball_path: str | None = Field(default=None)
     setup_script_path: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
@@ -729,7 +758,7 @@ class UpdateAutomationRequest(BaseModel):
     def validate_tarball_path(cls, v: str | None) -> str | None:
         if v is not None and not _TARBALL_SCHEME_RE.match(v):
             raise ValueError(
-                "tarball_path must start with s3://, gs://, http://, or https://"
+                "tarball_path must start with oh-internal://, s3://, gs://, or https://"
             )
         return v
 
@@ -756,6 +785,15 @@ class UpdateAutomationRequest(BaseModel):
     ) -> dict[str, str] | None:
         return validate_observability_association_exprs(v)
 
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str] | None) -> list[str]:
+        # Runs only when the field is sent; an explicit null would hit the
+        # NOT NULL column, so clearing is spelled [].
+        if v is None:
+            raise ValueError("tags cannot be null; send [] to clear them")
+        return normalize_tags(v)
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int | None) -> int | None:
@@ -779,6 +817,9 @@ class WebhookConfig(BaseModel):
     # source does not identify its deliveries. Built-in providers take it from
     # their descriptor; a custom webhook takes it from its row.
     event_id_header: str | None = None
+    # A custom webhook registered under a source name that is now built in.
+    # It keeps precedence for its org, so built-in deliveries are ignored.
+    shadows_builtin: bool = False
 
 
 class EventResponse(BaseModel):
@@ -804,6 +845,9 @@ class RequestedEventTypesResponse(BaseModel):
     source: str
     event_types: list[str]
     event_detection_rules: list[EventDetectionRule] = Field(default_factory=list)
+    # Organizations with an enabled automation on the source, for forwarders
+    # that fan an event out to them. None for sources routed to a single org.
+    org_ids: list[str] | None = None
 
 
 # Valid source name pattern: lowercase alphanumeric with hyphens, 1-50 chars
@@ -1085,6 +1129,8 @@ class AutomationResponse(BaseModel):
     agent_profile_id: uuid.UUID | None = None
     id: uuid.UUID
     user_id: uuid.UUID
+    run_as_kind: AutomationRunAsKind = AutomationRunAsKind.USER
+    created_by_user_id: uuid.UUID
     org_id: uuid.UUID
     model: str | None
 
@@ -1095,6 +1141,7 @@ class AutomationResponse(BaseModel):
     plugin_spec: dict | None = None
     trigger: dict
     observability_associations: dict[str, str] | None = None
+    tags: list[str] = Field(default_factory=list)
     tarball_path: str
     setup_script_path: str | None
     entrypoint: str
@@ -1121,6 +1168,17 @@ class AutomationResponse(BaseModel):
 class AutomationListResponse(BaseModel):
     automations: list[AutomationResponse]
     total: int
+
+
+class AutomationTagCount(BaseModel):
+    tag: str
+    count: int = Field(..., description="Live automations carrying this tag")
+
+
+class AutomationTagsResponse(BaseModel):
+    """The org's tags, most-used first, for a list filter."""
+
+    tags: list[AutomationTagCount]
 
 
 class CreateAutomationDraftRequest(BaseModel):
@@ -1232,6 +1290,7 @@ class AutomationRunResponse(BaseModel):
     automation_id: uuid.UUID
     status: RunStatus
     trigger_source: str | None = None
+    triggered_by_user_id: uuid.UUID | None = None
     error_detail: str | None
     status_detail: dict[str, Any] | None = None
     current_phase: str | None = None
@@ -1258,6 +1317,47 @@ class AutomationRunListResponse(BaseModel):
     # Lifetime run counts by status, unaffected by pagination. Sparse: only
     # statuses with at least one run appear, so a missing key means zero.
     status_counts: dict[RunStatus, int] = Field(default_factory=dict)
+
+
+class ChangeRunAsRequest(BaseModel):
+    """Make an automation run as a service account, or as the caller."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    to: Literal["service", "self"]
+    service_account_id: uuid.UUID | None = Field(
+        default=None,
+        description="Required when `to` is `service`; not allowed otherwise.",
+    )
+
+    @model_validator(mode="after")
+    def _service_account_matches_target(self) -> "ChangeRunAsRequest":
+        if (self.to == "service") != (self.service_account_id is not None):
+            raise ValueError(
+                "service_account_id is required when to is 'service' and "
+                "not allowed when to is 'self'"
+            )
+        return self
+
+
+class AutomationChangeResponse(BaseModel):
+    """One audited change to an automation (field names only, no values)."""
+
+    id: uuid.UUID
+    actor_user_id: uuid.UUID | None
+    actor_kind: Literal["user", "service", "git_sync", "system"]
+    action: str
+    changed_fields: list[str]
+    created_at: UtcDatetime
+
+    model_config = {"from_attributes": True}
+
+
+class AutomationChangeListResponse(BaseModel):
+    """Response for listing an automation's changes."""
+
+    changes: list[AutomationChangeResponse]
+    total: int
 
 
 # --- Capability and Preflight Schemas ---
@@ -1316,7 +1416,15 @@ class CapabilitiesResponse(_SetupContractModel):
             "Event key patterns matched with the same wildcard syntax a "
             "trigger's 'on' field uses. Only sources publishing a known "
             "catalog contribute; a custom webhook's keys come from its own "
-            "event_key_expr."
+            "event_key_expr. Kept to GitHub's patterns for older clients; "
+            "eventTypesBySource covers every source."
+        ),
+    )
+    event_types_by_source: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Event key patterns per offered event source, for each source "
+            "that publishes a catalog. A source missing here accepts any key."
         ),
     )
     triggers: TriggerCapabilities

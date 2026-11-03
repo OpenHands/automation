@@ -98,6 +98,84 @@ def _load_preset_title_builder(preset_name: str) -> Callable[[Any], str | None]:
     return cast(Callable[[Any], str | None], namespace["_build_conversation_title"])
 
 
+def _load_preset_repo_cloner(
+    preset_name: str, phases: list[str]
+) -> Callable[[Any, str], Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_clone_configured_repos"
+    )
+    namespace: dict[str, Any] = {"os": os, "json": json, "report_phase": phases.append}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(Callable[[Any, str], Any], namespace["_clone_configured_repos"])
+
+
+class TestPresetRepoCloning:
+    """A configured repository that fails to clone fails the run.
+
+    Continuing would run the agent in an empty workspace, without the repo's
+    context or skills, and still report the run COMPLETED.
+    """
+
+    @staticmethod
+    def _workspace(failed_repos: list[str]) -> MagicMock:
+        workspace = MagicMock()
+        workspace.clone_repos.return_value = MagicMock(
+            success_count=1 - len(failed_repos), failed_repos=failed_repos
+        )
+        return workspace
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_failed_clone_fails_the_run(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        repos = [{"url": "https://bb.example.com/scm/DEM/app.git"}]
+        config_file.write_text(json.dumps(repos))
+        workspace = self._workspace(["https://bb.example.com/scm/DEM/app.git"])
+        clone = _load_preset_repo_cloner(preset_name, [])
+
+        with pytest.raises(RuntimeError) as error:
+            clone(workspace, str(config_file))
+
+        assert "https://bb.example.com/scm/DEM/app.git" in str(error.value)
+        workspace.clone_repos.assert_called_once_with(repos)
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_successful_clone_returns_result(self, preset_name, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        config_file.write_text(json.dumps([{"url": "owner/repo"}]))
+        workspace = self._workspace([])
+        phases: list[str] = []
+
+        result = _load_preset_repo_cloner(preset_name, phases)(
+            workspace, str(config_file)
+        )
+
+        assert result is workspace.clone_repos.return_value
+        assert phases == ["Cloning repositories"]
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    @pytest.mark.parametrize("config", [None, []])
+    def test_no_configured_repos_clones_nothing(self, preset_name, config, tmp_path):
+        config_file = tmp_path / "repos_config.json"
+        if config is not None:
+            config_file.write_text(json.dumps(config))
+        workspace = self._workspace([])
+
+        result = _load_preset_repo_cloner(preset_name, [])(workspace, str(config_file))
+
+        assert result is None
+        workspace.clone_repos.assert_not_called()
+
+
 class TestPresetSessionUrl:
     """The session URL injected into a run must open the conversation in Agent Canvas.
 
@@ -2549,3 +2627,283 @@ class TestCreateAutomationFromPlugin:
             assert config[0]["source"] == "github:owner/minimal-plugin"
             # No ref or repo_path since they were None
             assert "ref" not in config[0]
+
+
+class TestCreatePresetAsServiceAccount:
+    """``run_as_user_id`` on preset creation: the generated upload follows it."""
+
+    SA_ID = uuid.UUID("99999999-9999-9999-9999-999999999998")
+
+    @pytest.fixture(autouse=True)
+    def file_store(self):
+        from collections.abc import AsyncIterator
+        from unittest.mock import AsyncMock
+
+        from openhands.automation.app import app
+        from openhands.automation.storage import get_file_store
+
+        store = MagicMock()
+
+        async def write_stream(
+            path: str,
+            stream: AsyncIterator[bytes],
+            max_size: int | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> int:
+            return len([chunk async for chunk in stream])
+
+        store.write_stream = AsyncMock(side_effect=write_stream)
+        app.dependency_overrides[get_file_store] = lambda: store
+        yield store
+        app.dependency_overrides.pop(get_file_store, None)
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("/api/automation/v1/preset/prompt", {"prompt": "Do something"}),
+            (
+                "/api/automation/v1/preset/plugin",
+                {
+                    "plugins": [
+                        {
+                            "source": "github:owner/plugin",
+                            "ref": "0123456789abcdef0123456789abcdef01234567",
+                        }
+                    ],
+                    "prompt": "Do something",
+                },
+            ),
+        ],
+    )
+    async def test_sa_owns_automation_and_upload(
+        self, async_client, async_session, enterprise_api, path, body
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            path,
+            json={
+                "name": "SA preset",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                **body,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["user_id"] == str(self.SA_ID)
+        assert response.json()["run_as_kind"] == "service"
+        assert response.json()["created_by_user_id"] == str(TEST_USER_ID)
+        uploads = (await async_session.execute(select(TarballUpload))).scalars().all()
+        assert [upload.user_id for upload in uploads] == [self.SA_ID]
+
+    async def test_preset_as_sa_without_manage_returns_403(
+        self, readonly_client, async_session
+    ):
+        response = await readonly_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 403
+
+    async def test_preset_as_non_sa_user_returns_422_and_creates_no_upload(
+        self, async_client, async_session, enterprise_api
+    ):
+        from sqlalchemy import select
+
+        enterprise_api.add_member(
+            self.SA_ID, TEST_ORG_ID, account_type="human", role="member"
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/prompt",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "active service account" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    @pytest.fixture
+    def resolve_refs_to_full_sha(self, monkeypatch):
+        """Make plugin preflight resolve every ref to FULL_SHA."""
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins",
+            lambda plugins, **_: [
+                {**p.model_dump(exclude_none=True), "resolved_ref": self.FULL_SHA}
+                for p in plugins
+            ],
+        )
+
+    @pytest.mark.parametrize(
+        ("plugin_body", "stored_plugins"),
+        [
+            (
+                {"plugins": [{"source": "github:owner/plugin"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {"plugins": [{"source": "github:owner/plugin", "ref": "main"}]},
+                [{"source": "github:owner/plugin", "ref": FULL_SHA}],
+            ),
+            (
+                {
+                    "variants": [
+                        {
+                            "name": "a",
+                            "weight": 1,
+                            "plugins": [
+                                {"source": "github:owner/plugin", "ref": FULL_SHA}
+                            ],
+                        },
+                        {
+                            "name": "b",
+                            "weight": 1,
+                            "plugins": [{"source": "github:owner/plugin", "ref": "v1"}],
+                        },
+                    ],
+                    "experiment_id": "exp",
+                },
+                None,
+            ),
+        ],
+    )
+    async def test_plugin_preset_as_sa_pins_mutable_refs(
+        self,
+        async_client,
+        enterprise_api,
+        file_store,
+        resolve_refs_to_full_sha,
+        plugin_body,
+        stored_plugins,
+    ):
+        # As on a run-as change: a branch, tag or missing ref is resolved to its
+        # commit, and the tarball and metadata store the SHA.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+        written: list[bytes] = []
+
+        async def write_stream(path, stream, max_size=None, content_type=""):
+            data = b"".join([chunk async for chunk in stream])
+            written.append(data)
+            return len(data)
+
+        file_store.write_stream.side_effect = write_stream
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                **plugin_body,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["preset_metadata"].get("plugins") == stored_plugins
+        (tarball,) = written
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            if stored_plugins is not None:
+                member = tar.extractfile("plugins_config.json")
+                assert member is not None
+                assert json.loads(member.read()) == stored_plugins
+            else:
+                member = tar.extractfile("experiment_config.json")
+                assert member is not None
+                refs = [
+                    plugin["ref"]
+                    for variant in json.loads(member.read())["variants"]
+                    for plugin in variant["plugins"]
+                ]
+                assert refs == [self.FULL_SHA, self.FULL_SHA]
+
+    @pytest.mark.parametrize(
+        "plugin",
+        [
+            {"source": "https://u:p@github.com/o/r.git", "ref": "main"},
+            {"source": "github:owner/plugin", "ref": "main", "repo_path": "a\\b"},
+        ],
+    )
+    async def test_plugin_preset_as_sa_with_a_disallowed_source_returns_422(
+        self, async_client, enterprise_api, plugin
+    ):
+        # The SDK model accepts these; the automation plugin source model does not.
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [plugin],
+            },
+        )
+
+        assert response.status_code == 422
+
+    async def test_plugin_preset_as_sa_with_unresolvable_ref_returns_422(
+        self, async_client, async_session, enterprise_api, monkeypatch
+    ):
+        from sqlalchemy import select
+
+        from openhands.automation.plugin_specs import PluginSpecError
+
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        def unreachable(plugins, **_):
+            raise PluginSpecError("Failed to preflight required plugin")
+
+        monkeypatch.setattr(
+            "openhands.automation.plugin_specs.validate_required_plugins", unreachable
+        )
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": "main"}],
+            },
+        )
+
+        assert response.status_code == 422
+        assert "Failed to preflight" in response.json()["detail"]
+        assert (await async_session.execute(select(TarballUpload))).first() is None
+
+    async def test_plugin_preset_as_sa_accepts_a_full_sha_ref(
+        self, async_client, enterprise_api
+    ):
+        enterprise_api.add_member(self.SA_ID, TEST_ORG_ID)
+
+        response = await async_client.post(
+            "/api/automation/v1/preset/plugin",
+            json={
+                "name": "SA preset",
+                "prompt": "Do something",
+                "trigger": {"type": "cron", "schedule": "0 9 * * 1"},
+                "run_as_user_id": str(self.SA_ID),
+                "plugins": [{"source": "github:owner/plugin", "ref": self.FULL_SHA}],
+            },
+        )
+
+        assert response.status_code == 201

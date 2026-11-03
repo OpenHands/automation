@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from openhands.automation.config import (
+    SlackAppSettings,
     StreamSettings,
     clear_config_cache,
     get_config,
@@ -29,6 +30,7 @@ from openhands.automation.streams.base import (
     reset_stream_health,
 )
 from openhands.automation.streams.slack import SlackStreamProvider
+from openhands.automation.utils.event_sources import configured_stream_sources
 from openhands.automation.utils.time import utcnow
 
 
@@ -189,6 +191,32 @@ def test_the_switch_kills_configured_apps(monkeypatch: pytest.MonkeyPatch):
         assert settings.enabled is False
     finally:
         clear_config_cache()
+
+
+def test_configured_stream_sources_are_org_scoped_and_respect_switch():
+    """Source validation should only see enabled streams for the caller's org."""
+    org_id = uuid.uuid4()
+    other_org_id = uuid.uuid4()
+    settings = StreamSettings(
+        slack_apps=[
+            SlackAppSettings(
+                org_id=org_id,
+                app_token="xapp-1",
+                bot_token="xoxb-1",
+                team_id=TEAM_ID,
+                bot_user_id=BOT_USER_ID,
+            )
+        ]
+    )
+
+    assert configured_stream_sources(org_id, settings) == ["slack"]
+    assert configured_stream_sources(other_org_id, settings) == []
+    assert (
+        configured_stream_sources(
+            org_id, settings.model_copy(update={"streams_enabled": False})
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------

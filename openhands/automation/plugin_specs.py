@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tarfile
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -22,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -30,6 +32,7 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
+    RUN_AS_USER_ID_DESCRIPTION,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -285,6 +288,9 @@ class CreatePluginSpecAutomationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    run_as_user_id: uuid.UUID | None = Field(
+        default=None, description=RUN_AS_USER_ID_DESCRIPTION
+    )
     name: str = Field(..., min_length=1, max_length=500)
     plugin: AutomationPluginSource
     config: dict[str, Any] = Field(default_factory=dict)
@@ -348,6 +354,59 @@ def validate_plugin_source_allowed(
             "Cloud plugin sources must use github:owner/repo or "
             "https://github.com/owner/repo.git"
         )
+
+
+COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
+    """Reject plugin refs that can move, for an automation run as a service account.
+
+    The generated tarball stores the refs as given and the sandbox resolves them
+    on every run, so a branch, tag or missing ref would let anyone who can push
+    to the plugin repo change code that runs as the service account.
+
+    Raises:
+        PluginSpecError: when a ref is not a full 40-character commit SHA.
+    """
+    for plugin in plugins:
+        if plugin.ref is None or not COMMIT_SHA_RE.fullmatch(plugin.ref):
+            raise PluginSpecError(
+                f"Plugin {plugin.source!r} must set ref to a full 40-character "
+                "commit SHA for an automation that runs as a service account"
+            )
+
+
+def pin_plugin_refs(
+    plugins: list[dict[str, Any]], *, allow_local_sources: bool
+) -> list[dict[str, Any]]:
+    """Return ``plugins`` with each ref replaced by its commit SHA.
+
+    Used for an automation that runs as a service account (see
+    ``require_pinned_plugin_refs``). A full SHA is kept as is; a branch, tag or
+    missing ref is resolved by preflight.
+
+    Raises:
+        PluginSpecError: when a source is not allowed, a plugin cannot be
+            preflighted, or a ref does not resolve to a full commit SHA.
+    """
+    pinned = []
+    for item in plugins:
+        if COMMIT_SHA_RE.fullmatch(item.get("ref") or ""):
+            pinned.append(item)
+            continue
+        try:
+            source = AutomationPluginSource.model_validate(item)
+        except ValidationError as exc:
+            # The SDK's PluginSource (preset bodies) accepts more than this.
+            raise PluginSpecError(f"Invalid plugin source: {exc}") from exc
+        [resolved] = validate_required_plugins(
+            [source], allow_local_sources=allow_local_sources
+        )
+        ref = resolved.pop("resolved_ref", None)
+        pinned.append({**resolved, **({"ref": ref} if ref else {})})
+    require_pinned_plugin_refs([PluginSource.model_validate(item) for item in pinned])
+    return pinned
 
 
 def _contained_path(root: Path, relative: str) -> Path:
@@ -627,8 +686,13 @@ def build_execution_payload(
         source, allow_local_sources=allow_local_sources
     )
     config = validate_plugin_config(manifest, requested_config)
+    # A stored list pins the secondary plugins (automations that run as a
+    # service account); otherwise they follow the manifest's refs.
+    stored_required = plugin_spec.get("required_plugins")
     required_plugins = validate_required_plugins(
-        manifest.runtime.plugins,
+        [AutomationPluginSource.model_validate(item) for item in stored_required]
+        if stored_required is not None
+        else manifest.runtime.plugins,
         allow_local_sources=allow_local_sources,
     )
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
