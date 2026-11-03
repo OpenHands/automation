@@ -15,15 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class APIKeyError(Exception):
-    """Exception raised when API key retrieval fails.
+    """Exception raised when API key retrieval fails."""
 
-    ``status_code`` is the HTTP status of the enterprise response, or None when
-    there was no response (network error) or it had no key.
-    """
-
-    def __init__(self, message: str, status_code: int | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
+    pass
 
 
 async def get_api_key_for_automation_run(run: "AutomationRun") -> str:
@@ -92,10 +86,7 @@ async def get_api_key_for_automation_run(run: "AutomationRun") -> str:
             e.response.text,
             exc_info=True,
         )
-        raise APIKeyError(
-            f"HTTP {e.response.status_code}: {e.response.text}",
-            status_code=e.response.status_code,
-        ) from e
+        raise APIKeyError(f"HTTP {e.response.status_code}: {e.response.text}") from e
 
     except httpx.RequestError as e:
         logger.error(

@@ -8,17 +8,15 @@ import uuid
 import jmespath
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
 
 from openhands.automation.auth import AuthenticatedUser
 from openhands.automation.config import clear_config_cache
 from openhands.automation.event_schemas import parse_event
 from openhands.automation.event_schemas.gitlab import GitLabEvent, parse_gitlab_event
-from openhands.automation.models import Automation, AutomationRun, CustomWebhook
+from openhands.automation.models import Automation
 
 
 SHARED_SECRET = "test-secret"
-LEGACY_SECRET = "legacy-custom-secret"
 
 
 @pytest.fixture
@@ -77,26 +75,6 @@ async def add_automation(session, user, org_id, on: str, filter: str | None = No
         )
     )
     await session.commit()
-
-
-async def add_legacy_custom_webhook(session, org_id, *, enabled: bool = True):
-    """A custom webhook registered as `gitlab` before the source was built in."""
-    session.add(
-        CustomWebhook(
-            org_id=org_id,
-            name="GitLab",
-            source="gitlab",
-            webhook_secret=LEGACY_SECRET,
-            event_key_expr="object_kind",
-            signature_header="X-Signature-256",
-            enabled=enabled,
-        )
-    )
-    await session.commit()
-
-
-async def run_count(session) -> int:
-    return len((await session.execute(select(AutomationRun))).scalars().all())
 
 
 class TestParseGitLabEvent:
@@ -224,91 +202,3 @@ async def test_forwarded_event_with_another_action_does_not_match(
 
     assert response.status_code == 200
     assert response.json()["matched"] == 0
-
-
-class TestLegacyCustomGitLabWebhook:
-    """An org's own `gitlab` custom webhook keeps working and does not double-fire."""
-
-    @pytest.mark.asyncio
-    async def test_its_direct_deliveries_still_run_automations(
-        self, async_client, async_session, org_id, mock_authenticated_user
-    ):
-        await add_legacy_custom_webhook(async_session, org_id)
-        await add_automation(
-            async_session, mock_authenticated_user, org_id, on="merge_request"
-        )
-        body = json.dumps(merge_request_payload()).encode()
-
-        response = await async_client.post(
-            f"/api/automation/v1/events/{org_id}/gitlab",
-            content=body,
-            headers={
-                "X-Signature-256": sign(body, LEGACY_SECRET),
-                "Content-Type": "application/json",
-            },
-        )
-
-        assert response.status_code == 200
-        assert response.json()["matched"] == 1
-
-    @pytest.mark.asyncio
-    async def test_forwarded_copies_are_acknowledged_without_running(
-        self, async_client, async_session, org_id, mock_authenticated_user
-    ):
-        await add_legacy_custom_webhook(async_session, org_id)
-        await add_automation(async_session, mock_authenticated_user, org_id, on="*")
-        body = json.dumps(forwarded(merge_request_payload(), org_id)).encode()
-
-        response = await async_client.post(
-            f"/api/automation/v1/events/{org_id}/gitlab",
-            content=body,
-            headers={
-                "X-Hub-Signature-256": sign(body, SHARED_SECRET),
-                "Content-Type": "application/json",
-            },
-        )
-
-        assert response.status_code == 200
-        assert response.json()["matched"] == 0
-        assert await run_count(async_session) == 0
-
-    @pytest.mark.asyncio
-    async def test_an_unsigned_delivery_is_still_rejected(
-        self, async_client, async_session, org_id
-    ):
-        await add_legacy_custom_webhook(async_session, org_id)
-        body = json.dumps(merge_request_payload()).encode()
-
-        response = await async_client.post(
-            f"/api/automation/v1/events/{org_id}/gitlab",
-            content=body,
-            headers={
-                "X-Signature-256": sign(body, "wrong-secret"),
-                "X-Hub-Signature-256": sign(body, "wrong-secret"),
-                "Content-Type": "application/json",
-            },
-        )
-
-        assert response.status_code == 401
-
-    @pytest.mark.asyncio
-    async def test_once_disabled_the_built_in_source_takes_over(
-        self, async_client, async_session, org_id, mock_authenticated_user
-    ):
-        await add_legacy_custom_webhook(async_session, org_id, enabled=False)
-        await add_automation(
-            async_session, mock_authenticated_user, org_id, on="merge_request.*"
-        )
-        body = json.dumps(forwarded(merge_request_payload(), org_id)).encode()
-
-        response = await async_client.post(
-            f"/api/automation/v1/events/{org_id}/gitlab",
-            content=body,
-            headers={
-                "X-Hub-Signature-256": sign(body, SHARED_SECRET),
-                "Content-Type": "application/json",
-            },
-        )
-
-        assert response.status_code == 200
-        assert response.json()["matched"] == 1

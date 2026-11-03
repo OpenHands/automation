@@ -11,7 +11,6 @@ import logging
 import shutil
 import tarfile
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,7 +36,6 @@ from openhands.automation.git_sync.client import (
     commit_and_push,
     diff_names,
     ensure_repo,
-    last_commit_author,
     pull,
 )
 from openhands.automation.git_sync.config_override import (
@@ -73,9 +71,7 @@ from openhands.automation.observability_associations import (
 )
 from openhands.automation.schemas import Trigger, validate_command_string
 from openhands.automation.storage import ObjectNotFoundError, get_file_store
-from openhands.automation.tags import normalize_tags
 from openhands.automation.utils import utcnow
-from openhands.automation.utils.change_events import GIT_SYNC_ACTOR, set_audit_actor
 from openhands.automation.utils.model_profiles import validate_agent_profile_selection
 from openhands.automation.utils.periodic_loop import run_periodic_loop
 from openhands.automation.utils.state import (
@@ -86,7 +82,6 @@ from openhands.automation.utils.state import (
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
-    get_org_upload,
     is_valid_external_url,
     parse_internal_upload_id,
 )
@@ -283,14 +278,6 @@ def _remove_exported_automation(directory: Path) -> None:
         directory.rmdir()
 
 
-# Resolves the author of the commit behind an imported directory, for the log.
-CommitAuthor = Callable[[], Awaitable[str]]
-
-
-async def _unknown_author() -> str:
-    return "unknown author"
-
-
 # --- Import owner -------------------------------------------------------------
 
 
@@ -343,7 +330,10 @@ async def _read_tarball_bytes(
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
-    upload = await get_org_upload(session, upload_id, automation.org_id)
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    upload = result.scalars().first()
     if upload is None:
         raise TarballUnavailableError(
             f"automation {automation.id} references missing upload {upload_id}"
@@ -412,7 +402,7 @@ async def _stored_tarball_matches(
 
 
 async def _delete_superseded_upload(
-    session: AsyncSession, automation: Automation, pending_storage_deletes: list[str]
+    session: AsyncSession, tarball_path: str, pending_storage_deletes: list[str]
 ) -> None:
     """Mark the upload an automation just stopped pointing at for removal.
 
@@ -426,10 +416,13 @@ async def _delete_superseded_upload(
     commit. Deleting before the commit destroyed the object irreversibly while
     a rollback revived the record, stranding it pointing at a missing object.
     """
-    upload_id = parse_internal_upload_id(automation.tarball_path)
+    upload_id = parse_internal_upload_id(tarball_path)
     if upload_id is None:
         return
-    upload = await get_org_upload(session, upload_id, automation.org_id)
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    upload = result.scalars().first()
     if upload is None or upload.deleted_at is not None:
         return
 
@@ -477,7 +470,9 @@ async def _resolve_tarball_path(
             slug,
         )
         if existing is not None:
-            await _delete_superseded_upload(session, existing, pending_storage_deletes)
+            await _delete_superseded_upload(
+                session, existing.tarball_path, pending_storage_deletes
+            )
         return new_path
 
     tarball_source = fields.get("tarball_source") or {}
@@ -518,11 +513,6 @@ async def _validate_and_resolve_fields(
     observability_associations = validate_observability_associations(
         fields.get("observability_associations")
     )
-    # Export omits an empty list, so a missing key means no tags.
-    raw_tags = fields.get("tags") or []
-    if not isinstance(raw_tags, list):
-        raise ValueError("automation.yaml 'tags' must be a list")
-    tags = normalize_tags(raw_tags)
     entrypoint = validate_command_string(raw_entrypoint, "entrypoint", allow_none=False)
     setup_script_path = validate_command_string(
         fields.get("setup_script_path"), "setup_script_path"
@@ -533,17 +523,9 @@ async def _validate_and_resolve_fields(
     raw_enabled = fields.get("enabled")
 
     requested_enabled = parse_automation_enabled(raw_enabled)
-    if raw_state is None and raw_enabled is None:
-        # Neither key given (or both empty in YAML): an update keeps the current
-        # value, and a new folder imports INACTIVE so a person turns it on.
-        # Anyone who can push to the repo could otherwise start an automation
-        # as its owner.
-        state = existing.state if existing is not None else AutomationState.INACTIVE
-        requested_enabled = automation_state_enabled(state)
-    else:
-        if requested_enabled is None:
-            requested_enabled = True
-        state = model_automation_state(raw_state, requested_enabled)
+    if requested_enabled is None:
+        requested_enabled = True
+    state = model_automation_state(raw_state, requested_enabled)
     enabled = automation_state_enabled(state)
 
     if existing is not None and state == AutomationState.DRAFT != existing.state:
@@ -575,7 +557,6 @@ async def _validate_and_resolve_fields(
         "agent_profile_id": agent_profile_id,
         "trigger": trigger.model_dump(),
         "observability_associations": observability_associations,
-        "tags": tags,
         "entrypoint": entrypoint,
         "setup_script_path": setup_script_path,
         "timeout": timeout,
@@ -596,7 +577,6 @@ async def _create_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
-    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     if owner is None:
         # A ValueError skips just this directory (see the import loop) rather
@@ -608,14 +588,7 @@ async def _create_automation_from_git(
     values = await _validate_and_resolve_fields(
         session, deserialized.fields, deserialized, slug, pending_storage_deletes, owner
     )
-    # The admin who saved the Git Sync config both creates it and is its
-    # run-as identity.
-    automation = Automation(
-        user_id=owner.user_id,
-        created_by_user_id=owner.user_id,
-        org_id=owner.org_id,
-        **values,
-    )
+    automation = Automation(user_id=owner.user_id, org_id=owner.org_id, **values)
     session.add(automation)
     await session.flush()
 
@@ -630,19 +603,7 @@ async def _create_automation_from_git(
             dirty=False,
         )
     )
-    logger.info(
-        "Imported new automation %s from git (slug=%r, last commit by %s)",
-        automation.id,
-        slug,
-        await commit_author(),
-    )
-
-
-def _same_trigger(stored: dict, validated: dict) -> bool:
-    try:
-        return _TRIGGER_ADAPTER.validate_python(stored).model_dump() == validated
-    except ValidationError:
-        return False
+    logger.info("Imported new automation %s from git (slug=%r)", automation.id, slug)
 
 
 async def _update_automation_from_git(
@@ -652,7 +613,6 @@ async def _update_automation_from_git(
     dir_files: dict[str, bytes],
     head: str,
     pending_storage_deletes: list[str],
-    commit_author: CommitAuthor = _unknown_author,
 ) -> None:
     new_hash = compute_content_hash(dir_files)
     if new_hash == state.content_hash:
@@ -677,21 +637,12 @@ async def _update_automation_from_git(
         existing=automation,
     )
     for column, value in values.items():
-        if column == "trigger" and _same_trigger(automation.trigger, value):
-            # A stored trigger may lack defaults the validated one carries;
-            # do not rewrite it, so the audit row does not list it.
-            continue
         setattr(automation, column, value)
 
     state.content_hash = new_hash
     state.last_synced_commit = head
     state.last_synced_at = utcnow()
-    logger.info(
-        "Updated automation %s from git (slug=%r, last commit by %s)",
-        automation.id,
-        state.slug,
-        await commit_author(),
-    )
+    logger.info("Updated automation %s from git (slug=%r)", automation.id, state.slug)
 
 
 async def _changed_slugs_since(
@@ -800,13 +751,6 @@ async def _import_from_git(
             continue
 
         dir_files = await asyncio.to_thread(_read_directory_files, directory)
-
-        # Looked up only when a create or update logs it, not for every
-        # directory the diff touched.
-        async def commit_author(directory: Path = directory) -> str:
-            author = await last_commit_author(workdir, directory, timeout)
-            return author or "unknown author"
-
         # A rolled-back savepoint revives the soft-deleted upload rows queued
         # inside it, so their storage paths must not stay pending for deletion.
         pending_snapshot = len(pending_storage_deletes)
@@ -830,7 +774,6 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
-                        commit_author,
                     )
                     result.imported += 1
                 else:
@@ -841,7 +784,6 @@ async def _import_from_git(
                         dir_files,
                         head,
                         pending_storage_deletes,
-                        commit_author,
                     )
         except (ValidationError, ValueError) as e:
             del pending_storage_deletes[pending_snapshot:]
@@ -1260,8 +1202,6 @@ async def _run_sync_cycle_leased(
     # single-writer lock for the whole transaction, and a push can take up to
     # git_sync_git_timeout_seconds.
     async with session_factory() as session:
-        # Imports, updates and deletes from the repo are audited as Git sync.
-        set_audit_actor(session, GIT_SYNC_ACTOR)
         org_config = await get_or_create_org_config(session, org_id)
         last_commit = org_config.last_synced_commit
         owner = _import_owner(org_config)

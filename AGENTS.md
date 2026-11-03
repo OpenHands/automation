@@ -74,7 +74,7 @@ automation/
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)
-│       ├── event_schemas/      # Typed event payloads (GitHub, GitLab, Jira DC, Bitbucket DC, custom)
+│       ├── event_schemas/      # Typed event payloads (GitHub, Jira DC, Bitbucket DC, custom)
 │       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
 │       │   ├── config_override.py  # Per-org runtime config overrides
@@ -96,10 +96,7 @@ automation/
 │       │   └── s3.py           # S3 implementation
 │       └── utils/              # Utility modules
 │           ├── api_key.py      # Per-user API key minting via service key
-│           ├── change_events.py  # Audit hook: one change row per automation write (before_flush)
 │           ├── cron.py         # Cron schedule utilities (next/prev fire time)
-│           ├── enterprise_client.py  # Enterprise service API: org membership / account type
-│           ├── run_as.py       # Run-as identity: resolve on create, check on change, move uploads
 │           ├── run.py          # Run status transitions (create, mark, update)
 │           ├── sandbox.py      # Sandbox verification and cleanup
 │           ├── tarball_validation.py  # Tarball path validation (internal/external)
@@ -165,7 +162,6 @@ OPENHANDS_API_KEY=sk-oh-... uv run python scripts/test_automation.py --api-url h
 
 - Cloud product events use the server-authoritative Cloud user ID as the PostHog `distinct_id`; never trust a client telemetry header as Cloud identity.
 - Local Agent Canvas requests carry their consented PostHog identity in `X-OpenHands-Telemetry-Distinct-Id`. Store that value on newly created automations and runs so asynchronous lifecycle events retain the same identity.
-- `AUTOMATION_TELEMETRY_DEPLOYMENT_MODE` (`local` | `cloud` | `self_hosted`) overrides the `deployment_mode` / `deployment_kind` event labels; self-hosted Enterprise runs in cloud mode but must report `self_hosted` / `local`. Every `automation_created` capture also carries `automation_name` and `is_first_automation_in_org` (see `automation_created_properties`). Self-hosted deployments send it as `ohe_automation_created` (see `automation_created_event`).
 - Local events with no Canvas attribution fall back to the DB-backed automation backend ID. Keep `automation_backend_id` as an event property for installation analysis rather than substituting it for a known person identity.
 - Local consent is stored per frontend distinct ID. Attributed events require consent for their resolved identity; only unattributed backend-level events use the aggregate installation consent.
 
@@ -213,12 +209,10 @@ Completion is handled asynchronously:
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
-| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
-| `AGENT_SERVER_URL` | Local backend | Local agent-server URL from the sandbox's point of view |
-| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured | Automation service key for local callbacks (not the agent-server session key) |
-| `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
-| `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
+| `OPENHANDS_API_KEY` | Per-user key issued via service key | SDK auth for get_llm()/get_secrets() |
+| `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`) | Cloud API base URL |
+| `SANDBOX_ID` | From sandbox creation response | SDK reads for settings API calls |
+| `SESSION_API_KEY` | From sandbox creation response | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
@@ -228,7 +222,7 @@ The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX
 
 ## Callback & Race Condition Handling
 
-- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses `authenticate_request`. Cloud runs use the per-user `OPENHANDS_API_KEY`; local runs use `AUTOMATION_CALLBACK_API_KEY` when configured (the service's local API key, not the agent-server session key). The authenticated user must own the run's parent automation.
+- **Callback auth**: The completion endpoint (`/runs/{id}/complete`) uses standard API key auth — the per-user `OPENHANDS_API_KEY` passed into the sandbox is validated via `authenticate_request`, and ownership is verified against the run's parent automation.
 - **Optimistic locking**: Both callback endpoint and watchdog use `UPDATE ... WHERE status = 'RUNNING'` and check `CursorResult.rowcount` to handle races. Returns 409 on conflict.
 - **Sandbox cleanup**: On callback, sandbox is deleted in a fire-and-forget background task (unless `keep_alive=True`); when `AUTOMATION_SANDBOX_CLEANUP_DELAY_SECONDS` > 0 it is paused instead and the watchdog deletes it once `automation_runs.sandbox_cleanup_due_at` passes. On dispatch failure, the dispatcher deletes the sandbox immediately.
 
@@ -427,18 +421,14 @@ exactly one org, the deterministic local org from `auth.py`'s
   rather than reporting success against an empty repo.
 - Automations created directly in git (e.g. via a PR) are imported into the org
   and stamped with the user who last saved the org's Git Sync config
-  (`configured_by_user_id`), who is also their `created_by_user_id`. They run
-  as that user — in cloud mode that means minting their API key, so they must
-  stay a member of the org; re-saving the config re-stamps the owner. Local mode falls back to `_get_local_user()`.
+  (`configured_by_user_id`). They run as that user — in cloud mode that means
+  minting their API key, so they must stay a member of the org; re-saving the
+  config re-stamps the owner. Local mode falls back to `_get_local_user()`.
   Outside local mode an org row that was never saved from the UI has no such
   user, so new directories are skipped (logged) while already-synced
   automations keep updating. Anything pushed to the configured repo becomes an
   automation that runs under that user: treat write access to the repo like
   admin access to the org.
-- Known limit: Git Sync updates do not check `run_as_kind`. A push to the repo
-  can enable an automation that runs as a service account, or change its plugin
-  refs, and the automation then runs with the service account's API key. The
-  `manage_automations` check covers the API only.
 - **Encryption**: set the org's encryption key (or, in local mode,
   `AUTOMATION_GIT_SYNC_ENCRYPTION_KEY`) to encrypt file contents (via the
   SDK's Fernet-based `Cipher`, same primitive as the KV store) before they're

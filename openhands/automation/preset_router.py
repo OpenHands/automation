@@ -29,31 +29,25 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.automation.auth import (
     AuthenticatedUser,
-    get_http_client,
+    require_permission,
 )
-from openhands.automation.config import get_config
 from openhands.automation.constants import MODEL_PROFILE_PATTERN
 from openhands.automation.db import get_session
 from openhands.automation.git_sync import mark_git_sync_dirty
 from openhands.automation.models import (
     Automation,
-    AutomationRunAsKind,
     TarballUpload,
     UploadStatus,
 )
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
-from openhands.automation.plugin_specs import (
-    PluginSpecError,
-    pin_plugin_refs,
-)
 from openhands.automation.schemas import (
-    RUN_AS_USER_ID_DESCRIPTION,
     AutomationResponse,
     PublicAutomationState,
     TemplateProvenance,
@@ -63,17 +57,11 @@ from openhands.automation.schemas import (
 )
 from openhands.automation.storage import FileStore, ObjectNotFoundError, get_file_store
 from openhands.automation.telemetry import (
-    automation_created_event,
-    automation_created_properties,
     capture_automation_event,
     get_request_telemetry_context,
 )
 from openhands.automation.utils import utcnow
 from openhands.automation.utils.model_profiles import resolve_model_profile_for_user
-from openhands.automation.utils.run_as import (
-    require_automation_creator,
-    resolve_run_as,
-)
 from openhands.automation.utils.state import (
     automation_state_enabled,
     model_automation_state,
@@ -81,7 +69,6 @@ from openhands.automation.utils.state import (
 from openhands.automation.utils.tarball_validation import (
     build_internal_url,
     build_upload_storage_path,
-    get_org_upload,
     parse_internal_upload_id,
 )
 from openhands.automation.utils.templates import (
@@ -100,6 +87,8 @@ from openhands.workspace import RepoSource
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/preset", tags=["Presets"])
+
+_require_view_automations = require_permission("view_automations")
 
 # Preset files directories
 PRESETS_DIR = Path(__file__).parent / "presets"
@@ -169,10 +158,6 @@ class CreatePromptAutomationRequest(BaseModel):
     """Request to create an automation from a prompt."""
 
     model_config = ConfigDict(extra="forbid")
-
-    run_as_user_id: uuid.UUID | None = Field(
-        default=None, description=RUN_AS_USER_ID_DESCRIPTION
-    )
 
     name: str = Field(..., min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=2000)
@@ -432,16 +417,18 @@ async def regenerate_preset_tarball(
 
     Returns ``None`` — leaving the tarball unchanged — when the automation is not a
     regenerable preset: its ``tarball_path`` is an external URL, the referenced upload
-    is missing or outside the automation's org, or the archive contains no
-    ``prompt.txt``. The file store is resolved lazily so that updates to non-preset
-    automations never construct one.
+    is missing, or the archive contains no ``prompt.txt``. The file store is resolved
+    lazily so that updates to non-preset automations never construct one.
     """
     upload_id = parse_internal_upload_id(automation.tarball_path)
     if upload_id is None:
         return None
 
     file_store = get_file_store()
-    source_upload = await get_org_upload(session, upload_id, automation.org_id)
+    result = await session.execute(
+        select(TarballUpload).where(TarballUpload.id == upload_id)
+    )
+    source_upload = result.scalars().first()
     if source_upload is None:
         return None
 
@@ -537,7 +524,7 @@ async def create_automation_from_prompt(
     body: CreatePromptAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(require_automation_creator),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -565,7 +552,6 @@ async def create_automation_from_prompt(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
 
@@ -574,13 +560,13 @@ async def create_automation_from_prompt(
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
     # Create upload record with safe UTF-8 truncation
     truncated_prompt = _safe_truncate(body.prompt, 100)
     upload = TarballUpload(
         id=upload_id,
-        user_id=run_as.user_id,
+        user_id=user.user_id,
         org_id=user.org_id,
         name=f"prompt-automation-{_safe_truncate(body.name, 50)}",
         description=f"Auto-generated from prompt: {truncated_prompt}...",
@@ -625,9 +611,7 @@ async def create_automation_from_prompt(
 
     try:
         automation = Automation(
-            user_id=run_as.user_id,
-            run_as_kind=run_as.kind,
-            created_by_user_id=user.user_id,
+            user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
             description=body.description,
@@ -674,9 +658,8 @@ async def create_automation_from_prompt(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
-    creation_properties.update(await automation_created_properties(session, automation))
     await capture_automation_event(
-        automation_created_event(),
+        "automation_created",
         request=request,
         user=user,
         automation=automation,
@@ -719,10 +702,6 @@ class CreatePluginAutomationRequest(BaseModel):
     """Request to create an automation using plugins."""
 
     model_config = ConfigDict(extra="forbid")
-
-    run_as_user_id: uuid.UUID | None = Field(
-        default=None, description=RUN_AS_USER_ID_DESCRIPTION
-    )
 
     name: str = Field(..., min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=2000)
@@ -909,44 +888,6 @@ def _resolve_experiment_variant_models(
     ]
 
 
-def _pin_preset_plugin_refs(
-    body: CreatePluginAutomationRequest,
-) -> CreatePluginAutomationRequest:
-    """Return ``body`` with every plugin ref (variants too) pinned to its commit.
-
-    The generated tarball stores the refs as given, so an automation that runs
-    as a service account stores SHAs (see ``pin_plugin_refs``).
-
-    Raises:
-        HTTPException: 422 when a ref cannot be resolved to a commit SHA.
-    """
-    allow_local_sources = get_config().service.is_local_mode
-
-    def pin(plugins: list[PluginSource]) -> list[PluginSource]:
-        pinned = pin_plugin_refs(
-            [p.model_dump(exclude_none=True) for p in plugins],
-            allow_local_sources=allow_local_sources,
-        )
-        return [PluginSource.model_validate(item) for item in pinned]
-
-    try:
-        return body.model_copy(
-            update={
-                "plugins": pin(body.plugins) if body.plugins is not None else None,
-                "variants": [
-                    v.model_copy(update={"plugins": pin(v.plugins)})
-                    for v in body.variants
-                ]
-                if body.variants is not None
-                else None,
-            }
-        )
-    except PluginSpecError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
-        ) from exc
-
-
 def _generate_plugin_tarball(
     plugins: list[PluginSource] | None,
     prompt: str,
@@ -1018,7 +959,7 @@ async def create_automation_from_plugin(
     body: CreatePluginAutomationRequest,
     request: Request,
     response: Response,
-    user: AuthenticatedUser = Depends(require_automation_creator),
+    user: AuthenticatedUser = Depends(_require_view_automations),
     session: AsyncSession = Depends(get_session, scope="function"),
     file_store: FileStore = Depends(get_file_store),
 ) -> AutomationResponse:
@@ -1053,9 +994,6 @@ async def create_automation_from_plugin(
             response.status_code = status.HTTP_200_OK
             return AutomationResponse.model_validate(existing)
 
-    run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
-    if run_as.kind == AutomationRunAsKind.SERVICE:
-        body = _pin_preset_plugin_refs(body)
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(
@@ -1073,7 +1011,7 @@ async def create_automation_from_plugin(
 
     # 2. Upload tarball to storage
     upload_id = uuid.uuid4()
-    storage_path = _build_storage_path(user.org_id, run_as.user_id, upload_id)
+    storage_path = _build_storage_path(user.org_id, user.user_id, upload_id)
 
     # Create upload record
     if body.variants is not None:
@@ -1089,7 +1027,7 @@ async def create_automation_from_plugin(
 
     upload = TarballUpload(
         id=upload_id,
-        user_id=run_as.user_id,
+        user_id=user.user_id,
         org_id=user.org_id,
         name=f"plugin-automation-{_safe_truncate(body.name, 50)}",
         description=description,
@@ -1138,9 +1076,7 @@ async def create_automation_from_plugin(
 
     try:
         automation = Automation(
-            user_id=run_as.user_id,
-            run_as_kind=run_as.kind,
-            created_by_user_id=user.user_id,
+            user_id=user.user_id,
             org_id=user.org_id,
             name=body.name,
             description=body.description,
@@ -1194,9 +1130,8 @@ async def create_automation_from_plugin(
     if body.template is not None:
         creation_properties["template_id"] = body.template.id
         creation_properties["template_version"] = body.template.version
-    creation_properties.update(await automation_created_properties(session, automation))
     await capture_automation_event(
-        automation_created_event(),
+        "automation_created",
         request=request,
         user=user,
         automation=automation,

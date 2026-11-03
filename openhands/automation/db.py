@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from openhands.automation.config import ServiceSettings, get_config
-from openhands.automation.utils.change_events import bind_request, register_audit_hook
 
 
 logger = logging.getLogger("automation.db")
@@ -263,9 +262,6 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-# Every ORM session records changes to automations (utils/change_events.py).
-register_audit_hook()
-
 # Module-level flag set after engine creation to indicate SQLite usage.
 # Used by scheduler/dispatcher to skip PostgreSQL-specific features like
 # FOR UPDATE SKIP LOCKED (not supported by SQLite).
@@ -303,8 +299,6 @@ async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
         request.app.state.session_factory
     )
     async with session_factory() as session:
-        # The audit hook takes its actor from the request's authenticated user.
-        bind_request(session, request)
         try:
             yield session
             await session.commit()

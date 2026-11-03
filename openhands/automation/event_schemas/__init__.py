@@ -86,20 +86,6 @@ def parse_event(
         return provider.parse(payload)
 
     # Unknown source = custom webhook (no registration needed)
-    return parse_custom_event(source, payload, event_key_expr=event_key_expr)
-
-
-def parse_custom_event(
-    source: str,
-    payload: dict[str, Any],
-    *,
-    event_key_expr: str | None = None,
-) -> WebhookEvent:
-    """Parse a custom webhook payload with its own event key expression.
-
-    Used for every custom webhook delivery, including one registered under a
-    source name that has since become built in.
-    """
     from openhands.automation.event_schemas.custom import (
         CustomWebhookEvent,
         extract_event_key,

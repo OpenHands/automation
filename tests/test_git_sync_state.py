@@ -165,15 +165,13 @@ async def test_invalid_state_metadata_rejects_before_tarball_upload(
 @pytest.mark.parametrize(
     ("lifecycle_fields", "expected_state", "expected_enabled"),
     [
-        # A new folder with neither key imports INACTIVE: a person turns it on.
-        pytest.param({}, AutomationState.INACTIVE, False, id="default-inactive"),
+        pytest.param({}, AutomationState.ACTIVE, True, id="legacy-default"),
         pytest.param({"enabled": True}, AutomationState.ACTIVE, True, id="legacy-on"),
         pytest.param(
             {"enabled": False}, AutomationState.INACTIVE, False, id="legacy-off"
         ),
-        # An empty value counts as an absent key.
         pytest.param(
-            {"enabled": None}, AutomationState.INACTIVE, False, id="legacy-empty"
+            {"enabled": None}, AutomationState.ACTIVE, True, id="legacy-empty"
         ),
         pytest.param(
             {"state": "ACTIVE", "enabled": True},
@@ -218,7 +216,7 @@ async def test_import_preserves_legacy_and_consistent_state_inputs(
 async def test_import_update_rejects_moving_existing_automation_to_draft(
     state_session,
 ):
-    automation = await _import_automation(state_session, {"enabled": True})
+    automation = await _import_automation(state_session, {})
     state = await state_session.scalar(
         select(AutomationGitSyncState).where(
             AutomationGitSyncState.automation_id == automation.id

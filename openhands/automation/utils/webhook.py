@@ -37,7 +37,6 @@ logger = logging.getLogger("automation.utils.webhook")
 # `is_builtin_source` and `verify_signature` now live in `providers`; re-exported
 # here for callers that predate the registry.
 __all__ = [
-    "builtin_webhook_config",
     "create_automation_run",
     "get_event_automations",
     "get_requested_event_types",
@@ -66,47 +65,27 @@ async def get_webhook_config(
     Returns:
         WebhookConfig with secret and parsing settings, or None if not found.
     """
-    provider = get_provider(source)
-    if provider is not None and provider.custom_webhook_precedence:
-        # An org that registered a custom webhook under this name before it
-        # was built in keeps receiving through it.
-        custom = await _get_custom_webhook_config(source, org_id, session)
-        if custom is not None:
-            return custom.model_copy(update={"shadows_builtin": True})
-
-    if provider is not None:
-        return builtin_webhook_config(source)
-
-    return await _get_custom_webhook_config(source, org_id, session)
-
-
-def builtin_webhook_config(source: str) -> WebhookConfig | None:
-    """The config for a built-in source, or None without a configured secret."""
-    provider = get_provider(source)
-    if provider is None:
-        return None
     settings = get_settings()
-    secret = (
-        provider.secret_from_settings(settings)
-        if provider.secret_from_settings
-        else None
-    )
-    if not secret:
+
+    # Check builtin sources first
+    provider = get_provider(source)
+    if provider is not None:
+        secret = (
+            provider.secret_from_settings(settings)
+            if provider.secret_from_settings
+            else None
+        )
+        if secret:
+            return WebhookConfig(
+                secret=secret,
+                is_builtin=True,
+                signature_header=provider.signature_header,
+                signature_scheme=provider.verifier,
+                event_id_header=provider.event_id_header,
+            )
         return None
-    return WebhookConfig(
-        secret=secret,
-        is_builtin=True,
-        signature_header=provider.signature_header,
-        signature_scheme=provider.verifier,
-        event_id_header=provider.event_id_header,
-    )
 
-
-async def _get_custom_webhook_config(
-    source: str,
-    org_id: uuid.UUID,
-    session: AsyncSession,
-) -> WebhookConfig | None:
+    # Custom webhook - look up in database
     result = await session.execute(
         select(CustomWebhook).where(
             CustomWebhook.org_id == org_id,
@@ -202,38 +181,6 @@ async def get_event_automations(
     return result_pairs
 
 
-def _enabled_event_automation_filters(source: str) -> list[Any]:
-    """Filters selecting enabled, active event automations on a source."""
-    from sqlalchemy import func, literal
-
-    if using_sqlite():
-        trigger_filter = and_(
-            func.json_extract(Automation.trigger, "$.type") == literal("event"),
-            func.json_extract(Automation.trigger, "$.source") == literal(source),
-        )
-    else:
-        trigger_filter = and_(
-            Automation.trigger.op("->>")("type") == literal("event"),
-            Automation.trigger.op("->>")("source") == literal(source),
-        )
-    return [
-        Automation.enabled == True,  # noqa: E712
-        Automation.state == AutomationState.ACTIVE,
-        Automation.deleted_at.is_(None),
-        trigger_filter,
-    ]
-
-
-async def get_event_automation_org_ids(source: str, session: AsyncSession) -> list[str]:
-    """Organizations with an enabled event automation on a source."""
-    result = await session.execute(
-        select(Automation.org_id)
-        .where(*_enabled_event_automation_filters(source))
-        .distinct()
-    )
-    return sorted(str(org_id) for org_id in result.scalars().all())
-
-
 def _event_type_from_pattern(pattern: str) -> str:
     return pattern.split(".", 1)[0].strip()
 
@@ -251,8 +198,27 @@ async def get_requested_event_types(
     event type. Unsupported requested types are omitted when a supported set is
     provided.
     """
+    from sqlalchemy import func, literal
+
+    base_filters = [
+        Automation.enabled == True,  # noqa: E712
+        Automation.state == AutomationState.ACTIVE,
+        Automation.deleted_at.is_(None),
+    ]
+
+    if using_sqlite():
+        trigger_filter = and_(
+            func.json_extract(Automation.trigger, "$.type") == literal("event"),
+            func.json_extract(Automation.trigger, "$.source") == literal(source),
+        )
+    else:
+        trigger_filter = and_(
+            Automation.trigger.op("->>")("type") == literal("event"),
+            Automation.trigger.op("->>")("source") == literal(source),
+        )
+
     result = await session.execute(
-        select(Automation.trigger).where(*_enabled_event_automation_filters(source))
+        select(Automation.trigger).where(*base_filters, trigger_filter)
     )
 
     supported = (

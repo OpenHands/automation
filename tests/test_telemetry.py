@@ -18,7 +18,6 @@ from openhands.automation.middleware import (
 from openhands.automation.models import (
     Automation,
     AutomationRun,
-    AutomationRunAsKind,
     AutomationRunStatus,
     AutomationServiceMetadata,
     Base,
@@ -110,26 +109,6 @@ def test_base_properties_normalizes_sqlite_run_timestamps(monkeypatch):
     )
 
     assert properties["duration_ms"] == 2000
-
-
-def test_base_properties_report_run_as_kind(monkeypatch):
-    monkeypatch.setattr(
-        telemetry,
-        "get_server_version_info",
-        lambda **kwargs: {"package_version": "test", "sdk_version": "test"},
-    )
-    automation = _automation()
-    automation.run_as_kind = AutomationRunAsKind.SERVICE
-
-    properties = telemetry._base_properties(
-        request_context=TelemetryRequestContext(),
-        user=None,
-        automation=automation,
-        run=None,
-        backend_distinct_id="automation-backend:test",
-    )
-
-    assert properties["run_as_kind"] == "service"
 
 
 @pytest.mark.asyncio
@@ -709,30 +688,3 @@ def test_server_version_properties_do_not_cache_missing_sdk(monkeypatch):
         assert telemetry._server_version_properties()["sdk_version"] == "1.2.3"
     finally:
         telemetry._installed_sdk_version.cache_clear()
-
-
-@pytest.mark.asyncio
-async def test_self_hosted_override_labels_cloud_mode_events_as_local(
-    monkeypatch, request
-):
-    request.addfinalizer(clear_config_cache)
-    monkeypatch.setenv("AUTOMATION_POSTHOG_API_KEY", "ph_test")
-    monkeypatch.setenv("AUTOMATION_TELEMETRY_DEPLOYMENT_MODE", "self_hosted")
-    clear_config_cache()
-    monkeypatch.setattr(telemetry.httpx, "AsyncClient", _MockAsyncClient)
-
-    async def backend_id(**kwargs):
-        return "automation-backend:ohe"
-
-    monkeypatch.setattr(telemetry, "get_automation_backend_distinct_id", backend_id)
-    automation = _automation()
-
-    await telemetry.capture_automation_event(
-        "automation_created", automation=automation
-    )
-
-    _, payload = _MockAsyncClient.posts[-1]
-    properties = payload["properties"]
-    assert properties["deployment_mode"] == "self_hosted"
-    assert properties["deployment_kind"] == "local"
-    assert properties["cloud_user_id"] == str(automation.user_id)

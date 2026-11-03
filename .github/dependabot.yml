@@ -5,15 +5,13 @@ updates:
     - package-ecosystem: github-actions
       directory: /
       schedule:
-          interval: cron
-          cronjob: 0 0 * * *
+          interval: weekly
       commit-message:
           prefix: ci(deps)
 
     - package-ecosystem: pip
       directory: /
       schedule:
-          interval: cron
-          cronjob: 0 0 * * *
+          interval: weekly
       commit-message:
           prefix: chore(deps)

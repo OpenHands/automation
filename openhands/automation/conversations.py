@@ -240,7 +240,6 @@ async def continue_conversation(
     source: str,
     subject_key: str,
     automation_id: uuid.UUID,
-    service_account_id: uuid.UUID | None,
     event_key: str,
     event_payload: dict[str, Any] | None,
     turn_text: str | None = None,
@@ -265,9 +264,7 @@ async def continue_conversation(
     if run is None:
         return ContinueResult()
 
-    conversation_id = conversation_id_for(
-        org_id, automation_id, source, subject_key, service_account_id
-    )
+    conversation_id = conversation_id_for(org_id, automation_id, source, subject_key)
     turn = compose_turn(source, event_key, event_payload, override=turn_text)
 
     if run.started_at is None:
