@@ -5,8 +5,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy import CursorResult, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import selectinload
 
 from openhands.automation.db import using_sqlite
 from openhands.automation.git_sync import mark_git_sync_dirty
@@ -23,6 +24,7 @@ from openhands.automation.utils.change_events import (
     record_core_disable,
     set_audit_actor,
 )
+from openhands.automation.utils.run_status_detail import RunStatusDetailKind
 from openhands.automation.utils.time import utcnow
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 
@@ -554,15 +556,24 @@ async def expire_aged_deferred_runs(
     Selects PENDING runs whose retry date and max age have both passed and
     updates them in one guarded statement, so a run cancelled or claimed
     concurrently is left alone. Uses FOR UPDATE SKIP LOCKED on PostgreSQL so
-    competing replicas never double-skip; SQLite runs single-process. Returns
-    the number of runs skipped.
+    competing replicas never double-skip; SQLite runs single-process.
+
+    The update also releases the subject in the same statement. A deferred run
+    has no ``started_at`` (the requeue clears it), so a terminal run that kept
+    its subject would still answer ``continue_conversation``: the next event
+    for that subject would be folded into this dead run instead of starting a
+    fresh one. Releasing with the status keeps both atomic.
+
+    Emits ``automation_run_skipped`` for each row actually updated, with its
+    automation and run attribution, so a capacity-full poll does not skip runs
+    silently. Returns the number of runs skipped.
     """
     deadline = utcnow() - timedelta(seconds=max_age_seconds)
     now = utcnow()
     async with session_factory() as session:
         set_audit_actor(session, SYSTEM_ACTOR)
         select_query = (
-            select(AutomationRun.id)
+            select(AutomationRun)
             .where(
                 AutomationRun.status == AutomationRunStatus.PENDING,
                 AutomationRun.deferred_until.is_not(None),
@@ -571,13 +582,15 @@ async def expire_aged_deferred_runs(
             )
             .order_by(AutomationRun.created_at.asc())
             .limit(limit)
+            .options(selectinload(AutomationRun.automation))
         )
         if not using_sqlite():
             select_query = select_query.with_for_update(skip_locked=True)
-        run_ids = list((await session.execute(select_query)).scalars().all())
-        if not run_ids:
+        runs = list((await session.execute(select_query)).scalars().all())
+        if not runs:
             return 0
-        result: CursorResult = await session.execute(  # type: ignore[assignment]
+        run_ids = [run.id for run in runs]
+        result = await session.execute(
             update(AutomationRun)
             .where(
                 AutomationRun.id.in_(run_ids),
@@ -588,13 +601,40 @@ async def expire_aged_deferred_runs(
                 completed_at=now,
                 deferred_until=None,
                 status_detail=status_detail,
+                subject_released_at=case(
+                    (AutomationRun.subject_key.is_not(None), now),
+                    else_=AutomationRun.subject_released_at,
+                ),
             )
+            .returning(AutomationRun.id)
+            .execution_options(synchronize_session=False)
         )
+        updated_ids = set(result.scalars().all())
         await session.commit()
-        skipped = result.rowcount or 0
-    if skipped:
-        logger.warning("Expired %d deferred run(s) past max deferral age", skipped)
-    return skipped
+
+    skipped_runs = [run for run in runs if run.id in updated_ids]
+    # The kind is on the status detail the caller built; mirror it as the
+    # event's skip_reason so the two cannot drift apart.
+    skip_reason = str(
+        status_detail.get("kind") or RunStatusDetailKind.DEFER_EXPIRED.value
+    )
+    for run in skipped_runs:
+        run.status = AutomationRunStatus.SKIPPED
+        await capture_automation_event(
+            "automation_run_skipped",
+            automation=run.automation,
+            run=run,
+            session_factory=session_factory,
+            properties={
+                "trigger_source": "dispatcher",
+                "skip_reason": skip_reason,
+            },
+        )
+    if updated_ids:
+        logger.warning(
+            "Expired %d deferred run(s) past max deferral age", len(updated_ids)
+        )
+    return len(updated_ids)
 
 
 async def _record_first_run_outcome_in_session(

@@ -2754,7 +2754,12 @@ class TestExpireAgedDeferredRuns:
     """
 
     async def _seed_deferred_run(
-        self, async_session_factory, *, age_seconds: int, retry_in_seconds: int
+        self,
+        async_session_factory,
+        *,
+        age_seconds: int,
+        retry_in_seconds: int,
+        subject_key: str | None = None,
     ):
         async with async_session_factory() as session:
             automation = Automation(
@@ -2773,6 +2778,7 @@ class TestExpireAgedDeferredRuns:
                 status=AutomationRunStatus.PENDING,
                 created_at=utcnow() - timedelta(seconds=age_seconds),
                 deferred_until=utcnow() + timedelta(seconds=retry_in_seconds),
+                subject_key=subject_key,
             )
             session.add(run)
             await session.commit()
@@ -2794,6 +2800,79 @@ class TestExpireAgedDeferredRuns:
             assert updated.deferred_until is None
             assert updated.completed_at is not None
             assert updated.status_detail == {"kind": "defer_expired"}
+
+    async def test_expiring_a_subject_run_releases_its_subject(
+        self, async_session_factory
+    ):
+        """A run that owns a subject must not keep routing events once dead.
+
+        The run has no ``started_at`` (the requeue clears it), so a terminal
+        run that kept its subject would still answer ``continue_conversation``
+        and swallow later events into a run that never dispatches.
+        """
+        run_id = await self._seed_deferred_run(
+            async_session_factory,
+            age_seconds=7 * 3600,
+            retry_in_seconds=-1,
+            subject_key="TEAM/C123/1.1",
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.status == AutomationRunStatus.SKIPPED
+            assert updated.subject_released_at is not None
+
+    async def test_expiring_a_non_subject_run_leaves_release_unset(
+        self, async_session_factory
+    ):
+        """Only a run that owns a subject gets a release stamp."""
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+        async with async_session_factory() as session:
+            updated = await session.get(AutomationRun, run_id)
+            assert updated.subject_released_at is None
+
+    @patch(
+        "openhands.automation.utils.run.capture_automation_event",
+        new_callable=AsyncMock,
+    )
+    async def test_expiring_emits_skip_event_per_run(
+        self, capture_event, async_session_factory
+    ):
+        """The sweep is the only path that skips a capacity-blocked run, so it
+        must emit the same ``automation_run_skipped`` event the dispatcher
+        does, with ``skip_reason: defer_expired`` and run attribution."""
+        run_id = await self._seed_deferred_run(
+            async_session_factory, age_seconds=7 * 3600, retry_in_seconds=-1
+        )
+        skipped = await expire_aged_deferred_runs(
+            async_session_factory,
+            max_age_seconds=6 * 3600,
+            status_detail={"kind": "defer_expired"},
+        )
+        assert skipped == 1
+
+        capture_event.assert_awaited_once()
+        call_args = capture_event.await_args
+        assert call_args is not None
+        args, kwargs = call_args
+        assert args[0] == "automation_run_skipped"
+        assert kwargs["run"].id == run_id
+        assert kwargs["automation"].id == kwargs["run"].automation_id
+        assert kwargs["properties"]["skip_reason"] == "defer_expired"
+        assert kwargs["properties"]["trigger_source"] == "dispatcher"
 
     async def test_keeps_run_within_age(self, async_session_factory):
         run_id = await self._seed_deferred_run(
