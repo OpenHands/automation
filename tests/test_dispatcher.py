@@ -2305,7 +2305,9 @@ class TestDispatchConcurrencyGate:
         """An aged deferred run is expired on a poll that admits nothing.
 
         The poll is at capacity, so it would return before claiming; the sweep
-        must still reap the aged deferred row instead of leaving it PENDING.
+        must still reap the aged deferred row instead of leaving it PENDING,
+        and must emit the ``automation_run_skipped`` event the dispatcher's own
+        skip handler would have emitted had it been reached.
         """
         from openhands.automation.config import clear_config_cache
 
@@ -2326,15 +2328,29 @@ class TestDispatchConcurrencyGate:
                 )
                 await session.commit()
 
-            dispatched = await dispatch_pending_runs(
-                async_session_factory, mock_settings, mock_client
-            )
+            with patch(
+                "openhands.automation.utils.run.capture_automation_event",
+                new_callable=AsyncMock,
+            ) as capture_event:
+                dispatched = await dispatch_pending_runs(
+                    async_session_factory, mock_settings, mock_client
+                )
             assert dispatched == []
 
             async with async_session_factory() as session:
                 updated = await session.get(AutomationRun, ids[0])
                 assert updated.status == AutomationRunStatus.SKIPPED
                 assert updated.status_detail["kind"] == "defer_expired"
+
+            # The capacity gate returns before the dispatcher's skip handler,
+            # so the sweep is the only emitter for this run.
+            capture_event.assert_awaited_once()
+            call_args = capture_event.await_args
+            assert call_args is not None
+            args, kwargs = call_args
+            assert args[0] == "automation_run_skipped"
+            assert kwargs["run"].id == ids[0]
+            assert kwargs["properties"]["skip_reason"] == "defer_expired"
         finally:
             clear_config_cache()
 
