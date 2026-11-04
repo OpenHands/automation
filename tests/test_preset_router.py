@@ -516,6 +516,66 @@ _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
             },
             "fabrikam-web#42",
         ),
+        # Bitbucket Data Center and Jira Data Center events are stored as the
+        # parsed event: the provider's payload sits under "payload".
+        (
+            {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {
+                        "id": 7,
+                        "title": "Add feature",
+                        "toRef": {
+                            "repository": {
+                                "slug": "payments-api",
+                                "project": {"key": "DEM"},
+                            }
+                        },
+                    },
+                },
+                "event_key": "pr:opened",
+            },
+            "payments-api#7",
+        ),
+        (
+            {
+                "event_key_value": "pr:comment:added",
+                "payload": {
+                    "eventKey": "pr:comment:added",
+                    "comment": {"text": "please review"},
+                    "pullRequest": {
+                        "id": 12,
+                        "toRef": {"repository": {"slug": "springboot-demo"}},
+                    },
+                },
+                "event_key": "pr:comment:added",
+            },
+            "springboot-demo#12",
+        ),
+        (
+            {
+                "webhook_event": "comment_created",
+                "payload": {
+                    "webhookEvent": "comment_created",
+                    "comment": {"body": "please review"},
+                    "issue": {"id": "10001", "key": "PROJ-123"},
+                },
+                "event_key": "comment_created",
+            },
+            "PROJ-123",
+        ),
+        (
+            {
+                "webhook_event": "jira:issue_updated",
+                "payload": {
+                    "webhookEvent": "jira:issue_updated",
+                    "issue": {"id": "10002", "key": " ENG-7 "},
+                },
+                "event_key": "jira:issue_updated",
+            },
+            "ENG-7",
+        ),
     ],
 )
 def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
@@ -554,6 +614,37 @@ def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
                     "eventType": "git.push",
                     "resource": {"repository": {"name": "fabrikam-web"}},
                 },
+            },
+        },
+        # A Bitbucket Data Center repository event has no pull request number.
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "repo:refs_changed",
+                "payload": {
+                    "eventKey": "repo:refs_changed",
+                    "repository": {"slug": "payments-api"},
+                },
+                "event_key": "repo:refs_changed",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {"id": True, "toRef": {"repository": {"slug": "r"}}},
+                },
+                "event_key": "pr:opened",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "webhook_event": "comment_created",
+                "payload": {"webhookEvent": "comment_created", "issue": {"key": 7}},
+                "event_key": "comment_created",
             },
         },
     ],
