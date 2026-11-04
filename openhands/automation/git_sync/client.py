@@ -197,6 +197,23 @@ async def current_head(workdir: Path) -> str | None:
     return out.strip() or None
 
 
+async def last_commit_author(workdir: Path, path: Path, timeout: float) -> str | None:
+    """`Name <email>` of the last commit that touched `path`, or `None`.
+
+    For the import log: the sync's own export commits carry the configured
+    author, so this tells a person's edit from the sync's. Best effort.
+    """
+    try:
+        out = await _run_git(
+            ["log", "-1", "--format=%an <%ae>", "--", str(path)],
+            cwd=workdir,
+            timeout=timeout,
+        )
+    except GitSyncError:
+        return None
+    return out.strip() or None
+
+
 async def diff_names(
     workdir: Path, path: str, base: str, head: str, timeout: float
 ) -> list[str]:

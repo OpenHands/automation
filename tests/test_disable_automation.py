@@ -248,7 +248,7 @@ class TestDownloadInternalTarball:
 
         async with async_session_factory() as session:
             with pytest.raises(TarballNotFoundError) as exc_info:
-                await _download_internal_tarball(fake_upload_id, session)
+                await _download_internal_tarball(fake_upload_id, TEST_ORG_ID, session)
 
         assert "not found" in str(exc_info.value).lower()
         assert str(fake_upload_id) in str(exc_info.value)
@@ -274,7 +274,7 @@ class TestDownloadInternalTarball:
         with patch("openhands.automation.storage.get_file_store", return_value=store):
             async with async_session_factory() as session:
                 with pytest.raises(TarballNotFoundError) as exc_info:
-                    await _download_internal_tarball(upload_id, session)
+                    await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
 
         message = str(exc_info.value)
         assert "missing from storage" in message
@@ -302,7 +302,7 @@ class TestDownloadInternalTarball:
         with patch("openhands.automation.storage.get_file_store", return_value=store):
             async with async_session_factory() as session:
                 with pytest.raises(FileNotFoundError) as exc_info:
-                    await _download_internal_tarball(upload_id, session)
+                    await _download_internal_tarball(upload_id, TEST_ORG_ID, session)
 
         assert not isinstance(exc_info.value, TarballNotFoundError)
 

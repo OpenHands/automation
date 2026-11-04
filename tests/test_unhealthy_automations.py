@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from openhands.automation.config import clear_config_cache
 from openhands.automation.models import (
     Automation,
+    AutomationChangeEvent,
     AutomationDisableEvent,
     AutomationRun,
     AutomationRunStatus,
@@ -172,6 +173,13 @@ async def test_auto_disables_after_consecutive_permanent_failures(
         assert events[0].source == "consecutive_permanent_failures"
         assert events[0].run_id is not None
         assert str(events[0].run_id) == automation.disabled_detail["run_id"]
+        (change,) = await session.scalars(
+            select(AutomationChangeEvent).where(
+                AutomationChangeEvent.automation_id == automation.id,
+                AutomationChangeEvent.action == "disable",
+            )
+        )
+        assert change.actor_kind == "system"
 
 
 async def test_direct_disable_records_event_history(sqlite_session_factory):
@@ -206,6 +214,15 @@ async def test_direct_disable_records_event_history(sqlite_session_factory):
     )
 
     assert disabled is True
+    async with sqlite_session_factory() as session:
+        # The disable is a Core update, which the audit hook cannot see.
+        (change,) = await session.scalars(
+            select(AutomationChangeEvent).where(
+                AutomationChangeEvent.automation_id == automation_id,
+                AutomationChangeEvent.action == "disable",
+            )
+        )
+    assert change.actor_kind == "system"
 
     async with sqlite_session_factory() as session:
         events = (
