@@ -634,3 +634,187 @@ def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(
 
     assert str(cache_dir).startswith(tempfile.gettempdir())
     assert ".openhands" not in str(cache_dir)
+
+
+def _write_catalog_manifest_with_bundle(root: Path) -> Path:
+    """Write a catalog plugin whose bundle.files references a repo-root path.
+
+    Returns repo_root. The repo root contains manifest.json and the actual
+    script referenced by bundle.files (scripts/main.py).
+    """
+    repo_root = root / "repo"
+    repo_root.mkdir()
+    (repo_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "description": "A catalog entry for testing.",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {
+                            "cron": {
+                                "schedule": {
+                                    "type": "cron",
+                                    "default": "0 8 * * *",
+                                    "required": True,
+                                },
+                                "timezone": {
+                                    "type": "timezone",
+                                    "default": "UTC",
+                                    "required": True,
+                                },
+                            }
+                        },
+                        "args": {
+                            "feeds": {
+                                "type": "textarea",
+                                "label": "Feeds",
+                                "default": "https://example.com/rss",
+                                "required": True,
+                            }
+                        },
+                    },
+                    "bundle": {
+                        "entrypoint": "python3 main.py",
+                        "timeout": 900,
+                        "files": {"main.py": "scripts/main.py"},
+                        "config": {"feeds": "{{form.feeds}}"},
+                    },
+                },
+            }
+        )
+    )
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "main.py").write_text("print('hello from bundle')\n")
+    return repo_root
+
+
+def _patch_catalog_preflight(monkeypatch):
+    """Force the catalog fallback path and fake the repo fetch."""
+    from openhands.automation.plugin_specs import PluginSourceError
+
+    def _fake_fetch(*, source, cache_dir, ref, repo_path, **kw):
+        return Path(source), "abc123"
+
+    monkeypatch.setattr(
+        "openhands.automation.plugin_specs.fetch_plugin_with_resolution",
+        _fake_fetch,
+    )
+
+    class _InvalidPluginCM:
+        def __enter__(self):
+            raise PluginSourceError("invalid_plugin", "no .plugin/plugin.json")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        "openhands.automation.plugin_specs.preflight_plugin",
+        lambda *a, **kw: _InvalidPluginCM(),
+    )
+
+
+def test_preflight_preserves_bundle_files(tmp_path):
+    """Catalog manifest bundle.files must be preserved on the entrypoint."""
+    repo_root = _write_catalog_manifest_with_bundle(tmp_path)
+
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(repo_root)),
+        allow_local_sources=True,
+    )
+
+    assert manifest.entrypoint.runner == "script"
+    assert manifest.entrypoint.bundle_files == {"main.py": "scripts/main.py"}
+
+
+def test_entrypoint_for_bundle_files_omits_plugin_root(tmp_path):
+    """When bundle_files are present, the entrypoint runs from the tarball root."""
+    from openhands.automation.plugin_specs import entrypoint_for_manifest
+
+    repo_root = _write_catalog_manifest_with_bundle(tmp_path)
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(repo_root)),
+        allow_local_sources=True,
+    )
+
+    assert entrypoint_for_manifest(manifest) == "python3 main.py"
+
+
+def test_build_execution_payload_bundles_files_and_skips_fetch(tmp_path, monkeypatch):
+    """build_execution_payload must bundle catalog script files and skip
+    the agent-server pre-fetch for the main plugin source."""
+    repo_root = _write_catalog_manifest_with_bundle(tmp_path)
+    _patch_catalog_preflight(monkeypatch)
+
+    tarball, _env, runtime, plugin_fetches = build_execution_payload(
+        plugin_spec={
+            "plugin": {"source": str(repo_root)},
+            "config": {"feeds": "https://example.com/rss"},
+        },
+        agent_profile_id=None,
+        agent_profile_name=None,
+        llm_profile_name=None,
+        work_dir="/tmp/automation-run",
+    )
+
+    # No main plugin source in fetch list — it's bundled in the tarball.
+    assert plugin_fetches == []
+    # Entrypoint is the raw command, no AUTOMATION_PLUGIN_ROOT prefix.
+    assert runtime["entrypoint"] == "python3 main.py"
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        names = set(tar.getnames())
+        assert "main.py" in names
+        main_file = tar.extractfile("main.py")
+        assert main_file is not None
+        assert main_file.read() == b"print('hello from bundle')\n"
+        assert ".automation/config.json" in names
+        assert ".automation/execution.json" in names
+
+
+def test_build_execution_payload_bundle_files_missing_source(tmp_path, monkeypatch):
+    """A missing bundle file source must raise PluginSpecError."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {
+                            "cron": {
+                                "schedule": {
+                                    "default": "0 8 * * *",
+                                    "required": True,
+                                },
+                                "timezone": {"default": "UTC", "required": True},
+                            }
+                        },
+                        "args": {},
+                    },
+                    "bundle": {
+                        "entrypoint": "python3 main.py",
+                        "files": {"main.py": "scripts/missing.py"},
+                    },
+                },
+            }
+        )
+    )
+    _patch_catalog_preflight(monkeypatch)
+
+    with pytest.raises(PluginSpecError, match="Bundle file not found"):
+        build_execution_payload(
+            plugin_spec={"plugin": {"source": str(repo_root)}, "config": {}},
+            agent_profile_id=None,
+            agent_profile_name=None,
+            llm_profile_name=None,
+            work_dir="/tmp/automation-run",
+        )

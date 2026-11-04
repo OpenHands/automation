@@ -131,6 +131,7 @@ class AutomationPluginEntrypoint(BaseModel):
     arguments: str | None = Field(default=None, max_length=5000)
     working_dir: str = Field(default=".", min_length=1, max_length=200)
     setup_script: str | None = Field(default=None, min_length=1, max_length=200)
+    bundle_files: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("command")
     @classmethod
@@ -619,11 +620,13 @@ def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManife
         )
 
     entrypoint_command = bundle.get("entrypoint") or "python3 main.py"
+    bundle_files = bundle.get("files") or {}
     try:
         entrypoint = AutomationPluginEntrypoint(
             runner="script",
             command=entrypoint_command,
             working_dir=".",
+            bundle_files=bundle_files,
         )
     except Exception as exc:
         raise PluginSpecError(
@@ -828,6 +831,7 @@ def build_execution_payload(
         "llm_profile_name": llm_profile_name,
     }
 
+    bundle_file_data: dict[str, bytes] | None = None
     if manifest.entrypoint.runner == "conversation":
         tarball = _build_stock_runner_tarball(
             source=source,
@@ -838,11 +842,25 @@ def build_execution_payload(
             required_plugins=required_plugins,
         )
     else:
+        if manifest.entrypoint.bundle_files:
+            bundle_file_data = _fetch_bundle_files(
+                source, resolved_ref, manifest.entrypoint.bundle_files
+            )
+            # Catalog plugins with bundle files are self-contained — the
+            # tarball carries the script. Skip the agent-server pre-fetch for
+            # the main plugin (which rejects catalog plugins for lacking
+            # .plugin/plugin.json) and only fetch declared runtime plugins.
+            plugin_fetches = _plugin_fetch_requests(
+                source=None,
+                resolved_ref=resolved_ref,
+                required_plugins=required_plugins,
+            )
         tarball = _build_runtime_metadata_tarball(
             manifest=manifest,
             config=config,
             resolved_runtime=resolved_runtime,
             required_plugins=required_plugins,
+            bundle_files=bundle_file_data,
         )
     work_dir = work_dir.rstrip("/") or "/workspace/project"
     env = {
@@ -859,12 +877,61 @@ def build_execution_payload(
     return tarball, env, resolved_runtime, plugin_fetches
 
 
+def _fetch_bundle_files(
+    source: AutomationPluginSource,
+    resolved_ref: str | None,
+    bundle_files: dict[str, str],
+) -> dict[str, bytes]:
+    """Fetch the full plugin repo and read bundle file contents.
+
+    Catalog manifests declare ``setup.bundle.files`` as a mapping of
+    tarball-destination → repo-relative-source. Source paths are relative to
+    the repository root, so the repo is fetched *without* ``repo_path`` (the
+    full clone) even when the plugin source uses a subdirectory.
+    """
+    if not bundle_files:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="automation-bundle-") as tmp_cache:
+        try:
+            repo_root, _ = fetch_plugin_with_resolution(
+                source=source.source,
+                cache_dir=Path(tmp_cache),
+                ref=resolved_ref or source.ref,
+                repo_path=None,
+            )
+        except Exception as exc:
+            raise PluginSpecError(
+                f"Failed to fetch plugin repo for bundle files: {exc}"
+            ) from exc
+
+        result: dict[str, bytes] = {}
+        for dest, src_path in bundle_files.items():
+            if not isinstance(src_path, str) or not src_path.strip():
+                raise PluginSpecError(
+                    f"Bundle file source for '{dest}' must be a non-empty string"
+                )
+            candidate = repo_root / src_path.strip("/")
+            try:
+                candidate.resolve().relative_to(repo_root.resolve())
+            except ValueError as exc:
+                raise PluginSpecError(
+                    f"Bundle file source escapes repo root: {src_path}"
+                ) from exc
+            if not candidate.is_file():
+                raise PluginSpecError(
+                    f"Bundle file not found in repo: {src_path}"
+                )
+            result[dest] = candidate.read_bytes()
+        return result
+
+
 def _build_runtime_metadata_tarball(
     *,
     manifest: AutomationPluginManifest,
     config: dict[str, Any],
     resolved_runtime: dict[str, Any],
     required_plugins: list[dict[str, Any]],
+    bundle_files: dict[str, bytes] | None = None,
 ) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -879,8 +946,18 @@ def _build_runtime_metadata_tarball(
                 f'bash "$AUTOMATION_PLUGIN_ROOT/{setup_script}"\n'
             )
             _add_bytes(tar, "setup.sh", wrapper.encode(), mode=0o755)
+        if bundle_files:
+            for dest, data in bundle_files.items():
+                _safe_add_tar_path(tar, dest, data)
     buf.seek(0)
     return buf.read()
+
+
+def _safe_add_tar_path(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+    """Add a file to the tarball, rejecting path escapes."""
+    if name.startswith("/") or ".." in PurePosixPath(name).parts:
+        raise PluginSpecError(f"Bundle file path escapes tarball root: {name}")
+    _add_bytes(tar, name, data, mode=0o755 if name.endswith(".sh") else 0o644)
 
 
 def _add_json(tar: tarfile.TarFile, name: str, data: Any) -> None:
@@ -921,6 +998,8 @@ def setup_script_for_manifest(manifest: AutomationPluginManifest) -> str | None:
 def entrypoint_for_manifest(manifest: AutomationPluginManifest) -> str:
     if manifest.entrypoint.runner == "conversation":
         return _preset_entrypoint()
+    if manifest.entrypoint.bundle_files:
+        return manifest.entrypoint.command
     if manifest.entrypoint.working_dir in ("", "."):
         return f'cd "$AUTOMATION_PLUGIN_ROOT" && {manifest.entrypoint.command}'
     return (
@@ -946,11 +1025,13 @@ def _resolved_plugin_source(
 
 
 def _plugin_config_sources(
-    source: AutomationPluginSource,
+    source: AutomationPluginSource | None,
     resolved_ref: str | None,
     required_plugins: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    sources = [_resolved_plugin_source(source, resolved_ref)]
+    sources: list[dict[str, Any]] = []
+    if source is not None:
+        sources.append(_resolved_plugin_source(source, resolved_ref))
     for plugin in required_plugins:
         item = {k: v for k, v in plugin.items() if k != "resolved_ref"}
         if resolved_ref := plugin.get("resolved_ref"):
@@ -960,7 +1041,7 @@ def _plugin_config_sources(
 
 
 def _plugin_fetch_requests(
-    source: AutomationPluginSource,
+    source: AutomationPluginSource | None,
     resolved_ref: str | None,
     required_plugins: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
