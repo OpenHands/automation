@@ -21,7 +21,7 @@ from openhands.automation.draft_schemas import (
     FINAL_DRAFT_MODELS,
     normalize_draft_body,
 )
-from openhands.automation.event_schemas import parse_event
+from openhands.automation.event_schemas import parse_custom_event, parse_event
 from openhands.automation.event_schemas.catalog import (
     SOURCE_LABELS,
     supported_event_patterns,
@@ -244,10 +244,14 @@ async def validate_draft(
                 )
             )
         else:
-            errors.extend(_event_type_errors(trigger))
+            if not delivery.custom_shadows_builtin:
+                errors.extend(_event_type_errors(trigger))
+            parse = (
+                parse_custom_event if delivery.custom_shadows_builtin else parse_event
+            )
             if body.sample_event is not None:
                 try:
-                    event = parse_event(
+                    event = parse(
                         trigger.source,
                         body.sample_event,
                         event_key_expr=delivery.event_key_expr,

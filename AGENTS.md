@@ -74,7 +74,7 @@ automation/
 │       ├── watchdog.py         # Staleness watchdog — marks hung runs as FAILED
 │       ├── webhook_router.py   # Custom webhook CRUD
 │       ├── backends/           # Execution backends (Cloud, Local)
-│       ├── event_schemas/      # Typed event payloads (GitHub, Jira DC, Bitbucket DC, custom)
+│       ├── event_schemas/      # Typed event payloads (GitHub, GitLab, Jira DC, Bitbucket DC, custom)
 │       ├── git_sync/           # Bidirectional git sync, one repo per org (see below)
 │       │   ├── client.py       # Async `git` CLI wrapper (clone/pull/commit/push)
 │       │   ├── config_override.py  # Per-org runtime config overrides
