@@ -7,6 +7,18 @@ from pydantic import Field, computed_field
 from openhands.automation.event_schemas import WebhookEvent
 
 
+# The Service Hooks the OpenHands server installs for an organization, so the
+# event types it delivers. ``git.pullrequest.updated`` arrives once per kind of
+# change; the forwarded copy names it in ``openhands.notificationType``.
+AZURE_DEVOPS_EVENT_TYPES: tuple[str, ...] = (
+    "git.pullrequest.created",
+    "git.pullrequest.merged",
+    "git.pullrequest.updated",
+    "ms.vss-code.git-pullrequest-comment-event",
+    "workitem.commented",
+)
+
+
 class AzureDevOpsEvent(WebhookEvent):
     """Azure DevOps Service Hook event.
 

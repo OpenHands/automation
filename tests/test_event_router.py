@@ -266,6 +266,49 @@ async def test_requested_bitbucket_data_center_event_types_detect_each_key(
 
 
 @pytest.mark.asyncio
+async def test_requested_azure_devops_event_types_are_the_installed_hooks(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The catalog names the Service Hooks the OpenHands server installs."""
+    monkeypatch.setenv("AUTOMATION_WEBHOOK_SECRET", "test-secret")
+    source = "azure_devops"
+
+    response = await async_client.get(
+        f"/api/automation/v1/events/{source}/requested-types",
+        headers={"X-Hub-Signature-256": sign_text(source, "test-secret")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["event_types"] == [
+        "git.pullrequest.created",
+        "git.pullrequest.merged",
+        "git.pullrequest.updated",
+        "ms.vss-code.git-pullrequest-comment-event",
+        "workitem.commented",
+    ]
+    assert [rule["event_type"] for rule in data["event_detection_rules"]] == (
+        data["event_types"]
+    )
+    pull_request_created = {
+        "eventType": "git.pullrequest.created",
+        "resource": {"pullRequestId": 42},
+    }
+    detected = [
+        rule["event_type"]
+        for rule in data["event_detection_rules"]
+        if jmespath.search(rule["jmespath"], pull_request_created)
+    ]
+    assert detected == ["git.pullrequest.created"]
+    assert not any(
+        jmespath.search(rule["jmespath"], {"eventType": "git.push"})
+        for rule in data["event_detection_rules"]
+    )
+    assert data["org_ids"] is None
+
+
+@pytest.mark.asyncio
 async def test_requested_jira_dc_event_types_name_orgs_with_automations(
     async_client: AsyncClient,
     async_session,
