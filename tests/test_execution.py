@@ -538,6 +538,46 @@ class TestPrivateEnvironmentInjection:
     @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
     @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
     @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_command_marks_the_run_as_cloud_mode(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        """run_automation() always uses a cloud sandbox, and since it exports
+        AGENT_SERVER_URL too, the presets need AUTOMATION_RUN_MODE to tell (#688)."""
+        session_key = "session_" + "b" * 64
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            session_key,
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key-123",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+        )
+
+        env_bytes = mock_upload.await_args_list[1].args[1]
+        assert b"AUTOMATION_RUN_MODE=" in env_bytes
+        assert b"cloud" in env_bytes
+        assert b"AGENT_SERVER_URL=" in env_bytes
+        assert b"SANDBOX_ID=" in env_bytes
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
     async def test_blocking_command_env_vars_not_overridden_by_caller(
         self,
         mock_async_client,
