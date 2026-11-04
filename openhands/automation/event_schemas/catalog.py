@@ -66,18 +66,22 @@ def event_detection_rules(source: str) -> list[dict[str, str]]:
     ]
 
 
+# Sources whose catalog holds event types (``pull_request``) while delivered keys
+# add an action after a dot (``pull_request.opened``). A keyed source's whole
+# key is its type, dots included (``git.pullrequest.created``).
+_ACTION_SUFFIX_SOURCES: frozenset[str] = frozenset({"github"})
+
+
 def pattern_can_match(source: str, pattern: str) -> bool | None:
     """Whether a trigger's ``on`` pattern can match an event this source delivers.
 
-    None when the source has no catalog. GitHub's catalog holds event types
-    (``pull_request``) while its keys add the action (``pull_request.opened``),
-    so only the part before the first dot is compared; a keyed source's whole
-    key is its type, dots included (``git.pullrequest.created``), and the
-    pattern is compared the way the trigger matcher compares a delivered key.
+    None when the source has no catalog. The pattern is compared the way the
+    trigger matcher compares a delivered key, except that an action suffix is
+    dropped first for sources whose catalog types carry none.
     """
     supported = supported_event_types(source)
     if supported is None:
         return None
-    if source == "github":
+    if source in _ACTION_SUFFIX_SOURCES:
         pattern = pattern.split(".", 1)[0]
     return any(fnmatch.fnmatch(event_type, pattern) for event_type in supported)

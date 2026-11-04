@@ -8,8 +8,10 @@ from openhands.automation.event_schemas import WebhookEvent
 
 
 # The Service Hooks the OpenHands server installs for an organization, so the
-# event types it delivers. ``git.pullrequest.updated`` arrives once per kind of
-# change; the forwarded copy names it in ``openhands.notificationType``.
+# event types it delivers; keep in step with the constants in OpenHands/enterprise
+# ``openhands/app_server/integrations/azure_devops/service/webhooks.py``.
+# ``git.pullrequest.updated`` arrives once per kind of change; the forwarded
+# copy names it in ``openhands.notificationType``.
 AZURE_DEVOPS_EVENT_TYPES: tuple[str, ...] = (
     "git.pullrequest.created",
     "git.pullrequest.merged",
