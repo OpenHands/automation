@@ -30,8 +30,10 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.auth import X_ORG_ID_HEADER
 from openhands.automation.backends import (
+    ConversationStart,
     ExecutionBackend,
     ExecutionContext,
+    StartedConversation,
     get_backend,
 )
 from openhands.automation.config import ServiceSettings, get_config
@@ -39,6 +41,8 @@ from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.db import using_sqlite
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    ConversationStartError,
+    ConversationStartUnavailable,
     DailySandboxLimitReachedError,
     PermanentDispatchError,
     SandboxProvisioningError,
@@ -194,6 +198,116 @@ def _api_key_error_message(exc: APIKeyError, what: str) -> str:
             "no longer in the organization."
         )
     return f"Failed to get API key to {what}: {exc}"
+
+
+# Presets whose runner the service ships, so it can be told to attach to a
+# conversation the app server started for the run.
+_STOCK_PRESET_TYPES = frozenset({"prompt", "plugin"})
+_PLUGIN_SOURCE_KEYS = frozenset({"source", "ref", "repo_path"})
+
+
+def _conversation_tags(automation: Automation, run: AutomationRun) -> dict[str, str]:
+    """The tags the stock runners put on their conversations."""
+    return {
+        "automationtrigger": "automation",
+        "automationid": str(automation.id),
+        "automationname": automation.name[:256],
+        "automationrunid": str(run.id),
+    }
+
+
+def _conversation_start(
+    automation: Automation,
+    run: AutomationRun,
+    resolved_runtime: dict[str, Any] | None,
+    plugin_fetches: list[dict[str, Any]],
+    env_vars: dict[str, str],
+) -> ConversationStart | None:
+    """What the app server needs to start this run's conversation, or None.
+
+    Only a run whose runner the service ships can attach to a conversation
+    started for it: the prompt and plugin presets, and plugin-spec runs on the
+    stock conversation runner. Custom tarballs keep creating their own.
+    """
+    preset_type = (automation.preset_metadata or {}).get("preset_type")
+    if resolved_runtime is not None:
+        if resolved_runtime.get("runner") != "conversation":
+            return None
+        agent_profile_id = (
+            resolved_runtime.get("agent_profile_id") or automation.agent_profile_id
+        )
+        # The agent profile owns the model for plugin-spec runs.
+        llm_profile = None
+        plugins = [
+            {k: v for k, v in plugin.items() if k in _PLUGIN_SOURCE_KEYS}
+            for plugin in plugin_fetches
+        ]
+    elif preset_type in _STOCK_PRESET_TYPES:
+        plugins = []
+        if preset_type == "plugin":
+            plugins = (automation.preset_metadata or {}).get("plugins") or []
+            if not plugins:
+                # An A/B experiment: the runner picks the variant's plugins and
+                # model itself, so only it can create that conversation.
+                return None
+        agent_profile_id = automation.agent_profile_id
+        llm_profile = automation.model
+    else:
+        return None
+    return ConversationStart(
+        agent_profile_id=str(agent_profile_id) if agent_profile_id else None,
+        llm_profile=llm_profile or None,
+        conversation_id=env_vars.get("AUTOMATION_CONVERSATION_ID"),
+        plugins=plugins,
+        tags=_conversation_tags(automation, run),
+    )
+
+
+def _check_launched_profile(
+    started: StartedConversation, requested: str | None
+) -> None:
+    """Fail when the app server launched from another profile, or none.
+
+    An app server that cannot resolve the profile falls back to composed
+    settings and reports no launched profile; the run must not go on as if
+    it had the one the automation selected.
+    """
+    if requested is None:
+        return
+    launched = started.agent_profile_id
+    if launched is not None and launched.lower() == requested.lower():
+        return
+    raise ConversationStartError(
+        f"Conversation {started.conversation_id} was launched from agent profile "
+        f"{launched or 'none'} instead of {requested}",
+        code="agent_profile_mismatch",
+    )
+
+
+def _conversation_start_status_detail(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ConversationStartError):
+        if exc.status_code is not None:
+            kind = _run_status_kind_for_http_status(exc.status_code)
+        elif exc.code == "start_task_timeout":
+            kind = RunStatusDetailKind.TIMEOUT
+        else:
+            kind = RunStatusDetailKind.UNKNOWN
+        return make_run_status_detail(
+            phase=RunStatusPhase.DISPATCH,
+            kind=kind,
+            detail=str(exc),
+            transient=exc.transient,
+            source="openhands_api",
+            operation="start_conversation",
+            code=exc.code or type(exc).__name__,
+            status_code=exc.status_code,
+        )
+    return run_status_detail_from_exception(
+        exc,
+        phase=RunStatusPhase.DISPATCH,
+        source="openhands_api",
+        operation="start_conversation",
+    )
 
 
 def _plugin_agent_profile_requirement(
@@ -506,8 +620,10 @@ async def _execute_run(
     1. Build env vars and calculate timeout
     2. Get execution context (creates sandbox in Cloud, returns config in local)
     3. Prepare tarball source
-    4. Execute in context (upload tarball, start entrypoint)
-    5. Store sandbox_id for watchdog verification (if applicable)
+    4. Start the run's conversation through the app server (cloud mode,
+       stock runners), so the run gets the owner's agent profile, MCP and secrets
+    5. Execute in context (upload tarball, start entrypoint)
+    6. Store sandbox_id for watchdog verification (if applicable)
 
     The SDK inside the execution environment fires the completion callback on exit.
     The watchdog will verify status if the callback is missed.
@@ -982,7 +1098,52 @@ async def _execute_run(
         )
         return
 
-    # 6. Execute in context
+    # 6. Start the run's conversation through the profile owner. On OpenHands
+    # Cloud/Enterprise the agent profile, MCP servers and secrets live on the
+    # app server; a conversation the runner creates on the sandbox's own agent
+    # server gets none of them. The stock runners attach to the one started here.
+    conversation_start = _conversation_start(
+        automation, run, resolved_runtime, plugin_fetches, env_vars
+    )
+    if conversation_start is not None:
+        started: StartedConversation | None = None
+        try:
+            started = await backend.start_conversation(client, ctx, conversation_start)
+            if started is not None:
+                _check_launched_profile(started, conversation_start.agent_profile_id)
+        except ConversationStartUnavailable as exc:
+            # An app server without this contract: the runner creates the
+            # conversation as before, without the owner's agent profile.
+            logger.warning(
+                "conversation_start_fallback: %s",
+                exc,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            started = None
+        except Exception as exc:
+            logger.warning(
+                "Failed to start the run's conversation: %s",
+                exc,
+                exc_info=True,
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+            await backend.release_context(client, ctx)
+            await _fail(
+                str(exc) or "Failed to start the run's conversation",
+                status_detail=_conversation_start_status_detail(exc),
+            )
+            return
+        if started is not None:
+            env_vars["AUTOMATION_CONVERSATION_ID"] = started.conversation_id
+            env_vars["AUTOMATION_CONVERSATION_STARTED"] = "app_server"
+            logger.info(
+                "Conversation %s started by the OpenHands API from agent profile %s",
+                started.conversation_id,
+                started.agent_profile_id or "(owner's active profile)",
+                extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+            )
+
+    # 7. Execute in context
     try:
         result = await execute_in_context(
             agent_url=ctx.agent_url,
@@ -1034,7 +1195,7 @@ async def _execute_run(
         )
         return
 
-    # 7. Handle result
+    # 8. Handle result
     if result.success:
         add_event(
             "automation.entrypoint.start",

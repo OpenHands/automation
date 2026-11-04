@@ -201,9 +201,10 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
+6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (404/405/422) logs `conversation_start_fallback` and the runner creates the conversation as before. Local mode and custom tarballs skip this step.
+7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
-7. **Return immediately** — Dispatcher does not wait for completion
+8. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
 - **Happy path**: SDK inside sandbox POSTs to `POST /v1/runs/{id}/complete` on the service (injected as `AUTOMATION_CALLBACK_URL`; the service serves it under the `/api/automation` base path)
@@ -222,7 +223,8 @@ Completion is handled asynchronously:
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
-| `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it. Absent otherwise |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 

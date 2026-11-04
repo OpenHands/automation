@@ -60,6 +60,10 @@ Common env vars:
   AUTOMATION_TRIGGER_SOURCE  - trigger source for observability context (optional)
   AUTOMATION_EVENT_PAYLOAD   - JSON with trigger info and event payload (optional)
   AUTOMATION_MODEL           - model profile name to load instead of default (optional)
+  AUTOMATION_CONVERSATION_ID - the conversation to use (optional)
+  AUTOMATION_CONVERSATION_STARTED - "app_server" when the service already started
+                               AUTOMATION_CONVERSATION_ID through the app server,
+                               plugins included; the script then attaches
 
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
   AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
@@ -80,6 +84,41 @@ from datetime import datetime, timezone
 # Detect execution mode based on AGENT_SERVER_URL presence
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
 IS_LOCAL_MODE = bool(agent_server_url)
+
+
+def _attaches_to_started_conversation(environ) -> bool:
+    """Whether the service already started this run's conversation.
+
+    On OpenHands Cloud/Enterprise the service asks the app server to start it
+    in this sandbox, plugins included, so the run gets the owner's agent
+    profile, MCP servers and secrets. The script then attaches instead of
+    building its own agent. A derived id alone (``continue_conversation``)
+    still means create.
+    """
+    return (
+        bool(environ.get("AUTOMATION_CONVERSATION_ID"))
+        and environ.get("AUTOMATION_CONVERSATION_STARTED") == "app_server"
+    )
+
+
+def _repo_instructions_section(skills) -> str | None:
+    """Always-on instructions from the cloned repositories, as a prompt section.
+
+    The app server built the system prompt before this script cloned the
+    repositories, so their AGENTS.md-style skills ride in the task message.
+    Triggered and SKILL.md skills are left out; they would need registering.
+    """
+    parts = [
+        f"### {skill.name}\n\n{skill.content}"
+        for skill in skills
+        if skill.trigger is None and not getattr(skill, "is_agentskills_format", False)
+    ]
+    if not parts:
+        return None
+    return "## Repository instructions\n\n" + "\n\n".join(parts)
+
+
+ATTACHES_TO_STARTED_CONVERSATION = _attaches_to_started_conversation(os.environ)
 
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
@@ -396,9 +435,22 @@ with workspace_ctx as workspace:
     # If repos were cloned, project skills are loaded from EACH cloned repo
     print("\n=== LOAD SKILLS ===")
     report_phase("Loading skills")
-    loaded_skills, agent_context = workspace.load_skills_from_agent_server(
-        project_dirs=repo_dirs if repo_dirs else None
-    )
+    if ATTACHES_TO_STARTED_CONVERSATION:
+        # The app server loaded the user's skills when it started the
+        # conversation; only the repositories cloned here are new to it.
+        agent_context = None
+        loaded_skills = []
+        if repo_dirs:
+            loaded_skills, _ = workspace.load_skills_from_agent_server(
+                project_dirs=repo_dirs,
+                load_public=False,
+                load_user=False,
+                load_org=False,
+            )
+    else:
+        loaded_skills, agent_context = workspace.load_skills_from_agent_server(
+            project_dirs=repo_dirs if repo_dirs else None
+        )
     print(f"  loaded {len(loaded_skills)} skills")
 
     # Get repos context (mapping of URLs to local paths)
@@ -445,6 +497,10 @@ with workspace_ctx as workspace:
     # Add repos context if repos were cloned
     if repos_context:
         context_sections.append(repos_context)
+    if ATTACHES_TO_STARTED_CONVERSATION:
+        repo_instructions = _repo_instructions_section(loaded_skills)
+        if repo_instructions:
+            context_sections.append(repo_instructions)
 
     # Add event context if this is an event-triggered run
     if event_context and "event" in event_context:
@@ -490,74 +546,6 @@ More activity arrived on the same subject while this run was queued:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get LLM config via workspace/profile APIs
-    print("\n=== GET_LLM ===")
-    try:
-        llm = workspace.get_llm(profile_name=model_profile)
-    except FileNotFoundError:
-        if not model_profile:
-            raise
-        print(
-            f"  profile {model_profile!r} not found; "
-            "falling back to active/default profile"
-        )
-        llm = workspace.get_llm()
-    print(f"  profile: {model_profile or 'DEFAULT'}")
-    print(f"  model: {llm.model}")
-    print(f"  api_key present: {bool(llm.api_key)}")
-
-    # Get secrets via workspace
-    print("\n=== GET_SECRETS ===")
-    secrets = {}
-    try:
-        secrets = workspace.get_secrets()
-        print(f"  available: {list(secrets.keys()) or '(none)'}")
-    except Exception as e:
-        # Not a hard failure — user may not have secrets configured
-        print(f"  get_secrets() failed (ok if no secrets): {e}")
-
-    # Get MCP config via workspace
-    print("\n=== GET_MCP_CONFIG ===")
-    mcp_config = {}
-    try:
-        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
-        if mcp_config:
-            print(f"  servers: {list(mcp_config.keys())}")
-        else:
-            print("  no MCP servers configured")
-    except Exception as e:
-        # Not a hard failure — user may not have MCP configured
-        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
-
-    # Get default agent with tools and condenser (CLI mode to disable browser)
-    print("\n=== AGENT ===")
-    report_phase("Configuring agent")
-    # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
-    agent = get_default_agent(
-        llm=llm,
-        cli_mode=True,
-        finish_tool_response_schema=TaskOutcome,
-    )
-
-    # Add MCP config and agent_context using model_copy if configured
-    # (Plugin MCP configs will be merged when plugins are loaded)
-    agent_updates = {}
-    if mcp_config:
-        agent_updates["mcp_config"] = mcp_config
-    if agent_context:
-        agent_updates["agent_context"] = agent_context
-    if agent_updates:
-        agent = agent.model_copy(update=agent_updates)
-
-    print(f"  tools: {[t.name for t in agent.tools]}")
-    print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
-    print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
-    condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
-    print(f"  condenser: {condenser_name}")
-
-    # Create conversation with plugins
-    print("\n=== CONVERSATION ===")
-
     received_events: list = []
     last_event_time = {"ts": time.time()}
 
@@ -586,28 +574,110 @@ More activity arrived on the same subject while this run was queued:
         if model_profile:
             experiment_tags["modelprofile"] = model_profile
 
-    conversation_kwargs = {
-        "agent": agent,
-        "workspace": workspace,
-        "plugins": plugin_sources,  # All plugins loaded here
-        "callbacks": [event_callback],
-        "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
-        "delete_on_close": False,  # Keep conversation history after completion
-        **automation_conversation_kwargs(conversation_tags=experiment_tags),
-    }
-    if automation_user_id and _conversation_supports_user_id():
-        conversation_kwargs["user_id"] = automation_user_id
-    # A `continue_conversation` run must use the derived id: RemoteConversation
-    # attaches to that conversation if it exists, and creates it if it does not.
     automation_conversation_id = os.environ.get("AUTOMATION_CONVERSATION_ID")
-    if automation_conversation_id:
-        conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
-    conversation = Conversation(**conversation_kwargs)
-    assert isinstance(conversation, RemoteConversation)
-    print(f"  conversation created: {type(conversation).__name__}")
-    print(f"  plugins loaded: {len(plugin_sources)}")
-    if experiment_tags:
-        print(f"  experiment tags: {experiment_tags}")
+    secrets = {}
+    if ATTACHES_TO_STARTED_CONVERSATION:
+        # The app server started this conversation from the owner's agent
+        # profile, with their LLM key, MCP servers, secrets and these plugins.
+        # Attach to it; recreating it here would lose all of that.
+        print("\n=== CONVERSATION ===")
+        report_phase("Configuring agent")
+        conversation = RemoteConversation.attach(
+            workspace,
+            uuid.UUID(automation_conversation_id),
+            callbacks=[event_callback],
+        )
+        print(f"  attached to conversation {conversation.id} (started by app server)")
+    else:
+        # Get LLM config via workspace/profile APIs
+        print("\n=== GET_LLM ===")
+        try:
+            llm = workspace.get_llm(profile_name=model_profile)
+        except FileNotFoundError:
+            if not model_profile:
+                raise
+            print(
+                f"  profile {model_profile!r} not found; "
+                "falling back to active/default profile"
+            )
+            llm = workspace.get_llm()
+        print(f"  profile: {model_profile or 'DEFAULT'}")
+        print(f"  model: {llm.model}")
+        print(f"  api_key present: {bool(llm.api_key)}")
+
+        # Get secrets via workspace
+        print("\n=== GET_SECRETS ===")
+        try:
+            secrets = workspace.get_secrets()
+            print(f"  available: {list(secrets.keys()) or '(none)'}")
+        except Exception as e:
+            # Not a hard failure — user may not have secrets configured
+            print(f"  get_secrets() failed (ok if no secrets): {e}")
+
+        # Get MCP config via workspace
+        print("\n=== GET_MCP_CONFIG ===")
+        mcp_config = {}
+        try:
+            mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+            if mcp_config:
+                print(f"  servers: {list(mcp_config.keys())}")
+            else:
+                print("  no MCP servers configured")
+        except Exception as e:
+            # Not a hard failure — user may not have MCP configured
+            print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+
+        # Get default agent with tools and condenser (CLI mode to disable browser)
+        print("\n=== AGENT ===")
+        report_phase("Configuring agent")
+        # Keep finish-tool schema wiring in sync with presets/prompt/sdk_main.py.
+        agent = get_default_agent(
+            llm=llm,
+            cli_mode=True,
+            finish_tool_response_schema=TaskOutcome,
+        )
+
+        # Add MCP config and agent_context using model_copy if configured
+        # (Plugin MCP configs will be merged when plugins are loaded)
+        agent_updates = {}
+        if mcp_config:
+            agent_updates["mcp_config"] = mcp_config
+        if agent_context:
+            agent_updates["agent_context"] = agent_context
+        if agent_updates:
+            agent = agent.model_copy(update=agent_updates)
+
+        print(f"  tools: {[t.name for t in agent.tools]}")
+        print(f"  mcp_config: {'configured' if mcp_config else 'none'}")
+        print(f"  skills: {len(loaded_skills) if loaded_skills else 0}")
+        condenser_name = type(agent.condenser).__name__ if agent.condenser else "none"
+        print(f"  condenser: {condenser_name}")
+
+        # Create conversation with plugins
+        print("\n=== CONVERSATION ===")
+        conversation_kwargs = {
+            "agent": agent,
+            "workspace": workspace,
+            "plugins": plugin_sources,  # All plugins loaded here
+            "callbacks": [event_callback],
+            "hook_config": finish_tool_required_hook_config(SCRIPT_DIR),
+            "delete_on_close": False,  # Keep conversation history after completion
+            **automation_conversation_kwargs(conversation_tags=experiment_tags),
+        }
+        if automation_user_id and _conversation_supports_user_id():
+            conversation_kwargs["user_id"] = automation_user_id
+        # A `continue_conversation` run must use the derived id: RemoteConversation
+        # attaches to that conversation if it exists, and creates it if it does not.
+        if automation_conversation_id:
+            conversation_kwargs["conversation_id"] = uuid.UUID(
+                automation_conversation_id
+            )
+        conversation = Conversation(**conversation_kwargs)
+        assert isinstance(conversation, RemoteConversation)
+        print(f"  conversation created: {type(conversation).__name__}")
+        print(f"  plugins loaded: {len(plugin_sources)}")
+        if experiment_tags:
+            print(f"  experiment tags: {experiment_tags}")
 
     # Set a descriptive title so automation runs are distinguishable in the
     # conversation panel — otherwise the agent-server's autotitle falls back

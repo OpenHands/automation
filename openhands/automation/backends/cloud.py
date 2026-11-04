@@ -6,6 +6,7 @@ Creates a fresh Cloud sandbox for each automation run.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -20,10 +21,18 @@ from tenacity import (
     wait_exponential,
 )
 
-from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.auth import X_ORG_ID_HEADER
+from openhands.automation.backends.base import (
+    ConversationStart,
+    ExecutionBackend,
+    ExecutionContext,
+    StartedConversation,
+)
 from openhands.automation.config import get_config
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
+    ConversationStartError,
+    ConversationStartUnavailable,
     DailySandboxLimitReachedError,
     SandboxProvisioningError,
 )
@@ -129,6 +138,36 @@ def summarize_status_detail(detail: Any) -> str | None:
         if any(marker in detail for marker in markers):
             return label
     return "unclassified"
+
+
+# The app server's conversation start: it attaches to the run's sandbox when
+# ``sandbox_id`` is set and applies the owner's profile, MCP servers and secrets.
+APP_CONVERSATIONS_PATH = "/api/v1/app-conversations"
+# An app server that answers these has no such route or rejects the body.
+_UNSUPPORTED_START_STATUSES = (404, 405, 422)
+
+
+def _response_detail(resp: httpx.Response) -> str:
+    """The ``detail`` of an API error response, else its text, kept short."""
+    try:
+        body = resp.json()
+    except Exception:
+        return resp.text[:500]
+    if isinstance(body, dict) and body.get("detail") is not None:
+        detail = body["detail"]
+        if not isinstance(detail, str):
+            detail = json.dumps(detail)
+        return detail[:500]
+    return resp.text[:500]
+
+
+def launched_agent_profile_id(conversation: dict[str, Any]) -> str | None:
+    """The profile an app-server conversation reports it launched from."""
+    launched = conversation.get("launched_agent_profile")
+    if not isinstance(launched, dict):
+        return None
+    profile_id = launched.get("agent_profile_id")
+    return str(profile_id) if profile_id else None
 
 
 class CloudSandboxBackend(ExecutionBackend):
@@ -237,6 +276,147 @@ class CloudSandboxBackend(ExecutionBackend):
         """Delete the sandbox."""
         if ctx.sandbox_id and ctx.api_url and ctx.api_key:
             await delete_sandbox(client, ctx.api_url, ctx.api_key, ctx.sandbox_id)
+
+    async def start_conversation(
+        self,
+        client: httpx.AsyncClient,
+        ctx: ExecutionContext,
+        start: ConversationStart,
+    ) -> StartedConversation:
+        """Ask the app server to start the run's conversation in its sandbox.
+
+        The request carries no prompt and no secrets: the runner sends the
+        prompt once it has attached, and the app server resolves the LLM key,
+        MCP servers and secrets itself. Raises ConversationStartUnavailable
+        when the app server has no such contract (the caller falls back to the
+        runner creating the conversation) and ConversationStartError when it
+        refused or failed.
+        """
+        if not ctx.sandbox_id:
+            raise ConversationStartError(
+                "Cloud runs need a sandbox to start the conversation in",
+                code="no_sandbox",
+            )
+        body: dict[str, Any] = {
+            "sandbox_id": ctx.sandbox_id,
+            "trigger": "automation",
+            "tags": start.tags,
+        }
+        if start.agent_profile_id:
+            body["agent_profile_id"] = start.agent_profile_id
+        if start.llm_profile:
+            body["llm_profile"] = start.llm_profile
+        if start.conversation_id:
+            body["conversation_id"] = start.conversation_id
+        if start.plugins:
+            body["plugins"] = start.plugins
+
+        task = await self._app_server_request(
+            client,
+            "POST",
+            APP_CONVERSATIONS_PATH,
+            json=body,
+            unsupported_statuses=_UNSUPPORTED_START_STATUSES,
+        )
+        conversation_id = await self._wait_for_start_task(client, task)
+        conversations = await self._app_server_request(
+            client, "GET", APP_CONVERSATIONS_PATH, params={"ids": conversation_id}
+        )
+        conversation = (
+            conversations[0]
+            if isinstance(conversations, list) and conversations
+            else None
+        )
+        if not isinstance(conversation, dict):
+            raise ConversationStartError(
+                f"Conversation {conversation_id} is not visible to its owner",
+                code="conversation_missing",
+            )
+        return StartedConversation(
+            conversation_id=conversation_id,
+            agent_profile_id=launched_agent_profile_id(conversation),
+        )
+
+    async def _wait_for_start_task(
+        self, client: httpx.AsyncClient, task: dict[str, Any]
+    ) -> str:
+        """Poll a conversation start task until READY; return the conversation id."""
+        task_id = task.get("id")
+        elapsed = 0.0
+        while True:
+            status = task.get("status")
+            if status == "READY" and task.get("app_conversation_id"):
+                return str(task["app_conversation_id"])
+            if status == "ERROR":
+                raise ConversationStartError(
+                    "OpenHands API failed to start the conversation: "
+                    f"{task.get('detail') or 'unknown error'}",
+                    code="start_task_error",
+                )
+            if elapsed >= self._ready_timeout:
+                raise ConversationStartError(
+                    f"Conversation start task {task_id} not ready after "
+                    f"{self._ready_timeout}s",
+                    transient=True,
+                    code="start_task_timeout",
+                )
+            await asyncio.sleep(self._poll_interval)
+            elapsed += self._poll_interval
+            tasks = await self._app_server_request(
+                client,
+                "GET",
+                f"{APP_CONVERSATIONS_PATH}/start-tasks",
+                params={"ids": task_id},
+            )
+            if not (isinstance(tasks, list) and tasks and isinstance(tasks[0], dict)):
+                raise ConversationStartError(
+                    f"Conversation start task {task_id} disappeared",
+                    code="start_task_missing",
+                )
+            task = tasks[0]
+
+    async def _app_server_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        unsupported_statuses: tuple[int, ...] = (),
+        **kwargs: Any,
+    ) -> Any:
+        """Call the OpenHands API as the run's user, in the automation's org.
+
+        429s are retried and a 401/403 re-mints the key once, as for sandboxes.
+        """
+
+        @self._retry
+        async def _do_request() -> Any:
+            resp = await client.request(
+                method,
+                f"{self.api_url}{path}",
+                headers={
+                    "Authorization": f"Bearer {await self._ensure_api_key()}",
+                    X_ORG_ID_HEADER: str(self._run.automation.org_id),
+                },
+                **kwargs,
+            )
+            if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
+                resp.raise_for_status()
+            if resp.status_code in unsupported_statuses:
+                raise ConversationStartUnavailable(
+                    "OpenHands API cannot start conversations in a sandbox "
+                    f"(HTTP {resp.status_code}): {_response_detail(resp)}",
+                    status_code=resp.status_code,
+                )
+            if resp.status_code >= 400:
+                raise ConversationStartError(
+                    "OpenHands API refused to start the conversation "
+                    f"(HTTP {resp.status_code}): {_response_detail(resp)}",
+                    status_code=resp.status_code,
+                )
+            return resp.json()
+
+        return await self._with_auth_retry(_do_request)
 
     async def get_api_key(self) -> str:
         """Return the per-user API key (minting if needed)."""
