@@ -95,6 +95,7 @@ class ExecutionBackend(ABC):
 
         For Cloud mode: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL
         For Local mode: AGENT_SERVER_URL, SESSION_API_KEY
+        Both set AUTOMATION_RUN_MODE (``cloud`` / ``local``) for the presets.
 
         Returns:
             Dictionary of environment variable name -> value

@@ -202,6 +202,167 @@ class TestPresetSessionUrl:
         )
 
 
+def _load_preset_mode_detector(
+    preset_name: str,
+) -> Callable[[dict[str, str]], tuple[str, str]]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_detect_execution_mode"
+    )
+    namespace: dict[str, Any] = {}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(
+        Callable[[dict[str, str]], tuple[str, str]], namespace["_detect_execution_mode"]
+    )
+
+
+MODE_PRESETS = ["prompt", "plugin", "plugin_spec"]
+
+
+class TestPresetExecutionMode:
+    """The presets take their mode from the backend's signal, not from AGENT_SERVER_URL.
+
+    Since #680 the cloud dispatcher exports AGENT_SERVER_URL into every sandbox so
+    standalone scripts can reach the agent server. A preset that read "AGENT_SERVER_URL
+    is set" as "local mode" then fetched the LLM, secrets and MCP servers from the
+    sandbox's own agent-server, which holds none of them on OHE/Cloud (#688).
+    """
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_signal_wins_over_agent_server_url(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_explicit_local_signal(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "local",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "local"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_local_backend_shape_without_signal_is_local(self, preset_name):
+        """A local backend that predates AUTOMATION_RUN_MODE: AGENT_SERVER_URL,
+        a session key and no SANDBOX_ID."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {"AGENT_SERVER_URL": "http://localhost:3000", "SESSION_API_KEY": "sk-1"}
+        )
+        assert mode == "local"
+        assert "AGENT_SERVER_URL" in signal
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "session_key_name", ["SESSION_API_KEY", "OH_SESSION_API_KEYS_0"]
+    )
+    def test_legacy_cloud_pair_without_signal_is_cloud(
+        self, preset_name, session_key_name
+    ):
+        """A cloud dispatcher that predates AUTOMATION_RUN_MODE but already
+        exports AGENT_SERVER_URL (#680): SANDBOX_ID plus a session key means cloud."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                session_key_name: "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert "SANDBOX_ID" in signal
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_no_signal_at_all_defaults_to_cloud(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect({})
+        assert mode == "cloud"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_unknown_signal_value_falls_back_to_env_shape(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "staging",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+            }
+        )
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_mode_is_never_derived_from_agent_server_url_presence(self, preset_name):
+        """Guard against the #688 regression coming back.
+
+        ``IS_LOCAL_MODE = bool(os.environ.get("AGENT_SERVER_URL"))`` looked right
+        until #680 started exporting that variable in cloud sandboxes too. The
+        presets are excluded from linting, so pin the shape here: the mode comes
+        from ``_detect_execution_mode`` and no ``bool(...)`` anywhere in the
+        script is fed by AGENT_SERVER_URL.
+        """
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        assert not re.search(r"IS_LOCAL_MODE\s*=\s*bool\(", source), (
+            f"{preset_name} preset derives IS_LOCAL_MODE with bool(...) again"
+        )
+        for node in ast.walk(module):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "bool"
+            ):
+                segment = ast.get_source_segment(source, node) or ""
+                assert "AGENT_SERVER_URL" not in segment.upper(), (
+                    f"{preset_name} preset turns AGENT_SERVER_URL into a mode: "
+                    f"{segment}"
+                )
+
+        mode_assignments = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "IS_LOCAL_MODE"
+                for target in node.targets
+            )
+        ]
+        assert len(mode_assignments) == 1, (
+            f"{preset_name} preset must assign IS_LOCAL_MODE exactly once"
+        )
+        value_source = ast.get_source_segment(source, mode_assignments[0].value) or ""
+        assert "EXECUTION_MODE" in value_source, (
+            f"{preset_name} preset must derive IS_LOCAL_MODE from the detected "
+            f"EXECUTION_MODE, got: {value_source}"
+        )
+        assert "_detect_execution_mode(os.environ)" in source, (
+            f"{preset_name} preset must detect its mode with _detect_execution_mode"
+        )
+
+
 class TestPresetFileSyntax:
     """Verify preset files have valid Python/shell syntax.
 
