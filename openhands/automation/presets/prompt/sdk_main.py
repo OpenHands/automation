@@ -252,7 +252,8 @@ def _build_conversation_title(event_context) -> str | None:
     """Build a descriptive conversation title from the automation event context.
 
     Returns "{automation_name} — {repo}#{number}" for PR/issue events,
-    including Azure DevOps pull requests,
+    including Azure DevOps and Bitbucket Data Center pull requests,
+    "{automation_name} — {issue key}" for Jira Data Center issue events,
     "{automation_name} — {timestamp}" otherwise, or None when no automation
     name is available (keeps the agent-server's default autotitle behavior).
     """
@@ -300,6 +301,28 @@ def _build_conversation_title(event_context) -> str | None:
                 and not isinstance(ado_number, bool)
             ):
                 context = f"{ado_repo_name}#{ado_number}"
+        # Jira Data Center and Bitbucket Data Center events arrive wrapped the
+        # same way. Bitbucket names the pull request's target repository by its
+        # slug; a Jira issue is best known by its key.
+        if context is None and isinstance(raw, dict):
+            pull_request = raw.get("pullRequest")
+            issue = raw.get("issue")
+            if isinstance(pull_request, dict):
+                to_ref = pull_request.get("toRef")
+                dc_repo = to_ref.get("repository") if isinstance(to_ref, dict) else None
+                dc_slug = dc_repo.get("slug") if isinstance(dc_repo, dict) else None
+                dc_number = pull_request.get("id")
+                if (
+                    isinstance(dc_slug, str)
+                    and dc_slug
+                    and isinstance(dc_number, int)
+                    and not isinstance(dc_number, bool)
+                ):
+                    context = f"{dc_slug}#{dc_number}"
+            elif isinstance(issue, dict):
+                issue_key = issue.get("key")
+                if isinstance(issue_key, str) and issue_key.strip():
+                    context = issue_key.strip()
     if context is None:
         context = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"{name} — {context}"[:200]
