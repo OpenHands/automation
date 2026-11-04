@@ -375,6 +375,8 @@ class GitSyncSettings(BaseSettings):
         AUTOMATION_GIT_SYNC_TOKEN: PAT (or other bearer token) for HTTPS
             authentication against the repo. Passed per git-invocation via
             `-c http.extraHeader`, never written to disk or the remote URL.
+            Sent as Basic auth (`x-access-token`), or as a Bearer header for
+            remotes such as Bitbucket Data Center that reject that username.
         AUTOMATION_GIT_SYNC_ENCRYPTION_KEY: When set, encrypts file contents
             (via the SDK's Fernet-based Cipher, same primitive as the KV
             store) before they're written to the synced repo. Empty disables
