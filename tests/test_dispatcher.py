@@ -1207,7 +1207,10 @@ class TestEffectiveTimeout:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -1272,7 +1275,10 @@ class TestExecuteRunPhaseReporting:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key="cloud-api-key",
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
@@ -1297,6 +1303,23 @@ class TestExecuteRunPhaseReporting:
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_injects_agent_server_url_and_callback_key(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        """Cloud-mode runs inject AGENT_SERVER_URL and AUTOMATION_CALLBACK_API_KEY
+        so standalone (non-SDK) scripts can reach the agent server and sign
+        their completion callback (see issue #679)."""
+        await self._run_successful_execution(
+            mock_execute, async_session_factory, mock_settings, mock_client
+        )
+
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AGENT_SERVER_URL"] == "http://agent.test"
+        assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
+        assert env_vars["SANDBOX_ID"] == "sbx-1"
+        assert env_vars["SESSION_API_KEY"] == "sk-1"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_marks_starting_automation_phase_after_bash_dispatch(
@@ -1902,7 +1925,10 @@ class TestExecuteRunConcurrencyLimit:
         backend = MagicMock()
         backend.is_local_mode = False
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.release_context = AsyncMock()
@@ -2031,7 +2057,10 @@ class TestExecuteRunProvisioningRetry:
     @staticmethod
     def _ctx() -> MagicMock:
         return MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-ok", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-ok",
+            session_key="sk-1",
+            api_key=None,
         )
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
@@ -2263,7 +2292,10 @@ class TestExecuteRunDerivedConversationId:
 
         backend = MagicMock()
         ctx = MagicMock(
-            agent_url="http://agent.test", sandbox_id="sbx-1", session_key="sk-1"
+            agent_url="http://agent.test",
+            sandbox_id="sbx-1",
+            session_key="sk-1",
+            api_key=None,
         )
         backend.get_execution_context = AsyncMock(return_value=ctx)
         backend.build_env_vars = MagicMock(return_value={})
