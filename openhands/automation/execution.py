@@ -459,8 +459,11 @@ async def run_automation(
 
     *env_vars* are exported before setup.sh and the entrypoint run,
     so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
-    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works.
+    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
+    ``AGENT_SERVER_URL``, ``AUTOMATION_CALLBACK_API_KEY``) are
+    **always** injected so the SDK's ``local_agent_server_mode`` works
+    and standalone (non-SDK) scripts can reach the agent server and
+    sign their completion callback.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -511,6 +514,12 @@ async def run_automation(
             # get_llm() / get_secrets() inside the sandbox.
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
+            # Standalone (non-SDK) scripts discover the agent server via
+            # AGENT_SERVER_URL; without it os.environ.get returns "". The
+            # per-run API key used for callbacks is the same one the SDK
+            # authenticates with.
+            env_vars.setdefault("AGENT_SERVER_URL", agent_url)
+            env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):
