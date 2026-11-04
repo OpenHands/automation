@@ -33,8 +33,8 @@ from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
 from openhands.automation.schemas import (
-    CronTrigger,
     RUN_AS_USER_ID_DESCRIPTION,
+    CronTrigger,
     PublicAutomationState,
     TemplateProvenance,
     Trigger,
@@ -572,9 +572,7 @@ def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
                 legacy_manifest_path.read_text()
             )
         except Exception as exc:
-            raise PluginSpecError(
-                f"Invalid automation plugin manifest: {exc}"
-            ) from exc
+            raise PluginSpecError(f"Invalid automation plugin manifest: {exc}") from exc
 
     catalog_manifest_path = _contained_path(plugin_path, "manifest.json")
     if catalog_manifest_path.is_file():
@@ -608,7 +606,9 @@ _CATALOG_FIELD_TYPE_MAP: dict[str, str] = {
 def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
     """Convert a catalog setup.form.args entry to a JSON Schema property."""
     catalog_type = arg.get("type", "string")
-    schema: dict[str, Any] = {"type": _CATALOG_FIELD_TYPE_MAP.get(catalog_type, "string")}
+    schema: dict[str, Any] = {
+        "type": _CATALOG_FIELD_TYPE_MAP.get(catalog_type, "string")
+    }
 
     if catalog_type == "textarea":
         schema["format"] = "textarea"
@@ -702,15 +702,15 @@ def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManife
         "description": description,
         "entrypoint": entrypoint.model_dump(),
         "config_schema": config_schema,
-        "suggested_trigger": suggested_trigger.model_dump() if suggested_trigger else None,
+        "suggested_trigger": suggested_trigger.model_dump()
+        if suggested_trigger
+        else None,
     }
 
     try:
         return AutomationPluginManifest.model_validate(data)
     except Exception as exc:
-        raise PluginSpecError(
-            f"Failed to convert catalog manifest: {exc}"
-        ) from exc
+        raise PluginSpecError(f"Failed to convert catalog manifest: {exc}") from exc
 
 
 def _validate_manifest_paths(
@@ -982,9 +982,7 @@ def _fetch_bundle_files(
                     f"Bundle file source escapes repo root: {src_path}"
                 ) from exc
             if not candidate.is_file():
-                raise PluginSpecError(
-                    f"Bundle file not found in repo: {src_path}"
-                )
+                raise PluginSpecError(f"Bundle file not found in repo: {src_path}")
             result[dest] = candidate.read_bytes()
         return result
 

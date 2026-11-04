@@ -575,16 +575,16 @@ def test_preflight_catalog_manifest_validates_config(tmp_path):
         allow_local_sources=True,
     )
 
-    valid_config = validate_plugin_config(manifest, {"feeds": "https://example.com/rss"})
+    valid_config = validate_plugin_config(
+        manifest, {"feeds": "https://example.com/rss"}
+    )
     assert valid_config["feeds"] == "https://example.com/rss"
 
     with pytest.raises(PluginSpecError, match="invalid"):
         validate_plugin_config(manifest, {"feeds": "short"})
 
 
-def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(
-    tmp_path, monkeypatch
-):
+def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(tmp_path, monkeypatch):
     """Preflight fallback must use a throwaway temp dir, not DEFAULT_CACHE_DIR.
 
     Regression test for staging, where the automation container runs with
@@ -818,6 +818,8 @@ def test_build_execution_payload_bundle_files_missing_source(tmp_path, monkeypat
             llm_profile_name=None,
             work_dir="/tmp/automation-run",
         )
+
+
 def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
     tmp_path, monkeypatch
 ):
