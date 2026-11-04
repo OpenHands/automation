@@ -580,3 +580,57 @@ def test_preflight_catalog_manifest_validates_config(tmp_path):
 
     with pytest.raises(PluginSpecError, match="invalid"):
         validate_plugin_config(manifest, {"feeds": "short"})
+
+
+def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(
+    tmp_path, monkeypatch
+):
+    """Preflight fallback must use a throwaway temp dir, not DEFAULT_CACHE_DIR.
+
+    Regression test for staging, where the automation container runs with
+    HOME=/home/automation (not writable). The fallback fetch path used to
+    pass ``_cache_dir_for_plugin(plugin)`` (rooted at ``~/.openhands``), which
+    blew up with ``[Errno 13] Permission denied: '/home/automation'``. It now
+    passes a ``tempfile.TemporaryDirectory`` path so the preflight never
+    touches the user persistence dir.
+    """
+    catalog_dir = _write_catalog_manifest(tmp_path)
+
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(*, source, cache_dir, ref, repo_path):
+        captured["cache_dir"] = cache_dir
+        # Return the catalog dir as the plugin path; manifest is read off it.
+        return catalog_dir, None
+
+    monkeypatch.setattr(
+        "openhands.automation.plugin_specs.fetch_plugin_with_resolution", _fake_fetch
+    )
+    # Make preflight_plugin raise invalid_plugin so the fallback runs.
+    # It's used as a context manager, so the error must fire on __enter__.
+    from openhands.automation.plugin_specs import PluginSourceError
+
+    class _InvalidPluginCM:
+        def __enter__(self):
+            raise PluginSourceError("invalid_plugin", "no .plugin/plugin.json")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        "openhands.automation.plugin_specs.preflight_plugin",
+        lambda *a, **kw: _InvalidPluginCM(),
+    )
+
+    preflight_manifest(
+        AutomationPluginSource(source=str(catalog_dir), ref="main"),
+        allow_local_sources=True,
+    )
+
+    cache_dir = captured["cache_dir"]
+    assert isinstance(cache_dir, Path)
+    # The temp dir must live under the system temp root, not ~/.openhands.
+    import tempfile
+
+    assert str(cache_dir).startswith(tempfile.gettempdir())
+    assert ".openhands" not in str(cache_dir)

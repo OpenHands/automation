@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -440,15 +441,23 @@ def preflight_manifest(
         except PluginSourceError as exc:
             if exc.code != "invalid_plugin":
                 raise
-            plugin_path, resolved_ref = fetch_plugin_with_resolution(
-                source=plugin.source,
-                cache_dir=_cache_dir_for_plugin(plugin),
-                ref=plugin.ref,
-                repo_path=plugin.repo_path,
-            )
-            manifest = _read_manifest(plugin_path)
-            _validate_manifest_paths(plugin_path, manifest)
-            return resolved_ref, manifest
+            # Catalog plugins (no .plugin/plugin.json) fall through to here.
+            # Use a throwaway temp dir for the checkout — the preflight is a
+            # read-only operation that only reads the manifest, so it should
+            # not write to the user persistence dir (which may be unset or
+            # unwritable in containers where HOME is not writable).
+            with tempfile.TemporaryDirectory(
+                prefix="automation-preflight-"
+            ) as tmp_cache:
+                plugin_path, resolved_ref = fetch_plugin_with_resolution(
+                    source=plugin.source,
+                    cache_dir=Path(tmp_cache),
+                    ref=plugin.ref,
+                    repo_path=plugin.repo_path,
+                )
+                manifest = _read_manifest(plugin_path)
+                _validate_manifest_paths(plugin_path, manifest)
+                return resolved_ref, manifest
     except PluginSourceError as exc:
         raise PluginSpecError(
             f"Failed to preflight automation plugin: {exc}",
