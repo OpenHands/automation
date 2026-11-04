@@ -182,15 +182,39 @@ def test_preflight_rejects_file_source_when_local_sources_disabled():
         )
 
 
-def test_preflight_rejects_non_github_git_source_when_local_sources_disabled():
+@pytest.mark.parametrize(
+    "source",
+    [
+        "http://bitbucket.example.com/scm/proj/plugin.git",
+        "git@github.com:acme/private.git",
+    ],
+)
+def test_preflight_rejects_non_https_git_source_when_local_sources_disabled(source):
     with pytest.raises(
         PluginSpecError,
-        match="Cloud plugin sources must use github:owner/repo",
+        match="Cloud plugin sources must use github:owner/repo or an https:// git URL",
     ):
         preflight_manifest(
-            AutomationPluginSource(source="https://127.0.0.1/acme/private.git"),
+            AutomationPluginSource(source=source),
             allow_local_sources=False,
         )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A Bitbucket Data Center repository, with and without a port and a
+        # context path.
+        "https://bitbucket.example.com/scm/proj/plugin.git",
+        "https://git.example.com:8443/bitbucket/scm/proj/plugin.git",
+        "https://gitlab.example.com/group/plugin.git",
+        "https://github.com/acme/plugin.git",
+    ],
+)
+def test_cloud_plugin_sources_accept_https_git_urls_on_any_host(source):
+    plugin_specs.validate_plugin_source_allowed(
+        AutomationPluginSource(source=source), allow_local_sources=False
+    )
 
 
 def test_required_plugins_reject_local_source_when_local_sources_disabled(tmp_path):
