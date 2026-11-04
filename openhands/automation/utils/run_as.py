@@ -154,9 +154,11 @@ async def assign_upload_to_run_as(
     """Move the internal upload behind ``tarball_path`` to ``run_as``.
 
     The caller's ownership of the upload is checked first (by
-    ``validate_tarball_path``); afterwards the upload belongs to the service
-    account, so the caller can no longer delete it from under the automation.
-    A path that is not an internal upload is left alone.
+    ``validate_tarball_path``); afterwards the upload belongs to the identity
+    the automation runs as (a service account, or the creator of an automation
+    an admin edits), so the caller can no longer delete it from under the
+    automation. A path that is not an internal upload, or one ``run_as``
+    already owns, is left alone.
 
     ``automation_id`` is the automation the upload moves with (None for one not
     yet added to the session). An upload is not tied to one automation; moving

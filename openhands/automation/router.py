@@ -157,12 +157,12 @@ _require_view_automations = require_permission("view_automations")
 async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) -> None:
     """Authorize a write operation on a specific automation.
 
-    Admins and owners carry ``manage_automations`` and are always allowed.
-    A member (view-only) is allowed only when they are the creator of the
-    automation being modified — the ticket calls this the "creator escape
-    hatch."  ``require_permission`` can't express this because it has no
-    access to the automation row, so the check lives here in the handler
-    path instead of in the dependency.
+    Admins and owners carry ``manage_automations`` and may edit, turn on or
+    off, dispatch, cancel and delete any automation in their org, whoever
+    created it. A member (view-only) may do so only for an automation they
+    created — the "creator escape hatch." ``require_permission`` can't express
+    this because it has no access to the automation row, so the check lives
+    here in the handler path instead of in the dependency.
 
     An automation that runs as a service account has no creator escape: only
     holders of ``manage_automations`` pass, so the service account's own run
@@ -181,42 +181,6 @@ async def _assert_can_manage(automation: Automation, user: AuthenticatedUser) ->
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Only admins, owners, or the automation creator can modify it",
-    )
-
-
-def _is_disable_only_update(update_data: dict[str, Any]) -> bool:
-    fields = set(update_data)
-    if not fields or not fields <= {"enabled", "state"}:
-        return False
-    if "state" in update_data:
-        state = model_automation_state(update_data["state"], update_data.get("enabled"))
-        return (
-            state == ModelAutomationState.INACTIVE
-            and update_data.get("enabled", False) is False
-        )
-    return update_data.get("enabled") is False
-
-
-def _assert_can_update_fields(
-    automation: Automation, user: AuthenticatedUser, update_data: dict[str, Any]
-) -> None:
-    """Allow a full edit by the creator, or by a manager of a run-as-service one.
-
-    ``_assert_can_manage`` has already run: a run-as-service automation reaches
-    here only for a ``manage_automations`` holder, so no permission recheck.
-    """
-    if automation.run_as_kind == AutomationRunAsKind.SERVICE:
-        return
-    if automation.user_id == user.user_id:
-        return
-    if _is_disable_only_update(update_data):
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=(
-            "Only the automation creator can edit it; admins and owners can only "
-            "turn it off or delete it"
-        ),
     )
 
 
@@ -818,15 +782,14 @@ async def update_automation(
 ) -> AutomationResponse:
     """Partially update an automation.
 
-    Only the creator may edit the definition. Admins and owners may turn an
-    automation off but cannot reactivate it or change what it runs, except for
-    an automation owned by a service account, which they may edit and enable.
+    Admins and owners may edit and turn on or off any automation in their org;
+    members only those they created (see ``_assert_can_manage``). An edit never
+    changes who the automation runs as: it keeps running as ``user_id``.
     """
     auto = await _get_org_automation(session, automation_id, user.org_id)
     await _assert_can_manage(auto, user)
 
     update_data = body.model_dump(exclude_unset=True)
-    _assert_can_update_fields(auto, user, update_data)
     # Same ownership check as create. Only a new value is checked: resending the
     # stored path cannot grant anything the row does not already have, and that
     # upload need not be owned by the editor or still be live.
@@ -841,16 +804,16 @@ async def update_automation(
             org_id=user.org_id,
             session=session,
         )
-        if auto.run_as_kind == AutomationRunAsKind.SERVICE:
-            # Validated against the caller above; the service account owns it
-            # from now on, as on create.
-            await assign_upload_to_run_as(
-                session,
-                requested_tarball_path,
-                user.org_id,
-                ResolvedRunAs(auto.user_id, auto.run_as_kind),
-                automation_id=auto.id,
-            )
+        # Validated against the caller above; the identity the automation runs
+        # as owns it from now on, so an admin editing a teammate's automation
+        # cannot delete the upload from under it.
+        await assign_upload_to_run_as(
+            session,
+            requested_tarball_path,
+            user.org_id,
+            ResolvedRunAs(auto.user_id, auto.run_as_kind),
+            automation_id=auto.id,
+        )
     # Repositories are not a column: a preset bakes them into its tarball and
     # records them in preset_metadata, so they are applied with the prompt below.
     repos_requested = "repos" in update_data
@@ -1012,7 +975,17 @@ async def update_automation(
         if selected_profile:
             update_data["model"] = None
         elif "model" in update_data:
-            update_data["model"] = resolve_model_profile_for_user(body.model, user)
+            # The model is a profile of the identity the automation runs as,
+            # which an admin editing a teammate's automation does not share: a
+            # resent profile is kept unchecked, like a resent agent profile, and
+            # only the run-as identity's own clear falls back to its active one.
+            if body.model is not None:
+                if body.model != auto.model:
+                    update_data["model"] = resolve_model_profile_for_user(
+                        body.model, user
+                    )
+            elif auto.user_id == user.user_id:
+                update_data["model"] = resolve_model_profile_for_user(None, user)
 
     original_prompt = auto.prompt
     for field, value in update_data.items():

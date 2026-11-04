@@ -336,86 +336,202 @@ class TestPermissionEnforcement:
         await async_session.commit()
         return automation
 
-    async def test_update_as_non_creator_manager_returns_403(
-        self, async_client, async_session
+    @pytest.fixture(params=["owner", "admin"])
+    def manager_client(self, request, async_client, mock_authenticated_user):
+        """``async_client`` acting as an org owner, then as an org admin."""
+        mock_authenticated_user.role = request.param
+        return async_client
+
+    async def test_manager_can_edit_other_users_automation(
+        self, manager_client, async_session
     ):
-        """A manager cannot edit another user's automation definition."""
+        """An admin or owner edits a teammate's automation; it still runs as
+        the teammate, and the change is attributed to the editor."""
         automation = await self._other_users_automation(async_session)
 
-        response = await async_client.patch(
+        response = await manager_client.patch(
             f"/api/automation/v1/{automation.id}",
-            json={"prompt": "Do something else"},
+            json={
+                "name": "Renamed by admin",
+                "trigger": {"type": "cron", "schedule": "0 10 * * *"},
+                "entrypoint": "uv run other.py",
+                "timeout": 120,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["name"] == "Renamed by admin"
+        assert data["trigger"]["schedule"] == "0 10 * * *"
+        assert data["entrypoint"] == "uv run other.py"
+        assert data["user_id"] == str(self._OTHER_USER_ID)
+        assert data["run_as_kind"] == "user"
+        await async_session.refresh(automation)
+        assert automation.user_id == self._OTHER_USER_ID
+        assert automation.created_by_user_id == self._OTHER_USER_ID
+
+        changes = await manager_client.get(
+            f"/api/automation/v1/{automation.id}/changes"
+        )
+        latest = changes.json()["changes"][0]
+        assert latest["actor_user_id"] == str(TEST_USER_ID)
+        assert latest["actor_kind"] == "user"
+        assert "name" in latest["changed_fields"]
+
+    async def test_manager_can_edit_other_users_preset_prompt(
+        self, manager_client, async_session, preset_store
+    ):
+        """The prompt edit rebuilds the tarball under the run-as identity."""
+        automation = await _seed_prompt_preset_automation(
+            async_session, preset_store, prompt="Original prompt"
+        )
+        automation.user_id = self._OTHER_USER_ID
+        await async_session.commit()
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"prompt": "Edited by admin"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["prompt"] == "Edited by admin"
+        assert response.json()["user_id"] == str(self._OTHER_USER_ID)
+        upload = await async_session.get(
+            TarballUpload, parse_internal_upload_id(response.json()["tarball_path"])
+        )
+        assert upload is not None
+        assert upload.user_id == self._OTHER_USER_ID
+
+    async def test_manager_resending_creators_model_keeps_it(
+        self, manager_client, async_session, mock_authenticated_user
+    ):
+        """The editor's own model profiles do not decide the creator's."""
+        automation = await self._other_users_automation(async_session)
+        automation.model = "creators-profile"
+        await async_session.commit()
+        mock_authenticated_user.model_profile_names = ["admins-profile"]
+        mock_authenticated_user.active_model_profile_name = "admins-profile"
+
+        resent = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"name": "Renamed", "model": "creators-profile"},
+        )
+        assert resent.status_code == 200, resent.text
+        assert resent.json()["model"] == "creators-profile"
+
+        cleared = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json={"model": None}
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["model"] is None
+
+    async def test_manager_tarball_edit_hands_upload_to_the_creator(
+        self, manager_client, async_session
+    ):
+        """The run-as identity owns the code it runs, so the editor cannot
+        delete the upload from under the automation."""
+        automation = await self._other_users_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=TEST_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["user_id"] == str(self._OTHER_USER_ID)
+        await async_session.refresh(upload)
+        assert upload.user_id == self._OTHER_USER_ID
+        deleted = await manager_client.delete(f"/api/automation/v1/uploads/{upload.id}")
+        assert deleted.status_code == 404
+
+    async def test_manager_cannot_use_another_users_upload(
+        self, manager_client, async_session
+    ):
+        """A new tarball_path is still checked against the caller."""
+        automation = await self._other_users_automation(async_session)
+        upload = await _seed_upload(
+            async_session, user_id=self._OTHER_USER_ID, org_id=TEST_ORG_ID
+        )
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}",
+            json={"tarball_path": build_internal_url(upload.id)},
+        )
+
+        assert response.status_code == 403, response.text
+
+    @pytest.mark.parametrize("body", [{"enabled": False}, {"state": "INACTIVE"}])
+    async def test_manager_can_turn_off_other_users_automation(
+        self, manager_client, async_session, body
+    ):
+        automation = await self._other_users_automation(async_session, enabled=True)
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is False
+        assert data["state"] == "INACTIVE"
+
+    @pytest.mark.parametrize("body", [{"enabled": True}, {"state": "ACTIVE"}])
+    async def test_manager_can_turn_on_other_users_automation(
+        self, manager_client, async_session, body
+    ):
+        automation = await self._other_users_automation(async_session, enabled=False)
+
+        response = await manager_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["enabled"] is True
+        assert data["state"] == "ACTIVE"
+        assert data["user_id"] == str(self._OTHER_USER_ID)
+
+    async def test_manager_can_delete_other_users_automation(
+        self, manager_client, async_session
+    ):
+        automation = await self._other_users_automation(async_session)
+
+        response = await manager_client.delete(f"/api/automation/v1/{automation.id}")
+
+        assert response.status_code == 204
+
+    @pytest.mark.parametrize(
+        "body", [{"enabled": False}, {"enabled": True}, {"state": "ACTIVE"}]
+    )
+    async def test_member_cannot_toggle_other_users_automation(
+        self, readonly_client, async_session, body
+    ):
+        automation = await self._other_users_automation(
+            async_session, enabled=body.get("enabled") is False
+        )
+
+        response = await readonly_client.patch(
+            f"/api/automation/v1/{automation.id}", json=body
         )
 
         assert response.status_code == 403
-        assert "creator" in response.json()["detail"]
 
-    async def test_disable_as_non_creator_manager_succeeds(
-        self, async_client, async_session
+    async def test_member_can_turn_own_automation_back_on(
+        self, readonly_client, async_session
     ):
-        """A manager can turn off another user's automation."""
-        automation = await self._other_users_automation(async_session, enabled=True)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"enabled": False}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["enabled"] is False
-        assert data["state"] == "INACTIVE"
-
-    async def test_set_inactive_state_as_non_creator_manager_succeeds(
-        self, async_client, async_session
-    ):
-        """A manager can use the state API to turn off another user's automation."""
-        automation = await self._other_users_automation(async_session, enabled=True)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"state": "INACTIVE"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["enabled"] is False
-        assert data["state"] == "INACTIVE"
-
-    async def test_enable_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot turn another user's automation back on."""
         automation = await self._other_users_automation(async_session, enabled=False)
+        automation.user_id = TEST_USER_ID
+        await async_session.commit()
 
-        response = await async_client.patch(
+        response = await readonly_client.patch(
             f"/api/automation/v1/{automation.id}", json={"enabled": True}
         )
 
-        assert response.status_code == 403
-
-    async def test_activate_state_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """A manager cannot reactivate another user's automation via state."""
-        automation = await self._other_users_automation(async_session, enabled=False)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}", json={"state": "ACTIVE"}
-        )
-
-        assert response.status_code == 403
-
-    async def test_disable_with_edits_as_non_creator_manager_returns_403(
-        self, async_client, async_session
-    ):
-        """Turning off cannot carry other edits along with it."""
-        automation = await self._other_users_automation(async_session)
-
-        response = await async_client.patch(
-            f"/api/automation/v1/{automation.id}",
-            json={"enabled": False, "name": "Renamed"},
-        )
-
-        assert response.status_code == 403
+        assert response.status_code == 200
+        assert response.json()["state"] == "ACTIVE"
 
 
 class TestServiceOwnedAutomations:
@@ -2655,10 +2771,11 @@ class TestUpdateAutomation:
             "prompt": "Same prompt",
         }
 
-    async def test_update_repos_as_non_creator_returns_403(
-        self, async_client, async_session
+    async def test_update_repos_as_non_creator_member_returns_403(
+        self, readonly_client, async_session
     ):
-        """Changing repositories edits the definition, so only the creator may."""
+        """Changing repositories edits the definition, which a member may do
+        only for an automation they created."""
         # Arrange — a teammate's preset in the same organization.
         automation = Automation(
             user_id=OTHER_USER_ID,
@@ -2673,7 +2790,7 @@ class TestUpdateAutomation:
         await async_session.commit()
 
         # Act
-        response = await async_client.patch(
+        response = await readonly_client.patch(
             f"/api/automation/v1/{automation.id}", json={"repos": []}
         )
 
