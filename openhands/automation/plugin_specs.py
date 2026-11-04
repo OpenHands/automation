@@ -348,11 +348,12 @@ def validate_plugin_source_allowed(
     if source_type == SourceType.GITHUB:
         return
 
+    # Any HTTPS host: a plugin can live on a self-hosted provider such as
+    # Bitbucket Data Center, not only on github.com.
     parsed = urlparse(url)
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+    if parsed.scheme != "https" or not parsed.hostname:
         raise PluginSpecError(
-            "Cloud plugin sources must use github:owner/repo or "
-            "https://github.com/owner/repo.git"
+            "Cloud plugin sources must use github:owner/repo or an https:// git URL"
         )
 
 
