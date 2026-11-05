@@ -1311,29 +1311,29 @@ class TestExecuteRunPhaseReporting:
         assert env_vars["AUTOMATION_PHASE_URL"].endswith(f"/v1/runs/{run_id}/phase")
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
-    async def test_injects_agent_server_url_and_callback_key(
+    async def test_injects_callback_key_but_not_agent_server_url(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """Cloud-mode runs inject AGENT_SERVER_URL and AUTOMATION_CALLBACK_API_KEY
-        so standalone (non-SDK) scripts can reach the agent server and sign
-        their completion callback (see issue #679)."""
+        """Cloud-mode runs inject AUTOMATION_CALLBACK_API_KEY so scripts can sign
+        their completion callback (see issue #679), but never AGENT_SERVER_URL:
+        stored scripts read it as running on a local Agent Canvas."""
         await self._run_successful_execution(
             mock_execute, async_session_factory, mock_settings, mock_client
         )
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
-        assert env_vars["AGENT_SERVER_URL"] == "http://agent.test"
+        assert "AGENT_SERVER_URL" not in env_vars
         assert env_vars["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
         assert env_vars["SANDBOX_ID"] == "sbx-1"
         assert env_vars["SESSION_API_KEY"] == "sk-1"
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
-    async def test_cloud_sandbox_env_names_its_mode_next_to_agent_server_url(
+    async def test_cloud_sandbox_env_names_its_mode(
         self, mock_execute, async_session_factory, mock_settings, mock_client
     ):
-        """With AGENT_SERVER_URL now exported in cloud sandboxes (#679), the
-        presets need an explicit signal to pick cloud mode (#688). The real
-        cloud backend's env must carry it next to the sandbox identity."""
+        """The presets pick cloud mode from an explicit signal (#688). The real
+        cloud backend's env must carry it next to the sandbox identity, and no
+        AGENT_SERVER_URL."""
         backend = CloudSandboxBackend(api_url="https://app.test", run=MagicMock())
         with patch(
             "openhands.automation.backends.cloud.get_api_key_for_automation_run",
@@ -1352,7 +1352,7 @@ class TestExecuteRunPhaseReporting:
 
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_RUN_MODE"] == "cloud"
-        assert env_vars["AGENT_SERVER_URL"] == "http://agent.test"
+        assert "AGENT_SERVER_URL" not in env_vars
         assert env_vars["SANDBOX_ID"] == "sbx-1"
         assert env_vars["SESSION_API_KEY"] == "sk-1"
         assert env_vars["OPENHANDS_API_KEY"] == "cloud-api-key"

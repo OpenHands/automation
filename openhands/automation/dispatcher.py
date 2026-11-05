@@ -852,14 +852,17 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
-        # Cloud mode does not inject these in build_env_vars() (unlike local
-        # mode), so fill them in here from the execution context:
-        # - AGENT_SERVER_URL lets standalone (non-SDK) scripts reach the agent
-        #   server; without it, os.environ.get("AGENT_SERVER_URL") returns "".
-        # - AUTOMATION_CALLBACK_API_KEY lets fire_callback() helpers sign the
-        #   completion POST; it is the same per-user key already exported as
-        #   OPENHANDS_API_KEY, which authenticates against /v1/runs/{id}/complete.
-        env_vars.setdefault("AGENT_SERVER_URL", ctx.agent_url)
+        # Cloud mode does not inject this in build_env_vars() (unlike local
+        # mode), so fill it in here from the execution context: it lets
+        # fire_callback() helpers sign the completion POST. It is the same
+        # per-user key already exported as OPENHANDS_API_KEY, which
+        # authenticates against /v1/runs/{id}/complete.
+        # AGENT_SERVER_URL is never exported here: scripts stored in existing
+        # automations (catalog bundles, scripts written from the
+        # openhands-automation skill, preset runners from 1.27.0 and earlier)
+        # read it as "running on a local Agent Canvas" and would then take
+        # their secrets, LLM and conversations from the sandbox's own
+        # agent-server, which has none of the user's.
         if ctx.api_key:
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", ctx.api_key)
 
