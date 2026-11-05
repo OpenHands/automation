@@ -358,6 +358,11 @@ async def sdk_version():
             status_code=503,
             content={"error": "openhands-sdk package not found"},
         )
+    # TEST ONLY (do not merge): this build runs the SDK 1.60 release branch,
+    # which is not on PyPI; sandboxes install the SDK from PyPI, so they keep
+    # the newest release there.
+    if version == "1.60.0":
+        version = "1.59.0"
     return {"version": version}
 
 

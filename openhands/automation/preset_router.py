@@ -394,6 +394,45 @@ def _replace_files_in_tarball(
     return out_buffer.read()
 
 
+# Every preset runner, back to the first release, opens with one of these lines.
+_PRESET_RUNNER_KINDS = (
+    (b'"""Prompt-based automation script', "prompt"),
+    (b'"""Plugin-based automation script', "plugin"),
+)
+
+
+def with_current_preset_runner(tarball_bytes: bytes) -> bytes:
+    """Return a preset tarball with the current runner, else the tarball unchanged.
+
+    A preset tarball bakes the service's runner (``main.py``, ``setup.sh`` and
+    ``finish_tool_hook.py``) next to the user's content (``prompt.txt`` and the
+    repository or plugin configuration) when the automation is created. The
+    runner has to match the service that dispatches it, so every run gets the
+    current one; the stored tarball is not rewritten. A tarball that is not a
+    preset (no ``prompt.txt``, or a ``main.py`` that is not a preset runner) is
+    returned as is.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+            names = set(tar.getnames())
+            if "prompt.txt" not in names or "main.py" not in names:
+                return tarball_bytes
+            member = tar.extractfile("main.py")
+            head = member.read(64) if member is not None else b""
+    except (tarfile.TarError, OSError, EOFError):
+        return tarball_bytes
+    kind = next(
+        (kind for prefix, kind in _PRESET_RUNNER_KINDS if head.startswith(prefix)),
+        None,
+    )
+    if kind is None:
+        return tarball_bytes
+    files = (
+        _load_prompt_preset_files() if kind == "prompt" else _load_plugin_preset_files()
+    )
+    return _replace_files_in_tarball(tarball_bytes, files) or tarball_bytes
+
+
 def _delete_storage_object_best_effort(
     file_store: FileStore, storage_path: str
 ) -> None:

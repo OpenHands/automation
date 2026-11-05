@@ -1,8 +1,8 @@
 """Base classes for execution backends."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -28,6 +28,36 @@ class ExecutionContext:
     sandbox_id: str | None = None
     api_url: str | None = None
     api_key: str | None = None
+
+
+@dataclass
+class ConversationStart:
+    """What the profile owner needs to start a run's conversation in its sandbox.
+
+    Everything else (the LLM key, MCP servers, secrets and skills) the app
+    server resolves itself, as it does for a chat.
+    """
+
+    agent_profile_id: str | None = None
+    llm_profile: str | None = None
+    conversation_id: str | None = None
+    plugins: list[dict[str, Any]] = field(default_factory=list)
+    tags: dict[str, str] = field(default_factory=dict)
+    # Repositories the app server clones, the primary first, as
+    # ``{"repository", "git_provider", "branch"}``. It then runs their setup and
+    # loads their skills and instruction files, as for a chat.
+    repositories: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class StartedConversation:
+    """A conversation the app server started, and the profile it launched from."""
+
+    conversation_id: str
+    agent_profile_id: str | None
+    # Whether the app server reported the conversation's repositories. Before
+    # it supported several (enterprise 1.81) it ignores all but the primary.
+    reports_repositories: bool = True
 
 
 class ExecutionBackend(ABC):
@@ -144,3 +174,29 @@ class ExecutionBackend(ABC):
         Returns:
             Absolute path to the working directory
         """
+
+    async def start_conversation(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        ctx: ExecutionContext,  # noqa: ARG002
+        start: ConversationStart,  # noqa: ARG002
+    ) -> StartedConversation | None:
+        """Start the run's conversation through the profile owner.
+
+        Cloud mode asks the app server to start it in the run's sandbox, so
+        the run gets the owner's agent profile, MCP servers and secrets the
+        way a chat does. Local mode returns None: that agent server already
+        holds them, and the runner creates the conversation itself.
+        """
+        return None
+
+    async def git_connections(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        ctx: ExecutionContext,  # noqa: ARG002
+    ) -> dict[str, str | None] | None:
+        """The git providers the run's owner is connected to, with their hosts.
+
+        None where no app server clones repositories for the run (local mode).
+        """
+        return None
