@@ -1244,6 +1244,34 @@ class TestExecuteRunStartsTheConversation:
         ]
         assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == []
 
+    async def test_a_bitbucket_data_center_repository_goes_to_the_app_server(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """The SDK's ``RepoSource`` takes the ``bitbucket_data_center`` provider
+        (1.60.0), so a Data Center repository is recorded with it, and the app
+        server clones it through the owner's Data Center connection."""
+        recorded = RepoSource(
+            url="https://bitbucket.example.com/scm/DEM/api.git",
+            provider="bitbucket_data_center",
+        ).model_dump(exclude_none=True)
+        backend, env_vars, _ = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            [recorded],
+            {"bitbucket_data_center": "https://bitbucket.example.com"},
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == [
+            {
+                "repository": "DEM/api",
+                "git_provider": "bitbucket_data_center",
+                "branch": None,
+            }
+        ]
+        assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == []
+
     async def test_the_public_host_of_a_self_managed_connection_stays_with_the_runner(
         self, async_session_factory, mock_settings, mock_client
     ):
