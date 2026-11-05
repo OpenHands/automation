@@ -45,6 +45,7 @@ from openhands.automation.utils.api_key import get_api_key_for_automation_run
 from openhands.automation.utils.sandbox import (
     cleanup_sandbox,
     delete_sandbox,
+    find_agent_server_url,
     verify_run_status,
 )
 
@@ -603,7 +604,7 @@ class CloudSandboxBackend(ExecutionBackend):
             status = sb.get("status", "UNKNOWN")
 
             if status == "RUNNING":
-                result = self._find_agent_server_url(sb)
+                result = find_agent_server_url(sb)
                 if result is None:
                     raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
                 agent_url, session_key = result
@@ -698,11 +699,3 @@ class CloudSandboxBackend(ExecutionBackend):
             return items[0] or {"id": sandbox_id, "status": "MISSING"}
 
         return await _do_poll()
-
-    @staticmethod
-    def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
-        """Extract (agent_url, session_key) from sandbox response."""
-        for url_info in sandbox.get("exposed_urls") or []:
-            if url_info.get("name") == "AGENT_SERVER":
-                return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-        return None
