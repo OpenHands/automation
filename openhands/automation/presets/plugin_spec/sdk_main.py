@@ -30,8 +30,8 @@ Env vars (Local mode):
 
 Common env vars:
   AUTOMATION_RUN_MODE         - "cloud" or "local", exported by the execution backend;
-                                decides the mode. Without it, SANDBOX_ID plus a session
-                                key means cloud, AGENT_SERVER_URL alone means local.
+                                decides the mode. Without it (a service from 1.27.0 or
+                                earlier), SANDBOX_ID means cloud and no SANDBOX_ID local.
   AUTOMATION_CALLBACK_URL     - completion callback endpoint (optional)
   AUTOMATION_ID               - automation ID for observability correlation (optional)
   AUTOMATION_NAME             - automation name for observability correlation (optional)
@@ -62,25 +62,19 @@ import uuid
 def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
 
-    The execution backend exports AUTOMATION_RUN_MODE. AGENT_SERVER_URL must
-    never decide the mode: cloud sandboxes export it too so standalone scripts
-    can reach the agent server (#680), and reading it as "local" made cloud
-    runs fetch their LLM, secrets and MCP servers from the sandbox's own
-    agent-server, which holds none of them (#688). A service that predates
-    AUTOMATION_RUN_MODE is recognised by its env shape: only cloud sandboxes
-    carry SANDBOX_ID.
+    The execution backend exports AUTOMATION_RUN_MODE, and it decides.
+    AGENT_SERVER_URL never does, whether it is set or not: reading it as
+    "local" made cloud runs fetch their LLM, secrets and MCP servers from the
+    sandbox's own agent-server, which holds none of them (#688). Only a service
+    from before AUTOMATION_RUN_MODE (1.27.0 and earlier) leaves it out; its cloud
+    sandboxes carry SANDBOX_ID and its local backend does not.
     """
     explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
     if explicit in ("cloud", "local"):
         return explicit, "AUTOMATION_RUN_MODE"
-    has_session_key = bool(
-        environ.get("OH_SESSION_API_KEYS_0") or environ.get("SESSION_API_KEY")
-    )
-    if environ.get("SANDBOX_ID") and has_session_key:
-        return "cloud", "SANDBOX_ID + session key (no AUTOMATION_RUN_MODE)"
-    if environ.get("AGENT_SERVER_URL"):
-        return "local", "AGENT_SERVER_URL without SANDBOX_ID (no AUTOMATION_RUN_MODE)"
-    return "cloud", "default (no AUTOMATION_RUN_MODE, SANDBOX_ID or AGENT_SERVER_URL)"
+    if environ.get("SANDBOX_ID"):
+        return "cloud", "SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+    return "local", "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
 
 
 # Keep _detect_execution_mode in sync with presets/prompt and presets/plugin.

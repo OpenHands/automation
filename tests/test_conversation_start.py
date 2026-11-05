@@ -1164,10 +1164,95 @@ class TestExecuteRunStartsTheConversation:
             {"url": "git@github.com:acme/ssh.git"}
         ]
 
+    @pytest.mark.parametrize(
+        ("fixture", "preset_metadata"),
+        [
+            ("prompt-1.27.0.tar.gz", {"preset_type": "prompt", "prompt": "hi"}),
+            (
+                "plugin-1.27.0.tar.gz",
+                {
+                    "preset_type": "plugin",
+                    "prompt": "hi",
+                    "plugins": [{"source": "github:acme/plugins"}],
+                },
+            ),
+        ],
+    )
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_a_cloud_run_needs_no_agent_server_url(
+        self,
+        mock_execute,
+        fixture,
+        preset_metadata,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+    ):
+        """Cloud sandboxes no longer receive AGENT_SERVER_URL. The runner a
+        1.27.0 preset gets at dispatch takes its mode from AUTOMATION_RUN_MODE,
+        so it runs in cloud mode, attached to the started conversation, with
+        or without that variable."""
+        run = await self._run(
+            async_session_factory,
+            preset_metadata=preset_metadata,
+            tarball_path=build_internal_url(uuid.uuid4()),
+        )
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        # What CloudSandboxBackend.build_env_vars exports.
+        backend.build_env_vars = MagicMock(
+            return_value={
+                "OPENHANDS_API_KEY": "sk-user",
+                "OPENHANDS_CLOUD_API_URL": "https://app.test",
+                "AUTOMATION_RUN_MODE": "cloud",
+            }
+        )
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
 
-def _load_preset_function(preset_name: str, function_name: str, namespace: dict):
-    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
-    module = ast.parse(source_path.read_text(), filename=str(source_path))
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher._download_internal_tarball",
+                new_callable=AsyncMock,
+                return_value=(FIXTURES / fixture).read_bytes(),
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        tarball = mock_execute.await_args.kwargs["tarball_source"]
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            member = tar.extractfile("main.py")
+            assert member is not None
+            main = member.read().decode()
+        detect = _function_from_source(main, "_detect_execution_mode", {})
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        cloud_env = {k: v for k, v in env_vars.items() if k != "AGENT_SERVER_URL"}
+        assert detect(cloud_env) == ("cloud", "AUTOMATION_RUN_MODE")
+        assert detect({**cloud_env, "AGENT_SERVER_URL": "http://agent.test"}) == (
+            "cloud",
+            "AUTOMATION_RUN_MODE",
+        )
+        # Everything the runner's cloud mode requires is there without it.
+        for name in (
+            "OPENHANDS_API_KEY",
+            "OPENHANDS_CLOUD_API_URL",
+            "SANDBOX_ID",
+            "SESSION_API_KEY",
+        ):
+            assert cloud_env.get(name), name
+        attaches = _function_from_source(main, "_attaches_to_started_conversation", {})
+        assert attaches(cloud_env)
+
+
+def _function_from_source(
+    source: str, function_name: str, namespace: dict, filename: str = "main.py"
+):
+    module = ast.parse(source, filename=filename)
     function_node = next(
         node
         for node in module.body
@@ -1175,12 +1260,17 @@ def _load_preset_function(preset_name: str, function_name: str, namespace: dict)
     )
     ast.fix_missing_locations(function_node)
     exec(
-        compile(
-            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
-        ),
+        compile(ast.Module(body=[function_node], type_ignores=[]), filename, "exec"),
         namespace,
     )
     return namespace[function_name]
+
+
+def _load_preset_function(preset_name: str, function_name: str, namespace: dict):
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    return _function_from_source(
+        source_path.read_text(), function_name, namespace, str(source_path)
+    )
 
 
 PRESETS = ["prompt", "plugin", "plugin_spec"]

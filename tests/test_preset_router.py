@@ -266,14 +266,15 @@ class TestPresetExecutionMode:
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     def test_local_backend_shape_without_signal_is_local(self, preset_name):
-        """A local backend that predates AUTOMATION_RUN_MODE: AGENT_SERVER_URL,
-        a session key and no SANDBOX_ID."""
+        """A local backend that predates AUTOMATION_RUN_MODE (1.27.0 and earlier,
+        say after a rollback): AGENT_SERVER_URL, a session key and no SANDBOX_ID.
+        The missing SANDBOX_ID decides, not the URL."""
         detect = _load_preset_mode_detector(preset_name)
         mode, signal = detect(
             {"AGENT_SERVER_URL": "http://localhost:3000", "SESSION_API_KEY": "sk-1"}
         )
         assert mode == "local"
-        assert "AGENT_SERVER_URL" in signal
+        assert signal == "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     @pytest.mark.parametrize(
@@ -296,10 +297,36 @@ class TestPresetExecutionMode:
         assert "SANDBOX_ID" in signal
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
-    def test_no_signal_at_all_defaults_to_cloud(self, preset_name):
+    def test_no_signal_and_no_sandbox_id_is_local(self, preset_name):
+        """Only cloud sandboxes carry SANDBOX_ID, and cloud mode cannot run
+        without it."""
         detect = _load_preset_mode_detector(preset_name)
         mode, _signal = detect({})
-        assert mode == "cloud"
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            },
+            {"AUTOMATION_RUN_MODE": "local", "SESSION_API_KEY": "sk-1"},
+            {"SANDBOX_ID": "sbx-1", "OH_SESSION_API_KEYS_0": "sk-1"},
+            {"SANDBOX_ID": "sbx-1"},
+            {"SESSION_API_KEY": "sk-1"},
+            {"AUTOMATION_RUN_MODE": "staging"},
+            {},
+        ],
+    )
+    def test_agent_server_url_never_changes_the_mode(self, preset_name, environ):
+        """Cloud sandboxes no longer receive AGENT_SERVER_URL and local runs do;
+        whether it is there must not change the mode."""
+        detect = _load_preset_mode_detector(preset_name)
+        with_url = {**environ, "AGENT_SERVER_URL": "http://10.0.0.5:8000"}
+        assert detect(with_url) == detect(environ)
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     def test_unknown_signal_value_falls_back_to_env_shape(self, preset_name):
@@ -360,6 +387,66 @@ class TestPresetExecutionMode:
         )
         assert "_detect_execution_mode(os.environ)" in source, (
             f"{preset_name} preset must detect its mode with _detect_execution_mode"
+        )
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_mode_never_reads_agent_server_url(self, preset_name):
+        """The script reads AGENT_SERVER_URL once, into ``agent_server_url``,
+        and only local-mode code uses it: the mode check never looks at it, and
+        a cloud run (which no longer receives it) has no use for it."""
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        reads = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Constant) and node.value == "AGENT_SERVER_URL"
+        ]
+        assert len(reads) == 1, f"{preset_name} reads AGENT_SERVER_URL again"
+
+        detector = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_detect_execution_mode"
+        )
+        code = [
+            ast.get_source_segment(source, statement) or ""
+            for statement in detector.body[1:]  # after the docstring
+        ]
+        assert not any("AGENT_SERVER_URL" in segment for segment in code)
+
+        parents = {
+            child: node
+            for node in ast.walk(module)
+            for child in ast.iter_child_nodes(node)
+        }
+
+        def in_local_mode_branch(node: ast.AST) -> bool:
+            child, parent = node, parents.get(node)
+            while parent is not None:
+                if (
+                    isinstance(parent, ast.If)
+                    and isinstance(parent.test, ast.Name)
+                    and parent.test.id == "IS_LOCAL_MODE"
+                    and any(child is statement for statement in parent.body)
+                ):
+                    return True
+                child, parent = parent, parents.get(parent)
+            return False
+
+        uses = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Name)
+            and node.id == "agent_server_url"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        assert uses
+        outside = [node.lineno for node in uses if not in_local_mode_branch(node)]
+        assert not outside, (
+            f"{preset_name} uses agent_server_url outside local mode on lines {outside}"
         )
 
 
@@ -621,6 +708,203 @@ def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
     assert normalize(wrapped_config) == native_config
     assert normalize(native_config) == native_config
     assert normalize(None) == {}
+
+
+def _load_preset_functions(
+    preset_name: str, names: set[str], namespace: dict[str, Any]
+) -> dict[str, Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in functions} == names
+    nodes: list[ast.stmt] = list(functions)
+    exec(
+        compile(ast.Module(body=nodes, type_ignores=[]), str(source_path), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+def _load_preset_mcp_loader(
+    preset_name: str,
+    users_me_mcp_config: Callable[[], Any],
+    *,
+    local_mode: bool = False,
+) -> Callable[[Any], Any]:
+    """The preset's ``_load_mcp_config`` with ``users/me`` answered by a stub."""
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_normalize_mcp_config", "_named_mcp_servers", "_load_mcp_config"},
+        {
+            "_coerce_mcp_config": coerce_mcp_config,
+            "IS_LOCAL_MODE": local_mode,
+            "_users_me_mcp_config": users_me_mcp_config,
+        },
+    )
+    return cast(Callable[[Any], Any], namespace["_load_mcp_config"])
+
+
+def _workspace_returning(mcp_config: dict[str, Any]) -> MagicMock:
+    workspace = MagicMock()
+    workspace.get_mcp_config.return_value = mcp_config
+    return workspace
+
+
+# GET /api/v1/users/me on OpenHands Cloud and Enterprise: a {name: server} map.
+_USERS_ME_MCP_CONFIG = {
+    "jira-dc": {
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-atlassian"],
+        "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        "enabled": True,
+    },
+    "tools": {
+        "url": "https://mcp.example.com/mcp",
+        "transport": "http",
+        "auth": {"strategy": "bearer", "value": "tools-token"},
+        "enabled": True,
+    },
+    "linear": {
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {
+            "strategy": "oauth2",
+            "state": {"tokens": {"access_token": "linear-access-token"}},
+        },
+        "enabled": True,
+    },
+}
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_loads_users_me_mcp_servers_the_sdk_cannot_read(preset_name, capsys):
+    # openhands-sdk 1.59 returns {} for the {name: server} map (automation#93).
+    load = _load_preset_mcp_loader(preset_name, lambda: _USERS_ME_MCP_CONFIG)
+
+    mcp_config = load(_workspace_returning({}))
+
+    assert dump_mcp_config(mcp_config) == {
+        "jira-dc": {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-atlassian"],
+            "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        },
+        "tools": {
+            "url": "https://mcp.example.com/mcp",
+            "transport": "http",
+            "auth": {"strategy": "bearer", "value": "tools-token"},
+        },
+    }
+    out = capsys.readouterr().out
+    assert "servers: ['jira-dc', 'tools']" in out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert "OAuth" in out
+    assert "linear-access-token" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reports_configured_servers_it_could_not_load(preset_name, capsys):
+    users_me = {
+        "linear": _USERS_ME_MCP_CONFIG["linear"],
+        "broken": {"transport": "stdio", "env": {"TOKEN": "broken-secret"}},
+    }
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert (
+        "MCP server 'broken' is configured but not loaded: "
+        "its settings could not be read"
+    ) in out
+    assert "broken-secret" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("users_me_mcp_config", [None, {}])
+def test_preset_reports_when_no_mcp_servers_are_configured(
+    preset_name, users_me_mcp_config, capsys
+):
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me_mcp_config)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "no MCP servers configured" in out
+    assert "WARNING" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_preset_keeps_sdk_mcp_servers_without_reading_users_me(preset_name, local_mode):
+    """An SDK that reads the map (or a local agent server) is used as is."""
+
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read")
+
+    load = _load_preset_mcp_loader(
+        preset_name, users_me_not_expected, local_mode=local_mode
+    )
+    sdk_servers = coerce_mcp_config({"fetch": {"command": "uvx"}})
+
+    assert load(_workspace_returning(sdk_servers)) == sdk_servers
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_local_preset_does_not_read_users_me(preset_name, capsys):
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read in local mode")
+
+    load = _load_preset_mcp_loader(preset_name, users_me_not_expected, local_mode=True)
+
+    assert load(_workspace_returning({})) == {}
+    assert "no MCP servers configured" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reads_users_me_with_unmasked_secrets(preset_name, monkeypatch):
+    import httpx
+
+    requests: list[dict[str, Any]] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        requests.append({"url": url, "params": params, "headers": headers})
+        return httpx.Response(
+            200,
+            json={"mcp_config": {"fetch": {"command": "uvx"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_users_me_mcp_config"},
+        {
+            "api_url": "https://ohe.example.com",
+            "api_key": "automation-key",
+            "session_key": "session-key",
+        },
+    )
+
+    assert namespace["_users_me_mcp_config"]() == {"fetch": {"command": "uvx"}}
+    assert requests == [
+        {
+            "url": "https://ohe.example.com/api/v1/users/me",
+            "params": {"expose_secrets": "true"},
+            "headers": {
+                "Authorization": "Bearer automation-key",
+                "X-Session-API-Key": "session-key",
+            },
+        }
+    ]
 
 
 _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
