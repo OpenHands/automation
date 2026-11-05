@@ -50,12 +50,16 @@ from openhands.automation.observability import (
     current_span_context,
     span,
 )
+from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     CreatePluginSpecAutomationRequest,
+    PluginSecretLookup,
     PluginSpecError,
     entrypoint_for_manifest,
+    no_plugin_secrets,
     pin_plugin_refs,
+    plugin_secret_names,
     preflight_manifest,
     resolve_suggested_trigger,
     setup_script_for_manifest,
@@ -362,6 +366,7 @@ async def create_automation_from_plugin_spec(
         plugin_config=body.config,
         request=request,
         user=user,
+        run_as_user_id=run_as.user_id,
         pin_ref=run_as.kind == AutomationRunAsKind.SERVICE,
     )
     trigger = await _resolve_plugin_spec_trigger(
@@ -438,9 +443,21 @@ def _allow_local_plugin_sources() -> bool:
     return get_config().service.is_local_mode
 
 
-def _fetch_validated_plugin_manifest(
+def _plugin_secrets_for(
+    request: Request, user_id: uuid.UUID, org_id: uuid.UUID
+) -> PluginSecretLookup:
+    """Secrets for a preflight of the plugins of an automation that runs as
+    ``user_id`` in ``org_id``: a private source names its credential with a
+    ``${NAME}`` placeholder, resolved for that identity."""
+    return preflight_secret_lookup(
+        get_http_client(request), user_id=user_id, org_id=org_id
+    )
+
+
+async def _fetch_validated_plugin_manifest(
     plugin: AutomationPluginSource,
     plugin_config: dict[str, Any] | None,
+    secrets: PluginSecretLookup,
 ) -> tuple[dict[str, Any], Any, str | None, list[dict[str, Any]]]:
     """Preflight a plugin.
 
@@ -450,11 +467,14 @@ def _fetch_validated_plugin_manifest(
     allow_local_sources = _allow_local_plugin_sources()
     try:
         resolved_ref, manifest = preflight_manifest(
-            plugin, allow_local_sources=allow_local_sources
+            plugin,
+            allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names([plugin])),
         )
         required_plugins = validate_required_plugins(
             manifest.runtime.plugins,
             allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names(manifest.runtime.plugins)),
         )
         resolved_config = validate_plugin_config(manifest, plugin_config)
     except PluginSpecError as exc:
@@ -556,6 +576,7 @@ async def _resolve_plugin_spec_runtime_fields(
     plugin_config: dict[str, Any] | None,
     request: Request,
     user: AuthenticatedUser,
+    run_as_user_id: uuid.UUID,
     pin_ref: bool = False,
 ) -> dict[str, Any]:
     """Validate a plugin spec and return automation fields derived from it.
@@ -565,9 +586,19 @@ async def _resolve_plugin_spec_runtime_fields(
     let anyone who can push to the plugin repo change code that runs as the
     service account, with no edit visible here. The manifest's secondary
     plugins are pinned the same way.
+
+    A private source is fetched with the secrets of ``run_as_user_id``, the
+    identity every run uses.
     """
-    plugin_config, manifest, resolved_ref, required_plugins = (
-        _fetch_validated_plugin_manifest(plugin, plugin_config)
+    (
+        plugin_config,
+        manifest,
+        resolved_ref,
+        required_plugins,
+    ) = await _fetch_validated_plugin_manifest(
+        plugin,
+        plugin_config,
+        _plugin_secrets_for(request, run_as_user_id, user.org_id),
     )
 
     agent_profile_name = (
@@ -633,10 +664,11 @@ async def _resolve_plugin_spec_runtime_fields(
     )
 
 
-def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+async def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
     *,
     plugin: AutomationPluginSource,
     automation: Automation,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> dict[str, Any]:
     """Resolve a plugin update without rereading agent profile details.
 
@@ -660,12 +692,18 @@ def _resolve_plugin_spec_update_fields_reusing_existing_profiles(
         )
     requested_config = existing_plugin_spec.get("config")
     old_plugin = AutomationPluginSource.model_validate(old_plugin_payload)
-    _old_config, old_manifest, _old_ref, _old_required = (
-        _fetch_validated_plugin_manifest(old_plugin, requested_config)
-    )
-    plugin_config, manifest, resolved_ref, required_plugins = (
-        _fetch_validated_plugin_manifest(plugin, requested_config)
-    )
+    (
+        _old_config,
+        old_manifest,
+        _old_ref,
+        _old_required,
+    ) = await _fetch_validated_plugin_manifest(old_plugin, requested_config, secrets)
+    (
+        plugin_config,
+        manifest,
+        resolved_ref,
+        required_plugins,
+    ) = await _fetch_validated_plugin_manifest(plugin, requested_config, secrets)
     if _profile_requirements_signature(manifest) != _profile_requirements_signature(
         old_manifest
     ):
@@ -866,6 +904,7 @@ async def update_automation(
                 else None,
                 request=request,
                 user=user,
+                run_as_user_id=auto.user_id,
                 pin_ref=auto.run_as_kind == AutomationRunAsKind.SERVICE,
             )
         except HTTPException as exc:
@@ -879,9 +918,10 @@ async def update_automation(
             ):
                 raise
             plugin_runtime_fields = (
-                _resolve_plugin_spec_update_fields_reusing_existing_profiles(
+                await _resolve_plugin_spec_update_fields_reusing_existing_profiles(
                     plugin=plugin_source,
                     automation=auto,
+                    secrets=_plugin_secrets_for(request, auto.user_id, auto.org_id),
                 )
             )
         plugin_runtime_fields.pop("manifest", None)
@@ -1115,8 +1155,12 @@ async def _pin_plugins_for_run_as_change(
     auto: Automation,
     session: AsyncSession,
     background_tasks: BackgroundTasks,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> None:
     """Pin the plugin refs of ``auto`` to commit SHAs for a service account.
+
+    ``secrets`` are those of the new identity: a private source must be
+    readable with its credentials.
 
     An automation runs the plugin code its ref points at. Under a service
     account that code would change, with no edit visible here, whenever anyone
@@ -1140,8 +1184,13 @@ async def _pin_plugins_for_run_as_change(
     """
     if auto.plugin_spec:
         plugin = AutomationPluginSource.model_validate(auto.plugin_spec.get("plugin"))
-        config, manifest, resolved_ref, required_plugins = (
-            _fetch_validated_plugin_manifest(plugin, auto.plugin_spec.get("config"))
+        (
+            config,
+            manifest,
+            resolved_ref,
+            required_plugins,
+        ) = await _fetch_validated_plugin_manifest(
+            plugin, auto.plugin_spec.get("config"), secrets
         )
         runtime_fields = _plugin_runtime_fields(
             plugin=plugin,
@@ -1164,8 +1213,10 @@ async def _pin_plugins_for_run_as_change(
                 "cannot run as a service account",
             )
         try:
-            pinned = pin_plugin_refs(
-                plugins, allow_local_sources=_allow_local_plugin_sources()
+            pinned = await pin_plugin_refs(
+                plugins,
+                allow_local_sources=_allow_local_plugin_sources(),
+                secrets=secrets,
             )
         except PluginSpecError as exc:
             raise HTTPException(
@@ -1276,7 +1327,12 @@ async def change_run_as(
             get_http_client(request),
             field="service_account_id",
         )
-        await _pin_plugins_for_run_as_change(auto, session, background_tasks)
+        await _pin_plugins_for_run_as_change(
+            auto,
+            session,
+            background_tasks,
+            _plugin_secrets_for(request, new_run_as.user_id, user.org_id),
+        )
     # After pinning (which may replace the tarball) and before the identity
     # changes, so a 409 for a shared upload leaves the row as it was.
     await assign_upload_to_run_as(

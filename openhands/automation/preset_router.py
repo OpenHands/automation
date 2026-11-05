@@ -48,8 +48,11 @@ from openhands.automation.models import (
 from openhands.automation.observability_associations import (
     validate_observability_associations as validate_observability_association_exprs,
 )
+from openhands.automation.plugin_secrets import preflight_secret_lookup
 from openhands.automation.plugin_specs import (
+    PluginSecretLookup,
     PluginSpecError,
+    no_plugin_secrets,
     pin_plugin_refs,
 )
 from openhands.automation.schemas import (
@@ -909,32 +912,37 @@ def _resolve_experiment_variant_models(
     ]
 
 
-def _pin_preset_plugin_refs(
+async def _pin_preset_plugin_refs(
     body: CreatePluginAutomationRequest,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> CreatePluginAutomationRequest:
     """Return ``body`` with every plugin ref (variants too) pinned to its commit.
 
     The generated tarball stores the refs as given, so an automation that runs
-    as a service account stores SHAs (see ``pin_plugin_refs``).
+    as a service account stores SHAs (see ``pin_plugin_refs``). A private
+    source is read with ``secrets``, those of the service account.
 
     Raises:
         HTTPException: 422 when a ref cannot be resolved to a commit SHA.
     """
     allow_local_sources = get_config().service.is_local_mode
 
-    def pin(plugins: list[PluginSource]) -> list[PluginSource]:
-        pinned = pin_plugin_refs(
+    async def pin(plugins: list[PluginSource]) -> list[PluginSource]:
+        pinned = await pin_plugin_refs(
             [p.model_dump(exclude_none=True) for p in plugins],
             allow_local_sources=allow_local_sources,
+            secrets=secrets,
         )
         return [PluginSource.model_validate(item) for item in pinned]
 
     try:
         return body.model_copy(
             update={
-                "plugins": pin(body.plugins) if body.plugins is not None else None,
+                "plugins": await pin(body.plugins)
+                if body.plugins is not None
+                else None,
                 "variants": [
-                    v.model_copy(update={"plugins": pin(v.plugins)})
+                    v.model_copy(update={"plugins": await pin(v.plugins)})
                     for v in body.variants
                 ]
                 if body.variants is not None
@@ -1055,7 +1063,12 @@ async def create_automation_from_plugin(
 
     run_as = await resolve_run_as(body.run_as_user_id, user, get_http_client(request))
     if run_as.kind == AutomationRunAsKind.SERVICE:
-        body = _pin_preset_plugin_refs(body)
+        body = await _pin_preset_plugin_refs(
+            body,
+            preflight_secret_lookup(
+                get_http_client(request), user_id=run_as.user_id, org_id=user.org_id
+            ),
+        )
     model = resolve_model_profile_for_user(body.model, user)
     state = model_automation_state(body.state, body.enabled)
     variants = _resolve_experiment_variant_models(

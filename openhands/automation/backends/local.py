@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -15,6 +16,10 @@ from uuid import UUID
 import httpx
 
 from openhands.automation.backends.base import ExecutionBackend, ExecutionContext
+from openhands.automation.plugin_secrets import (
+    PluginSourceSecrets,
+    local_plugin_source_secrets,
+)
 from openhands.automation.utils.agent_server import (
     VerificationResult,
     verify_run_on_agent_server,
@@ -140,6 +145,19 @@ class LocalAgentServerBackend(ExecutionBackend):
     async def get_api_key(self) -> str:
         """Return the pre-configured API key."""
         return self.api_key
+
+    async def plugin_source_secrets(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        names: Collection[str],
+    ) -> PluginSourceSecrets:
+        """References into the agent server's secret store."""
+        return local_plugin_source_secrets(
+            names,
+            agent_server_url=self.agent_server_url,
+            api_key=self.api_key,
+            sandbox_agent_server_url=self.sandbox_agent_server_url,
+        )
 
     def build_env_vars(self) -> dict[str, str]:
         """Build local mode environment variables.
