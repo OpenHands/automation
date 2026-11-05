@@ -21,7 +21,7 @@ import logging
 import random
 import tarfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -65,7 +65,12 @@ from openhands.automation.observability import (
     inject_trace_context,
     span,
 )
-from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
+from openhands.automation.plugin_secrets import PluginSourceSecrets
+from openhands.automation.plugin_specs import (
+    PluginSpecError,
+    build_execution_payload,
+    plugin_secret_names,
+)
 from openhands.automation.preset_router import with_current_preset_runner
 from openhands.automation.subjects import conversation_id_for, service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
@@ -491,16 +496,24 @@ async def _fetch_plugins_on_agent_server(
     agent_url: str,
     session_key: str,
     plugin_fetches: list[dict[str, Any]],
+    secrets: PluginSourceSecrets | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch already-preflighted plugins on the target agent server."""
+    """Fetch already-preflighted plugins on the target agent server.
+
+    A private source gets references for the secrets it names (``secrets``),
+    which the agent server resolves; the source itself is sent unexpanded.
+    """
     fetched: list[dict[str, Any]] = []
     headers = {"X-Session-API-Key": session_key} if session_key else {}
     for plugin in plugin_fetches:
-        request = {
+        request: dict[str, Any] = {
             key: value
             for key, value in plugin.items()
             if key in {"source", "ref", "repo_path"}
         }
+        names = plugin_secret_names([plugin])
+        if names and secrets is not None:
+            request["secrets"] = secrets.fetch_request_secrets(names)
         response = await client.post(
             f"{agent_url.rstrip('/')}/api/plugins/fetch",
             json=request,
@@ -512,6 +525,9 @@ async def _fetch_plugins_on_agent_server(
                 detail: Any = response.json().get("detail")
             except Exception:
                 detail = response.text
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if isinstance(detail, dict) and "message" in detail:
+                detail = f"{detail['message']} ({code})"
             message = (
                 f"Agent server failed to fetch plugin {request.get('source')!r}: "
                 f"{detail}"
@@ -520,7 +536,11 @@ async def _fetch_plugins_on_agent_server(
                 raise httpx.HTTPStatusError(
                     message, request=response.request, response=response
                 )
-            raise PluginSpecError(message)
+            raise PluginSpecError(
+                message,
+                code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
+            )
         fetched.append(response.json())
     return fetched
 
@@ -807,19 +827,31 @@ async def _execute_run(
     resolved_runtime: dict[str, Any] | None = None
     plugin_fetches: list[dict[str, Any]] = []
     tarball_source: bytes | str | None = None
+
+    async def preflight_secrets(names: Collection[str]) -> Mapping[str, Any]:
+        # Private sources resolve their ${NAME} placeholders for the identity
+        # the automation runs as.
+        if not names:
+            return {}
+        return (await backend.plugin_source_secrets(client, names)).preflight
+
     try:
         if automation.plugin_spec:
-            tarball_source, plugin_env, resolved_runtime, plugin_fetches = (
-                build_execution_payload(
-                    plugin_spec=automation.plugin_spec,
-                    agent_profile_id=str(automation.agent_profile_id)
-                    if automation.agent_profile_id
-                    else None,
-                    agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
-                    llm_profile_name=automation.model,
-                    work_dir=work_dir,
-                    allow_local_sources=backend.is_local_mode,
-                )
+            (
+                tarball_source,
+                plugin_env,
+                resolved_runtime,
+                plugin_fetches,
+            ) = await build_execution_payload(
+                plugin_spec=automation.plugin_spec,
+                agent_profile_id=str(automation.agent_profile_id)
+                if automation.agent_profile_id
+                else None,
+                agent_profile_name=automation.plugin_spec.get("agent_profile_name"),
+                llm_profile_name=automation.model,
+                work_dir=work_dir,
+                allow_local_sources=backend.is_local_mode,
+                secrets=preflight_secrets,
             )
             profile_id, profile_kind = await _validate_plugin_run_agent_profile(
                 client=client,
@@ -1111,11 +1143,20 @@ async def _execute_run(
         if automation.plugin_spec:
             assert isinstance(tarball_source, bytes)
             env_vars.update(plugin_env)
+            # Fresh references: a cloud reference is short-lived, and the
+            # sandbox can take minutes to start after the preflight.
+            secret_names = plugin_secret_names(plugin_fetches)
+            fetch_secrets = (
+                await backend.plugin_source_secrets(client, secret_names)
+                if secret_names
+                else None
+            )
             fetched_plugins = await _fetch_plugins_on_agent_server(
                 client=client,
                 agent_url=ctx.agent_url,
                 session_key=ctx.session_key,
                 plugin_fetches=plugin_fetches,
+                secrets=fetch_secrets,
             )
             if fetched_plugins:
                 env_vars["AUTOMATION_PLUGIN_ROOT"] = fetched_plugins[0]["path"]
@@ -1156,7 +1197,37 @@ async def _execute_run(
                 else ", preset runner replaced with the current one",
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
-    except (PermanentDispatchError, PluginSpecError) as exc:
+    except PluginSpecError as exc:
+        status_code = exc.status_code
+        transient = status_code is not None and _is_retryable_http_status(status_code)
+        logger.log(
+            logging.WARNING if transient else logging.ERROR,
+            "%s plugin fetch error%s: %s",
+            "Transient" if transient else "Permanent",
+            "" if transient else ", disabling automation",
+            exc,
+            exc_info=True,
+            extra=_log_ctx(sandbox_id=ctx.sandbox_id),
+        )
+        await backend.release_context(client, ctx)
+        await _fail(
+            str(exc),
+            disable=not transient,
+            status_detail=make_run_status_detail(
+                phase=RunStatusPhase.DISPATCH,
+                kind=_run_status_kind_for_http_status(status_code)
+                if transient and status_code is not None
+                else RunStatusDetailKind.UNKNOWN,
+                detail=str(exc),
+                transient=transient,
+                source="automation_service",
+                operation="fetch_plugin",
+                code=exc.code or type(exc).__name__,
+                status_code=status_code,
+            ),
+        )
+        return
+    except PermanentDispatchError as exc:
         logger.error(
             "Permanent dispatch error, disabling automation: %s",
             exc,

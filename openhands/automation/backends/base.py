@@ -1,6 +1,7 @@
 """Base classes for execution backends."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -8,6 +9,7 @@ import httpx
 
 
 if TYPE_CHECKING:
+    from openhands.automation.plugin_secrets import PluginSourceSecrets
     from openhands.automation.utils.agent_server import VerificationResult
 
 
@@ -117,6 +119,20 @@ class ExecutionBackend(ABC):
 
         Returns:
             API key string
+        """
+
+    @abstractmethod
+    async def plugin_source_secrets(
+        self, client: httpx.AsyncClient, names: Collection[str]
+    ) -> "PluginSourceSecrets":
+        """References for the secrets a run's plugin sources name.
+
+        For Cloud mode: lookup references the app server signs for the
+        identity the automation runs as.
+        For Local mode: references into the local agent server's secret store.
+
+        Raises:
+            PluginSpecError: when the references cannot be obtained.
         """
 
     @abstractmethod

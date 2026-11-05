@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
@@ -37,6 +37,10 @@ from openhands.automation.exceptions import (
     SandboxProvisioningError,
 )
 from openhands.automation.models import AutomationRun
+from openhands.automation.plugin_secrets import (
+    PluginSourceSecrets,
+    cloud_plugin_source_secrets,
+)
 from openhands.automation.utils.api_key import get_api_key_for_automation_run
 from openhands.automation.utils.sandbox import (
     cleanup_sandbox,
@@ -485,6 +489,21 @@ class CloudSandboxBackend(ExecutionBackend):
     async def get_api_key(self) -> str:
         """Return the per-user API key (minting if needed)."""
         return await self._ensure_api_key()
+
+    async def plugin_source_secrets(
+        self, client: httpx.AsyncClient, names: Collection[str]
+    ) -> PluginSourceSecrets:
+        """Lookup references for the identity the automation runs as."""
+        if not names:
+            return PluginSourceSecrets()
+        automation = self._run.automation
+        return await cloud_plugin_source_secrets(
+            client,
+            names,
+            user_id=automation.user_id,
+            org_id=automation.org_id,
+            automation_id=automation.id,
+        )
 
     def build_env_vars(self) -> dict[str, str]:
         """Build Cloud mode environment variables.

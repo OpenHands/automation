@@ -321,6 +321,37 @@ Each run swaps in the current `main.py`, `setup.sh` and `finish_tool_hook.py`, s
 - Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
 - Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
 
+## Private Plugin Sources
+
+A plugin-spec automation (and a plugin preset pinned for a service account)
+can use a plugin from a private repository. The source names its credential
+with a `${NAME}` placeholder as the URL user name or password, for example
+`https://x-access-token:${GITHUB_TOKEN}@github.com/org/plugins.git`. It is
+stored and returned with the placeholder; literal credentials are rejected
+(`AutomationPluginSource.validate_source`), and so are placeholders anywhere
+else in the source or in `ref`.
+
+- Every fetch resolves `NAME` for the identity the automation runs as and
+  hands the SDK `LookupSecret` references, never a value
+  (`plugin_secrets.py`): the create and PATCH preflight, the dispatch preflight,
+  `validate_required_plugins`, and the agent server's `POST /api/plugins/fetch`
+  (fresh references, after the sandbox starts).
+- Local mode resolves through the agent server's secret store,
+  `/api/settings/secrets/{name}`; the agent server's own reference uses
+  `AUTOMATION_SANDBOX_AGENT_SERVER_URL` when set.
+- Cloud mode asks the app server for short-lived references,
+  `POST /api/service/users/{user_id}/orgs/{org_id}/secret-lookups` with the
+  service key. A server without that route answers 404 `Not Found`, and the
+  source is refused with "not supported on this deployment yet".
+- `missing_secret`, `auth_failed`, `invalid_source` and refused lookups are
+  permanent and disable the automation; an unreachable lookup is transient.
+  Errors name the secret, never its value.
+- A conversation-runner run then has the app server start its conversation
+  with the same plugin spec, placeholder included (`_conversation_start`). The
+  sandbox's agent server fills the placeholder from the conversation's secrets,
+  which the app server may scope to the agent profile, and uses the checkout
+  the fetch pinned.
+
 ## Catalog Bundles
 
 A catalog entry in `OpenHands/extensions` normally ships a prompt, created
