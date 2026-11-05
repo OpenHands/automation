@@ -24,17 +24,8 @@ from openhands.automation.execution import (
     _upload,
     build_tarball,
     execute_in_context,
-    is_preset_tarball,
     run_automation,
 )
-from openhands.automation.git_sync.serializer import canonical_tarball_bytes
-from openhands.automation.preset_router import (
-    _generate_plugin_tarball,
-    _generate_tarball,
-    _replace_files_in_tarball,
-)
-from openhands.sdk.plugin import PluginSource
-from openhands.workspace import RepoSource
 
 
 class TestBuildTarball:
@@ -69,65 +60,6 @@ class TestBuildTarball:
             assert setup_file is not None
             setup = setup_file.read().decode()
             assert "pip install" in setup
-
-
-def _plain_tar(members: list[tuple[str, bytes]]) -> bytes:
-    """A gzip tarball with members in the given order."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, data in members:
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
-
-
-class TestIsPresetTarball:
-    """Presets carry prompt.txt at the root; scripts and URLs are not presets."""
-
-    def test_tarballs_the_preset_endpoints_write(self):
-        prompt = _generate_tarball("Do it")
-        with_repos = _generate_tarball(
-            "Do it", [RepoSource(url="owner/repo", provider="github")]
-        )
-        plugin = _generate_plugin_tarball(
-            [PluginSource(source="github:owner/repo")], "Do it"
-        )
-        edited = _replace_files_in_tarball(prompt, {"prompt.txt": "Edited"})
-
-        assert is_preset_tarball(prompt)
-        assert is_preset_tarball(with_repos)
-        assert is_preset_tarball(plugin)
-        assert edited is not None and is_preset_tarball(edited)
-        assert is_preset_tarball(canonical_tarball_bytes(plugin))
-
-    @pytest.mark.parametrize(
-        "source",
-        [
-            build_tarball({"main.py": "print('hi')", "config.json": "{}"}),
-            build_tarball({"main.py": "print('hi')", "docs/prompt.txt": "x"}),
-            build_tarball({}),
-            b"not a tarball",
-            b"",
-            "https://example.com/code.tar.gz",
-        ],
-        ids=["script", "nested-prompt", "empty", "garbage", "no-bytes", "url"],
-    )
-    def test_not_a_preset(self, source):
-        assert not is_preset_tarball(source)
-
-    def test_stops_before_decompressing_a_large_member(self):
-        big = b"\0" * (16 * 1024 * 1024 + 1)
-
-        assert not is_preset_tarball(
-            _plain_tar([("data.bin", big), ("prompt.txt", b"late")])
-        )
-
-    def test_stops_after_many_members(self):
-        members = [(f"f{i}.txt", b"") for i in range(300)]
-
-        assert not is_preset_tarball(_plain_tar([*members, ("prompt.txt", b"late")]))
-        assert is_preset_tarball(_plain_tar([*members[:10], ("prompt.txt", b"x")]))
 
 
 class TestShellQuote:
@@ -566,16 +498,16 @@ class TestPrivateEnvironmentInjection:
     @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
     @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
     @patch("openhands.automation.execution.httpx.AsyncClient")
-    async def test_blocking_command_injects_agent_server_url_and_callback_key(
+    async def test_blocking_command_injects_callback_key_but_not_agent_server_url(
         self,
         mock_async_client,
         mock_create_and_wait,
         mock_upload,
         mock_bash,
     ):
-        """AGENT_SERVER_URL and AUTOMATION_CALLBACK_API_KEY are injected so
-        standalone (non-SDK) scripts can reach the agent server and sign
-        their completion callback (see issue #679)."""
+        """AUTOMATION_CALLBACK_API_KEY is injected so scripts can sign their
+        completion callback (see issue #679). AGENT_SERVER_URL is not: stored
+        scripts read it as running on a local Agent Canvas."""
         session_key = "session_" + "b" * 64
         agent_url = "https://agent.example.com"
         api_key = "api-key-123"
@@ -596,9 +528,9 @@ class TestPrivateEnvironmentInjection:
 
         # Second upload is the env file; its bytes contain the injected vars.
         env_bytes = mock_upload.await_args_list[1].args[1]
-        assert agent_url.encode() in env_bytes
+        assert agent_url.encode() not in env_bytes
         assert api_key.encode() in env_bytes
-        assert b"AGENT_SERVER_URL=" in env_bytes
+        assert b"AGENT_SERVER_URL=" not in env_bytes
         assert b"AUTOMATION_CALLBACK_API_KEY=" in env_bytes
 
     @pytest.mark.asyncio
@@ -613,8 +545,8 @@ class TestPrivateEnvironmentInjection:
         mock_upload,
         mock_bash,
     ):
-        """run_automation() always uses a cloud sandbox, and since it exports
-        AGENT_SERVER_URL too, the presets need AUTOMATION_RUN_MODE to tell (#688)."""
+        """run_automation() always uses a cloud sandbox; the presets read
+        AUTOMATION_RUN_MODE to tell (#688)."""
         session_key = "session_" + "b" * 64
         context_manager = MagicMock()
         context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -638,7 +570,7 @@ class TestPrivateEnvironmentInjection:
         env_bytes = mock_upload.await_args_list[1].args[1]
         assert b"AUTOMATION_RUN_MODE=" in env_bytes
         assert b"cloud" in env_bytes
-        assert b"AGENT_SERVER_URL=" in env_bytes
+        assert b"AGENT_SERVER_URL=" not in env_bytes
         assert b"SANDBOX_ID=" in env_bytes
 
     @pytest.mark.asyncio
@@ -653,10 +585,10 @@ class TestPrivateEnvironmentInjection:
         mock_upload,
         mock_bash,
     ):
-        """Caller-provided AGENT_SERVER_URL wins over the discovered one."""
+        """A caller-provided callback key wins over the run's API key."""
         session_key = "session_" + "b" * 64
         agent_url = "https://agent.example.com"
-        override_url = "https://override.example.com"
+        override_key = "caller-callback-key"
         context_manager = MagicMock()
         context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
         context_manager.__aexit__ = AsyncMock(return_value=None)
@@ -669,13 +601,13 @@ class TestPrivateEnvironmentInjection:
             api_key="api-key",
             entrypoint="python main.py",
             tarball_source=b"fake tarball bytes",
-            env_vars={"AGENT_SERVER_URL": override_url},
+            env_vars={"AUTOMATION_CALLBACK_API_KEY": override_key},
             keep_sandbox=True,
         )
 
         env_bytes = mock_upload.await_args_list[1].args[1]
-        assert override_url.encode() in env_bytes
-        assert agent_url.encode() not in env_bytes
+        assert override_key.encode() in env_bytes
+        assert b"'api-key'" not in env_bytes
 
 
 class TestPerRunTarballPath:

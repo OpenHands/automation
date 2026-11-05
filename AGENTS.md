@@ -215,8 +215,8 @@ Completion is handled asynchronously:
 |----------|--------|---------|
 | `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
 | `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
-| `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use. `AGENT_SERVER_URL` is exported in both modes, so it must never decide this; presets without the variable fall back to `SANDBOX_ID` + session key = cloud |
-| `AGENT_SERVER_URL` | Local backend; cloud dispatcher and `run_automation()` (the sandbox's exposed agent-server URL), except for preset tarballs | Agent-server URL from the sandbox's point of view, so standalone (non-SDK) scripts can reach it. A cloud run of a preset tarball (one with `prompt.txt` at its root, see `is_preset_tarball`) does not get it: a preset keeps the `main.py` it was created with, and runners from 1.27.0 and earlier take this variable to mean local mode |
+| `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use; presets without the variable fall back to `SANDBOX_ID` + session key = cloud |
+| `AGENT_SERVER_URL` | Local backend only; never exported into a cloud sandbox | Agent-server URL from the sandbox's point of view. Scripts stored in existing automations (catalog bundles, scripts written from the openhands-automation skill, preset runners from 1.27.0 and earlier) read its presence as "local Agent Canvas", so a cloud run must not get it |
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |

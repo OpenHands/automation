@@ -44,7 +44,7 @@ from openhands.automation.exceptions import (
     SandboxProvisioningError,
     TarballNotFoundError,
 )
-from openhands.automation.execution import execute_in_context, is_preset_tarball
+from openhands.automation.execution import execute_in_context
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -856,8 +856,13 @@ async def _execute_run(
         # mode), so fill it in here from the execution context: it lets
         # fire_callback() helpers sign the completion POST. It is the same
         # per-user key already exported as OPENHANDS_API_KEY, which
-        # authenticates against /v1/runs/{id}/complete. AGENT_SERVER_URL
-        # depends on the tarball, so it is added once that is known.
+        # authenticates against /v1/runs/{id}/complete.
+        # AGENT_SERVER_URL is never exported here: scripts stored in existing
+        # automations (catalog bundles, scripts written from the
+        # openhands-automation skill, preset runners from 1.27.0 and earlier)
+        # read it as "running on a local Agent Canvas" and would then take
+        # their secrets, LLM and conversations from the sandbox's own
+        # agent-server, which has none of the user's.
         if ctx.api_key:
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", ctx.api_key)
 
@@ -979,14 +984,6 @@ async def _execute_run(
             ),
         )
         return
-
-    # Standalone (non-SDK) scripts reach the agent server through
-    # AGENT_SERVER_URL; without it, os.environ.get("AGENT_SERVER_URL") returns
-    # "". Presets never need it in a cloud sandbox, and a preset keeps the
-    # main.py it was created with: every runner from 1.27.0 or earlier reads
-    # AGENT_SERVER_URL as local mode, and the run then fails (#688).
-    if ctx.sandbox_id and not is_preset_tarball(tarball_source):
-        env_vars.setdefault("AGENT_SERVER_URL", ctx.agent_url)
 
     # 6. Execute in context
     try:

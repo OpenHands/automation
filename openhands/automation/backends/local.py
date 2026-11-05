@@ -146,11 +146,12 @@ class LocalAgentServerBackend(ExecutionBackend):
 
         Provides the env vars needed for local mode:
         - AUTOMATION_RUN_MODE: ``local``; the presets pick their workspace from
-          this, since AGENT_SERVER_URL is exported in cloud sandboxes as well
+          this
         - AGENT_SERVER_URL: URL of the local agent server — from the
-          *sandbox's* point of view. Defaults to ``agent_server_url`` (the
-          URL the backend uses) but can be overridden via
-          ``sandbox_agent_server_url`` for container-split setups.
+          *sandbox's* point of view; cloud runs never get it. Defaults to
+          ``agent_server_url`` (the URL the backend uses) but can be
+          overridden via ``sandbox_agent_server_url`` for container-split
+          setups.
         - SESSION_API_KEY: API key for authenticating with the agent server
         - WORKSPACE_BASE: Run-isolated workspace directory for SDK operations
         - AUTOMATION_CALLBACK_API_KEY: API key for callback auth to automation service

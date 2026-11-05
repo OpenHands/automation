@@ -27,7 +27,8 @@ The script:
   4. Loads skills via workspace.load_skills_from_agent_server()
   5. Gets LLM config via workspace.get_llm()
   6. Gets secrets via workspace.get_secrets()
-  7. Gets MCP config via workspace.get_mcp_config()
+  7. Gets MCP config via workspace.get_mcp_config(), or from users/me when an
+     older SDK cannot read it, and logs servers that are configured but skipped
   8. Gets default agent with tools and condenser
   9. Loads plugins from plugins_config.json
   10. Creates a RemoteConversation with all plugins and sets a descriptive title
@@ -46,8 +47,8 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (cloud sandboxes export it
-                               too, for standalone scripts; it does not pick the mode)
+  AGENT_SERVER_URL           - local agent server URL (local mode only; it does not
+                               pick the mode)
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 
@@ -86,12 +87,10 @@ def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
 
     The execution backend exports AUTOMATION_RUN_MODE. AGENT_SERVER_URL must
-    never decide the mode: cloud sandboxes export it too so standalone scripts
-    can reach the agent server (#680), and reading it as "local" made cloud
-    runs fetch their LLM, secrets and MCP servers from the sandbox's own
-    agent-server, which holds none of them (#688). A service that predates
-    AUTOMATION_RUN_MODE is recognised by its env shape: only cloud sandboxes
-    carry SANDBOX_ID.
+    never decide the mode: reading it as "local" made cloud runs fetch their
+    LLM, secrets and MCP servers from the sandbox's own agent-server, which
+    holds none of them (#688). A service that predates AUTOMATION_RUN_MODE is
+    recognised by its env shape: only cloud sandboxes carry SANDBOX_ID.
     """
     explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
     if explicit in ("cloud", "local"):
@@ -273,6 +272,65 @@ def _normalize_mcp_config(raw_mcp_config):
     ):
         return raw_mcp_config["mcpServers"]
     return raw_mcp_config
+
+
+# Keep the MCP helpers below in sync with presets/prompt/sdk_main.py.
+def _users_me_mcp_config():
+    """The owner's MCP servers as GET /api/v1/users/me returns them (cloud mode)."""
+    import httpx  # installed alongside the SDK by setup.sh
+
+    response = httpx.get(
+        f"{api_url}/api/v1/users/me",
+        params={"expose_secrets": "true"},
+        headers={"Authorization": f"Bearer {api_key}", "X-Session-API-Key": session_key},
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    return response.json().get("mcp_config")
+
+
+def _named_mcp_servers(raw_mcp_config):
+    """Split a {name: server} map into (servers to load, {name: reason skipped})."""
+    if isinstance(raw_mcp_config, dict) and "mcpServers" in raw_mcp_config:
+        raw_mcp_config = raw_mcp_config["mcpServers"]
+    servers, skipped = {}, {}
+    if not isinstance(raw_mcp_config, dict):
+        return servers, skipped
+    for name, raw_server in raw_mcp_config.items():
+        auth = raw_server.get("auth") if isinstance(raw_server, dict) else None
+        # The app server keeps OAuth tokens and saves the ones a conversation
+        # refreshes; a run cannot save a refreshed token back.
+        if isinstance(auth, dict) and auth.get("strategy") == "oauth2":
+            skipped[name] = (
+                "it signs in with OAuth, which automation runs do not support yet"
+            )
+            continue
+        try:
+            servers.update(_normalize_mcp_config({name: raw_server}))
+        except Exception:
+            # The error would echo the server's settings, secrets included.
+            skipped[name] = "its settings could not be read"
+    return servers, skipped
+
+
+def _load_mcp_config(workspace):
+    """Return the run's MCP servers, printing what was loaded and what was not.
+
+    openhands-sdk 1.59 and earlier read only the retired sse/shttp/stdio server
+    lists, so get_mcp_config() returns {} for the {name: server} map users/me
+    serves today (OpenHands/automation#93); read that map here instead.
+    """
+    mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
+    skipped = {}
+    if not mcp_config and not IS_LOCAL_MODE:
+        mcp_config, skipped = _named_mcp_servers(_users_me_mcp_config())
+    if mcp_config:
+        print(f"  servers: {list(mcp_config.keys())}")
+    for name, reason in skipped.items():
+        print(f"  WARNING: MCP server {name!r} is configured but not loaded: {reason}")
+    if not mcp_config and not skipped:
+        print("  no MCP servers configured")
+    return mcp_config
 
 
 def _build_conversation_title(event_context) -> str | None:
@@ -550,14 +608,10 @@ More activity arrived on the same subject while this run was queued:
     print("\n=== GET_MCP_CONFIG ===")
     mcp_config = {}
     try:
-        mcp_config = _normalize_mcp_config(workspace.get_mcp_config())
-        if mcp_config:
-            print(f"  servers: {list(mcp_config.keys())}")
-        else:
-            print("  no MCP servers configured")
+        mcp_config = _load_mcp_config(workspace)
     except Exception as e:
-        # Not a hard failure — user may not have MCP configured
-        print(f"  get_mcp_config() failed (ok if no MCP): {e}")
+        # Not a hard failure: the run continues without MCP servers
+        print(f"  WARNING: MCP servers not loaded: {type(e).__name__}: {e}")
 
     # Get default agent with tools and condenser (CLI mode to disable browser)
     print("\n=== AGENT ===")

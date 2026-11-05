@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 import openhands.automation.plugin_specs as plugin_specs
-from openhands.automation.execution import is_preset_tarball
 from openhands.automation.plugin_specs import (
     AutomationPluginSource,
     PluginSpecError,
@@ -458,26 +457,6 @@ def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch
         main_file = tar.extractfile("main.py")
         assert main_file is not None
         assert main_file.read().decode() == sentinel_main
-
-
-@pytest.mark.parametrize(
-    ("write", "is_preset"),
-    [(write_conversation_plugin, True), (write_plugin, False)],
-    ids=["conversation-runner", "script-runner"],
-)
-def test_only_the_conversation_runner_payload_is_a_preset(tmp_path, write, is_preset):
-    """A script runner is a standalone script, so a cloud run gives it
-    AGENT_SERVER_URL; the stock conversation runner is a preset and does not
-    need it."""
-    tarball, _env, _runtime, _plugin_fetches = build_execution_payload(
-        plugin_spec={"plugin": {"source": str(write(tmp_path))}, "config": {}},
-        agent_profile_id=None,
-        agent_profile_name=None,
-        llm_profile_name=None,
-        work_dir="/tmp/automation-run",
-    )
-
-    assert is_preset_tarball(tarball) is is_preset
 
 
 def test_conversation_runner_rejects_missing_plugin_command(tmp_path):

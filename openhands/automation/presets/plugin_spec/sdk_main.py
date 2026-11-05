@@ -23,8 +23,8 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (cloud sandboxes export it
-                               too, for standalone scripts; it does not pick the mode)
+  AGENT_SERVER_URL           - local agent server URL (local mode only; it does not
+                               pick the mode)
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 
@@ -59,12 +59,10 @@ def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
 
     The execution backend exports AUTOMATION_RUN_MODE. AGENT_SERVER_URL must
-    never decide the mode: cloud sandboxes export it too so standalone scripts
-    can reach the agent server (#680), and reading it as "local" made cloud
-    runs fetch their LLM, secrets and MCP servers from the sandbox's own
-    agent-server, which holds none of them (#688). A service that predates
-    AUTOMATION_RUN_MODE is recognised by its env shape: only cloud sandboxes
-    carry SANDBOX_ID.
+    never decide the mode: reading it as "local" made cloud runs fetch their
+    LLM, secrets and MCP servers from the sandbox's own agent-server, which
+    holds none of them (#688). A service that predates AUTOMATION_RUN_MODE is
+    recognised by its env shape: only cloud sandboxes carry SANDBOX_ID.
     """
     explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
     if explicit in ("cloud", "local"):

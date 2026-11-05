@@ -8,6 +8,6 @@ A preset automation keeps the `main.py` it was created with: editing its prompt
 or repositories rewrites only `prompt.txt` and `repos_config.json`. Every prompt
 and plugin preset created on 1.27.0 or earlier therefore still runs this code,
 which takes `AGENT_SERVER_URL` being set to mean local mode.
-`test_dispatcher.py` runs these runners' own mode detection against the
+`test_cloud_run_env.py` runs these runners' own mode detection against the
 environment a cloud run gets. The `.txt` suffix keeps the snapshots out of
 automatic Python rewrites.
