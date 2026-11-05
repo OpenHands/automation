@@ -287,8 +287,13 @@ def test_an_unreachable_secret_store_is_transient(private_repo):
     assert exc.value.status_code == 503
 
 
-def test_a_secret_value_that_breaks_the_url_is_permanent(private_repo, secret_store):
-    """SDK 1.59.0 does not percent-encode the value; a "/" breaks the URL."""
+def test_a_secret_value_that_breaks_the_url_is_encoded(private_repo, secret_store):
+    """SDK >= 1.60 percent-encodes the value, so a "/" no longer breaks the URL.
+
+    The encoded credentials are well-formed but wrong for this store, so the
+    git host rejects them: permanent ``auth_failed``, not the pre-1.60
+    ``invalid_source`` for a malformed URL.
+    """
     server, _sha = private_repo
     secret_store.secrets["PLUGIN_TOKEN"] = "fake/token/with/slashes"
 
@@ -298,7 +303,8 @@ def test_a_secret_value_that_breaks_the_url_is_permanent(private_repo, secret_st
             secrets={"PLUGIN_TOKEN": _lookup(secret_store)},
         )
 
-    assert exc.value.code == "invalid_source"
+    assert exc.value.code == "auth_failed"
+    # The SDK classifies auth_failed as a permanent client error (422).
     assert exc.value.status_code == 422
     assert "PLUGIN_TOKEN" in str(exc.value)
     assert "with/slashes" not in str(exc.value)
