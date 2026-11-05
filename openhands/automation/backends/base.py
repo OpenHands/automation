@@ -189,3 +189,14 @@ class ExecutionBackend(ABC):
         holds them, and the runner creates the conversation itself.
         """
         return None
+
+    async def git_connections(
+        self,
+        client: httpx.AsyncClient,  # noqa: ARG002
+        ctx: ExecutionContext,  # noqa: ARG002
+    ) -> dict[str, str | None] | None:
+        """The git providers the run's owner is connected to, with their hosts.
+
+        None where no app server clones repositories for the run (local mode).
+        """
+        return None

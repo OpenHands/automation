@@ -73,6 +73,8 @@ TASK_ID = "7a1b2c3d-0000-4000-8000-00000000aaaa"
 CONVERSATION_ID = "9f1b2c3d-0000-4000-8000-00000000cccc"
 PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "presets"
 FIXTURES = Path(__file__).parent / "fixtures" / "preset_tarballs"
+# The owner's git connections, as ``provider_tokens_set`` reports them.
+CONNECTED = {"github": None, "gitlab": "https://gitlab.com"}
 
 
 class AppServer:
@@ -465,6 +467,51 @@ class TestCloudBackendStartsTheConversation:
                 await _backend().start_conversation(client, ctx, _start())
 
 
+class TestCloudBackendReadsTheOwnersGitConnections:
+    @pytest.mark.asyncio
+    async def test_reads_provider_tokens_set_from_the_settings(self):
+        """Hosts only: the settings answer never carries a token here."""
+        requests: list[httpx.Request] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            assert request.url.path == "/api/v1/settings"
+            return httpx.Response(
+                200,
+                json={
+                    "provider_tokens_set": {
+                        "github": None,
+                        "gitlab": "gitlab.example.com",
+                    },
+                    "llm_api_key_set": True,
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            connections = await _backend().git_connections(client, _ctx())
+
+        assert connections == {"github": None, "gitlab": "gitlab.example.com"}
+        assert requests[0].headers["Authorization"] == "Bearer sk-user"
+        assert requests[0].headers["X-Org-Id"] == str(TEST_ORG_ID)
+
+    @pytest.mark.asyncio
+    async def test_no_connections(self):
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"provider_tokens_set": None})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            assert await _backend().git_connections(client, _ctx()) == {}
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_raises(self):
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Settings not found"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(ConversationStartError, match="git connections"):
+                await _backend().git_connections(client, _ctx())
+
+
 class TestLocalBackendLeavesCreationToTheRunner:
     @pytest.mark.asyncio
     async def test_returns_none(self):
@@ -546,7 +593,13 @@ class TestWhichRunsStartThroughTheAppServer:
         )
 
         start = _conversation_start(
-            automation, _RUN, None, [], {}, runner_takes_repository_list=True
+            automation,
+            _RUN,
+            None,
+            [],
+            {},
+            runner_takes_repository_list=True,
+            git_connections=CONNECTED,
         )
         assert start is not None
         assert start.repositories == [
@@ -556,9 +609,28 @@ class TestWhichRunsStartThroughTheAppServer:
 
         # An automation created before this support carries a runner that
         # clones every repository itself and would fail on existing checkouts.
-        older = _conversation_start(automation, _RUN, None, [], {})
+        older = _conversation_start(
+            automation, _RUN, None, [], {}, git_connections=CONNECTED
+        )
         assert older is not None
         assert older.repositories == []
+
+    def test_without_the_owners_connections_the_runner_clones_them_all(self):
+        """The app server clones only through the owner's git connections; when
+        those could not be read, it gets no repository."""
+        automation = _automation(
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "hi",
+                "repos": [{"url": "https://github.com/acme/api"}],
+            }
+        )
+
+        start = _conversation_start(
+            automation, _RUN, None, [], {}, runner_takes_repository_list=True
+        )
+        assert start is not None
+        assert start.repositories == []
 
     def test_plugin_preset_experiment_keeps_the_runner_path(self):
         """A/B variants pick plugins and model inside the runner at run time; the
@@ -655,7 +727,13 @@ class TestWhichRepositoriesTheRunnerClones:
             }
         )
         start = _conversation_start(
-            automation, _RUN, None, [], {}, runner_takes_repository_list=True
+            automation,
+            _RUN,
+            None,
+            [],
+            {},
+            runner_takes_repository_list=True,
+            git_connections=CONNECTED,
         )
         assert start is not None
         return start, automation
@@ -666,7 +744,7 @@ class TestWhichRepositoriesTheRunnerClones:
             conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
         )
 
-        assert _runner_repositories(automation, start, started) == [
+        assert _runner_repositories(automation, start, started, CONNECTED) == [
             {"url": "git@github.com:acme/ssh.git"}
         ]
 
@@ -678,7 +756,7 @@ class TestWhichRepositoriesTheRunnerClones:
             reports_repositories=False,
         )
 
-        assert _runner_repositories(automation, start, started) == [
+        assert _runner_repositories(automation, start, started, CONNECTED) == [
             {"url": "git@github.com:acme/ssh.git"},
             {"url": "https://github.com/acme/web"},
             {"url": "https://github.com/acme/docs"},
@@ -773,6 +851,7 @@ class TestExecuteRunStartsTheConversation:
         backend.release_context = AsyncMock()
         backend.build_env_vars = MagicMock(return_value={})
         backend.get_work_dir = MagicMock(return_value="/workspace/project")
+        backend.git_connections = AsyncMock(return_value=CONNECTED)
         if isinstance(start_result, Exception):
             backend.start_conversation = AsyncMock(side_effect=start_result)
         else:
@@ -1078,6 +1157,190 @@ class TestExecuteRunStartsTheConversation:
             {"url": "git@github.com:acme/ssh.git"}
         ]
 
+    async def _dispatch_repositories(
+        self,
+        async_session_factory,
+        mock_settings,
+        mock_client,
+        repos: list[dict[str, Any]],
+        connections: Any,
+    ) -> tuple[MagicMock, dict[str, str], AutomationRun]:
+        """Dispatch a prompt preset whose runner takes a repository list.
+
+        ``connections`` is what reading the owner's git connections returns,
+        or the exception it raises.
+        """
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi", "repos": repos},
+        )
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        if isinstance(connections, BaseException):
+            backend.git_connections = AsyncMock(side_effect=connections)
+        else:
+            backend.git_connections = AsyncMock(return_value=connections)
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher._runner_takes_repository_list",
+                return_value=True,
+            ),
+            patch(
+                "openhands.automation.dispatcher.execute_in_context",
+                new_callable=AsyncMock,
+                return_value=MagicMock(
+                    success=True, bash_command_id="cmd-1", error=None
+                ),
+            ) as mock_execute,
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+        executed = mock_execute.await_args
+        assert executed is not None
+        return backend, executed.kwargs["env_vars"], run
+
+    async def test_a_public_repository_on_an_unconnected_provider_stays_with_the_runner(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """The app server clones only through the owner's connection to the
+        provider. Without one it fails the start; the runner clones a public
+        repository anonymously, as it always has."""
+        backend, env_vars, _ = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            [{"url": "https://github.com/acme/public"}],
+            {"bitbucket_data_center": "bitbucket.example.com"},
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == []
+        assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
+        # No list: the runner clones every recorded repository.
+        assert "AUTOMATION_RUNNER_REPOS" not in env_vars
+
+    async def test_a_repository_on_a_connected_provider_and_host_goes_to_the_app_server(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        backend, env_vars, _ = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            [
+                {
+                    "url": "https://gitlab.example.com/team/api",
+                    "provider": "gitlab",
+                }
+            ],
+            {"gitlab": "https://gitlab.example.com"},
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == [
+            {"repository": "team/api", "git_provider": "gitlab", "branch": None}
+        ]
+        assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == []
+
+    async def test_the_public_host_of_a_self_managed_connection_stays_with_the_runner(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """An owner connected to GitHub Enterprise or a self-managed GitLab:
+        the app server would look the name up on that host, not the public one."""
+        repos = [
+            {"url": "https://github.com/acme/api"},
+            {"url": "https://gitlab.com/group/web"},
+        ]
+        backend, env_vars, _ = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            repos,
+            {
+                "github": "https://ghe.example.com/api/v3",
+                "gitlab": "gitlab.example.com",
+            },
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == []
+        assert "AUTOMATION_RUNNER_REPOS" not in env_vars
+
+    async def test_a_mixed_list_is_split_and_every_repository_stays_required(
+        self, async_session_factory, mock_settings, mock_client
+    ):
+        """Connected ones go to the app server, which must clone them all
+        (``require_all``); the runner clones the rest and fails the run if one
+        cannot be cloned. No run starts with a repository missing."""
+        repos = [
+            {"url": "https://ghe.example.com/acme/api", "provider": "github"},
+            {"url": "https://github.com/acme/public"},
+            {"url": "https://gitlab.com/group/web"},
+            {"url": "acme/tools", "provider": "github", "ref": "v2"},
+            {"url": "git@ghe.example.com:acme/ssh.git"},
+        ]
+        backend, env_vars, _ = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            repos,
+            {"github": "ghe.example.com"},
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == [
+            {"repository": "acme/api", "git_provider": "github", "branch": None},
+            {"repository": "acme/tools", "git_provider": "github", "branch": "v2"},
+        ]
+        assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == [
+            {"url": "https://github.com/acme/public"},
+            {"url": "https://gitlab.com/group/web"},
+            {"url": "git@ghe.example.com:acme/ssh.git"},
+        ]
+
+        # The request the backend builds from that split requires every one.
+        server = AppServer()
+        async with server.client() as client:
+            await _backend().start_conversation(client, _ctx(), start)
+        body = server.posted_body()
+        assert body["selected_repository"] == "acme/api"
+        assert body["additional_repositories"] == [
+            {"repository": "acme/tools", "git_provider": "github", "branch": "v2"}
+        ]
+        assert body["require_all"] is True
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            ConversationStartError(
+                "OpenHands API refused to read the owner's git connections "
+                "(HTTP 500): boom",
+                status_code=500,
+            ),
+            httpx.ReadTimeout("timed out"),
+        ],
+    )
+    async def test_unreadable_connections_leave_every_repository_to_the_runner(
+        self, failure, async_session_factory, mock_settings, mock_client, caplog
+    ):
+        backend, env_vars, run = await self._dispatch_repositories(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            [{"url": "https://github.com/acme/api"}],
+            failure,
+        )
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == []
+        assert "AUTOMATION_RUNNER_REPOS" not in env_vars
+        assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
+        assert "git_connections_unavailable" in caplog.text
+        reloaded = await self._reload(async_session_factory, run.id)
+        assert reloaded.status != AutomationRunStatus.FAILED
+
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_an_older_runner_keeps_cloning_every_repository(
         self, mock_execute, async_session_factory, mock_settings, mock_client
@@ -1373,3 +1636,10 @@ class TestRunnersAttachToTheStartedConversation:
         workspace.clone_repos.reset_mock()
         assert clone(workspace, str(config), []) is None
         workspace.clone_repos.assert_not_called()
+
+        # A repository left to the runner is as required as before.
+        workspace.clone_repos.return_value = MagicMock(
+            success_count=0, failed_repos=["git@github.com:acme/ssh.git"]
+        )
+        with pytest.raises(RuntimeError, match="acme/ssh"):
+            clone(workspace, str(config), left)

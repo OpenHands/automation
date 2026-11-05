@@ -10,12 +10,16 @@ loads its skills and instruction files, as for an interactive conversation.
 
 A repository that cannot be expressed that way (a commit SHA as its ref, an
 SSH or file URL, a host this module cannot place) is left to the runner, which
-clones it itself as before.
+clones it itself as before. So is one the owner has no git connection for: the
+app server clones only through the owner's connection to the repository's
+provider, on that connection's host, while the runner clones a public
+repository anonymously.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -33,6 +37,8 @@ _PUBLIC_HOSTS = {
 _PROVIDERS = frozenset(
     {"github", "gitlab", "bitbucket", "azure_devops", "bitbucket_data_center"}
 )
+# Where a connection that records no host clones from.
+_HOSTED = {"github": "github.com", "gitlab": "gitlab.com", "bitbucket": "bitbucket.org"}
 # ``git clone --branch`` takes branches and tags, not commits.
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -101,8 +107,38 @@ def _name_from_url(url: str, provider: str | None) -> tuple[str, str] | None:
     return ("/".join(parts[:2]), provider) if len(parts) >= 2 else None
 
 
-def app_server_repository(repo: dict[str, Any]) -> AppServerRepository | None:
-    """The app server's name for a recorded repository, or None to leave it."""
+def _hostname(value: str | None) -> str | None:
+    """The host of a URL or of a bare host name, lowercased, without its port."""
+    if not value:
+        return None
+    parsed = urlsplit(value if "://" in value else f"https://{value}")
+    return (parsed.hostname or "").lower() or None
+
+
+def _connected(
+    connections: Mapping[str, str | None], provider: str, host: str | None
+) -> bool:
+    """Whether the owner's connection to ``provider`` clones from ``host``.
+
+    ``host`` is None for an ``owner/repo`` name, which means the connected
+    host. An Azure DevOps connection records an organization, not a host, and
+    its repositories always live on Azure DevOps.
+    """
+    if provider not in connections:
+        return False
+    if host is None or provider == "azure_devops":
+        return True
+    return (_hostname(connections[provider]) or _HOSTED.get(provider)) == host
+
+
+def app_server_repository(
+    repo: dict[str, Any], connections: Mapping[str, str | None] | None = None
+) -> AppServerRepository | None:
+    """The app server's name for a recorded repository, or None to leave it.
+
+    With the owner's ``connections`` (``{provider: host}``), a repository on a
+    provider or host the owner is not connected to is left to the runner too.
+    """
     url = repo.get("url")
     provider = repo.get("provider")
     ref = repo.get("ref")
@@ -126,16 +162,24 @@ def app_server_repository(repo: dict[str, Any]) -> AppServerRepository | None:
     if named is None:
         return None
     name, resolved_provider = named
+    host = _hostname(url) if "://" in url else None
+    if connections is not None and not _connected(connections, resolved_provider, host):
+        return None
     return AppServerRepository(
         repository=name, git_provider=resolved_provider, branch=ref
     )
 
 
-def split_repositories(repos: list[dict[str, Any]] | None) -> RepositorySplit:
+def split_repositories(
+    repos: list[dict[str, Any]] | None,
+    connections: Mapping[str, str | None] | None = None,
+) -> RepositorySplit:
     """Split an automation's repositories between the app server and the runner."""
     split = RepositorySplit()
     for repo in repos or []:
-        mapped = app_server_repository(repo) if isinstance(repo, dict) else None
+        mapped = (
+            app_server_repository(repo, connections) if isinstance(repo, dict) else None
+        )
         if mapped is None or len(split.app_server) > MAX_ADDITIONAL_REPOSITORIES:
             # The primary plus MAX_ADDITIONAL_REPOSITORIES are already taken.
             split.runner.append(repo)

@@ -21,6 +21,7 @@ import logging
 import random
 import tarfile
 import uuid
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -234,6 +235,7 @@ def _conversation_start(
     plugin_fetches: list[dict[str, Any]],
     env_vars: dict[str, str],
     runner_takes_repository_list: bool = False,
+    git_connections: Mapping[str, str | None] | None = None,
 ) -> ConversationStart | None:
     """What the app server needs to start this run's conversation, or None.
 
@@ -242,7 +244,10 @@ def _conversation_start(
     stock conversation runner. Custom tarballs keep creating their own.
     A preset's repositories go to the app server only when its runner clones
     just the ones it is told to (``AUTOMATION_RUNNER_REPOS``): an older runner
-    clones them all and would fail on the app server's checkouts.
+    clones them all and would fail on the app server's checkouts. Of those,
+    only the ones on a provider and host the owner is connected to
+    (``git_connections``) go: the app server clones through that connection.
+    Without the owner's connections (None) the runner clones them all.
     """
     preset_type = (automation.preset_metadata or {}).get("preset_type")
     if resolved_runtime is not None:
@@ -278,9 +283,9 @@ def _conversation_start(
                     "git_provider": r.git_provider,
                     "branch": r.branch,
                 }
-                for r in _repository_split(automation).app_server
+                for r in _repository_split(automation, git_connections).app_server
             ]
-            if runner_takes_repository_list
+            if runner_takes_repository_list and git_connections is not None
             else []
         )
     else:
@@ -295,20 +300,27 @@ def _conversation_start(
     )
 
 
-def _repository_split(automation: Automation) -> RepositorySplit:
+def _repository_split(
+    automation: Automation, git_connections: Mapping[str, str | None] | None
+) -> RepositorySplit:
     """A preset's repositories: those the app server clones, and the rest."""
-    return split_repositories((automation.preset_metadata or {}).get("repos"))
+    return split_repositories(
+        (automation.preset_metadata or {}).get("repos"), git_connections or {}
+    )
 
 
 def _runner_repositories(
-    automation: Automation, start: ConversationStart, started: StartedConversation
+    automation: Automation,
+    start: ConversationStart,
+    started: StartedConversation,
+    git_connections: Mapping[str, str | None] | None,
 ) -> list[dict[str, Any]]:
     """Repositories the runner still clones itself after the app server start.
 
     Those the app server cannot take, plus the additional ones when it does
     not report repositories (an app server from before it cloned several).
     """
-    split = _repository_split(automation)
+    split = _repository_split(automation, git_connections)
     runner = list(split.runner)
     if not started.reports_repositories and len(start.repositories) > 1:
         recorded = [
@@ -318,6 +330,28 @@ def _runner_repositories(
         ]
         runner.extend(recorded[1:])
     return runner
+
+
+async def _owner_git_connections(
+    backend: ExecutionBackend,
+    client: httpx.AsyncClient,
+    ctx: ExecutionContext,
+    log_extra: dict[str, Any],
+) -> dict[str, str | None] | None:
+    """The run owner's git connections, or None when they cannot be read.
+
+    Without them no repository goes to the app server: the runner clones them
+    all, as it did before the app server cloned any.
+    """
+    try:
+        return await backend.git_connections(client, ctx)
+    except Exception as exc:
+        logger.warning(
+            "git_connections_unavailable: %s; the runner clones every repository",
+            str(exc) or type(exc).__name__,
+            extra=log_extra,
+        )
+        return None
 
 
 def _runner_takes_repository_list(tarball_source: bytes | str | None) -> bool:
@@ -1185,13 +1219,24 @@ async def _execute_run(
     # Cloud/Enterprise the agent profile, MCP servers and secrets live on the
     # app server; a conversation the runner creates on the sandbox's own agent
     # server gets none of them. The stock runners attach to the one started here.
+    runner_takes_repository_list = _runner_takes_repository_list(tarball_source)
+    git_connections = None
+    if (
+        runner_takes_repository_list
+        and not backend.is_local_mode
+        and (automation.preset_metadata or {}).get("repos")
+    ):
+        git_connections = await _owner_git_connections(
+            backend, client, ctx, _log_ctx(sandbox_id=ctx.sandbox_id)
+        )
     conversation_start = _conversation_start(
         automation,
         run,
         resolved_runtime,
         plugin_fetches,
         env_vars,
-        runner_takes_repository_list=_runner_takes_repository_list(tarball_source),
+        runner_takes_repository_list=runner_takes_repository_list,
+        git_connections=git_connections,
     )
     if conversation_start is not None:
         started: StartedConversation | None = None
@@ -1240,7 +1285,9 @@ async def _execute_run(
             env_vars["AUTOMATION_CONVERSATION_STARTED"] = "app_server"
             if conversation_start.repositories:
                 env_vars["AUTOMATION_RUNNER_REPOS"] = json.dumps(
-                    _runner_repositories(automation, conversation_start, started)
+                    _runner_repositories(
+                        automation, conversation_start, started, git_connections
+                    )
                 )
             logger.info(
                 "Conversation %s started by the OpenHands API from agent profile %s",

@@ -143,6 +143,10 @@ def summarize_status_detail(detail: Any) -> str | None:
 # The app server's conversation start: it attaches to the run's sandbox when
 # ``sandbox_id`` is set and applies the owner's profile, MCP servers and secrets.
 APP_CONVERSATIONS_PATH = "/api/v1/app-conversations"
+# The owner's settings; ``provider_tokens_set`` names their git connections.
+SETTINGS_PATH = "/api/v1/settings"
+# A slow settings read only means the runner clones every repository itself.
+GIT_CONNECTIONS_TIMEOUT_SECONDS = 15.0
 
 
 def _lacks_conversation_start(resp: httpx.Response) -> bool:
@@ -365,6 +369,35 @@ class CloudSandboxBackend(ExecutionBackend):
             reports_repositories="additional_repositories" in conversation,
         )
 
+    async def git_connections(
+        self,
+        client: httpx.AsyncClient,
+        ctx: ExecutionContext,  # noqa: ARG002
+    ) -> dict[str, str | None]:
+        """The git providers the run's owner is connected to, with their hosts.
+
+        The app server clones a repository only through the owner's connection
+        to its provider, on that connection's host. ``provider_tokens_set`` in
+        the owner's settings lists them as ``{provider: host}``; it holds hosts,
+        not tokens.
+        """
+        settings = await self._app_server_request(
+            client,
+            "GET",
+            SETTINGS_PATH,
+            action="read the owner's git connections",
+            timeout=GIT_CONNECTIONS_TIMEOUT_SECONDS,
+        )
+        connections = (
+            settings.get("provider_tokens_set") if isinstance(settings, dict) else None
+        )
+        if not isinstance(connections, dict):
+            return {}
+        return {
+            str(provider): host if isinstance(host, str) and host else None
+            for provider, host in connections.items()
+        }
+
     async def _wait_for_start_task(
         self, client: httpx.AsyncClient, task: dict[str, Any]
     ) -> str:
@@ -410,6 +443,7 @@ class CloudSandboxBackend(ExecutionBackend):
         path: str,
         *,
         start_request: bool = False,
+        action: str = "start the conversation",
         **kwargs: Any,
     ) -> Any:
         """Call the OpenHands API as the run's user, in the automation's org.
@@ -440,7 +474,7 @@ class CloudSandboxBackend(ExecutionBackend):
                 )
             if resp.status_code >= 400:
                 raise ConversationStartError(
-                    "OpenHands API refused to start the conversation "
+                    f"OpenHands API refused to {action} "
                     f"(HTTP {resp.status_code}): {_response_detail(resp)}",
                     status_code=resp.status_code,
                 )

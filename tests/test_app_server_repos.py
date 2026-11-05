@@ -124,3 +124,91 @@ def test_split_caps_what_the_app_server_takes():
 def test_split_of_nothing():
     assert split_repositories(None).app_server == []
     assert split_repositories([]).runner == []
+
+
+# The owner's git connections, as the settings' ``provider_tokens_set``.
+@pytest.mark.parametrize(
+    ("repo", "connections", "expected"),
+    [
+        # A public repository on a provider the owner never connected: the app
+        # server cannot clone it; the runner clones it anonymously.
+        (
+            {"url": "https://github.com/acme/public"},
+            {"gitlab": "gitlab.example.com"},
+            None,
+        ),
+        ({"url": "https://github.com/acme/public"}, {}, None),
+        # Connected provider and host.
+        (
+            {"url": "https://github.com/acme/api"},
+            {"github": None},
+            AppServerRepository("acme/api", "github"),
+        ),
+        (
+            {"url": "https://github.com/acme/api"},
+            {"github": "github.com"},
+            AppServerRepository("acme/api", "github"),
+        ),
+        (
+            {"url": "https://gitlab.example.com/team/api", "provider": "gitlab"},
+            {"gitlab": "https://gitlab.example.com"},
+            AppServerRepository("team/api", "gitlab"),
+        ),
+        (
+            {"url": "https://ghe.example.com/acme/api", "provider": "github"},
+            {"github": "https://ghe.example.com/api/v3"},
+            AppServerRepository("acme/api", "github"),
+        ),
+        (
+            {
+                "url": "https://bitbucket.example.com/scm/dem/api.git",
+                "provider": "bitbucket_data_center",
+            },
+            {"bitbucket_data_center": "bitbucket.example.com:7990"},
+            AppServerRepository("dem/api", "bitbucket_data_center"),
+        ),
+        # A self-managed connection, a repository named on the public host: the
+        # app server would look the name up on the connection's host instead.
+        (
+            {"url": "https://github.com/acme/api"},
+            {"github": "ghe.example.com"},
+            None,
+        ),
+        (
+            {"url": "https://gitlab.com/group/web"},
+            {"gitlab": "gitlab.example.com"},
+            None,
+        ),
+        # A name without a host means the connected host.
+        (
+            {"url": "acme/api", "provider": "github"},
+            {"github": "ghe.example.com"},
+            AppServerRepository("acme/api", "github"),
+        ),
+        # An Azure DevOps connection records an organization, not a host.
+        (
+            {"url": "https://dev.azure.com/org/project/_git/repo"},
+            {"azure_devops": "org"},
+            AppServerRepository("org/project/repo", "azure_devops"),
+        ),
+    ],
+)
+def test_only_repositories_the_owner_is_connected_to_go_to_the_app_server(
+    repo, connections, expected
+):
+    assert app_server_repository(repo, connections) == expected
+
+
+def test_split_with_connections_keeps_order():
+    repos = [
+        {"url": "https://ghe.example.com/acme/api", "provider": "github"},
+        {"url": "https://github.com/acme/public"},
+        {"url": "acme/tools", "provider": "github"},
+    ]
+    split = split_repositories(repos, {"github": "ghe.example.com"})
+
+    assert split.app_server == [
+        AppServerRepository("acme/api", "github"),
+        AppServerRepository("acme/tools", "github"),
+    ]
+    assert split.runner == [{"url": "https://github.com/acme/public"}]
