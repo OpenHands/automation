@@ -2365,37 +2365,44 @@ class TestDispatchAdmissionLock:
     """
 
     async def test_admission_lock_serializes_two_holders(self, async_session_factory):
-        order: list[str] = []
+        # The invariant under test is: the second holder cannot acquire the lock
+        # until the first has released it. Assert that directly instead of
+        # comparing append order from two concurrent tasks, which is racy --
+        # the first task's post-commit append and the second task's resume are
+        # both scheduled after the same lock release and can interleave either
+        # way.
+        holder_marked_release = False
         holder_ready = asyncio.Event()
+        # What the holder's release flag was when the second holder acquired.
+        # True  => it waited for the release (lock works).
+        # False => it acquired while the first still held the lock (no-op lock).
+        release_flag_at_second_acquire: bool | None = None
 
         async def holder():
+            nonlocal holder_marked_release
             async with async_session_factory() as session:
                 await _lock_dispatch_admission(session)
-                order.append("first-acquired")
                 holder_ready.set()
-                # Wait long enough for the second holder to block on the lock.
+                # Hold the lock while the second holder tries to acquire it.
                 await asyncio.sleep(0.3)
+                # Set the flag while still inside the transaction, i.e. still
+                # holding the lock. A second holder that acquires before the
+                # commit would observe False and prove the lock is a no-op.
+                holder_marked_release = True
                 await session.commit()
-                # The lock releases at commit, so record the release here (not
-                # after the block) to keep the ordering deterministic.
-                order.append("first-released")
 
         async def waiter():
+            nonlocal release_flag_at_second_acquire
             async with async_session_factory() as session:
                 await holder_ready.wait()
-                order.append("second-waiting")
                 await _lock_dispatch_admission(session)
-                order.append("second-acquired")
+                release_flag_at_second_acquire = holder_marked_release
                 await session.commit()
 
         await asyncio.gather(holder(), waiter())
 
-        assert order == [
-            "first-acquired",
-            "second-waiting",
-            "first-released",
-            "second-acquired",
-        ]
+        # The second holder acquired only after the first released the lock.
+        assert release_flag_at_second_acquire is True
 
     async def test_two_polls_never_admit_more_than_capacity(
         self, async_session_factory, mock_settings, mock_client, monkeypatch
