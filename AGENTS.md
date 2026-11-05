@@ -225,7 +225,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 | `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
-| `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it. Absent otherwise |
+| `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it, and register it with the workspace so the completion callback reports it as the run's conversation. Absent otherwise |
 | `AUTOMATION_RUNNER_REPOS` | JSON list, set with `AUTOMATION_CONVERSATION_STARTED` when the app server cloned some of a preset's repositories | The repositories the preset runner still clones itself; without it the runner clones every entry of `repos_config.json` |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.

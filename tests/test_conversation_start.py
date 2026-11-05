@@ -1558,6 +1558,31 @@ class TestRunnersAttachToTheStartedConversation:
         assert not attaches({})
 
     @pytest.mark.parametrize("preset_name", PRESETS)
+    def test_the_attached_conversation_is_the_runs_conversation(self, preset_name):
+        """``attach`` does not register the conversation with the workspace as
+        ``create`` does. Without that the completion callback carries no
+        conversation id, so the run loses its conversation and finish result."""
+        attached = SimpleNamespace(id=uuid.UUID(CONVERSATION_ID))
+        remote = MagicMock()
+        remote.attach.return_value = attached
+        attach = _load_preset_function(
+            preset_name,
+            "_attach_started_conversation",
+            {"RemoteConversation": remote, "uuid": uuid},
+        )
+        workspace = MagicMock()
+        callbacks = [lambda event: None]
+
+        assert attach(workspace, CONVERSATION_ID, callbacks=callbacks) is attached
+        remote.attach.assert_called_once_with(
+            workspace, uuid.UUID(CONVERSATION_ID), callbacks=callbacks
+        )
+        workspace.register_conversation.assert_called_once_with(CONVERSATION_ID)
+
+        # A workspace that cannot register one is attached all the same.
+        assert attach(SimpleNamespace(), CONVERSATION_ID) is attached
+
+    @pytest.mark.parametrize("preset_name", PRESETS)
     def test_source_attaches_instead_of_creating(self, preset_name):
         source = (PRESETS_DIR / preset_name / "sdk_main.py").read_text()
         assert "RemoteConversation.attach(" in source

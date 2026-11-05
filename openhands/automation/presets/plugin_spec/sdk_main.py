@@ -100,6 +100,23 @@ def _attaches_to_started_conversation(environ) -> bool:
 
 ATTACHES_TO_STARTED_CONVERSATION = _attaches_to_started_conversation(os.environ)
 
+
+def _attach_started_conversation(workspace, conversation_id: str, callbacks=None):
+    """Attach to the conversation the service started, as this run's conversation.
+
+    RemoteConversation.attach() does not register the conversation with the
+    workspace the way create() does. The completion callback reports only a
+    registered one, and without it the run loses its link to the conversation
+    and its finish result.
+    """
+    conversation = RemoteConversation.attach(
+        workspace, uuid.UUID(conversation_id), callbacks=callbacks
+    )
+    register = getattr(workspace, "register_conversation", None)
+    if callable(register):
+        register(str(conversation.id))
+    return conversation
+
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
 api_url = os.environ.get("OPENHANDS_CLOUD_API_URL", "").rstrip("/")
@@ -261,8 +278,8 @@ with workspace_ctx as workspace:
         # owner's LLM key, MCP servers, scoped secrets and these plugins.
         # Attach to it; recreating it here would lose all of that.
         print("\n=== CONVERSATION ===")
-        conversation = RemoteConversation.attach(
-            workspace, uuid.UUID(automation_conversation_id)
+        conversation = _attach_started_conversation(
+            workspace, automation_conversation_id
         )
         print(f"  attached to conversation {conversation.id} (started by app server)")
     else:
