@@ -12,6 +12,7 @@ against the environment the dispatcher and ``run_automation()`` hand a run.
 
 import ast
 import contextlib
+import json
 import os
 import shlex
 import uuid
@@ -25,10 +26,13 @@ from sqlalchemy.orm import selectinload
 
 from openhands.automation.backends import (
     CloudSandboxBackend,
+    ConversationStart,
     ExecutionContext,
     LocalAgentServerBackend,
+    StartedConversation,
 )
 from openhands.automation.dispatcher import _execute_run
+from openhands.automation.exceptions import ConversationStartUnavailable
 from openhands.automation.execution import build_tarball, run_automation
 from openhands.automation.git_sync.serializer import canonical_tarball_bytes
 from openhands.automation.models import (
@@ -209,7 +213,11 @@ def _stored_preset(kind: str, form: str) -> bytes:
 # -- Dispatching a run -----------------------------------------------------------
 
 
-async def _make_run(async_session_factory, tarball: bytes | str) -> AutomationRun:
+async def _make_run(
+    async_session_factory,
+    tarball: bytes | str,
+    preset_metadata: dict[str, Any] | None = None,
+) -> AutomationRun:
     """A running run of an automation whose code is ``tarball`` (bytes are
     stored as an internal upload, a string is an external URL)."""
     async with async_session_factory() as session:
@@ -236,6 +244,7 @@ async def _make_run(async_session_factory, tarball: bytes | str) -> AutomationRu
             tarball_path=tarball_path,
             entrypoint="python3 main.py",
             enabled=True,
+            preset_metadata=preset_metadata,
         )
         session.add(automation)
         await session.commit()
@@ -289,9 +298,17 @@ async def _dispatch(
     *,
     mode: str = "cloud",
     plugin_payload: tuple | None = None,
+    preset_metadata: dict[str, Any] | None = None,
+    git_connections: dict[str, str | None] | None = None,
+    app_server_starts: bool = True,
 ) -> dict[str, str]:
-    """Dispatch a run through ``_execute_run``; return the env the sandbox gets."""
-    run = await _make_run(async_session_factory, tarball)
+    """Dispatch a run through ``_execute_run``; return the env the sandbox gets.
+
+    Stock runners attach to a conversation the app server starts for them;
+    ``app_server_starts=False`` is an app server without that route, where the
+    runner creates the conversation itself.
+    """
+    run = await _make_run(async_session_factory, tarball, preset_metadata)
     if plugin_payload is not None:
         run.automation.plugin_spec = {"plugin": {"source": "github:org/plugin"}}
         run.automation.tarball_path = "plugin-spec://runtime"
@@ -310,6 +327,31 @@ async def _dispatch(
             stack.enter_context(
                 patch.object(
                     backend, "get_execution_context", AsyncMock(return_value=ctx)
+                )
+            )
+
+            # A stock runner attaches to the conversation the app server starts
+            # for it, from the profile the run asked for.
+            def _started(
+                _client, _ctx, start: ConversationStart
+            ) -> StartedConversation:
+                if not app_server_starts:
+                    raise ConversationStartUnavailable("no such route", status_code=404)
+                return StartedConversation(
+                    conversation_id=str(uuid.uuid4()),
+                    agent_profile_id=start.agent_profile_id,
+                )
+
+            stack.enter_context(
+                patch.object(
+                    backend, "start_conversation", AsyncMock(side_effect=_started)
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend,
+                    "git_connections",
+                    AsyncMock(return_value=git_connections or {}),
                 )
             )
         stack.enter_context(
@@ -681,6 +723,37 @@ class TestCloudSandboxesNeverGetAgentServerUrl:
 
         assert "AGENT_SERVER_URL" not in env
         assert env["AUTOMATION_EXECUTION_SPEC_PATH"].endswith("execution.json")
+
+    @pytest.mark.parametrize(
+        "app_server_starts", [True, False], ids=["started", "fallback"]
+    )
+    async def test_preset_runs_with_repositories(
+        self, app_server_starts, async_session_factory, mock_settings, mock_client
+    ):
+        """The app-server start, with a repository left to the runner, and the
+        fallback where the runner creates the conversation: neither exports it."""
+        repos = [
+            {"url": "https://gitlab.example.com/team/api", "provider": "gitlab"},
+            {"url": "https://github.com/owner/public"},
+        ]
+        env = await _dispatch(
+            async_session_factory,
+            mock_settings,
+            mock_client,
+            _preset_tarball("prompt"),
+            preset_metadata={"preset_type": "prompt", "prompt": "x", "repos": repos},
+            git_connections={"gitlab": "gitlab.example.com"},
+            app_server_starts=app_server_starts,
+        )
+
+        assert "AGENT_SERVER_URL" not in env
+        assert env["AUTOMATION_RUN_MODE"] == "cloud"
+        if app_server_starts:
+            assert env["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
+            assert json.loads(env["AUTOMATION_RUNNER_REPOS"]) == [repos[1]]
+        else:
+            assert "AUTOMATION_CONVERSATION_STARTED" not in env
+            assert "AUTOMATION_RUNNER_REPOS" not in env
 
     @pytest.mark.parametrize(
         "tarball",

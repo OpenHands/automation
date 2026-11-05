@@ -175,6 +175,20 @@ async def _upload(
     await workspace.file_upload(data, dest)
 
 
+async def upload_files(
+    agent_url: str, session_key: str, files: dict[str, bytes]
+) -> None:
+    """Write files into the execution environment, keyed by absolute path."""
+    workspace = AsyncRemoteWorkspace(
+        host=agent_url, api_key=session_key, working_dir="/"
+    )
+    try:
+        for path, data in files.items():
+            await _upload(workspace, data, path)
+    finally:
+        await workspace.reset_client()
+
+
 async def _bash(
     workspace: AsyncRemoteWorkspace,
     command: str,

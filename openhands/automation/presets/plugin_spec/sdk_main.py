@@ -23,16 +23,15 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (local mode only). It picks
-                               the mode only when neither AUTOMATION_RUN_MODE nor
-                               SANDBOX_ID is set
+  AGENT_SERVER_URL           - local agent server URL (local mode only); it never
+                               picks the mode
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 
 Common env vars:
   AUTOMATION_RUN_MODE         - "cloud" or "local", exported by the execution backend;
-                                decides the mode. Without it, SANDBOX_ID plus a session
-                                key means cloud, AGENT_SERVER_URL alone means local.
+                                decides the mode. Without it (a service from 1.27.0 or
+                                earlier), SANDBOX_ID means cloud and no SANDBOX_ID local.
   AUTOMATION_CALLBACK_URL     - completion callback endpoint (optional)
   AUTOMATION_ID               - automation ID for observability correlation (optional)
   AUTOMATION_NAME             - automation name for observability correlation (optional)
@@ -43,6 +42,10 @@ Common env vars:
   AUTOMATION_EVENT_PAYLOAD    - JSON with trigger info and event payload (optional)
   AUTOMATION_AGENT_PROFILE_ID - required selected Agent Profile id
   AUTOMATION_AGENT_PROFILE_NAME - selected Agent Profile name
+  AUTOMATION_CONVERSATION_ID  - the conversation to use (optional)
+  AUTOMATION_CONVERSATION_STARTED - "app_server" when the service already started
+                                AUTOMATION_CONVERSATION_ID from the profile through
+                                the app server, plugins included; the script attaches
 
 Runtime-injected secrets (via conversation.update_secrets after creation):
   AUTOMATION_SESSION_URL      - direct URL to this conversation in Agent Canvas
@@ -59,30 +62,60 @@ import uuid
 def _detect_execution_mode(environ) -> tuple[str, str]:
     """Return ("cloud" | "local", the signal that decided it).
 
-    The execution backend exports AUTOMATION_RUN_MODE, which decides. Without
-    it (a service that predates the variable) the env shape decides: SANDBOX_ID
-    plus a session key means cloud, since only cloud sandboxes carry SANDBOX_ID;
-    otherwise AGENT_SERVER_URL means a local agent server. Checking the URL
-    first made cloud runs that had it fetch their LLM, secrets and MCP servers
-    from the sandbox's own agent-server, which holds none of them (#688).
+    The execution backend exports AUTOMATION_RUN_MODE, and it decides.
+    AGENT_SERVER_URL never does, whether it is set or not: reading it as
+    "local" made cloud runs fetch their LLM, secrets and MCP servers from the
+    sandbox's own agent-server, which holds none of them (#688). Only a service
+    from before AUTOMATION_RUN_MODE (1.27.0 and earlier) leaves it out; its cloud
+    sandboxes carry SANDBOX_ID and its local backend does not.
     """
     explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
     if explicit in ("cloud", "local"):
         return explicit, "AUTOMATION_RUN_MODE"
-    has_session_key = bool(
-        environ.get("OH_SESSION_API_KEYS_0") or environ.get("SESSION_API_KEY")
-    )
-    if environ.get("SANDBOX_ID") and has_session_key:
-        return "cloud", "SANDBOX_ID + session key (no AUTOMATION_RUN_MODE)"
-    if environ.get("AGENT_SERVER_URL"):
-        return "local", "AGENT_SERVER_URL without SANDBOX_ID (no AUTOMATION_RUN_MODE)"
-    return "cloud", "default (no AUTOMATION_RUN_MODE, SANDBOX_ID or AGENT_SERVER_URL)"
+    if environ.get("SANDBOX_ID"):
+        return "cloud", "SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+    return "local", "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
 
 
 # Keep _detect_execution_mode in sync with presets/prompt and presets/plugin.
 EXECUTION_MODE, MODE_SIGNAL = _detect_execution_mode(os.environ)
 IS_LOCAL_MODE = EXECUTION_MODE == "local"
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
+
+
+def _attaches_to_started_conversation(environ) -> bool:
+    """Whether the service already started this run's conversation.
+
+    On OpenHands Cloud/Enterprise the sandbox's agent server cannot resolve an
+    enterprise agent profile, so the service asks the app server to start the
+    conversation from the profile in this sandbox, plugins included. The script
+    then attaches. A derived id alone (``continue_conversation``) still means
+    create.
+    """
+    return (
+        bool(environ.get("AUTOMATION_CONVERSATION_ID"))
+        and environ.get("AUTOMATION_CONVERSATION_STARTED") == "app_server"
+    )
+
+
+ATTACHES_TO_STARTED_CONVERSATION = _attaches_to_started_conversation(os.environ)
+
+
+def _attach_started_conversation(workspace, conversation_id: str, callbacks=None):
+    """Attach to the conversation the service started, as this run's conversation.
+
+    RemoteConversation.attach() does not register the conversation with the
+    workspace the way create() does. The completion callback reports only a
+    registered one, and without it the run loses its link to the conversation
+    and its finish result.
+    """
+    conversation = RemoteConversation.attach(
+        workspace, uuid.UUID(conversation_id), callbacks=callbacks
+    )
+    register = getattr(workspace, "register_conversation", None)
+    if callable(register):
+        register(str(conversation.id))
+    return conversation
 
 # Cloud mode env vars
 api_key = os.environ.get("OPENHANDS_API_KEY", "")
@@ -233,53 +266,67 @@ with workspace_ctx as workspace:
         path_str = f" ({ps.repo_path})" if ps.repo_path else ""
         print(f"    - {ps.source}{ref_str}{path_str}")
 
-    # Get secrets via workspace. The agent-server applies the selected
-    # profile's secret_refs when agent_profile_id is present.
-    print("\n=== GET_SECRETS ===")
-    secrets = {}
-    try:
-        secrets = workspace.get_secrets(agent_profile_id=agent_profile_id)
-        print(f"  profile: {agent_profile_name or agent_profile_id or 'DEFAULT'}")
-        print(f"  available: {list(secrets.keys()) or '(none)'}")
-    except Exception as e:
-        # Not a hard failure — user may not have secrets configured
-        print(f"  get_secrets() failed (ok if no secrets): {e}")
-
-    if not agent_profile_id:
-        raise RuntimeError("Plugin-spec conversation runner requires an agent profile")
-
     print("\n=== AGENT PROFILE ===")
-    print(f"  profile id: {agent_profile_id}")
+    print(f"  profile id: {agent_profile_id or 'UNKNOWN'}")
     print(f"  profile name: {agent_profile_name or 'UNKNOWN'}")
     print(f"  profile kind: {agent_profile_kind or 'UNKNOWN'}")
 
-    # Create conversation with plugins
-    print("\n=== CONVERSATION ===")
-
-    conversation_kwargs = {
-        "workspace": workspace,
-        "plugins": plugin_sources,  # All plugins loaded here
-        **automation_conversation_kwargs(),
-    }
-    if automation_user_id and _conversation_supports_user_id():
-        conversation_kwargs["user_id"] = automation_user_id
-    # A `continue_conversation` run must use the derived id: RemoteConversation
-    # attaches to that conversation if it exists, and creates it if it does not.
     automation_conversation_id = os.environ.get("AUTOMATION_CONVERSATION_ID")
-    if automation_conversation_id:
-        conversation_kwargs["conversation_id"] = uuid.UUID(automation_conversation_id)
+    secrets = {}
+    if ATTACHES_TO_STARTED_CONVERSATION:
+        # The app server started this conversation from the profile, with the
+        # owner's LLM key, MCP servers, scoped secrets and these plugins.
+        # Attach to it; recreating it here would lose all of that.
+        print("\n=== CONVERSATION ===")
+        conversation = _attach_started_conversation(
+            workspace, automation_conversation_id
+        )
+        print(f"  attached to conversation {conversation.id} (started by app server)")
+    else:
+        # Get secrets via workspace. The agent-server applies the selected
+        # profile's secret_refs when agent_profile_id is present.
+        print("\n=== GET_SECRETS ===")
+        try:
+            secrets = workspace.get_secrets(agent_profile_id=agent_profile_id)
+            print(f"  profile: {agent_profile_name or agent_profile_id or 'DEFAULT'}")
+            print(f"  available: {list(secrets.keys()) or '(none)'}")
+        except Exception as e:
+            # Not a hard failure — user may not have secrets configured
+            print(f"  get_secrets() failed (ok if no secrets): {e}")
 
-    request_kwargs = {
-        **conversation_kwargs,
-        "workspace": LocalWorkspace(working_dir=workspace.working_dir),
-        "agent_profile_id": uuid.UUID(agent_profile_id),
-    }
-    conversation = RemoteConversation.create(
-        workspace, StartConversationRequest(**request_kwargs)
-    )
-    assert isinstance(conversation, RemoteConversation)
-    print(f"  conversation created: {type(conversation).__name__}")
-    print(f"  plugins loaded: {len(plugin_sources)}")
+        if not agent_profile_id:
+            raise RuntimeError(
+                "Plugin-spec conversation runner requires an agent profile"
+            )
+
+        # Create conversation with plugins
+        print("\n=== CONVERSATION ===")
+
+        conversation_kwargs = {
+            "workspace": workspace,
+            "plugins": plugin_sources,  # All plugins loaded here
+            **automation_conversation_kwargs(),
+        }
+        if automation_user_id and _conversation_supports_user_id():
+            conversation_kwargs["user_id"] = automation_user_id
+        # A `continue_conversation` run must use the derived id: RemoteConversation
+        # attaches to that conversation if it exists, and creates it if it does not.
+        if automation_conversation_id:
+            conversation_kwargs["conversation_id"] = uuid.UUID(
+                automation_conversation_id
+            )
+
+        request_kwargs = {
+            **conversation_kwargs,
+            "workspace": LocalWorkspace(working_dir=workspace.working_dir),
+            "agent_profile_id": uuid.UUID(agent_profile_id),
+        }
+        conversation = RemoteConversation.create(
+            workspace, StartConversationRequest(**request_kwargs)
+        )
+        assert isinstance(conversation, RemoteConversation)
+        print(f"  conversation created: {type(conversation).__name__}")
+        print(f"  plugins loaded: {len(plugin_sources)}")
 
     # Inject secrets into the conversation (auto-exported as env vars in bash)
     if secrets:

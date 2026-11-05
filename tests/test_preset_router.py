@@ -266,14 +266,15 @@ class TestPresetExecutionMode:
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     def test_local_backend_shape_without_signal_is_local(self, preset_name):
-        """A local backend that predates AUTOMATION_RUN_MODE: AGENT_SERVER_URL,
-        a session key and no SANDBOX_ID."""
+        """A local backend that predates AUTOMATION_RUN_MODE (1.27.0 and earlier,
+        say after a rollback): AGENT_SERVER_URL, a session key and no SANDBOX_ID.
+        The missing SANDBOX_ID decides, not the URL."""
         detect = _load_preset_mode_detector(preset_name)
         mode, signal = detect(
             {"AGENT_SERVER_URL": "http://localhost:3000", "SESSION_API_KEY": "sk-1"}
         )
         assert mode == "local"
-        assert "AGENT_SERVER_URL" in signal
+        assert signal == "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     @pytest.mark.parametrize(
@@ -296,10 +297,36 @@ class TestPresetExecutionMode:
         assert "SANDBOX_ID" in signal
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
-    def test_no_signal_at_all_defaults_to_cloud(self, preset_name):
+    def test_no_signal_and_no_sandbox_id_is_local(self, preset_name):
+        """Only cloud sandboxes carry SANDBOX_ID, and cloud mode cannot run
+        without it."""
         detect = _load_preset_mode_detector(preset_name)
         mode, _signal = detect({})
-        assert mode == "cloud"
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            },
+            {"AUTOMATION_RUN_MODE": "local", "SESSION_API_KEY": "sk-1"},
+            {"SANDBOX_ID": "sbx-1", "OH_SESSION_API_KEYS_0": "sk-1"},
+            {"SANDBOX_ID": "sbx-1"},
+            {"SESSION_API_KEY": "sk-1"},
+            {"AUTOMATION_RUN_MODE": "staging"},
+            {},
+        ],
+    )
+    def test_agent_server_url_never_changes_the_mode(self, preset_name, environ):
+        """Cloud sandboxes no longer receive AGENT_SERVER_URL and local runs do;
+        whether it is there must not change the mode."""
+        detect = _load_preset_mode_detector(preset_name)
+        with_url = {**environ, "AGENT_SERVER_URL": "http://10.0.0.5:8000"}
+        assert detect(with_url) == detect(environ)
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
     def test_unknown_signal_value_falls_back_to_env_shape(self, preset_name):
@@ -360,6 +387,66 @@ class TestPresetExecutionMode:
         )
         assert "_detect_execution_mode(os.environ)" in source, (
             f"{preset_name} preset must detect its mode with _detect_execution_mode"
+        )
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_mode_never_reads_agent_server_url(self, preset_name):
+        """The script reads AGENT_SERVER_URL once, into ``agent_server_url``,
+        and only local-mode code uses it: the mode check never looks at it, and
+        a cloud run (which no longer receives it) has no use for it."""
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        reads = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Constant) and node.value == "AGENT_SERVER_URL"
+        ]
+        assert len(reads) == 1, f"{preset_name} reads AGENT_SERVER_URL again"
+
+        detector = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_detect_execution_mode"
+        )
+        code = [
+            ast.get_source_segment(source, statement) or ""
+            for statement in detector.body[1:]  # after the docstring
+        ]
+        assert not any("AGENT_SERVER_URL" in segment for segment in code)
+
+        parents = {
+            child: node
+            for node in ast.walk(module)
+            for child in ast.iter_child_nodes(node)
+        }
+
+        def in_local_mode_branch(node: ast.AST) -> bool:
+            child, parent = node, parents.get(node)
+            while parent is not None:
+                if (
+                    isinstance(parent, ast.If)
+                    and isinstance(parent.test, ast.Name)
+                    and parent.test.id == "IS_LOCAL_MODE"
+                    and any(child is statement for statement in parent.body)
+                ):
+                    return True
+                child, parent = parent, parents.get(parent)
+            return False
+
+        uses = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Name)
+            and node.id == "agent_server_url"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        assert uses
+        outside = [node.lineno for node in uses if not in_local_mode_branch(node)]
+        assert not outside, (
+            f"{preset_name} uses agent_server_url outside local mode on lines {outside}"
         )
 
 
