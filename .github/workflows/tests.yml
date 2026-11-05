@@ -16,7 +16,7 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
             - name: Checkout
-              uses: actions/checkout@v7
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
             - name: Reject temporary artifacts in release PRs
               if: >-
@@ -32,7 +32,7 @@ jobs:
                   fi
 
             - name: Install uv
-              uses: astral-sh/setup-uv@v7
+              uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
               with:
                   enable-cache: true
                   python-version: '3.12'
@@ -53,10 +53,11 @@ jobs:
             - name: Pytest coverage PR comment
               if: always() && github.event_name == 'pull_request'
               continue-on-error: true
-              uses: MishaKav/pytest-coverage-comment@v1
+              uses: MishaKav/pytest-coverage-comment@9516bf7f32a9229cf18d5e1717ae387c7154f279 # v1
               with:
                   github-token: ${{ secrets.GITHUB_TOKEN }}
                   pytest-xml-coverage-path: coverage.xml
                   title: Coverage Report
                   create-new-comment: false
                   hide-report: false
+
