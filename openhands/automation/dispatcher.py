@@ -65,6 +65,7 @@ from openhands.automation.observability import (
     span,
 )
 from openhands.automation.plugin_specs import PluginSpecError, build_execution_payload
+from openhands.automation.preset_router import with_current_preset_runner
 from openhands.automation.subjects import conversation_id_for, service_account_id_of
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
@@ -1105,12 +1106,17 @@ async def _execute_run(
             if upload_id is None:
                 raise ValueError(f"Unsupported tarball_path: {tarball_path!r}")
             async with session_factory() as session:
-                tarball_source = await _download_internal_tarball(
+                stored_tarball = await _download_internal_tarball(
                     upload_id, automation.org_id, session
                 )
+            # A preset keeps the runner it was created with; run today's.
+            tarball_source = with_current_preset_runner(stored_tarball)
             logger.info(
-                "Internal tarball downloaded (%d bytes)",
-                len(tarball_source),
+                "Internal tarball downloaded (%d bytes)%s",
+                len(stored_tarball),
+                ""
+                if tarball_source is stored_tarball
+                else ", preset runner replaced with the current one",
                 extra=_log_ctx(sandbox_id=ctx.sandbox_id),
             )
     except (PermanentDispatchError, PluginSpecError) as exc:

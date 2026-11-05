@@ -197,7 +197,7 @@ Important notes:
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 
 1. **Fetch per-user API key** — `get_api_key_for_automation_run()` mints a key via the service key
-2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox
+2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox. A prompt or plugin preset tarball gets the service's current runner (`main.py`, `setup.sh`, `finish_tool_hook.py`) in place of the one baked in at creation (`with_current_preset_runner`); the stored tarball is not rewritten
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
@@ -295,6 +295,8 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
    - `setup.sh` - SDK installation script
 4. Uploads the tarball to storage (creates `TarballUpload` record)
 5. Creates the `Automation` record referencing the internal upload
+
+Each run swaps in the current `main.py`, `setup.sh` and `finish_tool_hook.py`, so an automation created on an earlier release runs today's runner with its own prompt and repository configuration.
 
 #### Files
 

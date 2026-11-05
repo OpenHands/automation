@@ -52,6 +52,7 @@ from openhands.automation.utils.finish_plugin import (
     finish_plugin_dir,
     finish_plugin_files,
 )
+from openhands.automation.utils.tarball_validation import build_internal_url
 from openhands.sdk.plugin import PluginSource
 from openhands.workspace import RepoSource
 
@@ -71,6 +72,7 @@ def mock_client():
 TASK_ID = "7a1b2c3d-0000-4000-8000-00000000aaaa"
 CONVERSATION_ID = "9f1b2c3d-0000-4000-8000-00000000cccc"
 PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "presets"
+FIXTURES = Path(__file__).parent / "fixtures" / "preset_tarballs"
 
 
 class AppServer:
@@ -717,6 +719,7 @@ class TestExecuteRunStartsTheConversation:
         preset_metadata: dict | None,
         agent_profile_id: uuid.UUID | None = PROFILE_UUID,
         subject_key: str | None = None,
+        tarball_path: str = "https://example.com/code.tar.gz",
     ) -> AutomationRun:
         async with async_session_factory() as session:
             automation = Automation(
@@ -727,7 +730,7 @@ class TestExecuteRunStartsTheConversation:
                 model="Default",
                 preset_metadata=preset_metadata,
                 trigger={"type": "event", "source": "github-events", "on": "*"},
-                tarball_path="https://example.com/code.tar.gz",
+                tarball_path=tarball_path,
                 entrypoint="uv run main.py",
                 enabled=True,
             )
@@ -1106,6 +1109,60 @@ class TestExecuteRunStartsTheConversation:
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
         assert "AUTOMATION_RUNNER_REPOS" not in env_vars
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_a_preset_created_on_1_27_0_runs_with_the_current_runner(
+        self, mock_execute, uploads, async_session_factory, mock_settings, mock_client
+    ):
+        """An automation created on an earlier release needs no action: its
+        stored runner is replaced at dispatch, so the run gets the repository
+        hand-off and the finish requirement like a new one."""
+        repos = [
+            {"url": "https://github.com/acme/api"},
+            {"url": "git@github.com:acme/ssh.git"},
+        ]
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi", "repos": repos},
+            tarball_path=build_internal_url(uuid.uuid4()),
+        )
+        stored = (FIXTURES / "prompt-1.27.0.tar.gz").read_bytes()
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher._download_internal_tarball",
+                new_callable=AsyncMock,
+                return_value=stored,
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        tarball = mock_execute.await_args.kwargs["tarball_source"]
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            member = tar.extractfile("main.py")
+            assert member is not None
+            main = member.read().decode()
+        assert main == (PRESETS_DIR / "prompt" / "sdk_main.py").read_text()
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == [
+            {"repository": "acme/api", "git_provider": "github", "branch": None}
+        ]
+        assert start.plugins[0] == {"source": finish_plugin_dir(str(run.id))}
+        uploads.assert_awaited_once()
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
+        assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == [
+            {"url": "git@github.com:acme/ssh.git"}
+        ]
 
 
 def _load_preset_function(preset_name: str, function_name: str, namespace: dict):
