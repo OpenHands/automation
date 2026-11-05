@@ -25,7 +25,7 @@ from openhands.automation.config import get_config
 from openhands.automation.constants import TARBALL_PATH
 from openhands.automation.exceptions import PermanentDispatchError, TarballNotFoundError
 from openhands.automation.utils import log_extra
-from openhands.automation.utils.sandbox import delete_sandbox
+from openhands.automation.utils.sandbox import delete_sandbox, find_agent_server_url
 from openhands.automation.utils.timeout import resolve_automation_timeout_seconds
 from openhands.sdk.workspace import AsyncRemoteWorkspace
 
@@ -72,14 +72,6 @@ def build_tarball(files: dict[str, str | bytes]) -> bytes:
 
 
 # -- Sandbox helpers (private) ------------------------------------------------
-
-
-def _find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
-    """Return ``(agent_url, session_key)`` if an AGENT_SERVER URL exists."""
-    for url_info in sandbox.get("exposed_urls") or []:
-        if url_info.get("name") == "AGENT_SERVER":
-            return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-    return None
 
 
 async def _create_sandbox(
@@ -143,7 +135,7 @@ async def _create_and_wait(
         status = sb.get("status", "UNKNOWN")
 
         if status == "RUNNING":
-            result = _find_agent_server_url(sb)
+            result = find_agent_server_url(sb)
             if result is None:
                 raise RuntimeError(f"No AGENT_SERVER URL in sandbox {sandbox_id}")
             agent_url, session_key = result

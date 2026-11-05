@@ -21,6 +21,7 @@ from openhands.automation.backends.local import (
     local_runs_root,
     resolve_local_workspace_base,
 )
+from openhands.automation.config import clear_config_cache
 from openhands.automation.exceptions import (
     ConcurrencyLimitReachedError,
     SandboxProvisioningError,
@@ -358,33 +359,44 @@ class TestCloudSandboxBackend:
         )
         assert backend.api_url == "https://app.all-hands.dev"
 
-    def test_find_agent_server_url_found(self):
-        """_find_agent_server_url extracts agent URL from sandbox response."""
-        sandbox = {
-            "exposed_urls": [
-                {"name": "OTHER", "url": "http://other.example.com"},
-                {"name": "AGENT_SERVER", "url": "http://agent.example.com/"},
-            ],
-            "session_api_key": "session-key",
-        }
-        result = CloudSandboxBackend._find_agent_server_url(sandbox)
-        assert result == ("http://agent.example.com", "session-key")
+    @pytest.mark.asyncio
+    async def test_create_and_wait_uses_sandbox_internal_url(
+        self, mock_run, monkeypatch
+    ):
+        """The agent URL points at AUTOMATION_SANDBOX_INTERNAL_URL when set."""
+        monkeypatch.setenv("AUTOMATION_SANDBOX_INTERNAL_URL", "http://proxy")
+        clear_config_cache()
 
-    def test_find_agent_server_url_not_found(self):
-        """_find_agent_server_url returns None if no AGENT_SERVER URL."""
-        sandbox = {
-            "exposed_urls": [
-                {"name": "OTHER", "url": "http://other.example.com"},
-            ],
-        }
-        result = CloudSandboxBackend._find_agent_server_url(sandbox)
-        assert result is None
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "sb1"})
+            sandbox = {
+                "id": "sb1",
+                "status": "RUNNING",
+                "session_api_key": "session-key",
+                "exposed_urls": [
+                    {
+                        "name": "AGENT_SERVER",
+                        "url": "http://localhost:9043/runtime/oh-agent-server-abc/8000",
+                    }
+                ],
+            }
+            return httpx.Response(200, json=[sandbox])
 
-    def test_find_agent_server_url_empty(self):
-        """_find_agent_server_url handles empty exposed_urls."""
-        sandbox = {"exposed_urls": None}
-        result = CloudSandboxBackend._find_agent_server_url(sandbox)
-        assert result is None
+        backend = CloudSandboxBackend(api_url="https://app.test", run=mock_run)
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                result = await backend._create_and_wait(client, "key")
+        finally:
+            clear_config_cache()
+
+        assert result == (
+            "sb1",
+            "session-key",
+            "http://proxy/runtime/oh-agent-server-abc/8000",
+        )
 
     @pytest.mark.asyncio
     async def test_get_api_key_mints_per_user_key(self, mock_run):

@@ -222,6 +222,11 @@ class SandboxSettings(BaseSettings):
         AUTOMATION_RATE_LIMIT_MIN_WAIT: Initial 429 wait (default: 10)
         AUTOMATION_RATE_LIMIT_MAX_WAIT: Max retry wait (default: 60)
         AUTOMATION_RATE_LIMIT_MAX_RETRIES: Max retries (default: 5)
+        AUTOMATION_SANDBOX_INTERNAL_URL: Base URL this service uses to reach
+            the sandbox URLs from the OpenHands API, e.g. http://proxy in the
+            Docker Compose stack. When set, it replaces the origin
+            (scheme://host[:port]) of those URLs and keeps the path and query.
+            Empty uses the URLs unchanged (default: "")
     """
 
     default_run_duration: int = 10 * 60  # 10 minutes
@@ -243,6 +248,7 @@ class SandboxSettings(BaseSettings):
     rate_limit_min_wait: int = 10
     rate_limit_max_wait: int = 60
     rate_limit_max_retries: int = 5
+    sandbox_internal_url: str = ""
 
     model_config = {"env_prefix": "AUTOMATION_"}
 

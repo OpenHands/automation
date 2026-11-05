@@ -8,9 +8,11 @@ For local mode, use utils/agent_server.py directly.
 """
 
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from openhands.automation.config import get_config
 from openhands.automation.utils.agent_server import (
     BashCommandResult,
     VerificationOutcome,
@@ -30,6 +32,7 @@ __all__ = [
     "VerificationResult",
     "get_last_bash_command_result",
     "SandboxApiTransientError",
+    "find_agent_server_url",
     "get_sandbox_agent_url",
     "resume_sandbox",
     "delete_sandbox",
@@ -47,6 +50,23 @@ class SandboxApiTransientError(RuntimeError):
     def __init__(self, error_info: TransientErrorInfo):
         self.error_info = error_info
         super().__init__(error_info.detail)
+
+
+def find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
+    """Return ``(agent_url, session_key)`` from an OpenHands API sandbox.
+
+    Returns None if the sandbox has no AGENT_SERVER URL. When
+    AUTOMATION_SANDBOX_INTERNAL_URL is set, the agent URL uses that origin.
+    """
+    for url_info in sandbox.get("exposed_urls") or []:
+        if url_info.get("name") == "AGENT_SERVER":
+            url: str = url_info["url"]
+            internal_url = get_config().sandbox.sandbox_internal_url.rstrip("/")
+            if internal_url:
+                parts = urlsplit(url)
+                url = internal_url + urlunsplit(parts._replace(scheme="", netloc=""))
+            return url.rstrip("/"), sandbox.get("session_api_key", "")
+    return None
 
 
 async def get_sandbox_agent_url(
@@ -81,10 +101,7 @@ async def get_sandbox_agent_url(
         if sandbox.get("status") != "RUNNING":
             return None
 
-        for url_info in sandbox.get("exposed_urls") or []:
-            if url_info.get("name") == "AGENT_SERVER":
-                return url_info["url"].rstrip("/"), sandbox.get("session_api_key", "")
-        return None
+        return find_agent_server_url(sandbox)
     except httpx.HTTPStatusError as e:
         status_code = e.response.status_code
         if status_code in (401, 403):
