@@ -623,6 +623,203 @@ def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
     assert normalize(None) == {}
 
 
+def _load_preset_functions(
+    preset_name: str, names: set[str], namespace: dict[str, Any]
+) -> dict[str, Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in functions} == names
+    nodes: list[ast.stmt] = list(functions)
+    exec(
+        compile(ast.Module(body=nodes, type_ignores=[]), str(source_path), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+def _load_preset_mcp_loader(
+    preset_name: str,
+    users_me_mcp_config: Callable[[], Any],
+    *,
+    local_mode: bool = False,
+) -> Callable[[Any], Any]:
+    """The preset's ``_load_mcp_config`` with ``users/me`` answered by a stub."""
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_normalize_mcp_config", "_named_mcp_servers", "_load_mcp_config"},
+        {
+            "_coerce_mcp_config": coerce_mcp_config,
+            "IS_LOCAL_MODE": local_mode,
+            "_users_me_mcp_config": users_me_mcp_config,
+        },
+    )
+    return cast(Callable[[Any], Any], namespace["_load_mcp_config"])
+
+
+def _workspace_returning(mcp_config: dict[str, Any]) -> MagicMock:
+    workspace = MagicMock()
+    workspace.get_mcp_config.return_value = mcp_config
+    return workspace
+
+
+# GET /api/v1/users/me on OpenHands Cloud and Enterprise: a {name: server} map.
+_USERS_ME_MCP_CONFIG = {
+    "jira-dc": {
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-atlassian"],
+        "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        "enabled": True,
+    },
+    "tools": {
+        "url": "https://mcp.example.com/mcp",
+        "transport": "http",
+        "auth": {"strategy": "bearer", "value": "tools-token"},
+        "enabled": True,
+    },
+    "linear": {
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {
+            "strategy": "oauth2",
+            "state": {"tokens": {"access_token": "linear-access-token"}},
+        },
+        "enabled": True,
+    },
+}
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_loads_users_me_mcp_servers_the_sdk_cannot_read(preset_name, capsys):
+    # openhands-sdk 1.59 returns {} for the {name: server} map (automation#93).
+    load = _load_preset_mcp_loader(preset_name, lambda: _USERS_ME_MCP_CONFIG)
+
+    mcp_config = load(_workspace_returning({}))
+
+    assert dump_mcp_config(mcp_config) == {
+        "jira-dc": {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-atlassian"],
+            "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        },
+        "tools": {
+            "url": "https://mcp.example.com/mcp",
+            "transport": "http",
+            "auth": {"strategy": "bearer", "value": "tools-token"},
+        },
+    }
+    out = capsys.readouterr().out
+    assert "servers: ['jira-dc', 'tools']" in out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert "OAuth" in out
+    assert "linear-access-token" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reports_configured_servers_it_could_not_load(preset_name, capsys):
+    users_me = {
+        "linear": _USERS_ME_MCP_CONFIG["linear"],
+        "broken": {"transport": "stdio", "env": {"TOKEN": "broken-secret"}},
+    }
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert (
+        "MCP server 'broken' is configured but not loaded: "
+        "its settings could not be read"
+    ) in out
+    assert "broken-secret" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("users_me_mcp_config", [None, {}])
+def test_preset_reports_when_no_mcp_servers_are_configured(
+    preset_name, users_me_mcp_config, capsys
+):
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me_mcp_config)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "no MCP servers configured" in out
+    assert "WARNING" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_preset_keeps_sdk_mcp_servers_without_reading_users_me(preset_name, local_mode):
+    """An SDK that reads the map (or a local agent server) is used as is."""
+
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read")
+
+    load = _load_preset_mcp_loader(
+        preset_name, users_me_not_expected, local_mode=local_mode
+    )
+    sdk_servers = coerce_mcp_config({"fetch": {"command": "uvx"}})
+
+    assert load(_workspace_returning(sdk_servers)) == sdk_servers
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_local_preset_does_not_read_users_me(preset_name, capsys):
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read in local mode")
+
+    load = _load_preset_mcp_loader(preset_name, users_me_not_expected, local_mode=True)
+
+    assert load(_workspace_returning({})) == {}
+    assert "no MCP servers configured" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reads_users_me_with_unmasked_secrets(preset_name, monkeypatch):
+    import httpx
+
+    requests: list[dict[str, Any]] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        requests.append({"url": url, "params": params, "headers": headers})
+        return httpx.Response(
+            200,
+            json={"mcp_config": {"fetch": {"command": "uvx"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_users_me_mcp_config"},
+        {
+            "api_url": "https://ohe.example.com",
+            "api_key": "automation-key",
+            "session_key": "session-key",
+        },
+    )
+
+    assert namespace["_users_me_mcp_config"]() == {"fetch": {"command": "uvx"}}
+    assert requests == [
+        {
+            "url": "https://ohe.example.com/api/v1/users/me",
+            "params": {"expose_secrets": "true"},
+            "headers": {
+                "Authorization": "Bearer automation-key",
+                "X-Session-API-Key": "session-key",
+            },
+        }
+    ]
+
+
 _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
 
 
