@@ -23,8 +23,8 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (cloud sandboxes export it
-                               too, for standalone scripts; it does not pick the mode)
+  AGENT_SERVER_URL           - local agent server URL (local mode only); it never
+                               picks the mode
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 

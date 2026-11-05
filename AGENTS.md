@@ -217,7 +217,7 @@ Completion is handled asynchronously:
 | `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
 | `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
 | `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use. `AGENT_SERVER_URL` never decides this, whether it is set or not. Without the variable (a service from 1.27.0 or earlier) the presets treat `SANDBOX_ID` as cloud and its absence as local |
-| `AGENT_SERVER_URL` | Local backend; cloud dispatcher and `run_automation()` (the sandbox's exposed agent-server URL) | Agent-server URL from the sandbox's point of view, so standalone (non-SDK) scripts can reach it |
+| `AGENT_SERVER_URL` | Local backend only; never exported into a cloud sandbox | Agent-server URL from the sandbox's point of view. Scripts stored in existing automations (catalog bundles, scripts written from the openhands-automation skill, preset runners from 1.27.0 and earlier) read its presence as "local Agent Canvas", so a cloud run must not get it |
 | `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |

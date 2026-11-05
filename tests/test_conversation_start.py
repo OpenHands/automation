@@ -1451,10 +1451,10 @@ class TestExecuteRunStartsTheConversation:
         mock_settings,
         mock_client,
     ):
-        """Cloud sandboxes no longer receive AGENT_SERVER_URL. The runner a
-        1.27.0 preset gets at dispatch takes its mode from AUTOMATION_RUN_MODE,
-        so it runs in cloud mode, attached to the started conversation, with
-        or without that variable."""
+        """Cloud sandboxes do not receive AGENT_SERVER_URL. The runner a 1.27.0
+        preset gets at dispatch takes its mode from AUTOMATION_RUN_MODE, so it
+        runs in cloud mode, attached to the started conversation, and would
+        even if the variable were set."""
         run = await self._run(
             async_session_factory,
             preset_metadata=preset_metadata,
@@ -1494,7 +1494,8 @@ class TestExecuteRunStartsTheConversation:
             main = member.read().decode()
         detect = _function_from_source(main, "_detect_execution_mode", {})
         env_vars = mock_execute.await_args.kwargs["env_vars"]
-        cloud_env = {k: v for k, v in env_vars.items() if k != "AGENT_SERVER_URL"}
+        assert "AGENT_SERVER_URL" not in env_vars
+        cloud_env = dict(env_vars)
         assert detect(cloud_env) == ("cloud", "AUTOMATION_RUN_MODE")
         assert detect({**cloud_env, "AGENT_SERVER_URL": "http://agent.test"}) == (
             "cloud",

@@ -499,8 +499,8 @@ class CloudSandboxBackend(ExecutionBackend):
         return {
             "OPENHANDS_API_KEY": self._api_key,
             "OPENHANDS_CLOUD_API_URL": self.api_url,
-            # The presets pick their workspace from this. AGENT_SERVER_URL is
-            # exported in cloud sandboxes too (#680), so it cannot mean "local".
+            # The presets pick their workspace from this. Cloud runs never
+            # get AGENT_SERVER_URL; scripts read it as a local Agent Canvas.
             "AUTOMATION_RUN_MODE": "cloud",
         }
 
