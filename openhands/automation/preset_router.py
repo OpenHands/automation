@@ -429,6 +429,9 @@ def with_current_preset_runner(tarball_bytes: bytes) -> bytes:
     current one; the stored tarball is not rewritten. A tarball that is not a
     preset (no ``prompt.txt``, or a ``main.py`` that is not a preset runner) is
     returned as is.
+
+    On Windows the run also gets ``setup.py`` (see ``_add_setup_scripts``), so
+    a preset created before the service shipped it still runs there.
     """
     try:
         with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
@@ -445,9 +448,12 @@ def with_current_preset_runner(tarball_bytes: bytes) -> bytes:
     )
     if kind is None:
         return tarball_bytes
-    files = (
+    files = dict(
         _load_prompt_preset_files() if kind == "prompt" else _load_plugin_preset_files()
     )
+    if os.name != "nt":
+        # A missing file is added, and only a Windows agent server uses setup.py.
+        del files["setup.py"]
     return _replace_files_in_tarball(tarball_bytes, files) or tarball_bytes
 
 
