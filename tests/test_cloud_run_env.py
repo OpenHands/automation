@@ -29,11 +29,7 @@ from openhands.automation.backends import (
     LocalAgentServerBackend,
 )
 from openhands.automation.dispatcher import _execute_run
-from openhands.automation.execution import (
-    DispatchResult,
-    build_tarball,
-    run_automation,
-)
+from openhands.automation.execution import build_tarball, run_automation
 from openhands.automation.git_sync.serializer import canonical_tarball_bytes
 from openhands.automation.models import (
     Automation,
@@ -343,21 +339,36 @@ async def _dispatch(
                     return_value=[],
                 )
             )
-        mock_execute = stack.enter_context(
+        # The real execute_in_context writes the env file the run sources; only
+        # the transfers into the sandbox are stubbed.
+        mock_upload = stack.enter_context(
+            patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+        )
+        stack.enter_context(
             patch(
-                "openhands.automation.dispatcher.execute_in_context",
+                "openhands.automation.execution._download_in_sandbox",
                 new_callable=AsyncMock,
-                return_value=DispatchResult(
-                    success=True, sandbox_id="sbx-1", bash_command_id="cmd-1"
-                ),
+            )
+        )
+        mock_start = stack.enter_context(
+            patch(
+                "openhands.automation.execution._start_bash",
+                new_callable=AsyncMock,
+                return_value="cmd-1",
             )
         )
         if mode == "cloud":
             await backend.get_api_key()
         await _execute_run(run, mock_settings, async_session_factory, mock_client)
 
-    assert mock_execute.await_args is not None, "the run was not dispatched"
-    return dict(mock_execute.await_args.kwargs["env_vars"])
+    assert mock_start.await_args is not None, "the run was not dispatched"
+    env_files = [
+        call.args[1]
+        for call in mock_upload.await_args_list
+        if str(call.args[2]).endswith(".env")
+    ]
+    assert len(env_files) == 1, "the run's env file was not uploaded"
+    return _exported_env(env_files[0])
 
 
 def _plugin_payload(tmp_path: Path, write) -> tuple:
@@ -495,6 +506,26 @@ class TestCloudRunsTakeTheCloudPath:
         assert env["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
 
 
+def _uses(source: str, match) -> list[tuple[ast.AST, list[ast.AST]]]:
+    """Every node of ``source`` that ``match`` accepts, with its ancestors."""
+    found: list[tuple[ast.AST, list[ast.AST]]] = []
+
+    def visit(node: ast.AST, parents: list[ast.AST]) -> None:
+        if match(node):
+            found.append((node, parents))
+        for child in ast.iter_child_nodes(node):
+            visit(child, [*parents, node])
+
+    visit(ast.parse(source), [])
+    return found
+
+
+def _names_the_variable(node: ast.AST) -> bool:
+    """``"AGENT_SERVER_URL"`` itself, as in ``os.environ["AGENT_SERVER_URL"]``,
+    ``os.environ.get(...)`` or ``os.getenv(...)``."""
+    return isinstance(node, ast.Constant) and node.value == "AGENT_SERVER_URL"
+
+
 class TestCurrentRunnersUseTheUrlOnlyLocally:
     """Nothing in today's runners needs AGENT_SERVER_URL in a cloud sandbox:
     they read it only on their local-mode branch."""
@@ -509,22 +540,60 @@ class TestCurrentRunnersUseTheUrlOnlyLocally:
             for parent in parents
         )
 
+    @staticmethod
+    def _allowed_read(node: ast.AST, parents: list[ast.AST]) -> bool:
+        """Where a runner may name the variable: the ``agent_server_url``
+        assignment, the mode fallback for services that predate
+        AUTOMATION_RUN_MODE, and the local-mode branch."""
+        return (
+            any(
+                isinstance(parent, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "agent_server_url"
+                    for target in parent.targets
+                )
+                for parent in parents
+            )
+            or any(
+                isinstance(parent, ast.FunctionDef)
+                and parent.name == "_detect_execution_mode"
+                for parent in parents
+            )
+            or TestCurrentRunnersUseTheUrlOnlyLocally._local_only(node, parents)
+        )
+
     @pytest.mark.parametrize("kind", ["prompt", "plugin", "plugin_spec"])
     def test_agent_server_url_is_used_only_in_local_mode(self, kind):
-        module = ast.parse(_current_runner(kind))
-        uses: list[tuple[ast.AST, list[ast.AST]]] = []
-
-        def visit(node: ast.AST, parents: list[ast.AST]) -> None:
-            if isinstance(node, ast.Name) and node.id == "agent_server_url":
-                if isinstance(node.ctx, ast.Load):
-                    uses.append((node, parents))
-            for child in ast.iter_child_nodes(node):
-                visit(child, [*parents, node])
-
-        visit(module, [])
+        uses = _uses(
+            _current_runner(kind),
+            lambda node: (
+                isinstance(node, ast.Name)
+                and node.id == "agent_server_url"
+                and isinstance(node.ctx, ast.Load)
+            ),
+        )
 
         assert uses, "the runner no longer reads agent_server_url"
         assert all(self._local_only(node, parents) for node, parents in uses)
+
+    @pytest.mark.parametrize("kind", ["prompt", "plugin", "plugin_spec"])
+    def test_the_variable_is_read_only_where_allowed(self, kind):
+        reads = _uses(_current_runner(kind), _names_the_variable)
+
+        assert reads, "the runner no longer reads AGENT_SERVER_URL"
+        assert all(self._allowed_read(node, parents) for node, parents in reads)
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["dispatcher.py", "execution.py", "backends/cloud.py"],
+)
+def test_cloud_env_code_never_names_the_variable(module):
+    """Guard: the code that builds a cloud run's environment never writes
+    AGENT_SERVER_URL (comments and docstrings aside)."""
+    source = (PRESETS_DIR.parent / module).read_text()
+
+    assert not _uses(source, _names_the_variable)
 
 
 # -- Local mode is unchanged ------------------------------------------------------
