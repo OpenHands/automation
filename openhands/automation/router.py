@@ -462,7 +462,13 @@ async def preflight_plugin_spec(
             manifest.runtime.plugins,
             allow_local_sources=allow_local_sources,
         )
-        suggested_trigger = resolve_suggested_trigger(manifest, {})
+        # Static suggested_trigger can be returned directly. Templated triggers
+        # need config the preflight doesn't have, so return null and let the
+        # frontend render the trigger once config is collected at install time.
+        if manifest.suggested_trigger_template is None:
+            suggested_trigger = resolve_suggested_trigger(manifest, {})
+        else:
+            suggested_trigger = None
     except PluginSpecError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return PluginSpecPreflightResponse(

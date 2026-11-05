@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from urllib.parse import urlparse
 
 from jsonschema import (
@@ -57,6 +57,9 @@ PLUGIN_SPEC_PRESET_DIR = PRESETS_DIR / "plugin_spec"
 _PLUGIN_SPEC_PRESET_CACHE: dict[str, str] | None = None
 _CONFIG_TEMPLATE_RE = re.compile(
     r"{{\s*(?P<json>json\s+)?config\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
+)
+_FORM_TEMPLATE_RE = re.compile(
+    r"{{\s*(?P<json>json\s+)?form\.(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}"
 )
 _TRIGGER_ADAPTER: TypeAdapter[Trigger] = TypeAdapter(Trigger)
 
@@ -135,6 +138,14 @@ class AutomationPluginEntrypoint(BaseModel):
     working_dir: str = Field(default=".", min_length=1, max_length=200)
     setup_script: str | None = Field(default=None, min_length=1, max_length=200)
     bundle_files: dict[str, str] = Field(default_factory=dict)
+    bundle_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Catalog-only: a template mapping rendered against the validated "
+            "form config and written as config.json at the tarball root. "
+            "Templates use {{form.<arg>}} syntax."
+        ),
+    )
 
     @field_validator("command")
     @classmethod
@@ -161,6 +172,17 @@ class AutomationPluginEntrypoint(BaseModel):
                 raise ValueError(
                     "entrypoint.arguments is only valid for conversation runners"
                 )
+            if self.bundle_files or self.bundle_config:
+                if self.working_dir not in ("", "."):
+                    raise ValueError(
+                        "entrypoint.bundle_files/bundle_config are self-contained "
+                        "and cannot be combined with working_dir"
+                    )
+                if self.setup_script is not None:
+                    raise ValueError(
+                        "entrypoint.bundle_files/bundle_config cannot be combined "
+                        "with setup_script"
+                    )
             return self
         if self.setup_script is not None:
             raise ValueError(
@@ -501,6 +523,13 @@ def preflight_manifest(
         except PluginSourceError as exc:
             if exc.code != "invalid_plugin":
                 raise
+            # Only fall through to the catalog path when the plugin has no
+            # plugin.json (catalog manifests use manifest.json instead). Other
+            # invalid_plugin errors — bad JSON, non-object manifest, Plugin.load
+            # failures — indicate a broken plugin and must surface, not silently
+            # fall back to a catalog checkout that may accept invalid metadata.
+            if "plugin.json not found" not in exc.message:
+                raise
             # Catalog plugins (no .plugin/plugin.json) fall through to here.
             # Use a throwaway temp dir for the checkout — the preflight is a
             # read-only operation that only reads the manifest, so it should
@@ -592,7 +621,7 @@ def _read_manifest(plugin_path: Path) -> AutomationPluginManifest:
     )
 
 
-_CATALOG_FIELD_TYPE_MAP: dict[str, str] = {
+_CATALOG_FIELD_TYPE_MAP: Final[dict[str, str]] = {
     "textarea": "string",
     "text": "string",
     "string": "string",
@@ -600,25 +629,39 @@ _CATALOG_FIELD_TYPE_MAP: dict[str, str] = {
     "integer": "integer",
     "boolean": "boolean",
     "checkbox": "boolean",
+    "select": "string",
+    "enum": "string",
+    "llm-profile": "string",
+    "repo-picker": "string",
 }
 
 
 def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
     """Convert a catalog setup.form.args entry to a JSON Schema property."""
     catalog_type = arg.get("type", "string")
-    schema: dict[str, Any] = {
-        "type": _CATALOG_FIELD_TYPE_MAP.get(catalog_type, "string")
-    }
+    if catalog_type not in _CATALOG_FIELD_TYPE_MAP:
+        raise PluginSpecError(
+            f"Unknown catalog field type: {catalog_type!r}. "
+            f"Supported: {', '.join(sorted(_CATALOG_FIELD_TYPE_MAP))}"
+        )
+
+    item_type = _CATALOG_FIELD_TYPE_MAP[catalog_type]
+    is_multiple = bool(arg.get("multiple"))
+    if is_multiple:
+        schema: dict[str, Any] = {"type": "array", "items": {"type": item_type}}
+    else:
+        schema = {"type": item_type}
 
     if catalog_type == "textarea":
         schema["format"] = "textarea"
     elif catalog_type == "timezone":
         schema["format"] = "timezone"
     elif catalog_type in ("select", "enum") and arg.get("options"):
-        schema["enum"] = [
-            opt.get("value", opt) if isinstance(opt, dict) else opt
-            for opt in arg["options"]
-        ]
+        options = _catalog_options(arg["options"])
+        if is_multiple:
+            schema["items"]["enum"] = options
+        else:
+            schema["enum"] = options
 
     if arg.get("label"):
         schema["title"] = arg["label"]
@@ -636,14 +679,23 @@ def _convert_catalog_arg_to_schema(arg: dict[str, Any]) -> dict[str, Any]:
         schema["minimum"] = constraints["minimum"]
     if "maximum" in constraints:
         schema["maximum"] = constraints["maximum"]
+    if "pattern" in constraints:
+        schema["pattern"] = constraints["pattern"]
 
-    if arg.get("options") and "enum" not in schema:
-        schema["enum"] = [
-            opt.get("value", opt) if isinstance(opt, dict) else opt
-            for opt in arg["options"]
-        ]
+    if arg.get("options") and "enum" not in schema and "enum" not in schema.get(
+        "items", {}
+    ):
+        options = _catalog_options(arg["options"])
+        if is_multiple:
+            schema["items"]["enum"] = options
+        else:
+            schema["enum"] = options
 
     return schema
+
+
+def _catalog_options(options: list[Any]) -> list[Any]:
+    return [opt.get("value", opt) if isinstance(opt, dict) else opt for opt in options]
 
 
 def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManifest:
@@ -680,12 +732,18 @@ def _convert_catalog_manifest(catalog: dict[str, Any]) -> AutomationPluginManife
 
     entrypoint_command = bundle.get("entrypoint") or "python3 main.py"
     bundle_files = bundle.get("files") or {}
+    bundle_config = bundle.get("config") or None
+    if bundle_config is not None and not isinstance(bundle_config, dict):
+        raise PluginSpecError(
+            "Catalog manifest setup.bundle.config must be an object"
+        )
     try:
         entrypoint = AutomationPluginEntrypoint(
             runner="script",
             command=entrypoint_command,
             working_dir=".",
             bundle_files=bundle_files,
+            bundle_config=bundle_config,
         )
     except Exception as exc:
         raise PluginSpecError(
@@ -807,6 +865,31 @@ def _render_config_templates(value: Any, config: dict[str, Any]) -> Any:
         return str(resolved)
 
     return _CONFIG_TEMPLATE_RE.sub(replace, value)
+
+
+def _render_form_templates(value: Any, config: dict[str, Any]) -> Any:
+    """Render {{form.<path>}} templates against validated plugin config.
+
+    Catalog bundle.config maps form arg names to config file keys, e.g.
+    ``{"repos": "{{form.repositories}}"}}``. The config dict is keyed by the
+    form arg name, so ``form.repositories`` resolves to ``config["repositories"]``.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _render_form_templates(item, config) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_render_form_templates(item, config) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        resolved = _config_value(config, match.group("path"))
+        if match.group("json"):
+            return json.dumps(resolved)
+        return str(resolved)
+
+    return _FORM_TEMPLATE_RE.sub(replace, value)
 
 
 def resolve_suggested_trigger(
@@ -1008,6 +1091,11 @@ def _build_runtime_metadata_tarball(
                 f'bash "$AUTOMATION_PLUGIN_ROOT/{setup_script}"\n'
             )
             _add_bytes(tar, "setup.sh", wrapper.encode(), mode=0o755)
+        if manifest.entrypoint.bundle_config:
+            rendered = _render_form_templates(
+                manifest.entrypoint.bundle_config, config
+            )
+            _add_json(tar, "config.json", rendered)
         if bundle_files:
             for dest, data in bundle_files.items():
                 _safe_add_tar_path(tar, dest, data)
@@ -1015,10 +1103,25 @@ def _build_runtime_metadata_tarball(
     return buf.read()
 
 
+_RESERVED_BUNDLE_DESTINATIONS: Final[frozenset[str]] = frozenset(
+    {
+        "config.json",
+        f"{AUTOMATION_DIR}/config.json",
+        f"{AUTOMATION_DIR}/execution.json",
+        f"{AUTOMATION_DIR}/plugins.json",
+        "setup.sh",
+    }
+)
+
+
 def _safe_add_tar_path(tar: tarfile.TarFile, name: str, data: bytes) -> None:
-    """Add a file to the tarball, rejecting path escapes."""
+    """Add a file to the tarball, rejecting path escapes and reserved names."""
     if name.startswith("/") or ".." in PurePosixPath(name).parts:
         raise PluginSpecError(f"Bundle file path escapes tarball root: {name}")
+    if name in _RESERVED_BUNDLE_DESTINATIONS:
+        raise PluginSpecError(
+            f"Bundle file destination is reserved: {name}"
+        )
     _add_bytes(tar, name, data, mode=0o755 if name.endswith(".sh") else 0o644)
 
 

@@ -612,7 +612,9 @@ def test_preflight_catalog_manifest_uses_temp_dir_not_home_cache(tmp_path, monke
 
     class _InvalidPluginCM:
         def __enter__(self):
-            raise PluginSourceError("invalid_plugin", "no .plugin/plugin.json")
+            raise PluginSourceError(
+                "invalid_plugin", "Invalid plugin: plugin.json not found."
+            )
 
         def __exit__(self, *exc):
             return False
@@ -707,7 +709,9 @@ def _patch_catalog_preflight(monkeypatch):
 
     class _InvalidPluginCM:
         def __enter__(self):
-            raise PluginSourceError("invalid_plugin", "no .plugin/plugin.json")
+            raise PluginSourceError(
+                "invalid_plugin", "Invalid plugin: plugin.json not found."
+            )
 
         def __exit__(self, *exc):
             return False
@@ -774,6 +778,258 @@ def test_build_execution_payload_bundles_files_and_skips_fetch(tmp_path, monkeyp
         assert main_file.read() == b"print('hello from bundle')\n"
         assert ".automation/config.json" in names
         assert ".automation/execution.json" in names
+
+
+def test_build_execution_payload_renders_bundle_config_at_root(
+    tmp_path, monkeypatch
+):
+    """Catalog bundle.config templates are rendered and written as config.json
+    at the tarball root, with form arg names mapped to config file keys."""
+    repo_root = _write_catalog_manifest_with_bundle(tmp_path)
+    _patch_catalog_preflight(monkeypatch)
+
+    tarball, _env, _runtime, _fetches = build_execution_payload(
+        plugin_spec={
+            "plugin": {"source": str(repo_root)},
+            "config": {"feeds": "https://example.com/rss\nhttps://example.org"},
+        },
+        agent_profile_id=None,
+        agent_profile_name=None,
+        llm_profile_name=None,
+        work_dir="/tmp/automation-run",
+    )
+
+    with tarfile.open(fileobj=BytesIO(tarball), mode="r:gz") as tar:
+        config_file = tar.extractfile("config.json")
+        assert config_file is not None
+        rendered = json.loads(config_file.read().decode())
+        assert rendered == {"feeds": "https://example.com/rss\nhttps://example.org"}
+
+
+def test_build_execution_payload_bundle_config_missing_form_value_raises(
+    tmp_path, monkeypatch
+):
+    """A bundle.config template referencing an unsubmitted form arg (with no
+    default) must raise PluginSpecError, not silently produce an empty config."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {
+                            "cron": {"schedule": {"default": "0 8 * * *"}}
+                        },
+                        "args": {
+                            "feeds": {"type": "textarea", "required": False}
+                        },
+                    },
+                    "bundle": {
+                        "entrypoint": "python3 main.py",
+                        "files": {"main.py": "scripts/main.py"},
+                        "config": {"feeds": "{{form.feeds}}"},
+                    },
+                },
+            }
+        )
+    )
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "main.py").write_text("print('hello')\n")
+    _patch_catalog_preflight(monkeypatch)
+
+    with pytest.raises(PluginSpecError, match="missing config value"):
+        build_execution_payload(
+            plugin_spec={"plugin": {"source": str(repo_root)}, "config": {}},
+            agent_profile_id=None,
+            agent_profile_name=None,
+            llm_profile_name=None,
+            work_dir="/tmp/automation-run",
+        )
+
+
+def test_catalog_arg_multiple_true_produces_array_schema(tmp_path):
+    """A catalog arg with multiple: true must produce an array schema, not a
+    string schema (which would 422 on list values)."""
+    catalog_dir = tmp_path / "catalog-plugin"
+    catalog_dir.mkdir()
+    (catalog_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {"cron": {"schedule": {"default": "0 8 * * *"}}},
+                        "args": {
+                            "repositories": {
+                                "type": "repo-picker",
+                                "label": "Repos",
+                                "multiple": True,
+                                "required": True,
+                            }
+                        },
+                    },
+                    "bundle": {"entrypoint": "python3 main.py"},
+                },
+            }
+        )
+    )
+
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(catalog_dir)),
+        allow_local_sources=True,
+    )
+
+    prop = manifest.config_schema["properties"]["repositories"]
+    assert prop["type"] == "array"
+    assert prop["items"]["type"] == "string"
+
+
+def test_catalog_arg_unknown_type_raises(tmp_path):
+    """An unknown catalog field type must raise, not silently fall back to
+    string."""
+    catalog_dir = tmp_path / "catalog-plugin"
+    catalog_dir.mkdir()
+    (catalog_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {"cron": {"schedule": {"default": "0 8 * * *"}}},
+                        "args": {
+                            "weird": {"type": "nonexistent-type", "required": True}
+                        },
+                    },
+                    "bundle": {"entrypoint": "python3 main.py"},
+                },
+            }
+        )
+    )
+
+    with pytest.raises(PluginSpecError, match="Unknown catalog field type"):
+        preflight_manifest(
+            AutomationPluginSource(source=str(catalog_dir)),
+            allow_local_sources=True,
+        )
+
+
+def test_catalog_arg_pattern_constraint_is_translated(tmp_path):
+    """A pattern constraint must be translated to the JSON Schema, not
+    dropped."""
+    catalog_dir = tmp_path / "catalog-plugin"
+    catalog_dir.mkdir()
+    (catalog_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "test-catalog",
+                "name": "Test Catalog Automation",
+                "setup": {
+                    "version": "1.0",
+                    "mode": "direct",
+                    "form": {
+                        "triggers": {"cron": {"schedule": {"default": "0 8 * * *"}}},
+                        "args": {
+                            "slug": {
+                                "type": "string",
+                                "constraints": {"pattern": "^[a-z-]+$"},
+                            }
+                        },
+                    },
+                    "bundle": {"entrypoint": "python3 main.py"},
+                },
+            }
+        )
+    )
+
+    _resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(catalog_dir)),
+        allow_local_sources=True,
+    )
+
+    assert manifest.config_schema["properties"]["slug"]["pattern"] == "^[a-z-]+$"
+
+
+def test_bundle_files_rejects_reserved_destination(tmp_path, monkeypatch):
+    """A bundle file destination that collides with a reserved name must
+    raise, not silently overwrite validated config."""
+    repo_root = _write_catalog_manifest_with_bundle(tmp_path)
+    _patch_catalog_preflight(monkeypatch)
+
+    # Overwrite manifest to use a reserved destination
+    manifest_data = json.loads((repo_root / "manifest.json").read_text())
+    manifest_data["setup"]["bundle"]["files"] = {
+        "config.json": "scripts/main.py"
+    }
+    (repo_root / "manifest.json").write_text(json.dumps(manifest_data))
+
+    with pytest.raises(PluginSpecError, match="reserved"):
+        build_execution_payload(
+            plugin_spec={"plugin": {"source": str(repo_root)}, "config": {}},
+            agent_profile_id=None,
+            agent_profile_name=None,
+            llm_profile_name=None,
+            work_dir="/tmp/automation-run",
+        )
+
+
+def test_bundle_files_rejects_working_dir_combo():
+    """bundle_files cannot be combined with working_dir on a general
+    (non-catalog) entrypoint."""
+    from openhands.automation.plugin_specs import AutomationPluginEntrypoint
+
+    with pytest.raises(ValueError, match="bundle_files.*working_dir"):
+        AutomationPluginEntrypoint(
+            runner="script",
+            command="python3 main.py",
+            working_dir="subdir",
+            bundle_files={"main.py": "scripts/main.py"},
+        )
+
+
+def test_bundle_files_rejects_setup_script_combo():
+    """bundle_files cannot be combined with setup_script."""
+    from openhands.automation.plugin_specs import AutomationPluginEntrypoint
+
+    with pytest.raises(ValueError, match="bundle_files.*setup_script"):
+        AutomationPluginEntrypoint(
+            runner="script",
+            command="python3 main.py",
+            setup_script="install.sh",
+            bundle_files={"main.py": "scripts/main.py"},
+        )
+
+
+def test_preflight_returns_null_trigger_for_templated_manifest(tmp_path):
+    """Preflight must return null suggested_trigger when the manifest uses a
+    template (which needs config the preflight doesn't have), not 422."""
+    plugin = write_plugin(tmp_path)
+    data = json.loads((plugin / "automation-plugin.json").read_text())
+    data["suggested_trigger_template"] = {
+        "type": "cron",
+        "schedule": "{{ json config.schedule }}",
+        "timezone": "UTC",
+    }
+    data.pop("suggested_trigger", None)
+    _write_automation_manifest(plugin, data)
+
+    resolved_ref, manifest = preflight_manifest(
+        AutomationPluginSource(source=str(plugin)),
+        allow_local_sources=True,
+    )
+    assert manifest.suggested_trigger_template is not None
+    assert manifest.suggested_trigger is None
 
 
 def test_build_execution_payload_bundle_files_missing_source(tmp_path, monkeypatch):
