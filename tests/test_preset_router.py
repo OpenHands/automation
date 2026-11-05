@@ -40,6 +40,10 @@ PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "prese
 
 def _docker_available() -> bool:
     """Check if Docker is available for testcontainers."""
+    # Windows has no AF_UNIX; without this guard the module fails to import
+    # there and none of its tests run.
+    if not hasattr(socket, "AF_UNIX"):
+        return False
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect("/var/run/docker.sock")

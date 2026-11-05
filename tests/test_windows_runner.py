@@ -4,11 +4,13 @@ The runner is plain Python, so these tests run it the way the agent server
 does (``python <runner> <spec>``) on any OS.
 """
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 from openhands.automation import windows_runner
@@ -112,3 +114,50 @@ def test_setup_sh_alone_fails_with_a_clear_message(tmp_path):
     assert result.returncode == 1
     assert "setup.py" in result.stderr
     assert not (work_dir / "main-ran").exists()
+
+
+def test_work_dir_with_spaces_and_quoted_arguments(tmp_path):
+    """Windows profile paths often hold spaces and non-ASCII letters."""
+    work_dir = tmp_path / "automation runs" / "José Müller"
+    runner = _stage(
+        work_dir,
+        {
+            "main.py": (
+                "import json, pathlib, sys\n"
+                "pathlib.Path('argv.json').write_text(json.dumps(sys.argv[1:]))\n"
+            ),
+        },
+        entrypoint='python main.py "two words" plain',
+        env={"PATH": _PATH},
+    )
+
+    result = _run(runner)
+
+    # No setup script at all is fine: the entrypoint runs straight away.
+    assert result.returncode == 0, result.stderr
+    assert json.loads((work_dir / "argv.json").read_text()) == ["two words", "plain"]
+
+
+def test_tarball_member_outside_the_work_dir_is_rejected(tmp_path):
+    work_dir = tmp_path / "run"
+    runner = _stage(
+        work_dir,
+        {"main.py": "open('main-ran', 'w').close()\n"},
+        entrypoint="python main.py",
+        env={"PATH": _PATH, "PRIVATE_VALUE": "secret"},
+    )
+    payload = b"escaped"
+    crafted = io.BytesIO()
+    with tarfile.open(fileobj=crafted, mode="w:gz") as tar:
+        member = tarfile.TarInfo("../escaped.txt")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+    (work_dir / ".automation-run.tar.gz").write_bytes(crafted.getvalue())
+
+    result = _run(runner)
+
+    assert result.returncode != 0
+    assert not (tmp_path / "escaped.txt").exists()
+    assert not (work_dir / "main-ran").exists()
+    # The spec holds the injected secrets: it is gone even though the run failed.
+    assert not (work_dir / ".automation-run.json").exists()

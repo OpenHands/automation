@@ -6,6 +6,7 @@ Only tests pure logic that can run without a network.  The e2e flow
 
 import io
 import json
+import os
 import subprocess
 import tarfile
 from pathlib import Path, PureWindowsPath
@@ -275,6 +276,10 @@ class TestExecuteInContextErrors:
         assert result.sandbox_id == "test-sandbox-id"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="runs the POSIX env-file prefix with bash; Windows uses windows_runner.py",
+)
 class TestPrivateEnvironmentInjection:
     def test_env_file_is_loaded_and_removed(self, tmp_path):
         env_path = tmp_path / "private.env"
@@ -906,3 +911,48 @@ class TestWindowsAgentServer:
             f'del /f /q "{self.WORK_DIR}\\.automation-run.json"',
             timeout=int(get_config().http.http_timeout),
         )
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_successful_start_leaves_the_spec_for_the_runner(
+        self, mock_upload, mock_start_bash, mock_bash
+    ):
+        """The runner starts after this call returns (uv may first fetch a
+        Python), so deleting the spec here would fail the run."""
+        mock_start_bash.return_value = "cmd-123"
+
+        result = await execute_in_context(
+            agent_url="http://127.0.0.1:18000",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=self.WORK_DIR,
+            env_vars={"PRIVATE_VALUE": "secret"},
+        )
+
+        assert result.success is True
+        mock_bash.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._start_bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    async def test_run_without_env_vars_sends_an_empty_env(
+        self, mock_upload, mock_start_bash
+    ):
+        """The runner merges ``spec["env"]`` into its environment, so the spec
+        must carry a mapping even when the run has no variables."""
+        mock_start_bash.return_value = "cmd-123"
+
+        await execute_in_context(
+            agent_url="http://127.0.0.1:18000",
+            session_key="session-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            work_dir=self.WORK_DIR,
+        )
+
+        uploads = {c.args[2]: c.args[1] for c in mock_upload.await_args_list}
+        spec = json.loads(uploads[f"{self.WORK_DIR}\\.automation-run.json"])
+        assert spec["env"] == {}
