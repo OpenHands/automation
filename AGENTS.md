@@ -197,14 +197,15 @@ Important notes:
 The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 
 1. **Fetch per-user API key** — `get_api_key_for_automation_run()` mints a key via the service key
-2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox
+2. **Resolve tarball** — Internal (`oh-internal://`) downloads from GCS; external (HTTP) URLs are downloaded inside the sandbox. A prompt or plugin preset tarball gets the service's current runner (`main.py`, `setup.sh`, `finish_tool_hook.py`) in place of the one baked in at creation (`with_current_preset_runner`); the stored tarball is not rewritten
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
+6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`): those on a provider and host the owner is connected to, from `provider_tokens_set` in `GET /api/v1/settings`. The runner clones the rest, and all of them if that read fails. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before; any other refusal fails the run. Local mode and custom tarballs skip this step.
+7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
    - Native Windows local mode (the run's work dir is a drive path): the agent-server runs commands with cmd.exe, so the tarball, a JSON spec (env vars + entrypoint) and `windows_runner.py` are uploaded into the work dir and `uv run --no-project python <runner> <spec>` does the same steps, running `setup.py` instead of `setup.sh`
-7. **Return immediately** — Dispatcher does not wait for completion
+8. **Return immediately** — Dispatcher does not wait for completion
 
 Completion is handled asynchronously:
 - **Happy path**: SDK inside sandbox POSTs to `POST /v1/runs/{id}/complete` on the service (injected as `AUTOMATION_CALLBACK_URL`; the service serves it under the `/api/automation` base path)
@@ -216,14 +217,17 @@ Completion is handled asynchronously:
 |----------|--------|---------|
 | `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
 | `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
-| `AGENT_SERVER_URL` | Local backend | Local agent-server URL from the sandbox's point of view |
-| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured | Automation service key for local callbacks (not the agent-server session key) |
+| `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use. `AGENT_SERVER_URL` never decides this, whether it is set or not. Without the variable (a service from 1.27.0 or earlier) the presets treat `SANDBOX_ID` as cloud and its absence as local |
+| `AGENT_SERVER_URL` | Local backend only; never exported into a cloud sandbox | Agent-server URL from the sandbox's point of view. Scripts stored in existing automations (catalog bundles, scripts written from the openhands-automation skill, preset runners from 1.27.0 and earlier) read its presence as "local Agent Canvas", so a cloud run must not get it |
+| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
 | `AUTOMATION_RUN_ID` | Run ID | Included in callback payload |
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
-| `AUTOMATION_CONVERSATION_ID` | Derived by the service, `continue_conversation` runs only | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
+| `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it, and register it with the workspace so the completion callback reports it as the run's conversation. Absent otherwise |
+| `AUTOMATION_RUNNER_REPOS` | JSON list, set with `AUTOMATION_CONVERSATION_STARTED` when the app server cloned some of a preset's repositories | The repositories the preset runner still clones itself; without it the runner clones every entry of `repos_config.json` |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 
@@ -293,6 +297,8 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 4. Uploads the tarball to storage (creates `TarballUpload` record)
 5. Creates the `Automation` record referencing the internal upload
 
+Each run swaps in the current `main.py`, `setup.sh` and `finish_tool_hook.py`, so an automation created on an earlier release runs today's runner with its own prompt and repository configuration.
+
 #### Files
 
 - `openhands/automation/preset_router.py` - Endpoint and tarball generation logic
@@ -316,6 +322,37 @@ The `/v1/preset/prompt` endpoint allows creating automations by simply providing
 - Generated presets use `.venv/bin/python main.py` on POSIX (`.venv/Scripts/python.exe main.py` on Windows) as the entrypoint and `setup.sh` as the setup script
 - Prompt and plugin preset tarballs created on Windows also carry `presets/setup.py`, the Python counterpart of their `setup.sh`; keep the two in step
 - Prompt and plugin presets live in separate subdirectories under `openhands/automation/presets/`
+
+## Private Plugin Sources
+
+A plugin-spec automation (and a plugin preset pinned for a service account)
+can use a plugin from a private repository. The source names its credential
+with a `${NAME}` placeholder as the URL user name or password, for example
+`https://x-access-token:${GITHUB_TOKEN}@github.com/org/plugins.git`. It is
+stored and returned with the placeholder; literal credentials are rejected
+(`AutomationPluginSource.validate_source`), and so are placeholders anywhere
+else in the source or in `ref`.
+
+- Every fetch resolves `NAME` for the identity the automation runs as and
+  hands the SDK `LookupSecret` references, never a value
+  (`plugin_secrets.py`): the create and PATCH preflight, the dispatch preflight,
+  `validate_required_plugins`, and the agent server's `POST /api/plugins/fetch`
+  (fresh references, after the sandbox starts).
+- Local mode resolves through the agent server's secret store,
+  `/api/settings/secrets/{name}`; the agent server's own reference uses
+  `AUTOMATION_SANDBOX_AGENT_SERVER_URL` when set.
+- Cloud mode asks the app server for short-lived references,
+  `POST /api/service/users/{user_id}/orgs/{org_id}/secret-lookups` with the
+  service key. A server without that route answers 404 `Not Found`, and the
+  source is refused with "not supported on this deployment yet".
+- `missing_secret`, `auth_failed`, `invalid_source` and refused lookups are
+  permanent and disable the automation; an unreachable lookup is transient.
+  Errors name the secret, never its value.
+- A conversation-runner run then has the app server start its conversation
+  with the same plugin spec, placeholder included (`_conversation_start`). The
+  sandbox's agent server fills the placeholder from the conversation's secrets,
+  which the app server may scope to the agent profile, and uses the checkout
+  the fetch pinned.
 
 ## Catalog Bundles
 

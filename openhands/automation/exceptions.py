@@ -85,3 +85,37 @@ class SandboxProvisioningError(Exception):
         if self.timed_out:
             return "sandbox_ready_timeout"
         return f"sandbox_{self.status.lower()}"
+
+
+class ConversationStartUnavailable(Exception):
+    """The OpenHands API cannot start a conversation in a run's sandbox.
+
+    An older app server has no such route or rejects the request body. The run
+    keeps the previous behavior: the runner creates its own conversation.
+    """
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class ConversationStartError(Exception):
+    """The OpenHands API did not start the run's conversation as requested.
+
+    ``transient`` marks failures a later run may not meet (a start task that
+    never finished). A refusal, a failed start task or a launch from a profile
+    other than the requested one is final for this run.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        transient: bool = False,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.transient = transient
+        self.code = code

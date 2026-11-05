@@ -181,6 +181,20 @@ async def _upload(
     await workspace.file_upload(data, dest)
 
 
+async def upload_files(
+    agent_url: str, session_key: str, files: dict[str, bytes]
+) -> None:
+    """Write files into the execution environment, keyed by absolute path."""
+    workspace = AsyncRemoteWorkspace(
+        host=agent_url, api_key=session_key, working_dir="/"
+    )
+    try:
+        for path, data in files.items():
+            await _upload(workspace, data, path)
+    finally:
+        await workspace.reset_client()
+
+
 async def _bash(
     workspace: AsyncRemoteWorkspace,
     command: str,
@@ -503,8 +517,11 @@ async def run_automation(
 
     *env_vars* are exported before setup.sh and the entrypoint run,
     so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
-    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works.
+    The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
+    ``AUTOMATION_CALLBACK_API_KEY``) are **always** injected so the SDK's
+    ``local_agent_server_mode`` works and scripts can sign their completion
+    callback, along with ``AUTOMATION_RUN_MODE=cloud``. ``AGENT_SERVER_URL``
+    is not: stored scripts read it as running on a local Agent Canvas.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -555,6 +572,12 @@ async def run_automation(
             # get_llm() / get_secrets() inside the sandbox.
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
+            # The per-run API key used for callbacks is the same one the SDK
+            # authenticates with. AGENT_SERVER_URL is not exported: scripts
+            # read it as running on a local Agent Canvas.
+            env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
+            # This helper always runs in a cloud sandbox; say so.
+            env_vars.setdefault("AUTOMATION_RUN_MODE", "cloud")
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):

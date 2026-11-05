@@ -9,10 +9,12 @@ import os
 import re
 import tarfile
 import uuid
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+import httpx
 from jsonschema import (
     Draft202012Validator,
     ValidationError as JSONSchemaValidationError,
@@ -44,6 +46,7 @@ from openhands.automation.utils.timeout import validate_automation_timeout
 from openhands.sdk.extensions.fetch import SourceType, parse_extension_source
 from openhands.sdk.plugin import PluginSource, PluginSourceError, preflight_plugin
 from openhands.sdk.plugin.fetch import DEFAULT_CACHE_DIR, fetch_plugin_with_resolution
+from openhands.sdk.secret import SecretValue
 
 
 MANIFEST_NAME = "automation-plugin.json"
@@ -74,8 +77,102 @@ class PluginSpecError(ValueError):
         self.status_code = status_code
 
 
+# Resolves secret names to the references a plugin fetch expands its
+# placeholders from; see ``plugin_secrets``.
+PluginSecretLookup = Callable[[Collection[str]], Awaitable[Mapping[str, SecretValue]]]
+
+
+async def no_plugin_secrets(
+    names: Collection[str],  # noqa: ARG001
+) -> Mapping[str, SecretValue]:
+    """The lookup of a fetch that resolves no credentials."""
+    return {}
+
+
+# A placeholder is the whole user name or password of an http(s) URL: the SDK
+# expands it, from the secrets a fetch is given, only for that fetch.
+_SECRET_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_CREDENTIALS_MESSAGE = (
+    "plugin source URLs must not include credentials; name a secret with a "
+    "placeholder in the URL user info instead, for example "
+    "https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git"
+)
+_PLACEHOLDER_MESSAGE = (
+    "a ${NAME} placeholder is only allowed as the user name or password of an "
+    "http(s) plugin source URL"
+)
+
+
+def _url_userinfo_secret_names(source: str) -> list[str]:
+    """Secret names in the user info of an http(s) source, validating its form.
+
+    Raises:
+        ValueError: when the user info holds a literal credential, or a
+            placeholder appears anywhere else in the URL.
+    """
+    parsed = urlparse(source)
+    userinfo, has_userinfo, hostport = parsed.netloc.rpartition("@")
+    rest = source.split(parsed.netloc, 1)[-1] if parsed.netloc else source
+    if "${" in hostport or "${" in rest:
+        raise ValueError(_PLACEHOLDER_MESSAGE)
+    if not has_userinfo:
+        return []
+    username, has_password, password = userinfo.partition(":")
+    names: list[str] = []
+    if has_password:
+        # The password must be a placeholder; the user name may be literal
+        # (x-access-token, oauth2, a Data Center user name) or one too.
+        password_match = _SECRET_PLACEHOLDER_RE.fullmatch(password)
+        if password_match is None:
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        names.append(password_match.group(1))
+        if "${" in username:
+            username_match = _SECRET_PLACEHOLDER_RE.fullmatch(username)
+            if username_match is None:
+                raise ValueError(_PLACEHOLDER_MESSAGE)
+            names.append(username_match.group(1))
+    else:
+        # A lone user name is the credential itself (a token as user name).
+        username_match = _SECRET_PLACEHOLDER_RE.fullmatch(username)
+        if username_match is None:
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        names.append(username_match.group(1))
+    return names
+
+
+def plugin_source_secret_names(source: str) -> list[str]:
+    """The secret names a validated plugin source references, sorted."""
+    parsed = urlparse(source.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return []
+    return sorted(set(_url_userinfo_secret_names(source.strip())))
+
+
+def plugin_secret_names(
+    plugins: Iterable[AutomationPluginSource | Mapping[str, Any]],
+) -> list[str]:
+    """The secret names any of ``plugins`` references, sorted."""
+    names: set[str] = set()
+    for plugin in plugins:
+        source = (
+            plugin.source
+            if isinstance(plugin, AutomationPluginSource)
+            else plugin.get("source")
+        )
+        if isinstance(source, str):
+            names.update(plugin_source_secret_names(source))
+    return sorted(names)
+
+
 class AutomationPluginSource(BaseModel):
-    """Source of an executable automation plugin or secondary plugin."""
+    """Source of an executable automation plugin or secondary plugin.
+
+    A private repository names its credential with a ``${NAME}`` placeholder
+    as the URL user name or password, for example
+    ``https://x-access-token:${GITHUB_TOKEN}@github.com/org/repo.git``. The
+    source is stored as written; each fetch resolves ``NAME`` for the identity
+    the automation runs as. Literal credentials are rejected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -94,18 +191,22 @@ class AutomationPluginSource(BaseModel):
             parsed_source = source
         parsed = urlparse(parsed_source)
         shorthand_path = source.removeprefix("github:")
-        if (
-            parsed.scheme in {"http", "https"}
-            and (parsed.username is not None or parsed.password is not None)
-        ) or (
-            source_type == SourceType.GITHUB
-            and ("@" in shorthand_path or ":" in shorthand_path)
+        if source_type == SourceType.GITHUB and (
+            "@" in shorthand_path or ":" in shorthand_path or "${" in shorthand_path
         ):
-            raise ValueError(
-                "plugin source URLs must not include credentials; use a "
-                "credential-free source"
-            )
+            raise ValueError(_CREDENTIALS_MESSAGE)
+        if parsed.scheme in {"http", "https"}:
+            _url_userinfo_secret_names(parsed_source)
+        elif "${" in source:
+            raise ValueError(_PLACEHOLDER_MESSAGE)
         return source
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str | None) -> str | None:
+        if value is not None and "${" in value:
+            raise ValueError("plugin ref must not contain a ${NAME} placeholder")
+        return value
 
     @field_validator("repo_path")
     @classmethod
@@ -348,11 +449,12 @@ def validate_plugin_source_allowed(
     if source_type == SourceType.GITHUB:
         return
 
+    # Any HTTPS host: a plugin can live on a self-hosted provider such as
+    # Bitbucket Data Center, not only on github.com.
     parsed = urlparse(url)
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+    if parsed.scheme != "https" or not parsed.hostname:
         raise PluginSpecError(
-            "Cloud plugin sources must use github:owner/repo or "
-            "https://github.com/owner/repo.git"
+            "Cloud plugin sources must use github:owner/repo or an https:// git URL"
         )
 
 
@@ -377,14 +479,17 @@ def require_pinned_plugin_refs(plugins: list[PluginSource]) -> None:
             )
 
 
-def pin_plugin_refs(
-    plugins: list[dict[str, Any]], *, allow_local_sources: bool
+async def pin_plugin_refs(
+    plugins: list[dict[str, Any]],
+    *,
+    allow_local_sources: bool,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> list[dict[str, Any]]:
     """Return ``plugins`` with each ref replaced by its commit SHA.
 
     Used for an automation that runs as a service account (see
     ``require_pinned_plugin_refs``). A full SHA is kept as is; a branch, tag or
-    missing ref is resolved by preflight.
+    missing ref is resolved by preflight, with ``secrets`` for a private source.
 
     Raises:
         PluginSpecError: when a source is not allowed, a plugin cannot be
@@ -401,7 +506,9 @@ def pin_plugin_refs(
             # The SDK's PluginSource (preset bodies) accepts more than this.
             raise PluginSpecError(f"Invalid plugin source: {exc}") from exc
         [resolved] = validate_required_plugins(
-            [source], allow_local_sources=allow_local_sources
+            [source],
+            allow_local_sources=allow_local_sources,
+            secrets=await secrets(plugin_secret_names([source])),
         )
         ref = resolved.pop("resolved_ref", None)
         pinned.append({**resolved, **({"ref": ref} if ref else {})})
@@ -452,33 +559,99 @@ def fetch_manifest(
     return plugin_path, resolved_ref, manifest
 
 
+def _source_secrets(
+    plugin: AutomationPluginSource, secrets: Mapping[str, SecretValue] | None
+) -> dict[str, SecretValue] | None:
+    """The secrets ``plugin``'s own fetch may expand: only the names it uses."""
+    names = plugin_source_secret_names(plugin.source)
+    if not names or not secrets:
+        return None
+    return {name: secrets[name] for name in names if name in secrets}
+
+
+def plugin_fetch_error(
+    prefix: str, exc: Exception, plugin: AutomationPluginSource
+) -> PluginSpecError:
+    """A ``PluginSpecError`` for a failed strict fetch of ``plugin``.
+
+    Keeps the SDK's ``code`` and ``status_code``, so a failure is permanent or
+    transient as the SDK classifies it, and names the secrets the source uses.
+    A secret lookup that fails inside the fetch raises an ``httpx`` error: a
+    missing secret is permanent, an unreachable lookup transient.
+    """
+    names = ", ".join(plugin_source_secret_names(plugin.source))
+    if isinstance(exc, PluginSourceError):
+        message = f"{prefix}: {exc}"
+        code, status_code = exc.code, exc.status_code
+        if names and code == "auth_failed":
+            message += f" (the git host rejected the credentials from secret {names})"
+        elif code == "source_unavailable" and "url rejected" in str(exc).lower():
+            # Git refused a malformed URL, which retrying cannot fix. A
+            # secret value with "/", "@" or ":" breaks the URL it is put in.
+            code, status_code = "invalid_source", 422
+            if names:
+                message += (
+                    f" (the value of secret {names} may contain a character that "
+                    'is not allowed in a URL, such as "/", "@" or ":")'
+                )
+        return PluginSpecError(message, code=code, status_code=status_code)
+    if isinstance(exc, httpx.HTTPStatusError):
+        lookup_status = exc.response.status_code
+        if lookup_status == 404:
+            return PluginSpecError(
+                f"{prefix}: Missing secret: {names}",
+                code="missing_secret",
+                status_code=422,
+            )
+        if lookup_status in (408, 429) or lookup_status >= 500:
+            return PluginSpecError(
+                f"{prefix}: could not read secret {names} (HTTP {lookup_status})",
+                code="secret_unavailable",
+                status_code=lookup_status,
+            )
+        return PluginSpecError(
+            f"{prefix}: reading secret {names} was refused (HTTP {lookup_status})",
+            code="secret_lookup_failed",
+            status_code=lookup_status,
+        )
+    if isinstance(exc, httpx.RequestError):
+        return PluginSpecError(
+            f"{prefix}: could not reach the secret store for secret {names} "
+            f"({type(exc).__name__})",
+            code="secret_unavailable",
+            status_code=503,
+        )
+    return PluginSpecError(f"{prefix}: {exc}")
+
+
 def preflight_manifest(
     plugin: AutomationPluginSource,
     *,
     allow_local_sources: bool = True,
+    secrets: Mapping[str, SecretValue] | None = None,
 ) -> tuple[str | None, AutomationPluginManifest]:
-    """Strictly resolve a plugin source and parse its automation metadata."""
+    """Strictly resolve a plugin source and parse its automation metadata.
+
+    ``secrets`` resolves the placeholders of a private source.
+    """
     validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
     try:
         with preflight_plugin(
             source=plugin.source,
             ref=plugin.ref,
             repo_path=plugin.repo_path,
+            secrets=_source_secrets(plugin, secrets),
             allow_local=allow_local_sources,
         ) as checked:
             manifest = _read_manifest_from_plugin_metadata(checked.manifest)
             _validate_manifest_paths(checked.path, manifest)
             return checked.resolved_ref, manifest
-    except PluginSourceError as exc:
-        raise PluginSpecError(
-            f"Failed to preflight automation plugin: {exc}",
-            code=exc.code,
-            status_code=exc.status_code,
-        ) from exc
+    except PluginSpecError:
+        raise
     except Exception as exc:
-        if isinstance(exc, PluginSpecError):
-            raise
-        raise PluginSpecError(f"Failed to preflight automation plugin: {exc}") from exc
+        raise plugin_fetch_error(
+            "Failed to preflight automation plugin", exc, plugin
+        ) from exc
 
 
 def _read_manifest_from_plugin_metadata(
@@ -646,8 +819,12 @@ def validate_required_plugins(
     plugins: list[AutomationPluginSource],
     *,
     allow_local_sources: bool = True,
+    secrets: Mapping[str, SecretValue] | None = None,
 ) -> list[dict[str, Any]]:
-    """Preflight secondary plugins and return source specs with resolved refs."""
+    """Preflight secondary plugins and return source specs with resolved refs.
+
+    ``secrets`` resolves the placeholders of private sources.
+    """
     resolved: list[dict[str, Any]] = []
     for plugin in plugins:
         validate_plugin_source_allowed(plugin, allow_local_sources=allow_local_sources)
@@ -656,12 +833,13 @@ def validate_required_plugins(
                 source=plugin.source,
                 ref=plugin.ref,
                 repo_path=plugin.repo_path,
+                secrets=_source_secrets(plugin, secrets),
                 allow_local=allow_local_sources,
             ) as checked:
                 resolved_ref = checked.resolved_ref
         except Exception as exc:
-            raise PluginSpecError(
-                f"Failed to preflight required plugin {plugin.source!r}: {exc}"
+            raise plugin_fetch_error(
+                f"Failed to preflight required plugin {plugin.source!r}", exc, plugin
             ) from exc
         item = plugin.model_dump(exclude_none=True)
         if resolved_ref:
@@ -670,7 +848,7 @@ def validate_required_plugins(
     return resolved
 
 
-def build_execution_payload(
+async def build_execution_payload(
     *,
     plugin_spec: dict[str, Any],
     agent_profile_id: str | None,
@@ -678,22 +856,33 @@ def build_execution_payload(
     llm_profile_name: str | None,
     work_dir: str,
     allow_local_sources: bool = True,
+    secrets: PluginSecretLookup = no_plugin_secrets,
 ) -> tuple[bytes, dict[str, str], dict[str, Any], list[dict[str, Any]]]:
-    """Preflight, validate, and package a plugin-backed automation run."""
+    """Preflight, validate, and package a plugin-backed automation run.
+
+    ``secrets`` resolves the placeholders of private sources, for the
+    identity the automation runs as.
+    """
     source = AutomationPluginSource.model_validate(plugin_spec["plugin"])
     requested_config = plugin_spec.get("config") or {}
     resolved_ref, manifest = preflight_manifest(
-        source, allow_local_sources=allow_local_sources
+        source,
+        allow_local_sources=allow_local_sources,
+        secrets=await secrets(plugin_secret_names([source])),
     )
     config = validate_plugin_config(manifest, requested_config)
     # A stored list pins the secondary plugins (automations that run as a
     # service account); otherwise they follow the manifest's refs.
     stored_required = plugin_spec.get("required_plugins")
-    required_plugins = validate_required_plugins(
+    required_sources = (
         [AutomationPluginSource.model_validate(item) for item in stored_required]
         if stored_required is not None
-        else manifest.runtime.plugins,
+        else manifest.runtime.plugins
+    )
+    required_plugins = validate_required_plugins(
+        required_sources,
         allow_local_sources=allow_local_sources,
+        secrets=await secrets(plugin_secret_names(required_sources)),
     )
     plugin_fetches = _plugin_fetch_requests(source, resolved_ref, required_plugins)
     if agent_profile_name is None and manifest.runtime.agent_profile is not None:

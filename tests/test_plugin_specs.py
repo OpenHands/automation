@@ -182,15 +182,39 @@ def test_preflight_rejects_file_source_when_local_sources_disabled():
         )
 
 
-def test_preflight_rejects_non_github_git_source_when_local_sources_disabled():
+@pytest.mark.parametrize(
+    "source",
+    [
+        "http://bitbucket.example.com/scm/proj/plugin.git",
+        "git@github.com:acme/private.git",
+    ],
+)
+def test_preflight_rejects_non_https_git_source_when_local_sources_disabled(source):
     with pytest.raises(
         PluginSpecError,
-        match="Cloud plugin sources must use github:owner/repo",
+        match="Cloud plugin sources must use github:owner/repo or an https:// git URL",
     ):
         preflight_manifest(
-            AutomationPluginSource(source="https://127.0.0.1/acme/private.git"),
+            AutomationPluginSource(source=source),
             allow_local_sources=False,
         )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A Bitbucket Data Center repository, with and without a port and a
+        # context path.
+        "https://bitbucket.example.com/scm/proj/plugin.git",
+        "https://git.example.com:8443/bitbucket/scm/proj/plugin.git",
+        "https://gitlab.example.com/group/plugin.git",
+        "https://github.com/acme/plugin.git",
+    ],
+)
+def test_cloud_plugin_sources_accept_https_git_urls_on_any_host(source):
+    plugin_specs.validate_plugin_source_allowed(
+        AutomationPluginSource(source=source), allow_local_sources=False
+    )
 
 
 def test_required_plugins_reject_local_source_when_local_sources_disabled(tmp_path):
@@ -279,13 +303,13 @@ def test_resolve_suggested_trigger_template_uses_normal_install_config(tmp_path)
     }
 
 
-def test_fetch_manifest_and_build_execution_payload(tmp_path):
+async def test_fetch_manifest_and_build_execution_payload(tmp_path):
     plugin = write_plugin(tmp_path, setup_script="scripts/setup.sh")
 
     _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
     assert manifest.name == "hello-world-automation"
 
-    tarball, env, runtime, plugin_fetches = build_execution_payload(
+    tarball, env, runtime, plugin_fetches = await build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin)}, "config": {"message": "hi"}},
         agent_profile_id="profile-id",
         agent_profile_name="agent-default",
@@ -345,13 +369,13 @@ def test_fetch_manifest_rejects_missing_entrypoint(tmp_path):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))
 
 
-def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
+async def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     plugin = write_conversation_plugin(tmp_path)
 
     _, _, manifest = fetch_manifest(AutomationPluginSource(source=str(plugin)))
     assert manifest.entrypoint.runner == "conversation"
 
-    tarball, env, runtime, plugin_fetches = build_execution_payload(
+    tarball, env, runtime, plugin_fetches = await build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin)}, "config": {"message": "hi"}},
         agent_profile_id="profile-id",
         agent_profile_name="agent-default",
@@ -406,7 +430,7 @@ def test_stock_conversation_runner_packages_primary_plugin_command(tmp_path):
     assert "report_phase" not in main_source
 
 
-def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):
+async def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch):
     plugin = write_conversation_plugin(tmp_path)
     sentinel_main = "print('plugin-spec conversation runner')\n"
     monkeypatch.setattr(
@@ -421,7 +445,7 @@ def test_stock_conversation_runner_uses_plugin_spec_preset(tmp_path, monkeypatch
         },
     )
 
-    tarball, _env, _runtime, _plugin_fetches = build_execution_payload(
+    tarball, _env, _runtime, _plugin_fetches = await build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin)}, "config": {}},
         agent_profile_id="profile-id",
         agent_profile_name="agent-default",
@@ -469,7 +493,7 @@ def test_fetch_manifest_rejects_invalid_suggested_cron(tmp_path):
         fetch_manifest(AutomationPluginSource(source=str(plugin)))
 
 
-def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
+async def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
     tmp_path, monkeypatch
 ):
     """A stored full SHA is what each run asks the plugin source for.
@@ -492,7 +516,7 @@ def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
 
     monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
 
-    build_execution_payload(
+    await build_execution_payload(
         plugin_spec={"plugin": {"source": str(plugin), "ref": sha}, "config": {}},
         agent_profile_id=None,
         agent_profile_name=None,
@@ -503,7 +527,7 @@ def test_run_fetches_the_pinned_sha_stored_for_an_sa_owned_automation(
     assert requested_refs == [sha]
 
 
-def test_run_fetches_the_pinned_secondary_plugins_not_the_moved_branch(
+async def test_run_fetches_the_pinned_secondary_plugins_not_the_moved_branch(
     tmp_path, monkeypatch
 ):
     """Stored ``required_plugins`` win over the manifest's mutable secondary refs."""
@@ -535,7 +559,7 @@ def test_run_fetches_the_pinned_secondary_plugins_not_the_moved_branch(
 
     monkeypatch.setattr(plugin_specs, "preflight_plugin", preflight)
 
-    *_, plugin_fetches = build_execution_payload(
+    *_, plugin_fetches = await build_execution_payload(
         plugin_spec={
             "plugin": {"source": str(plugin)},
             "config": {},

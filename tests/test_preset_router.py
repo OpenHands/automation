@@ -202,6 +202,254 @@ class TestPresetSessionUrl:
         )
 
 
+def _load_preset_mode_detector(
+    preset_name: str,
+) -> Callable[[dict[str, str]], tuple[str, str]]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    function_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_detect_execution_mode"
+    )
+    namespace: dict[str, Any] = {}
+    ast.fix_missing_locations(function_node)
+    exec(
+        compile(
+            ast.Module(body=[function_node], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+    return cast(
+        Callable[[dict[str, str]], tuple[str, str]], namespace["_detect_execution_mode"]
+    )
+
+
+MODE_PRESETS = ["prompt", "plugin", "plugin_spec"]
+
+
+class TestPresetExecutionMode:
+    """The presets take their mode from the backend's signal, not from AGENT_SERVER_URL.
+
+    #680 made the cloud dispatcher export AGENT_SERVER_URL into every sandbox (cloud
+    runs no longer get it). A preset that read "AGENT_SERVER_URL is set" as "local
+    mode" then fetched the LLM, secrets and MCP servers from the sandbox's own
+    agent-server, which holds none of them on OHE/Cloud (#688).
+    """
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_signal_wins_over_agent_server_url(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_explicit_local_signal(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "local",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+                "SESSION_API_KEY": "sk-1",
+            }
+        )
+        assert mode == "local"
+        assert signal == "AUTOMATION_RUN_MODE"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_local_backend_shape_without_signal_is_local(self, preset_name):
+        """A local backend that predates AUTOMATION_RUN_MODE (1.27.0 and earlier,
+        say after a rollback): AGENT_SERVER_URL, a session key and no SANDBOX_ID.
+        The missing SANDBOX_ID decides, not the URL."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {"AGENT_SERVER_URL": "http://localhost:3000", "SESSION_API_KEY": "sk-1"}
+        )
+        assert mode == "local"
+        assert signal == "no SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "session_key_name", ["SESSION_API_KEY", "OH_SESSION_API_KEYS_0"]
+    )
+    def test_legacy_cloud_pair_without_signal_is_cloud(
+        self, preset_name, session_key_name
+    ):
+        """A cloud dispatcher that predates AUTOMATION_RUN_MODE but already
+        exports AGENT_SERVER_URL (#680): SANDBOX_ID plus a session key means cloud."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, signal = detect(
+            {
+                "AGENT_SERVER_URL": "http://10.0.0.5:8000",
+                "SANDBOX_ID": "sbx-1",
+                session_key_name: "sk-1",
+            }
+        )
+        assert mode == "cloud"
+        assert "SANDBOX_ID" in signal
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_no_signal_and_no_sandbox_id_is_local(self, preset_name):
+        """Only cloud sandboxes carry SANDBOX_ID, and cloud mode cannot run
+        without it."""
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect({})
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            {
+                "AUTOMATION_RUN_MODE": "cloud",
+                "SANDBOX_ID": "sbx-1",
+                "SESSION_API_KEY": "sk-1",
+            },
+            {"AUTOMATION_RUN_MODE": "local", "SESSION_API_KEY": "sk-1"},
+            {"SANDBOX_ID": "sbx-1", "OH_SESSION_API_KEYS_0": "sk-1"},
+            {"SANDBOX_ID": "sbx-1"},
+            {"SESSION_API_KEY": "sk-1"},
+            {"AUTOMATION_RUN_MODE": "staging"},
+            {},
+        ],
+    )
+    def test_agent_server_url_never_changes_the_mode(self, preset_name, environ):
+        """Cloud sandboxes no longer receive AGENT_SERVER_URL and local runs do;
+        whether it is there must not change the mode."""
+        detect = _load_preset_mode_detector(preset_name)
+        with_url = {**environ, "AGENT_SERVER_URL": "http://10.0.0.5:8000"}
+        assert detect(with_url) == detect(environ)
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_unknown_signal_value_falls_back_to_env_shape(self, preset_name):
+        detect = _load_preset_mode_detector(preset_name)
+        mode, _signal = detect(
+            {
+                "AUTOMATION_RUN_MODE": "staging",
+                "AGENT_SERVER_URL": "http://localhost:3000",
+            }
+        )
+        assert mode == "local"
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_mode_is_never_derived_from_agent_server_url_presence(self, preset_name):
+        """Guard against the #688 regression coming back.
+
+        ``IS_LOCAL_MODE = bool(os.environ.get("AGENT_SERVER_URL"))`` looked right
+        until #680 started exporting that variable in cloud sandboxes too. The
+        presets are excluded from linting, so pin the shape here: the mode comes
+        from ``_detect_execution_mode`` and no ``bool(...)`` anywhere in the
+        script is fed by AGENT_SERVER_URL.
+        """
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        assert not re.search(r"IS_LOCAL_MODE\s*=\s*bool\(", source), (
+            f"{preset_name} preset derives IS_LOCAL_MODE with bool(...) again"
+        )
+        for node in ast.walk(module):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "bool"
+            ):
+                segment = ast.get_source_segment(source, node) or ""
+                assert "AGENT_SERVER_URL" not in segment.upper(), (
+                    f"{preset_name} preset turns AGENT_SERVER_URL into a mode: "
+                    f"{segment}"
+                )
+
+        mode_assignments = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "IS_LOCAL_MODE"
+                for target in node.targets
+            )
+        ]
+        assert len(mode_assignments) == 1, (
+            f"{preset_name} preset must assign IS_LOCAL_MODE exactly once"
+        )
+        value_source = ast.get_source_segment(source, mode_assignments[0].value) or ""
+        assert "EXECUTION_MODE" in value_source, (
+            f"{preset_name} preset must derive IS_LOCAL_MODE from the detected "
+            f"EXECUTION_MODE, got: {value_source}"
+        )
+        assert "_detect_execution_mode(os.environ)" in source, (
+            f"{preset_name} preset must detect its mode with _detect_execution_mode"
+        )
+
+    @pytest.mark.parametrize("preset_name", MODE_PRESETS)
+    def test_cloud_mode_never_reads_agent_server_url(self, preset_name):
+        """The script reads AGENT_SERVER_URL once, into ``agent_server_url``,
+        and only local-mode code uses it: the mode check never looks at it, and
+        a cloud run (which no longer receives it) has no use for it."""
+        source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+        source = source_path.read_text()
+        module = ast.parse(source, filename=str(source_path))
+
+        reads = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Constant) and node.value == "AGENT_SERVER_URL"
+        ]
+        assert len(reads) == 1, f"{preset_name} reads AGENT_SERVER_URL again"
+
+        detector = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_detect_execution_mode"
+        )
+        code = [
+            ast.get_source_segment(source, statement) or ""
+            for statement in detector.body[1:]  # after the docstring
+        ]
+        assert not any("AGENT_SERVER_URL" in segment for segment in code)
+
+        parents = {
+            child: node
+            for node in ast.walk(module)
+            for child in ast.iter_child_nodes(node)
+        }
+
+        def in_local_mode_branch(node: ast.AST) -> bool:
+            child, parent = node, parents.get(node)
+            while parent is not None:
+                if (
+                    isinstance(parent, ast.If)
+                    and isinstance(parent.test, ast.Name)
+                    and parent.test.id == "IS_LOCAL_MODE"
+                    and any(child is statement for statement in parent.body)
+                ):
+                    return True
+                child, parent = parent, parents.get(parent)
+            return False
+
+        uses = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Name)
+            and node.id == "agent_server_url"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        assert uses
+        outside = [node.lineno for node in uses if not in_local_mode_branch(node)]
+        assert not outside, (
+            f"{preset_name} uses agent_server_url outside local mode on lines {outside}"
+        )
+
+
 class TestPresetFileSyntax:
     """Verify preset files have valid Python/shell syntax.
 
@@ -507,6 +755,203 @@ def test_preset_mcp_normalizer_unwraps_without_sdk_coercer(preset_name):
     assert normalize(None) == {}
 
 
+def _load_preset_functions(
+    preset_name: str, names: set[str], namespace: dict[str, Any]
+) -> dict[str, Any]:
+    source_path = PRESETS_DIR / preset_name / "sdk_main.py"
+    module = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in functions} == names
+    nodes: list[ast.stmt] = list(functions)
+    exec(
+        compile(ast.Module(body=nodes, type_ignores=[]), str(source_path), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+def _load_preset_mcp_loader(
+    preset_name: str,
+    users_me_mcp_config: Callable[[], Any],
+    *,
+    local_mode: bool = False,
+) -> Callable[[Any], Any]:
+    """The preset's ``_load_mcp_config`` with ``users/me`` answered by a stub."""
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_normalize_mcp_config", "_named_mcp_servers", "_load_mcp_config"},
+        {
+            "_coerce_mcp_config": coerce_mcp_config,
+            "IS_LOCAL_MODE": local_mode,
+            "_users_me_mcp_config": users_me_mcp_config,
+        },
+    )
+    return cast(Callable[[Any], Any], namespace["_load_mcp_config"])
+
+
+def _workspace_returning(mcp_config: dict[str, Any]) -> MagicMock:
+    workspace = MagicMock()
+    workspace.get_mcp_config.return_value = mcp_config
+    return workspace
+
+
+# GET /api/v1/users/me on OpenHands Cloud and Enterprise: a {name: server} map.
+_USERS_ME_MCP_CONFIG = {
+    "jira-dc": {
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-atlassian"],
+        "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        "enabled": True,
+    },
+    "tools": {
+        "url": "https://mcp.example.com/mcp",
+        "transport": "http",
+        "auth": {"strategy": "bearer", "value": "tools-token"},
+        "enabled": True,
+    },
+    "linear": {
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {
+            "strategy": "oauth2",
+            "state": {"tokens": {"access_token": "linear-access-token"}},
+        },
+        "enabled": True,
+    },
+}
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_loads_users_me_mcp_servers_the_sdk_cannot_read(preset_name, capsys):
+    # openhands-sdk 1.59 returns {} for the {name: server} map (automation#93).
+    load = _load_preset_mcp_loader(preset_name, lambda: _USERS_ME_MCP_CONFIG)
+
+    mcp_config = load(_workspace_returning({}))
+
+    assert dump_mcp_config(mcp_config) == {
+        "jira-dc": {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-atlassian"],
+            "env": {"JIRA_URL": "https://jira.example.com", "JIRA_TOKEN": "jira-pat"},
+        },
+        "tools": {
+            "url": "https://mcp.example.com/mcp",
+            "transport": "http",
+            "auth": {"strategy": "bearer", "value": "tools-token"},
+        },
+    }
+    out = capsys.readouterr().out
+    assert "servers: ['jira-dc', 'tools']" in out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert "OAuth" in out
+    assert "linear-access-token" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reports_configured_servers_it_could_not_load(preset_name, capsys):
+    users_me = {
+        "linear": _USERS_ME_MCP_CONFIG["linear"],
+        "broken": {"transport": "stdio", "env": {"TOKEN": "broken-secret"}},
+    }
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "MCP server 'linear' is configured but not loaded" in out
+    assert (
+        "MCP server 'broken' is configured but not loaded: "
+        "its settings could not be read"
+    ) in out
+    assert "broken-secret" not in out
+    assert "no MCP servers configured" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("users_me_mcp_config", [None, {}])
+def test_preset_reports_when_no_mcp_servers_are_configured(
+    preset_name, users_me_mcp_config, capsys
+):
+    load = _load_preset_mcp_loader(preset_name, lambda: users_me_mcp_config)
+
+    assert load(_workspace_returning({})) == {}
+
+    out = capsys.readouterr().out
+    assert "no MCP servers configured" in out
+    assert "WARNING" not in out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+@pytest.mark.parametrize("local_mode", [False, True])
+def test_preset_keeps_sdk_mcp_servers_without_reading_users_me(preset_name, local_mode):
+    """An SDK that reads the map (or a local agent server) is used as is."""
+
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read")
+
+    load = _load_preset_mcp_loader(
+        preset_name, users_me_not_expected, local_mode=local_mode
+    )
+    sdk_servers = coerce_mcp_config({"fetch": {"command": "uvx"}})
+
+    assert load(_workspace_returning(sdk_servers)) == sdk_servers
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_local_preset_does_not_read_users_me(preset_name, capsys):
+    def users_me_not_expected():
+        raise AssertionError("users/me must not be read in local mode")
+
+    load = _load_preset_mcp_loader(preset_name, users_me_not_expected, local_mode=True)
+
+    assert load(_workspace_returning({})) == {}
+    assert "no MCP servers configured" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+def test_preset_reads_users_me_with_unmasked_secrets(preset_name, monkeypatch):
+    import httpx
+
+    requests: list[dict[str, Any]] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        requests.append({"url": url, "params": params, "headers": headers})
+        return httpx.Response(
+            200,
+            json={"mcp_config": {"fetch": {"command": "uvx"}}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    namespace = _load_preset_functions(
+        preset_name,
+        {"_users_me_mcp_config"},
+        {
+            "api_url": "https://ohe.example.com",
+            "api_key": "automation-key",
+            "session_key": "session-key",
+        },
+    )
+
+    assert namespace["_users_me_mcp_config"]() == {"fetch": {"command": "uvx"}}
+    assert requests == [
+        {
+            "url": "https://ohe.example.com/api/v1/users/me",
+            "params": {"expose_secrets": "true"},
+            "headers": {
+                "Authorization": "Bearer automation-key",
+                "X-Session-API-Key": "session-key",
+            },
+        }
+    ]
+
+
 _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
 
 
@@ -561,6 +1006,66 @@ _UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC")
             },
             "fabrikam-web#42",
         ),
+        # Bitbucket Data Center and Jira Data Center events are stored as the
+        # parsed event: the provider's payload sits under "payload".
+        (
+            {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {
+                        "id": 7,
+                        "title": "Add feature",
+                        "toRef": {
+                            "repository": {
+                                "slug": "payments-api",
+                                "project": {"key": "DEM"},
+                            }
+                        },
+                    },
+                },
+                "event_key": "pr:opened",
+            },
+            "payments-api#7",
+        ),
+        (
+            {
+                "event_key_value": "pr:comment:added",
+                "payload": {
+                    "eventKey": "pr:comment:added",
+                    "comment": {"text": "please review"},
+                    "pullRequest": {
+                        "id": 12,
+                        "toRef": {"repository": {"slug": "springboot-demo"}},
+                    },
+                },
+                "event_key": "pr:comment:added",
+            },
+            "springboot-demo#12",
+        ),
+        (
+            {
+                "webhook_event": "comment_created",
+                "payload": {
+                    "webhookEvent": "comment_created",
+                    "comment": {"body": "please review"},
+                    "issue": {"id": "10001", "key": "PROJ-123"},
+                },
+                "event_key": "comment_created",
+            },
+            "PROJ-123",
+        ),
+        (
+            {
+                "webhook_event": "jira:issue_updated",
+                "payload": {
+                    "webhookEvent": "jira:issue_updated",
+                    "issue": {"id": "10002", "key": " ENG-7 "},
+                },
+                "event_key": "jira:issue_updated",
+            },
+            "ENG-7",
+        ),
     ],
 )
 def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
@@ -599,6 +1104,37 @@ def test_preset_title_builder_uses_repo_and_number_for_numbered_events(
                     "eventType": "git.push",
                     "resource": {"repository": {"name": "fabrikam-web"}},
                 },
+            },
+        },
+        # A Bitbucket Data Center repository event has no pull request number.
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "repo:refs_changed",
+                "payload": {
+                    "eventKey": "repo:refs_changed",
+                    "repository": {"slug": "payments-api"},
+                },
+                "event_key": "repo:refs_changed",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "event_key_value": "pr:opened",
+                "payload": {
+                    "eventKey": "pr:opened",
+                    "pullRequest": {"id": True, "toRef": {"repository": {"slug": "r"}}},
+                },
+                "event_key": "pr:opened",
+            },
+        },
+        {
+            "automation_name": "Issue triage",
+            "event": {
+                "webhook_event": "comment_created",
+                "payload": {"webhookEvent": "comment_created", "issue": {"key": 7}},
+                "event_key": "comment_created",
             },
         },
     ],

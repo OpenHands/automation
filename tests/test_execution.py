@@ -497,6 +497,122 @@ class TestPrivateEnvironmentInjection:
         assert session_key not in command
         assert f"{TARBALL_PATH}.env" in command
 
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_command_injects_callback_key_but_not_agent_server_url(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        """AUTOMATION_CALLBACK_API_KEY is injected so scripts can sign their
+        completion callback (see issue #679). AGENT_SERVER_URL is not: stored
+        scripts read it as running on a local Agent Canvas."""
+        session_key = "session_" + "b" * 64
+        agent_url = "https://agent.example.com"
+        api_key = "api-key-123"
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = ("sandbox-1", session_key, agent_url)
+        mock_bash.return_value = (0, "", "")
+
+        await run_automation(
+            api_url="https://api.example.com",
+            api_key=api_key,
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+        )
+
+        # Second upload is the env file; its bytes contain the injected vars.
+        env_bytes = mock_upload.await_args_list[1].args[1]
+        assert agent_url.encode() not in env_bytes
+        assert api_key.encode() in env_bytes
+        assert b"AGENT_SERVER_URL=" not in env_bytes
+        assert b"AUTOMATION_CALLBACK_API_KEY=" in env_bytes
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_command_marks_the_run_as_cloud_mode(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        """run_automation() always uses a cloud sandbox; the presets read
+        AUTOMATION_RUN_MODE to tell (#688)."""
+        session_key = "session_" + "b" * 64
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = (
+            "sandbox-1",
+            session_key,
+            "https://agent.example.com",
+        )
+        mock_bash.return_value = (0, "", "")
+
+        await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key-123",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            keep_sandbox=True,
+        )
+
+        env_bytes = mock_upload.await_args_list[1].args[1]
+        assert b"AUTOMATION_RUN_MODE=" in env_bytes
+        assert b"cloud" in env_bytes
+        assert b"AGENT_SERVER_URL=" not in env_bytes
+        assert b"SANDBOX_ID=" in env_bytes
+
+    @pytest.mark.asyncio
+    @patch("openhands.automation.execution._bash", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._upload", new_callable=AsyncMock)
+    @patch("openhands.automation.execution._create_and_wait", new_callable=AsyncMock)
+    @patch("openhands.automation.execution.httpx.AsyncClient")
+    async def test_blocking_command_env_vars_not_overridden_by_caller(
+        self,
+        mock_async_client,
+        mock_create_and_wait,
+        mock_upload,
+        mock_bash,
+    ):
+        """A caller-provided callback key wins over the run's API key."""
+        session_key = "session_" + "b" * 64
+        agent_url = "https://agent.example.com"
+        override_key = "caller-callback-key"
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client.return_value = context_manager
+        mock_create_and_wait.return_value = ("sandbox-1", session_key, agent_url)
+        mock_bash.return_value = (0, "", "")
+
+        await run_automation(
+            api_url="https://api.example.com",
+            api_key="api-key",
+            entrypoint="python main.py",
+            tarball_source=b"fake tarball bytes",
+            env_vars={"AUTOMATION_CALLBACK_API_KEY": override_key},
+            keep_sandbox=True,
+        )
+
+        env_bytes = mock_upload.await_args_list[1].args[1]
+        assert override_key.encode() in env_bytes
+        assert b"'api-key'" not in env_bytes
+
 
 class TestPerRunTarballPath:
     """Tests that execute_in_context uses an isolated per-run tarball path.
