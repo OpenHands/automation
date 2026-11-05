@@ -1,0 +1,4 @@
+import os
+
+# Only a local run is handed the agent server's URL.
+IS_LOCAL = bool(os.environ.get("AGENT_SERVER_URL"))

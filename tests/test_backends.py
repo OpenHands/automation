@@ -415,7 +415,7 @@ class TestCloudSandboxBackend:
 
             env_vars = backend.build_env_vars()
             # AUTOMATION_RUN_MODE is what the presets read to pick cloud mode
-            # now that AGENT_SERVER_URL is exported in cloud sandboxes too (#688).
+            # (#688); a cloud run never gets AGENT_SERVER_URL.
             assert env_vars == {
                 "OPENHANDS_API_KEY": "sk-user",
                 "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",

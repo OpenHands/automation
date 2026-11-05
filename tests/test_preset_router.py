@@ -231,10 +231,10 @@ MODE_PRESETS = ["prompt", "plugin", "plugin_spec"]
 class TestPresetExecutionMode:
     """The presets take their mode from the backend's signal, not from AGENT_SERVER_URL.
 
-    Since #680 the cloud dispatcher exports AGENT_SERVER_URL into every sandbox so
-    standalone scripts can reach the agent server. A preset that read "AGENT_SERVER_URL
-    is set" as "local mode" then fetched the LLM, secrets and MCP servers from the
-    sandbox's own agent-server, which holds none of them on OHE/Cloud (#688).
+    #680 made the cloud dispatcher export AGENT_SERVER_URL into every sandbox (cloud
+    runs no longer get it). A preset that read "AGENT_SERVER_URL is set" as "local
+    mode" then fetched the LLM, secrets and MCP servers from the sandbox's own
+    agent-server, which holds none of them on OHE/Cloud (#688).
     """
 
     @pytest.mark.parametrize("preset_name", MODE_PRESETS)
