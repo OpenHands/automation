@@ -313,6 +313,25 @@ def _resolve_distinct_id(
     )
 
 
+def _failure_kind_from_error_detail(error_detail: str | None) -> str | None:
+    """Coarse, non-identifying failure category derived from stored prefixes.
+
+    ``error_detail`` itself is free text and must never reach telemetry; only
+    the closed set of prefixes this service writes is mapped.
+    """
+    if not error_detail:
+        return None
+    if error_detail.startswith("Timed out: verification failed"):
+        return "verification_failed"
+    if error_detail.startswith("Timed out:"):
+        return "timeout"
+    if error_detail.startswith("Cancelled"):
+        return "cancelled"
+    if error_detail.startswith("Failed to get execution context"):
+        return "dispatch_error"
+    return "execution_error"
+
+
 def _base_properties(
     *,
     request_context: TelemetryRequestContext,
@@ -372,6 +391,9 @@ def _base_properties(
                 "has_conversation_id": bool(run.conversation_id),
             }
         )
+        failure_kind = _failure_kind_from_error_detail(run.error_detail)
+        if failure_kind is not None:
+            properties["failure_kind"] = failure_kind
         properties.setdefault("automation_id", str(run.automation_id))
         if run.started_at and run.completed_at:
             duration_ms = int(
