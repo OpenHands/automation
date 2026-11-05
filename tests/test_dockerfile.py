@@ -49,6 +49,21 @@ def test_runtime_contract_is_preserved() -> None:
     ) in dockerfile
 
 
+def test_snapshot_apt_is_resilient() -> None:
+    dockerfile = _dockerfile()
+
+    # snapshot.debian.org 5xx responses must not fail the build on first hit
+    assert (
+        "https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" in dockerfile
+    )
+    assert (
+        "https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/"
+        in dockerfile
+    )
+    assert 'Acquire::Retries "5";' in dockerfile
+    assert "for attempt in 1 2 3 4 5; do" in dockerfile
+
+
 def test_runtime_data_dir_is_owned_by_service_user() -> None:
     dockerfile = _dockerfile()
     data_dir = "mkdir /data && chown automation:automation /data"
