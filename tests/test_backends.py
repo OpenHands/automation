@@ -134,6 +134,8 @@ class TestLocalAgentServerBackend:
             callback_api_key="automation-service-key",
         )
         env_vars = backend.build_env_vars()
+        # The presets pick local mode from this, not from AGENT_SERVER_URL (#688)
+        assert env_vars["AUTOMATION_RUN_MODE"] == "local"
         # WORKSPACE_BASE should be run-isolated (includes run_id)
         assert env_vars["AGENT_SERVER_URL"] == "http://localhost:3000"
         assert env_vars["SESSION_API_KEY"] == "agent-server-key"
@@ -412,9 +414,12 @@ class TestCloudSandboxBackend:
             await backend.get_api_key()
 
             env_vars = backend.build_env_vars()
+            # AUTOMATION_RUN_MODE is what the presets read to pick cloud mode
+            # now that AGENT_SERVER_URL is exported in cloud sandboxes too (#688).
             assert env_vars == {
                 "OPENHANDS_API_KEY": "sk-user",
                 "OPENHANDS_CLOUD_API_URL": "https://app.all-hands.dev",
+                "AUTOMATION_RUN_MODE": "cloud",
             }
 
     def test_build_env_vars_raises_without_api_key(self, mock_run):

@@ -43,6 +43,10 @@ class ConversationStart:
     conversation_id: str | None = None
     plugins: list[dict[str, Any]] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
+    # Repositories the app server clones, the primary first, as
+    # ``{"repository", "git_provider", "branch"}``. It then runs their setup and
+    # loads their skills and instruction files, as for a chat.
+    repositories: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +55,9 @@ class StartedConversation:
 
     conversation_id: str
     agent_profile_id: str | None
+    # Whether the app server reported the conversation's repositories. Before
+    # it supported several (enterprise 1.81) it ignores all but the primary.
+    reports_repositories: bool = True
 
 
 class ExecutionBackend(ABC):
@@ -118,6 +125,7 @@ class ExecutionBackend(ABC):
 
         For Cloud mode: OPENHANDS_API_KEY, OPENHANDS_CLOUD_API_URL
         For Local mode: AGENT_SERVER_URL, SESSION_API_KEY
+        Both set AUTOMATION_RUN_MODE (``cloud`` / ``local``) for the presets.
 
         Returns:
             Dictionary of environment variable name -> value

@@ -145,6 +145,8 @@ class LocalAgentServerBackend(ExecutionBackend):
         """Build local mode environment variables.
 
         Provides the env vars needed for local mode:
+        - AUTOMATION_RUN_MODE: ``local``; the presets pick their workspace from
+          this, since AGENT_SERVER_URL is exported in cloud sandboxes as well
         - AGENT_SERVER_URL: URL of the local agent server — from the
           *sandbox's* point of view. Defaults to ``agent_server_url`` (the
           URL the backend uses) but can be overridden via
@@ -162,6 +164,7 @@ class LocalAgentServerBackend(ExecutionBackend):
         # Use run-specific workspace directory for isolation
         run_workspace = self.get_work_dir(str(self._run.id))
         env_vars = {
+            "AUTOMATION_RUN_MODE": "local",
             "AGENT_SERVER_URL": self.sandbox_agent_server_url or self.agent_server_url,
             "SESSION_API_KEY": self.api_key,
             "WORKSPACE_BASE": run_workspace,

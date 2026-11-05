@@ -143,8 +143,27 @@ def summarize_status_detail(detail: Any) -> str | None:
 # The app server's conversation start: it attaches to the run's sandbox when
 # ``sandbox_id`` is set and applies the owner's profile, MCP servers and secrets.
 APP_CONVERSATIONS_PATH = "/api/v1/app-conversations"
-# An app server that answers these has no such route or rejects the body.
-_UNSUPPORTED_START_STATUSES = (404, 405, 422)
+
+
+def _lacks_conversation_start(resp: httpx.Response) -> bool:
+    """Whether an error response means the app server has no such contract.
+
+    That is a missing route (FastAPI's plain 404 or a 405) or a body it cannot
+    validate (a 422 listing field errors, as for an unknown ``trigger``). A 404
+    or 422 with the app server's own detail, such as an agent profile it cannot
+    find or resolve, is a refusal: falling back would run the default agent.
+    """
+    if resp.status_code == 405:
+        return True
+    if resp.status_code not in (404, 422):
+        return False
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        return resp.status_code == 404
+    if resp.status_code == 404:
+        return detail == "Not Found"
+    return isinstance(detail, list)
 
 
 def _response_detail(resp: httpx.Response) -> str:
@@ -310,13 +329,21 @@ class CloudSandboxBackend(ExecutionBackend):
             body["conversation_id"] = start.conversation_id
         if start.plugins:
             body["plugins"] = start.plugins
+        if start.repositories:
+            primary, *others = start.repositories
+            body["selected_repository"] = primary["repository"]
+            body["git_provider"] = primary["git_provider"]
+            if primary.get("branch"):
+                body["selected_branch"] = primary["branch"]
+            if others:
+                body["additional_repositories"] = [
+                    {k: v for k, v in repo.items() if v is not None} for repo in others
+                ]
+                # As the runner did: a repository that fails to clone fails the run.
+                body["require_all"] = True
 
         task = await self._app_server_request(
-            client,
-            "POST",
-            APP_CONVERSATIONS_PATH,
-            json=body,
-            unsupported_statuses=_UNSUPPORTED_START_STATUSES,
+            client, "POST", APP_CONVERSATIONS_PATH, json=body, start_request=True
         )
         conversation_id = await self._wait_for_start_task(client, task)
         conversations = await self._app_server_request(
@@ -335,6 +362,7 @@ class CloudSandboxBackend(ExecutionBackend):
         return StartedConversation(
             conversation_id=conversation_id,
             agent_profile_id=launched_agent_profile_id(conversation),
+            reports_repositories="additional_repositories" in conversation,
         )
 
     async def _wait_for_start_task(
@@ -381,12 +409,14 @@ class CloudSandboxBackend(ExecutionBackend):
         method: str,
         path: str,
         *,
-        unsupported_statuses: tuple[int, ...] = (),
+        start_request: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Call the OpenHands API as the run's user, in the automation's org.
 
         429s are retried and a 401/403 re-mints the key once, as for sandboxes.
+        ``start_request`` marks the conversation start, whose errors can also
+        mean an app server without that contract.
         """
 
         @self._retry
@@ -402,7 +432,7 @@ class CloudSandboxBackend(ExecutionBackend):
             )
             if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
                 resp.raise_for_status()
-            if resp.status_code in unsupported_statuses:
+            if start_request and _lacks_conversation_start(resp):
                 raise ConversationStartUnavailable(
                     "OpenHands API cannot start conversations in a sandbox "
                     f"(HTTP {resp.status_code}): {_response_detail(resp)}",
@@ -435,6 +465,9 @@ class CloudSandboxBackend(ExecutionBackend):
         return {
             "OPENHANDS_API_KEY": self._api_key,
             "OPENHANDS_CLOUD_API_URL": self.api_url,
+            # The presets pick their workspace from this. AGENT_SERVER_URL is
+            # exported in cloud sandboxes too (#680), so it cannot mean "local".
+            "AUTOMATION_RUN_MODE": "cloud",
         }
 
     async def verify_run(self, run_id: str) -> VerificationResult:

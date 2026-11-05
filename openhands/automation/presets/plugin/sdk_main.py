@@ -10,7 +10,7 @@ This script is auto-generated from a plugin automation request. It supports two 
 **Local Mode** (self-hosted):
   Uses RemoteWorkspace connected to a local agent server (AGENT_SERVER_URL).
   Full functionality: repos, skills, LLM, secrets, MCP from agent server settings.
-  Requires: AGENT_SERVER_URL (presence triggers local mode)
+  Requires: AUTOMATION_RUN_MODE=local (exported by the local backend), AGENT_SERVER_URL
 
 Both workspace types share the same interface:
   - clone_repos() - clone repositories with auto-fetched tokens
@@ -21,7 +21,7 @@ Both workspace types share the same interface:
   - get_mcp_config() - get MCP server configuration
 
 The script:
-  1. Detects mode based on AGENT_SERVER_URL presence
+  1. Detects mode from AUTOMATION_RUN_MODE (exported by the execution backend)
   2. Opens the workspace context EARLY (ensures callback on any failure)
   3. Clones repos via workspace.clone_repos()
   4. Loads skills via workspace.load_skills_from_agent_server()
@@ -46,11 +46,15 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (presence = local mode)
+  AGENT_SERVER_URL           - local agent server URL (cloud sandboxes export it
+                               too, for standalone scripts; it does not pick the mode)
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 
 Common env vars:
+  AUTOMATION_RUN_MODE        - "cloud" or "local", exported by the execution backend;
+                               decides the mode. Without it, SANDBOX_ID plus a session
+                               key means cloud, AGENT_SERVER_URL alone means local.
   AUTOMATION_CALLBACK_URL    - completion callback endpoint (optional)
   AUTOMATION_ID              - automation ID for observability correlation (optional)
   AUTOMATION_NAME            - automation name for observability correlation (optional)
@@ -64,6 +68,9 @@ Common env vars:
   AUTOMATION_CONVERSATION_STARTED - "app_server" when the service already started
                                AUTOMATION_CONVERSATION_ID through the app server,
                                plugins included; the script then attaches
+  AUTOMATION_RUNNER_REPOS    - JSON list of the repositories this script still
+                               clones when the app server cloned the others
+                               (optional; otherwise repos_config.json)
 
 Runtime-injected secrets (via conversation.update_secrets after Conversation creation):
   AUTOMATION_SESSION_URL     - direct URL to this conversation in Agent Canvas
@@ -81,9 +88,35 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-# Detect execution mode based on AGENT_SERVER_URL presence
+
+def _detect_execution_mode(environ) -> tuple[str, str]:
+    """Return ("cloud" | "local", the signal that decided it).
+
+    The execution backend exports AUTOMATION_RUN_MODE. AGENT_SERVER_URL must
+    never decide the mode: cloud sandboxes export it too so standalone scripts
+    can reach the agent server (#680), and reading it as "local" made cloud
+    runs fetch their LLM, secrets and MCP servers from the sandbox's own
+    agent-server, which holds none of them (#688). A service that predates
+    AUTOMATION_RUN_MODE is recognised by its env shape: only cloud sandboxes
+    carry SANDBOX_ID.
+    """
+    explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
+    if explicit in ("cloud", "local"):
+        return explicit, "AUTOMATION_RUN_MODE"
+    has_session_key = bool(
+        environ.get("OH_SESSION_API_KEYS_0") or environ.get("SESSION_API_KEY")
+    )
+    if environ.get("SANDBOX_ID") and has_session_key:
+        return "cloud", "SANDBOX_ID + session key (no AUTOMATION_RUN_MODE)"
+    if environ.get("AGENT_SERVER_URL"):
+        return "local", "AGENT_SERVER_URL without SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+    return "cloud", "default (no AUTOMATION_RUN_MODE, SANDBOX_ID or AGENT_SERVER_URL)"
+
+
+# Keep _detect_execution_mode in sync with presets/prompt and presets/plugin_spec.
+EXECUTION_MODE, MODE_SIGNAL = _detect_execution_mode(os.environ)
+IS_LOCAL_MODE = EXECUTION_MODE == "local"
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
-IS_LOCAL_MODE = bool(agent_server_url)
 
 
 def _attaches_to_started_conversation(environ) -> bool:
@@ -118,6 +151,15 @@ def _repo_instructions_section(skills) -> str | None:
     return "## Repository instructions\n\n" + "\n\n".join(parts)
 
 
+def _listed_runner_repos(environ, attaches: bool):
+    """The repositories left to this script when the app server cloned the others.
+
+    None means clone every repository in repos_config.json, as before.
+    """
+    listed = environ.get("AUTOMATION_RUNNER_REPOS")
+    return json.loads(listed) if attaches and listed is not None else None
+
+
 ATTACHES_TO_STARTED_CONVERSATION = _attaches_to_started_conversation(os.environ)
 
 # Cloud mode env vars
@@ -137,7 +179,7 @@ model_profile = os.environ.get("AUTOMATION_MODEL") or None
 automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
 
 print("=== EXECUTION MODE ===")
-print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
+print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'} (decided by {MODE_SIGNAL})")
 
 print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
@@ -196,19 +238,23 @@ def report_phase(message: str) -> None:
         pass  # phases are cosmetic; the run must never fail because of them
 
 
-def _clone_configured_repos(workspace, config_file: str):
+def _clone_configured_repos(workspace, config_file: str, listed=None):
     """Clone the automation's repositories, or fail the run if any cannot be.
 
     A run without its repository would work on nothing and still report
     success, so a failed clone stops the run with the reason instead.
+    ``listed`` replaces repos_config.json when the app server cloned the rest.
     """
-    if not os.path.exists(config_file):
+    if listed is not None:
+        repos_config = listed
+    elif os.path.exists(config_file):
+        with open(config_file) as f:
+            repos_config = json.load(f)
+    else:
         return None
-    print("\n=== CLONE REPOS ===")
-    with open(config_file) as f:
-        repos_config = json.load(f)
     if not repos_config:
         return None
+    print("\n=== CLONE REPOS ===")
     report_phase("Cloning repositories")
     clone_result = workspace.clone_repos(repos_config)
     print(f"  cloned {clone_result.success_count}/{len(repos_config)} repos")
@@ -423,7 +469,11 @@ with workspace_ctx as workspace:
     # Clone repositories if repos_config.json exists
     SCRIPT_DIR = os.path.dirname(__file__)
     REPOS_CONFIG_FILE = os.path.join(SCRIPT_DIR, "repos_config.json")
-    clone_result = _clone_configured_repos(workspace, REPOS_CONFIG_FILE)
+    clone_result = _clone_configured_repos(
+        workspace,
+        REPOS_CONFIG_FILE,
+        _listed_runner_repos(os.environ, ATTACHES_TO_STARTED_CONVERSATION),
+    )
     # Collect cloned repo directories for skill loading
     repo_dirs = (
         [m.local_path for m in clone_result.repo_mappings.values()]

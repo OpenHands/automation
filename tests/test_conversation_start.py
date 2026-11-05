@@ -7,7 +7,9 @@ the conversation in the run's sandbox instead, and the stock runners attach.
 """
 
 import ast
+import io
 import json
+import tarfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +27,12 @@ from openhands.automation.backends.base import (
     ExecutionContext,
     StartedConversation,
 )
-from openhands.automation.dispatcher import _conversation_start, _execute_run
+from openhands.automation.dispatcher import (
+    _conversation_start,
+    _execute_run,
+    _runner_repositories,
+    _runner_takes_repository_list,
+)
 from openhands.automation.exceptions import (
     ConversationStartError,
     ConversationStartUnavailable,
@@ -35,8 +42,18 @@ from openhands.automation.models import (
     AutomationRun,
     AutomationRunStatus,
 )
+from openhands.automation.preset_router import (
+    _generate_plugin_tarball,
+    _generate_tarball,
+)
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
+from openhands.automation.utils.finish_plugin import (
+    finish_plugin_dir,
+    finish_plugin_files,
+)
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 TEST_USER_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -68,6 +85,8 @@ class AppServer:
         self.task_detail: str | None = None
         self.launched_profile: str | None = PROFILE_ID
         self.conversation_visible = True
+        # Enterprise 1.81+ reports a conversation's additional repositories.
+        self.reports_repositories = True
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -91,10 +110,13 @@ class AppServer:
                 if self.launched_profile
                 else None
             )
-            return httpx.Response(
-                200,
-                json=[{"id": CONVERSATION_ID, "launched_agent_profile": launched}],
-            )
+            conversation: dict[str, Any] = {
+                "id": CONVERSATION_ID,
+                "launched_agent_profile": launched,
+            }
+            if self.reports_repositories:
+                conversation["additional_repositories"] = []
+            return httpx.Response(200, json=[conversation])
         return httpx.Response(404, json={"detail": f"no route {path}"})
 
     def _task(self, status: str) -> dict[str, Any]:
@@ -219,18 +241,135 @@ class TestCloudBackendStartsTheConversation:
 
         assert server.posted_body()["conversation_id"] == CONVERSATION_ID
 
-    @pytest.mark.parametrize("status", [404, 405, 422])
     @pytest.mark.asyncio
-    async def test_an_app_server_without_the_contract_means_fallback(self, status):
+    async def test_hands_the_repositories_to_the_app_server(self):
+        """The app server clones them, runs their setup and loads their skills
+        and instruction files, as for a chat. A clone failure fails the start,
+        as it failed the run when the runner cloned."""
+        server = AppServer()
+        repositories = [
+            {"repository": "acme/api", "git_provider": "github", "branch": "main"},
+            {"repository": "group/web", "git_provider": "gitlab", "branch": None},
+        ]
+        async with server.client() as client:
+            started = await _backend().start_conversation(
+                client, _ctx(), _start(repositories=repositories)
+            )
+
+        body = server.posted_body()
+        assert body["selected_repository"] == "acme/api"
+        assert body["git_provider"] == "github"
+        assert body["selected_branch"] == "main"
+        assert body["additional_repositories"] == [
+            {"repository": "group/web", "git_provider": "gitlab"}
+        ]
+        assert body["require_all"] is True
+        assert started.reports_repositories
+
+    @pytest.mark.asyncio
+    async def test_a_single_repository_is_only_the_selected_one(self):
+        server = AppServer()
+        async with server.client() as client:
+            await _backend().start_conversation(
+                client,
+                _ctx(),
+                _start(
+                    repositories=[{"repository": "acme/api", "git_provider": "github"}]
+                ),
+            )
+
+        body = server.posted_body()
+        assert body["selected_repository"] == "acme/api"
+        assert "selected_branch" not in body
+        assert "additional_repositories" not in body
+        assert "require_all" not in body
+
+    @pytest.mark.asyncio
+    async def test_notices_an_app_server_that_clones_only_the_selected_one(self):
+        """Before enterprise 1.81 the start ignores additional repositories and
+        the conversation does not report them; the runner clones them then."""
+        server = AppServer()
+        server.reports_repositories = False
+        async with server.client() as client:
+            started = await _backend().start_conversation(client, _ctx(), _start())
+
+        assert not started.reports_repositories
+
+    @pytest.mark.parametrize(
+        ("status", "detail"),
+        [
+            # FastAPI's own answers: no such route, or a body it cannot
+            # validate, such as a trigger value it does not know.
+            (404, "Not Found"),
+            (405, "Method Not Allowed"),
+            (
+                422,
+                [
+                    {
+                        "type": "enum",
+                        "loc": ["body", "trigger"],
+                        "msg": "Input should be 'gui' or 'resolver'",
+                    }
+                ],
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_app_server_without_the_contract_means_fallback(
+        self, status, detail
+    ):
         """An older app server has no such route or rejects the body; the run
         continues the old way rather than failing."""
         server = AppServer()
         server.post_status = status
+        server.post_detail = detail
         async with server.client() as client:
             with pytest.raises(ConversationStartUnavailable) as exc_info:
                 await _backend().start_conversation(client, _ctx(), _start())
 
         assert exc_info.value.status_code == status
+        assert len(server.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_missing_route_without_json_means_fallback(self):
+        def handle(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, text="<html>Not Found</html>")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as c:
+            with pytest.raises(ConversationStartUnavailable):
+                await _backend().start_conversation(c, _ctx(), _start())
+
+    @pytest.mark.parametrize(
+        ("status", "detail"),
+        [
+            (404, {"code": "agent_profile_not_found"}),
+            (
+                422,
+                {
+                    "code": "unresolved_profile_references",
+                    "mcp_server_refs": ["gone"],
+                },
+            ),
+            (422, "The LLM profile references a missing provider connection"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_profile_the_app_server_cannot_launch_fails_the_run(
+        self, status, detail
+    ):
+        """The app server answers 404/422 with its own detail when it cannot
+        find or resolve the profile. Falling back would run the default agent
+        instead of the one the automation selected."""
+        server = AppServer()
+        server.post_status = status
+        server.post_detail = detail
+        async with server.client() as client:
+            with pytest.raises(ConversationStartError) as exc_info:
+                await _backend().start_conversation(client, _ctx(), _start())
+
+        exc = exc_info.value
+        assert exc.status_code == status
+        assert not exc.transient
         assert len(server.requests) == 1
 
     @pytest.mark.asyncio
@@ -363,7 +502,9 @@ class TestWhichRunsStartThroughTheAppServer:
             agent_profile_id=PROFILE_ID,
             llm_profile="Default",
             conversation_id=None,
-            plugins=[],
+            # The presets require the finish tool; the start request takes
+            # that requirement as a plugin the service writes into the sandbox.
+            plugins=[{"source": finish_plugin_dir(str(_RUN.id))}],
             tags={
                 "automationtrigger": "automation",
                 "automationid": "aaaaaaaa-0000-4000-8000-000000000001",
@@ -390,7 +531,32 @@ class TestWhichRunsStartThroughTheAppServer:
             {},
         )
         assert start is not None
-        assert start.plugins == plugins
+        assert start.plugins == [{"source": finish_plugin_dir(str(_RUN.id))}, *plugins]
+
+    def test_preset_repositories_go_to_the_app_server_when_its_runner_allows(self):
+        repos = [
+            {"url": "https://github.com/acme/api", "ref": "main"},
+            {"url": "git@github.com:acme/ssh.git"},
+            {"url": "https://gitlab.com/group/web"},
+        ]
+        automation = _automation(
+            preset_metadata={"preset_type": "prompt", "prompt": "hi", "repos": repos}
+        )
+
+        start = _conversation_start(
+            automation, _RUN, None, [], {}, runner_takes_repository_list=True
+        )
+        assert start is not None
+        assert start.repositories == [
+            {"repository": "acme/api", "git_provider": "github", "branch": "main"},
+            {"repository": "group/web", "git_provider": "gitlab", "branch": None},
+        ]
+
+        # An automation created before this support carries a runner that
+        # clones every repository itself and would fail on existing checkouts.
+        older = _conversation_start(automation, _RUN, None, [], {})
+        assert older is not None
+        assert older.repositories == []
 
     def test_plugin_preset_experiment_keeps_the_runner_path(self):
         """A/B variants pick plugins and model inside the runner at run time; the
@@ -458,8 +624,92 @@ class TestWhichRunsStartThroughTheAppServer:
         )
 
 
+def _tarball(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+_RECORDED_REPOS = [
+    {"url": "https://github.com/acme/api"},
+    {"url": "git@github.com:acme/ssh.git"},
+    {"url": "https://github.com/acme/web"},
+    {"url": "https://github.com/acme/docs"},
+]
+
+
+class TestWhichRepositoriesTheRunnerClones:
+    def _start_and_automation(self) -> tuple[ConversationStart, Automation]:
+        automation = _automation(
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "hi",
+                "repos": _RECORDED_REPOS,
+            }
+        )
+        start = _conversation_start(
+            automation, _RUN, None, [], {}, runner_takes_repository_list=True
+        )
+        assert start is not None
+        return start, automation
+
+    def test_only_the_ones_the_app_server_cannot_clone(self):
+        start, automation = self._start_and_automation()
+        started = StartedConversation(
+            conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+        )
+
+        assert _runner_repositories(automation, start, started) == [
+            {"url": "git@github.com:acme/ssh.git"}
+        ]
+
+    def test_and_the_additional_ones_an_older_app_server_ignored(self):
+        start, automation = self._start_and_automation()
+        started = StartedConversation(
+            conversation_id=CONVERSATION_ID,
+            agent_profile_id=PROFILE_ID,
+            reports_repositories=False,
+        )
+
+        assert _runner_repositories(automation, start, started) == [
+            {"url": "git@github.com:acme/ssh.git"},
+            {"url": "https://github.com/acme/web"},
+            {"url": "https://github.com/acme/docs"},
+        ]
+
+    def test_new_preset_tarballs_take_a_list(self):
+        repos = [RepoSource(url="https://github.com/acme/api")]
+        assert _runner_takes_repository_list(_generate_tarball("hi", repos))
+        assert _runner_takes_repository_list(
+            _generate_plugin_tarball(
+                [PluginSource(source="github:acme/plugin")], "hi", repos
+            )
+        )
+
+    def test_older_tarballs_and_others_do_not(self):
+        older = _tarball({"main.py": "print('clones repos_config.json')\n"})
+        assert not _runner_takes_repository_list(older)
+        assert not _runner_takes_repository_list(_tarball({"run.sh": "echo"}))
+        assert not _runner_takes_repository_list(b"not a tarball")
+        assert not _runner_takes_repository_list("https://example.com/code.tar.gz")
+        assert not _runner_takes_repository_list(None)
+
+
 @pytest.mark.asyncio
 class TestExecuteRunStartsTheConversation:
+    @pytest.fixture(autouse=True)
+    def uploads(self):
+        """Writes into the sandbox; the finish plugin goes there first."""
+        with patch(
+            "openhands.automation.dispatcher.upload_files", new_callable=AsyncMock
+        ) as upload:
+            yield upload
+
     async def _run(
         self,
         async_session_factory,
@@ -727,6 +977,136 @@ class TestExecuteRunStartsTheConversation:
         env_vars = mock_execute.await_args.kwargs["env_vars"]
         assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
 
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_the_finish_plugin_is_in_the_sandbox_before_the_start(
+        self, mock_execute, uploads, async_session_factory, mock_settings, mock_client
+    ):
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        order: list[str] = []
+        uploads.side_effect = lambda *args: order.append("upload")
+        backend.start_conversation.side_effect = lambda *args: (
+            order.append("start")
+            or StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        assert order == ["upload", "start"]
+        agent_url, session_key, files = uploads.await_args.args
+        assert (agent_url, session_key) == ("http://agent.test", "sk-1")
+        assert files == finish_plugin_files(str(run.id))
+        start = backend.start_conversation.await_args.args[2]
+        assert start.plugins[0] == {"source": finish_plugin_dir(str(run.id))}
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_a_failed_plugin_write_fails_the_run_before_the_start(
+        self, mock_execute, uploads, async_session_factory, mock_settings, mock_client
+    ):
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        backend = self._backend(None)
+        uploads.side_effect = httpx.ConnectError("agent server unreachable")
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        backend.start_conversation.assert_not_awaited()
+        mock_execute.assert_not_awaited()
+        backend.release_context.assert_awaited_once()
+        reloaded = await self._reload(async_session_factory, run.id)
+        assert reloaded.status == AutomationRunStatus.FAILED
+        detail = cast(dict, reloaded.status_detail)
+        assert detail["code"] == "finish_plugin_upload"
+        assert detail["source"] == "agent_server"
+        assert detail["transient"] is True
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_the_runner_is_told_which_repositories_it_still_clones(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        repos = [
+            {"url": "https://github.com/acme/api"},
+            {"url": "git@github.com:acme/ssh.git"},
+        ]
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi", "repos": repos},
+        )
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        with (
+            patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+            patch(
+                "openhands.automation.dispatcher._runner_takes_repository_list",
+                return_value=True,
+            ),
+        ):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == [
+            {"repository": "acme/api", "git_provider": "github", "branch": None}
+        ]
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert json.loads(env_vars["AUTOMATION_RUNNER_REPOS"]) == [
+            {"url": "git@github.com:acme/ssh.git"}
+        ]
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_an_older_runner_keeps_cloning_every_repository(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={
+                "preset_type": "prompt",
+                "prompt": "hi",
+                "repos": [{"url": "https://github.com/acme/api"}],
+            },
+        )
+        backend = self._backend(
+            StartedConversation(
+                conversation_id=CONVERSATION_ID, agent_profile_id=PROFILE_ID
+            )
+        )
+        mock_execute.return_value = MagicMock(
+            success=True, bash_command_id="cmd-1", error=None
+        )
+
+        # This run's tarball is a download, not a preset tarball the service
+        # can read, so its runner gets no repository list.
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        start = backend.start_conversation.await_args.args[2]
+        assert start.repositories == []
+        env_vars = mock_execute.await_args.kwargs["env_vars"]
+        assert env_vars["AUTOMATION_CONVERSATION_STARTED"] == "app_server"
+        assert "AUTOMATION_RUNNER_REPOS" not in env_vars
+
 
 def _load_preset_function(preset_name: str, function_name: str, namespace: dict):
     source_path = PRESETS_DIR / preset_name / "sdk_main.py"
@@ -804,3 +1184,45 @@ class TestRunnersAttachToTheStartedConversation:
         assert "never" not in text
         assert section([]) is None
         assert section([skills[1]]) is None
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_reads_the_list_only_when_attaching(self, preset_name):
+        listed = _load_preset_function(
+            preset_name, "_listed_runner_repos", {"json": json}
+        )
+        left = [{"url": "git@github.com:acme/ssh.git"}]
+        env = {"AUTOMATION_RUNNER_REPOS": json.dumps(left)}
+
+        assert listed(env, True) == left
+        assert listed({"AUTOMATION_RUNNER_REPOS": "[]"}, True) == []
+        # Without the list, or when this script creates the conversation itself,
+        # it clones every recorded repository as before.
+        assert listed({}, True) is None
+        assert listed(env, False) is None
+
+    @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
+    def test_clones_only_what_the_app_server_left(self, preset_name, tmp_path):
+        clone = _load_preset_function(
+            preset_name,
+            "_clone_configured_repos",
+            {"json": json, "os": __import__("os"), "report_phase": lambda _: None},
+        )
+        config = tmp_path / "repos_config.json"
+        config.write_text(
+            json.dumps(
+                [
+                    {"url": "https://github.com/acme/api"},
+                    {"url": "git@github.com:acme/ssh.git"},
+                ]
+            )
+        )
+        workspace = MagicMock()
+        workspace.clone_repos.return_value = MagicMock(success_count=1, failed_repos=[])
+        left = [{"url": "git@github.com:acme/ssh.git"}]
+
+        assert clone(workspace, str(config), left) is workspace.clone_repos.return_value
+        workspace.clone_repos.assert_called_once_with(left)
+
+        workspace.clone_repos.reset_mock()
+        assert clone(workspace, str(config), []) is None
+        workspace.clone_repos.assert_not_called()

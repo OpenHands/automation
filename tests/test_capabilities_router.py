@@ -184,8 +184,20 @@ class TestGetCapabilities:
             "release.*",
         ]
         by_source = body["eventTypesBySource"]
-        assert set(by_source) == {"bitbucket_data_center", "github", "jira_dc"}
+        assert set(by_source) == {
+            "azure_devops",
+            "bitbucket_data_center",
+            "github",
+            "jira_dc",
+        }
         assert by_source["github"] == body["eventTypes"]
+        assert by_source["azure_devops"] == [
+            "git.pullrequest.created",
+            "git.pullrequest.merged",
+            "git.pullrequest.updated",
+            "ms.vss-code.git-pullrequest-comment-event",
+            "workitem.commented",
+        ]
         assert "comment_created" in by_source["jira_dc"]
         assert "jira:issue_updated" in by_source["jira_dc"]
         assert "pr:opened" in by_source["bitbucket_data_center"]
@@ -453,7 +465,25 @@ class TestValidateDraft:
                 [("trigger.on", "event_type_not_delivered")],
                 id="bitbucket-dc-github-key",
             ),
-            pytest.param("azure_devops", "anything", [], id="no-catalog"),
+            # Azure DevOps keys are dotted, so the whole pattern is compared.
+            pytest.param(
+                "azure_devops", "git.pullrequest.created", [], id="azure-devops-pr"
+            ),
+            pytest.param(
+                "azure_devops", "git.pullrequest.*", [], id="azure-devops-wildcard"
+            ),
+            pytest.param(
+                "azure_devops",
+                "pr.*",
+                [("trigger.on", "event_type_not_delivered")],
+                id="azure-devops-bitbucket-key",
+            ),
+            pytest.param(
+                "azure_devops",
+                "git.push",
+                [("trigger.on", "event_type_not_delivered")],
+                id="azure-devops-no-hook",
+            ),
         ],
     )
     async def test_data_center_event_types_are_checked_against_their_catalog(

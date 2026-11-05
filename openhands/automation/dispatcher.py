@@ -15,9 +15,11 @@ in the ExecutionBackend (see automation/backends/).
 """
 
 import asyncio
+import io
 import json
 import logging
 import random
+import tarfile
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -48,7 +50,7 @@ from openhands.automation.exceptions import (
     SandboxProvisioningError,
     TarballNotFoundError,
 )
-from openhands.automation.execution import execute_in_context
+from openhands.automation.execution import execute_in_context, upload_files
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -67,6 +69,14 @@ from openhands.automation.subjects import conversation_id_for, service_account_i
 from openhands.automation.telemetry import capture_automation_event
 from openhands.automation.utils import log_extra
 from openhands.automation.utils.api_key import APIKeyError
+from openhands.automation.utils.app_server_repos import (
+    RepositorySplit,
+    split_repositories,
+)
+from openhands.automation.utils.finish_plugin import (
+    finish_plugin_dir,
+    finish_plugin_files,
+)
 from openhands.automation.utils.kv import create_kv_token
 from openhands.automation.utils.model_profiles import (
     validate_agent_profile_allowlists_with_client,
@@ -222,12 +232,16 @@ def _conversation_start(
     resolved_runtime: dict[str, Any] | None,
     plugin_fetches: list[dict[str, Any]],
     env_vars: dict[str, str],
+    runner_takes_repository_list: bool = False,
 ) -> ConversationStart | None:
     """What the app server needs to start this run's conversation, or None.
 
     Only a run whose runner the service ships can attach to a conversation
     started for it: the prompt and plugin presets, and plugin-spec runs on the
     stock conversation runner. Custom tarballs keep creating their own.
+    A preset's repositories go to the app server only when its runner clones
+    just the ones it is told to (``AUTOMATION_RUNNER_REPOS``): an older runner
+    clones them all and would fail on the app server's checkouts.
     """
     preset_type = (automation.preset_metadata or {}).get("preset_type")
     if resolved_runtime is not None:
@@ -242,16 +256,32 @@ def _conversation_start(
             {k: v for k, v in plugin.items() if k in _PLUGIN_SOURCE_KEYS}
             for plugin in plugin_fetches
         ]
+        repositories: list[dict[str, Any]] = []
     elif preset_type in _STOCK_PRESET_TYPES:
-        plugins = []
+        preset_plugins: list[dict[str, Any]] = []
         if preset_type == "plugin":
-            plugins = (automation.preset_metadata or {}).get("plugins") or []
-            if not plugins:
+            preset_plugins = (automation.preset_metadata or {}).get("plugins") or []
+            if not preset_plugins:
                 # An A/B experiment: the runner picks the variant's plugins and
                 # model itself, so only it can create that conversation.
                 return None
+        # The presets require the finish tool; the app server's start request
+        # takes that requirement as a plugin (see utils/finish_plugin.py).
+        plugins = [{"source": finish_plugin_dir(str(run.id))}, *preset_plugins]
         agent_profile_id = automation.agent_profile_id
         llm_profile = automation.model
+        repositories = (
+            [
+                {
+                    "repository": r.repository,
+                    "git_provider": r.git_provider,
+                    "branch": r.branch,
+                }
+                for r in _repository_split(automation).app_server
+            ]
+            if runner_takes_repository_list
+            else []
+        )
     else:
         return None
     return ConversationStart(
@@ -260,7 +290,50 @@ def _conversation_start(
         conversation_id=env_vars.get("AUTOMATION_CONVERSATION_ID"),
         plugins=plugins,
         tags=_conversation_tags(automation, run),
+        repositories=repositories,
     )
+
+
+def _repository_split(automation: Automation) -> RepositorySplit:
+    """A preset's repositories: those the app server clones, and the rest."""
+    return split_repositories((automation.preset_metadata or {}).get("repos"))
+
+
+def _runner_repositories(
+    automation: Automation, start: ConversationStart, started: StartedConversation
+) -> list[dict[str, Any]]:
+    """Repositories the runner still clones itself after the app server start.
+
+    Those the app server cannot take, plus the additional ones when it does
+    not report repositories (an app server from before it cloned several).
+    """
+    split = _repository_split(automation)
+    runner = list(split.runner)
+    if not started.reports_repositories and len(start.repositories) > 1:
+        recorded = [
+            r
+            for r in (automation.preset_metadata or {}).get("repos") or []
+            if r not in split.runner
+        ]
+        runner.extend(recorded[1:])
+    return runner
+
+
+def _runner_takes_repository_list(tarball_source: bytes | str | None) -> bool:
+    """Whether a preset tarball's runner clones only ``AUTOMATION_RUNNER_REPOS``.
+
+    A preset tarball keeps the runner it was created with, so an automation
+    created before this support still clones every recorded repository itself.
+    """
+    if not isinstance(tarball_source, bytes):
+        return False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_source), mode="r:*") as tar:
+            member = tar.extractfile("main.py")
+            source = member.read() if member is not None else b""
+    except (tarfile.TarError, KeyError, OSError):
+        return False
+    return b"AUTOMATION_RUNNER_REPOS" in source
 
 
 def _check_launched_profile(
@@ -297,7 +370,11 @@ def _conversation_start_status_detail(exc: Exception) -> dict[str, Any]:
             kind=kind,
             detail=str(exc),
             transient=exc.transient,
-            source="openhands_api",
+            source=(
+                "agent_server"
+                if exc.code == "finish_plugin_upload"
+                else "openhands_api"
+            ),
             operation="start_conversation",
             code=exc.code or type(exc).__name__,
             status_code=exc.status_code,
@@ -1103,11 +1180,30 @@ async def _execute_run(
     # app server; a conversation the runner creates on the sandbox's own agent
     # server gets none of them. The stock runners attach to the one started here.
     conversation_start = _conversation_start(
-        automation, run, resolved_runtime, plugin_fetches, env_vars
+        automation,
+        run,
+        resolved_runtime,
+        plugin_fetches,
+        env_vars,
+        runner_takes_repository_list=_runner_takes_repository_list(tarball_source),
     )
     if conversation_start is not None:
         started: StartedConversation | None = None
         try:
+            finish_dir = finish_plugin_dir(run_id)
+            if not backend.is_local_mode and any(
+                p.get("source") == finish_dir for p in conversation_start.plugins
+            ):
+                try:
+                    await upload_files(
+                        ctx.agent_url, ctx.session_key, finish_plugin_files(run_id)
+                    )
+                except Exception as exc:
+                    raise ConversationStartError(
+                        f"Could not write the finish-required plugin: {exc}",
+                        transient=True,
+                        code="finish_plugin_upload",
+                    ) from exc
             started = await backend.start_conversation(client, ctx, conversation_start)
             if started is not None:
                 _check_launched_profile(started, conversation_start.agent_profile_id)
@@ -1136,6 +1232,10 @@ async def _execute_run(
         if started is not None:
             env_vars["AUTOMATION_CONVERSATION_ID"] = started.conversation_id
             env_vars["AUTOMATION_CONVERSATION_STARTED"] = "app_server"
+            if conversation_start.repositories:
+                env_vars["AUTOMATION_RUNNER_REPOS"] = json.dumps(
+                    _runner_repositories(automation, conversation_start, started)
+                )
             logger.info(
                 "Conversation %s started by the OpenHands API from agent profile %s",
                 started.conversation_id,

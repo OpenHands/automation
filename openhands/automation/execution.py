@@ -175,6 +175,20 @@ async def _upload(
     await workspace.file_upload(data, dest)
 
 
+async def upload_files(
+    agent_url: str, session_key: str, files: dict[str, bytes]
+) -> None:
+    """Write files into the execution environment, keyed by absolute path."""
+    workspace = AsyncRemoteWorkspace(
+        host=agent_url, api_key=session_key, working_dir="/"
+    )
+    try:
+        for path, data in files.items():
+            await _upload(workspace, data, path)
+    finally:
+        await workspace.reset_client()
+
+
 async def _bash(
     workspace: AsyncRemoteWorkspace,
     command: str,
@@ -463,7 +477,8 @@ async def run_automation(
     ``AGENT_SERVER_URL``, ``AUTOMATION_CALLBACK_API_KEY``) are
     **always** injected so the SDK's ``local_agent_server_mode`` works
     and standalone (non-SDK) scripts can reach the agent server and
-    sign their completion callback.
+    sign their completion callback, along with ``AUTOMATION_RUN_MODE=cloud``
+    so the presets do not take ``AGENT_SERVER_URL`` for local mode.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -520,6 +535,9 @@ async def run_automation(
             # authenticates with.
             env_vars.setdefault("AGENT_SERVER_URL", agent_url)
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
+            # This helper always runs in a cloud sandbox; say so, because the
+            # presets must not read AGENT_SERVER_URL as local mode (#688).
+            env_vars.setdefault("AUTOMATION_RUN_MODE", "cloud")
 
             # Get tarball into sandbox: upload bytes or download from URL
             if isinstance(tarball_source, bytes):

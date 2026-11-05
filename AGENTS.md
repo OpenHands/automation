@@ -201,7 +201,7 @@ The dispatcher uses a **fire-and-forget** model. For each PENDING run:
 3. **Create sandbox** — `POST /api/v1/sandboxes` (Cloud API, Bearer token auth)
 4. **Wait for RUNNING** — Poll `GET /api/v1/sandboxes?id=<id>` until status=RUNNING
 5. **Upload/download tarball** — `POST /api/file/upload/<path>` (agent-server) or `curl` inside sandbox
-6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (404/405/422) logs `conversation_start_fallback` and the runner creates the conversation as before. Local mode and custom tarballs skip this step.
+6. **Start the conversation through the app server** (cloud mode; prompt and plugin presets, plugin-spec conversation runs) — `POST /api/v1/app-conversations` with the run's `sandbox_id`, the automation's `agent_profile_id` (else the owner's active profile), the run tags and, for plugin runs, the plugins. Presets also pass a finish-required plugin the service writes into the sandbox and, when their runner supports it, the repositories the app server can clone (`selected_repository`, `additional_repositories`). The app server applies the owner's profile, MCP servers and secrets as it does for a chat, and the service checks `launched_agent_profile`. An app server without this contract (a missing route or a body it cannot validate) logs `conversation_start_fallback` and the runner creates the conversation as before; any other refusal fails the run. Local mode and custom tarballs skip this step.
 7. **Start entrypoint** — `POST /api/bash/start_bash_command` (agent-server)
    - Extracts tarball, runs setup.sh (if present), exports env vars, runs entrypoint
 8. **Return immediately** — Dispatcher does not wait for completion
@@ -216,8 +216,9 @@ Completion is handled asynchronously:
 |----------|--------|---------|
 | `OPENHANDS_API_KEY` | Per-user key issued via service key (cloud) | SDK auth for get_llm()/get_secrets() |
 | `OPENHANDS_CLOUD_API_URL` | Config (`openhands_api_base_url`, cloud) | Cloud API base URL |
-| `AGENT_SERVER_URL` | Local backend | Local agent-server URL from the sandbox's point of view |
-| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured | Automation service key for local callbacks (not the agent-server session key) |
+| `AUTOMATION_RUN_MODE` | Both backends (`cloud` / `local`), and `run_automation()` (`cloud`) | Tells the preset scripts which workspace to use. `AGENT_SERVER_URL` is exported in both modes, so it must never decide this; presets without the variable fall back to `SANDBOX_ID` + session key = cloud |
+| `AGENT_SERVER_URL` | Local backend; cloud dispatcher and `run_automation()` (the sandbox's exposed agent-server URL) | Agent-server URL from the sandbox's point of view, so standalone (non-SDK) scripts can reach it |
+| `AUTOMATION_CALLBACK_API_KEY` | Local backend, when configured; cloud dispatcher and `run_automation()` (the per-user key) | Key for signing the completion callback (local: the automation service key, not the agent-server session key; cloud: the same key as `OPENHANDS_API_KEY`) |
 | `SANDBOX_ID` | Cloud sandbox creation response | SDK reads for settings API calls |
 | `SESSION_API_KEY` | Cloud sandbox creation response or local backend | SDK reads for settings API auth |
 | `AUTOMATION_CALLBACK_URL` | Constructed by dispatcher | SDK posts completion status here |
@@ -225,6 +226,7 @@ Completion is handled asynchronously:
 | `AUTOMATION_EVENT_PAYLOAD` | Trigger context JSON | Available to user's script; preset scripts also use it to set a descriptive conversation title |
 | `AUTOMATION_CONVERSATION_ID` | Derived by the service for `continue_conversation` runs; the started conversation's id when the app server started it | The id the script must give its conversation, so a later event on the same subject reaches it. A custom script that ignores it gets a fresh conversation per event |
 | `AUTOMATION_CONVERSATION_STARTED` | `app_server`, cloud mode, when the service started the conversation | The stock runners attach to `AUTOMATION_CONVERSATION_ID` with `RemoteConversation.attach` instead of building an agent and creating it. Absent otherwise |
+| `AUTOMATION_RUNNER_REPOS` | JSON list, set with `AUTOMATION_CONVERSATION_STARTED` when the app server cloned some of a preset's repositories | The repositories the preset runner still clones itself; without it the runner clones every entry of `repos_config.json` |
 
 The SDK's `OpenHandsCloudWorkspace(local_agent_server_mode=True)` reads `SANDBOX_ID`, `SESSION_API_KEY`, and `AGENT_SERVER_PORT` from env vars automatically.
 

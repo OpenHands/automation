@@ -6,7 +6,7 @@ through an Agent Profile selected by the Automation Service from the plugin
 manifest's runtime.agent_profile requirement.
 
 The script:
-  1. Detects mode based on AGENT_SERVER_URL presence.
+  1. Detects mode from AUTOMATION_RUN_MODE (exported by the execution backend).
   2. Opens the workspace context early so failures trigger the completion callback.
   3. Loads skills already available to the agent server.
   4. Reads plugin sources, prompt text, and event context.
@@ -23,11 +23,15 @@ Env vars (Cloud mode - all required):
                                (legacy fallback: SESSION_API_KEY)
 
 Env vars (Local mode):
-  AGENT_SERVER_URL           - local agent server URL (presence = local mode)
+  AGENT_SERVER_URL           - local agent server URL (cloud sandboxes export it
+                               too, for standalone scripts; it does not pick the mode)
   OH_SESSION_API_KEYS_0      - API key for agent server auth (optional)
                                (legacy fallback: SESSION_API_KEY)
 
 Common env vars:
+  AUTOMATION_RUN_MODE         - "cloud" or "local", exported by the execution backend;
+                                decides the mode. Without it, SANDBOX_ID plus a session
+                                key means cloud, AGENT_SERVER_URL alone means local.
   AUTOMATION_CALLBACK_URL     - completion callback endpoint (optional)
   AUTOMATION_ID               - automation ID for observability correlation (optional)
   AUTOMATION_NAME             - automation name for observability correlation (optional)
@@ -54,9 +58,35 @@ import os
 import sys
 import uuid
 
-# Detect execution mode based on AGENT_SERVER_URL presence
+
+def _detect_execution_mode(environ) -> tuple[str, str]:
+    """Return ("cloud" | "local", the signal that decided it).
+
+    The execution backend exports AUTOMATION_RUN_MODE. AGENT_SERVER_URL must
+    never decide the mode: cloud sandboxes export it too so standalone scripts
+    can reach the agent server (#680), and reading it as "local" made cloud
+    runs fetch their LLM, secrets and MCP servers from the sandbox's own
+    agent-server, which holds none of them (#688). A service that predates
+    AUTOMATION_RUN_MODE is recognised by its env shape: only cloud sandboxes
+    carry SANDBOX_ID.
+    """
+    explicit = environ.get("AUTOMATION_RUN_MODE", "").strip().lower()
+    if explicit in ("cloud", "local"):
+        return explicit, "AUTOMATION_RUN_MODE"
+    has_session_key = bool(
+        environ.get("OH_SESSION_API_KEYS_0") or environ.get("SESSION_API_KEY")
+    )
+    if environ.get("SANDBOX_ID") and has_session_key:
+        return "cloud", "SANDBOX_ID + session key (no AUTOMATION_RUN_MODE)"
+    if environ.get("AGENT_SERVER_URL"):
+        return "local", "AGENT_SERVER_URL without SANDBOX_ID (no AUTOMATION_RUN_MODE)"
+    return "cloud", "default (no AUTOMATION_RUN_MODE, SANDBOX_ID or AGENT_SERVER_URL)"
+
+
+# Keep _detect_execution_mode in sync with presets/prompt and presets/plugin.
+EXECUTION_MODE, MODE_SIGNAL = _detect_execution_mode(os.environ)
+IS_LOCAL_MODE = EXECUTION_MODE == "local"
 agent_server_url = os.environ.get("AGENT_SERVER_URL", "").rstrip("/")
-IS_LOCAL_MODE = bool(agent_server_url)
 
 
 def _attaches_to_started_conversation(environ) -> bool:
@@ -95,7 +125,7 @@ agent_profile_kind = os.environ.get("AUTOMATION_AGENT_PROFILE_KIND") or None
 automation_user_id = os.environ.get("AUTOMATION_USER_ID") or None
 
 print("=== EXECUTION MODE ===")
-print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'}")
+print(f"  mode: {'LOCAL' if IS_LOCAL_MODE else 'CLOUD'} (decided by {MODE_SIGNAL})")
 
 print("\n=== ENV VARS ===")
 if IS_LOCAL_MODE:
