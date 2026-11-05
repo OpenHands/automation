@@ -56,7 +56,8 @@ def find_agent_server_url(sandbox: dict) -> tuple[str, str] | None:
     """Return ``(agent_url, session_key)`` from an OpenHands API sandbox.
 
     Returns None if the sandbox has no AGENT_SERVER URL. When
-    AUTOMATION_SANDBOX_INTERNAL_URL is set, the agent URL uses that origin.
+    AUTOMATION_SANDBOX_INTERNAL_URL is set, that URL replaces the origin of
+    the agent URL.
     """
     for url_info in sandbox.get("exposed_urls") or []:
         if url_info.get("name") == "AGENT_SERVER":
