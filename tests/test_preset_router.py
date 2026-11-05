@@ -655,6 +655,7 @@ class TestPresetEntrypoint:
         assert "command -v python" in content
         assert "command -v py" in content
 
+    @pytest.mark.skipif(os.name == "nt", reason="runs setup.sh with bash")
     @pytest.mark.parametrize("preset_name", ["prompt", "plugin"])
     @pytest.mark.parametrize(
         "venv_python", [".venv/bin/python", ".venv/Scripts/python.exe"]
@@ -1353,6 +1354,9 @@ class TestReplaceFilesInTarball:
         """A replacement the archive lacks is added; existing files are kept."""
         # Arrange — a prompt preset created without repositories.
         original = _generate_tarball("Same prompt")
+        with tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as tar:
+            original_names = tar.getnames()
+        assert "repos_config.json" not in original_names
 
         # Act
         updated = _replace_files_in_tarball(
@@ -1368,13 +1372,8 @@ class TestReplaceFilesInTarball:
             assert repos_file is not None and prompt_file is not None
             assert json.loads(repos_file.read()) == [{"url": "owner/repo"}]
             assert prompt_file.read().decode() == "Same prompt"
-        assert names == [
-            "finish_tool_hook.py",
-            "main.py",
-            "prompt.txt",
-            "repos_config.json",
-            "setup.sh",
-        ]
+        # The original members depend on the host (Windows adds setup.py).
+        assert names == sorted([*original_names, "repos_config.json"])
 
     def test_none_removes_file(self):
         """A ``None`` replacement drops that file from the archive."""
