@@ -322,6 +322,7 @@ async def _dispatch(
             stack.enter_context(
                 patch(
                     "openhands.automation.dispatcher.build_execution_payload",
+                    new_callable=AsyncMock,
                     return_value=plugin_payload,
                 )
             )
@@ -371,8 +372,8 @@ async def _dispatch(
     return _exported_env(env_files[0])
 
 
-def _plugin_payload(tmp_path: Path, write) -> tuple:
-    return build_execution_payload(
+async def _plugin_payload(tmp_path: Path, write) -> tuple:
+    return await build_execution_payload(
         plugin_spec={"plugin": {"source": str(write(tmp_path))}, "config": {}},
         agent_profile_id=None,
         agent_profile_name=None,
@@ -668,7 +669,7 @@ class TestCloudSandboxesNeverGetAgentServerUrl:
     async def test_plugin_spec_runs(
         self, write, tmp_path, async_session_factory, mock_settings, mock_client
     ):
-        payload = _plugin_payload(tmp_path, write)
+        payload = await _plugin_payload(tmp_path, write)
 
         env = await _dispatch(
             async_session_factory,
