@@ -3,12 +3,16 @@
 The dispatcher polls for PENDING automation runs and marks them as RUNNING.
 """
 
+import ast
 import asyncio
 import contextlib
 import json
 import logging
+import os
+import shlex
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +23,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from openhands.automation.backends import CloudSandboxBackend
+from openhands.automation.backends import CloudSandboxBackend, ExecutionContext
 from openhands.automation.config import get_config
 from openhands.automation.conversations import COALESCED_TURNS_KEY
 from openhands.automation.dispatcher import (
@@ -36,6 +40,8 @@ from openhands.automation.exceptions import (
     DailySandboxLimitReachedError,
     SandboxProvisioningError,
 )
+from openhands.automation.execution import DispatchResult, build_tarball, run_automation
+from openhands.automation.git_sync.serializer import canonical_tarball_bytes
 from openhands.automation.models import (
     Automation,
     AutomationChangeEvent,
@@ -43,6 +49,13 @@ from openhands.automation.models import (
     AutomationRunAsKind,
     AutomationRunStatus,
     AutomationState,
+    TarballUpload,
+    UploadStatus,
+)
+from openhands.automation.preset_router import (
+    _generate_plugin_tarball,
+    _generate_tarball,
+    _replace_files_in_tarball,
 )
 from openhands.automation.subjects import conversation_id_for
 from openhands.automation.utils import utcnow
@@ -52,7 +65,11 @@ from openhands.automation.utils.run import (
     update_run_current_phase,
     update_run_timeout_at,
 )
-from openhands.automation.utils.tarball_validation import is_http_url
+from openhands.automation.utils.tarball_validation import (
+    build_internal_url,
+    is_http_url,
+)
+from openhands.sdk.plugin import PluginSource
 
 
 # Test UUIDs
@@ -1369,6 +1386,304 @@ class TestExecuteRunPhaseReporting:
         async with async_session_factory() as session:
             updated = await session.get(AutomationRun, run_id)
             assert updated.current_phase == "Starting automation"
+
+
+RELEASED_PRESETS = Path(__file__).parent / "fixtures" / "released_presets"
+PRESETS_DIR = Path(__file__).parent.parent / "openhands" / "automation" / "presets"
+AGENT_URL = "http://agent.test"
+# A standalone script reaches the agent server itself (#679).
+STANDALONE_SCRIPT = (
+    "import os, urllib.request\n"
+    'agent_url = os.environ["AGENT_SERVER_URL"]\n'
+    'urllib.request.urlopen(f"{agent_url}/api/conversations")\n'
+)
+STORED_FORMS = ["as-created", "prompt-edited", "git-synced"]
+
+
+def _runner_mode(runner: str, environ: dict[str, str]) -> str:
+    """Run a preset runner's own top-level statements, up to its
+    ``IS_LOCAL_MODE`` assignment, in ``environ``; return the mode it picks."""
+    module = ast.parse(runner)
+    statements: list[ast.stmt] = []
+    for node in module.body:
+        statements.append(node)
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "IS_LOCAL_MODE"
+            for target in node.targets
+        ):
+            break
+    else:
+        raise AssertionError("the runner never assigns IS_LOCAL_MODE")
+    namespace: dict[str, Any] = {}
+    code = compile(ast.Module(body=statements, type_ignores=[]), "main.py", "exec")
+    with patch.dict(os.environ, environ, clear=True):
+        exec(code, namespace)
+    return "local" if namespace["IS_LOCAL_MODE"] else "cloud"
+
+
+def _released_runner(kind: str) -> str:
+    return (RELEASED_PRESETS / f"{kind}_sdk_main_1.27.0.py.txt").read_text()
+
+
+def _current_runner(kind: str) -> str:
+    return (PRESETS_DIR / kind / "sdk_main.py").read_text()
+
+
+def _preset_tarball(kind: str, runner: str | None = None) -> bytes:
+    """A preset tarball from today's endpoints, optionally with another runner.
+
+    Only ``main.py`` changed in the layout since 1.27.0, so swapping in the
+    released runner gives the tarball a 1.27.0 automation still has stored.
+    """
+    if kind == "prompt":
+        tarball = _generate_tarball("Summarize the new issue")
+    else:
+        tarball = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/repo")], "Summarize the new issue"
+        )
+    if runner is None:
+        return tarball
+    stored = _replace_files_in_tarball(tarball, {"main.py": runner})
+    assert stored is not None
+    return stored
+
+
+def _stored_preset(kind: str, form: str) -> bytes:
+    """A preset created on 1.27.0, in a form it can be dispatched in later."""
+    tarball = _preset_tarball(kind, _released_runner(kind))
+    if form == "prompt-edited":
+        edited = _replace_files_in_tarball(tarball, {"prompt.txt": "Edited later"})
+        assert edited is not None
+        return edited
+    if form == "git-synced":
+        return canonical_tarball_bytes(tarball)
+    return tarball
+
+
+async def _dispatch_cloud_run(
+    tarball: bytes, async_session_factory, mock_settings, mock_client
+) -> tuple[dict[str, str], bytes | str]:
+    """Dispatch a run of a stored tarball through the cloud sandbox backend.
+
+    Returns the env and tarball handed to the sandbox.
+    """
+    upload_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        session.add(
+            TarballUpload(
+                id=upload_id,
+                user_id=TEST_USER_ID,
+                org_id=TEST_ORG_ID,
+                name="stored-tarball",
+                status=UploadStatus.COMPLETED,
+                storage_path=f"uploads/{upload_id}.tar.gz",
+            )
+        )
+        automation = Automation(
+            user_id=TEST_USER_ID,
+            org_id=TEST_ORG_ID,
+            name="Stored tarball",
+            trigger={"type": "cron", "schedule": "* * * * *", "timezone": "UTC"},
+            tarball_path=build_internal_url(upload_id),
+            entrypoint=".venv/bin/python main.py",
+            enabled=True,
+        )
+        session.add(automation)
+        await session.commit()
+        run = AutomationRun(
+            automation_id=automation.id,
+            status=AutomationRunStatus.RUNNING,
+            started_at=utcnow(),
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    async with async_session_factory() as session:
+        run = (
+            await session.execute(
+                select(AutomationRun)
+                .options(selectinload(AutomationRun.automation))
+                .where(AutomationRun.id == run_id)
+            )
+        ).scalar_one()
+
+    backend = CloudSandboxBackend(api_url="https://app.test", run=run)
+    ctx = ExecutionContext(
+        agent_url=AGENT_URL,
+        session_key="sk-1",
+        sandbox_id="sbx-1",
+        api_url="https://app.test",
+        api_key="cloud-api-key",
+    )
+    store = MagicMock()
+    store.read.return_value = tarball
+    with (
+        patch(
+            "openhands.automation.backends.cloud.get_api_key_for_automation_run",
+            new_callable=AsyncMock,
+            return_value="cloud-api-key",
+        ),
+        patch.object(backend, "get_execution_context", AsyncMock(return_value=ctx)),
+        patch("openhands.automation.dispatcher.get_backend", return_value=backend),
+        patch("openhands.automation.storage.get_file_store", return_value=store),
+        patch(
+            "openhands.automation.dispatcher.execute_in_context",
+            new_callable=AsyncMock,
+            return_value=DispatchResult(
+                success=True, sandbox_id="sbx-1", bash_command_id="cmd-1"
+            ),
+        ) as mock_execute,
+    ):
+        await backend.get_api_key()
+        await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+    assert mock_execute.await_args is not None, "the run was not dispatched"
+    kwargs = mock_execute.await_args.kwargs
+    return kwargs["env_vars"], kwargs["tarball_source"]
+
+
+@contextlib.contextmanager
+def _blocking_cloud_run():
+    """Stub the sandbox for ``run_automation()``; yields the upload mock."""
+    with (
+        patch("openhands.automation.execution.httpx.AsyncClient") as mock_client,
+        patch(
+            "openhands.automation.execution._create_and_wait",
+            new_callable=AsyncMock,
+            return_value=("sbx-1", "sk-1", AGENT_URL),
+        ),
+        patch(
+            "openhands.automation.execution._upload", new_callable=AsyncMock
+        ) as mock_upload,
+        patch(
+            "openhands.automation.execution._bash",
+            new_callable=AsyncMock,
+            return_value=(0, "", ""),
+        ),
+    ):
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=AsyncMock())
+        context_manager.__aexit__ = AsyncMock(return_value=None)
+        mock_client.return_value = context_manager
+        yield mock_upload
+
+
+def _exported_env(env_file: bytes) -> dict[str, str]:
+    """Parse the ``export NAME='value'`` file uploaded next to the tarball."""
+    exports = (shlex.split(line)[1] for line in env_file.decode().splitlines())
+    return dict(item.split("=", 1) for item in exports)
+
+
+class TestCloudRunAgentServerUrl:
+    """Only non-preset tarballs get AGENT_SERVER_URL in a cloud run.
+
+    #680 exports it so standalone scripts can reach the agent server (#679).
+    A preset automation keeps the ``main.py`` it was created with, and every
+    runner before #689 reads AGENT_SERVER_URL as local mode, so a cloud run
+    then takes its LLM, secrets and MCP servers from the sandbox's own
+    agent-server and fails with LLMAuthenticationError (#688).
+    """
+
+    @pytest.mark.parametrize("kind", ["prompt", "plugin"])
+    async def test_preset_created_on_1_27_0_stays_in_cloud_mode(
+        self, kind, async_session_factory, mock_settings, mock_client
+    ):
+        tarball = _stored_preset(kind, "as-created")
+
+        env, sent = await _dispatch_cloud_run(
+            tarball, async_session_factory, mock_settings, mock_client
+        )
+
+        assert sent == tarball
+        assert "AGENT_SERVER_URL" not in env
+        assert _runner_mode(_released_runner(kind), env) == "cloud"
+        assert env["SANDBOX_ID"] == "sbx-1"
+        assert env["SESSION_API_KEY"] == "sk-1"
+        assert env["OPENHANDS_API_KEY"] == "cloud-api-key"
+
+    @pytest.mark.parametrize("kind", ["prompt", "plugin"])
+    async def test_new_preset_stays_in_cloud_mode_without_the_url(
+        self, kind, async_session_factory, mock_settings, mock_client
+    ):
+        env, _ = await _dispatch_cloud_run(
+            _preset_tarball(kind), async_session_factory, mock_settings, mock_client
+        )
+
+        assert "AGENT_SERVER_URL" not in env
+        assert env["AUTOMATION_RUN_MODE"] == "cloud"
+        assert _runner_mode(_current_runner(kind), env) == "cloud"
+
+    @pytest.mark.parametrize(
+        "files",
+        [
+            {"main.py": STANDALONE_SCRIPT, "config.json": "{}"},
+            {"main.py": STANDALONE_SCRIPT, "docs/prompt.txt": "not a preset"},
+        ],
+        ids=["standalone-script", "prompt-txt-not-at-root"],
+    )
+    async def test_non_preset_tarball_still_gets_agent_server_url(
+        self, files, async_session_factory, mock_settings, mock_client
+    ):
+        env, _ = await _dispatch_cloud_run(
+            build_tarball(files), async_session_factory, mock_settings, mock_client
+        )
+
+        assert env["AGENT_SERVER_URL"] == AGENT_URL
+        assert env["AUTOMATION_CALLBACK_API_KEY"] == "cloud-api-key"
+
+
+class TestStoredPresetRunnersNeverSeeAgentServerUrl:
+    """Guard: no cloud path may hand AGENT_SERVER_URL to a released preset runner.
+
+    Each case runs the 1.27.0 runner's own mode detection against the env a
+    cloud run gets, for each form a stored preset is dispatched in: as
+    created, after a prompt edit (only ``prompt.txt`` is rewritten) and after
+    a round trip through git sync.
+    """
+
+    @pytest.mark.parametrize("kind", ["prompt", "plugin"])
+    @pytest.mark.parametrize("form", STORED_FORMS)
+    async def test_dispatcher(
+        self, kind, form, async_session_factory, mock_settings, mock_client
+    ):
+        env, _ = await _dispatch_cloud_run(
+            _stored_preset(kind, form),
+            async_session_factory,
+            mock_settings,
+            mock_client,
+        )
+
+        assert _runner_mode(_released_runner(kind), env) == "cloud"
+
+    @pytest.mark.parametrize("kind", ["prompt", "plugin"])
+    @pytest.mark.parametrize("form", STORED_FORMS)
+    async def test_run_automation(self, kind, form):
+        with _blocking_cloud_run() as mock_upload:
+            await run_automation(
+                api_url="https://app.test",
+                api_key="cloud-api-key",
+                entrypoint=".venv/bin/python main.py",
+                tarball_source=_stored_preset(kind, form),
+                keep_sandbox=True,
+            )
+
+        env = _exported_env(mock_upload.await_args_list[1].args[1])
+        assert env["SANDBOX_ID"] == "sbx-1"
+        assert _runner_mode(_released_runner(kind), env) == "cloud"
+
+    async def test_run_automation_still_gives_scripts_the_url(self):
+        with _blocking_cloud_run() as mock_upload:
+            await run_automation(
+                api_url="https://app.test",
+                api_key="cloud-api-key",
+                entrypoint="python3 main.py",
+                tarball_source=build_tarball({"main.py": STANDALONE_SCRIPT}),
+                keep_sandbox=True,
+            )
+
+        env = _exported_env(mock_upload.await_args_list[1].args[1])
+        assert env["AGENT_SERVER_URL"] == AGENT_URL
 
 
 class TestBuildEventPayload:

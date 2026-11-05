@@ -9,6 +9,7 @@ import io
 import logging
 import re
 import tarfile
+import zlib
 from typing import Any
 
 import httpx
@@ -69,6 +70,39 @@ def build_tarball(files: dict[str, str | bytes]) -> bytes:
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
+
+
+# Presets (prompt, plugin and plugin-spec stock runners) carry their prompt as
+# prompt.txt at the archive root, the file preset_router keys on too. They hold
+# a few small files, so the search stops early instead of decompressing a
+# large upload on the service.
+_PRESET_SCAN_MAX_MEMBERS = 256
+_PRESET_SCAN_MAX_BYTES = 16 * 1024 * 1024
+
+
+def is_preset_tarball(tarball_source: bytes | str) -> bool:
+    """Whether a run's tarball is a preset: it has ``prompt.txt`` at its root.
+
+    A URL is never one (presets are internal uploads), and neither is an
+    archive that cannot be read; extracting it fails in the sandbox as before.
+    """
+    if not isinstance(tarball_source, bytes):
+        return False
+    scanned = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball_source), mode="r:gz") as tar:
+            for count, member in enumerate(tar, start=1):
+                if member.name == "prompt.txt":
+                    return True
+                scanned += member.size
+                if (
+                    count >= _PRESET_SCAN_MAX_MEMBERS
+                    or scanned > _PRESET_SCAN_MAX_BYTES
+                ):
+                    return False
+    except (tarfile.TarError, EOFError, OSError, zlib.error):
+        return False
+    return False
 
 
 # -- Sandbox helpers (private) ------------------------------------------------
@@ -460,11 +494,11 @@ async def run_automation(
     *env_vars* are exported before setup.sh and the entrypoint run,
     so setup.sh can consume injected values such as ``AUTOMATION_API_URL``.
     The sandbox identity env vars (``SANDBOX_ID``, ``SESSION_API_KEY``,
-    ``AGENT_SERVER_URL``, ``AUTOMATION_CALLBACK_API_KEY``) are
-    **always** injected so the SDK's ``local_agent_server_mode`` works
-    and standalone (non-SDK) scripts can reach the agent server and
-    sign their completion callback, along with ``AUTOMATION_RUN_MODE=cloud``
-    so the presets do not take ``AGENT_SERVER_URL`` for local mode.
+    ``AUTOMATION_CALLBACK_API_KEY``) are **always** injected so the SDK's
+    ``local_agent_server_mode`` works and scripts can sign their completion
+    callback, along with ``AUTOMATION_RUN_MODE=cloud``. ``AGENT_SERVER_URL``
+    is injected unless the tarball is a preset (see ``is_preset_tarball``),
+    so standalone (non-SDK) scripts can reach the agent server.
     If *callback_url* / *run_id* are set they are injected as
     ``AUTOMATION_CALLBACK_URL`` / ``AUTOMATION_RUN_ID`` so the SDK's
     ``OpenHandsCloudWorkspace`` can POST completion status on exit.
@@ -516,10 +550,12 @@ async def run_automation(
             env_vars.setdefault("SANDBOX_ID", sandbox_id)
             env_vars.setdefault("SESSION_API_KEY", session_key)
             # Standalone (non-SDK) scripts discover the agent server via
-            # AGENT_SERVER_URL; without it os.environ.get returns "". The
-            # per-run API key used for callbacks is the same one the SDK
-            # authenticates with.
-            env_vars.setdefault("AGENT_SERVER_URL", agent_url)
+            # AGENT_SERVER_URL; without it os.environ.get returns "". A
+            # preset never needs it, and the runner stored in one created on
+            # 1.27.0 or earlier reads it as local mode (#688). The per-run API
+            # key used for callbacks is the same one the SDK authenticates with.
+            if not is_preset_tarball(tarball_source):
+                env_vars.setdefault("AGENT_SERVER_URL", agent_url)
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", api_key)
             # This helper always runs in a cloud sandbox; say so, because the
             # presets must not read AGENT_SERVER_URL as local mode (#688).

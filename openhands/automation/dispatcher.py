@@ -44,7 +44,7 @@ from openhands.automation.exceptions import (
     SandboxProvisioningError,
     TarballNotFoundError,
 )
-from openhands.automation.execution import execute_in_context
+from openhands.automation.execution import execute_in_context, is_preset_tarball
 from openhands.automation.models import (
     Automation,
     AutomationRun,
@@ -852,14 +852,12 @@ async def _execute_run(
     if ctx.sandbox_id:
         env_vars["SANDBOX_ID"] = ctx.sandbox_id
         env_vars["SESSION_API_KEY"] = ctx.session_key
-        # Cloud mode does not inject these in build_env_vars() (unlike local
-        # mode), so fill them in here from the execution context:
-        # - AGENT_SERVER_URL lets standalone (non-SDK) scripts reach the agent
-        #   server; without it, os.environ.get("AGENT_SERVER_URL") returns "".
-        # - AUTOMATION_CALLBACK_API_KEY lets fire_callback() helpers sign the
-        #   completion POST; it is the same per-user key already exported as
-        #   OPENHANDS_API_KEY, which authenticates against /v1/runs/{id}/complete.
-        env_vars.setdefault("AGENT_SERVER_URL", ctx.agent_url)
+        # Cloud mode does not inject this in build_env_vars() (unlike local
+        # mode), so fill it in here from the execution context: it lets
+        # fire_callback() helpers sign the completion POST. It is the same
+        # per-user key already exported as OPENHANDS_API_KEY, which
+        # authenticates against /v1/runs/{id}/complete. AGENT_SERVER_URL
+        # depends on the tarball, so it is added once that is known.
         if ctx.api_key:
             env_vars.setdefault("AUTOMATION_CALLBACK_API_KEY", ctx.api_key)
 
@@ -981,6 +979,14 @@ async def _execute_run(
             ),
         )
         return
+
+    # Standalone (non-SDK) scripts reach the agent server through
+    # AGENT_SERVER_URL; without it, os.environ.get("AGENT_SERVER_URL") returns
+    # "". Presets never need it in a cloud sandbox, and a preset keeps the
+    # main.py it was created with: every runner from 1.27.0 or earlier reads
+    # AGENT_SERVER_URL as local mode, and the run then fails (#688).
+    if ctx.sandbox_id and not is_preset_tarball(tarball_source):
+        env_vars.setdefault("AGENT_SERVER_URL", ctx.agent_url)
 
     # 6. Execute in context
     try:

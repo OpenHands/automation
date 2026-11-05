@@ -24,8 +24,17 @@ from openhands.automation.execution import (
     _upload,
     build_tarball,
     execute_in_context,
+    is_preset_tarball,
     run_automation,
 )
+from openhands.automation.git_sync.serializer import canonical_tarball_bytes
+from openhands.automation.preset_router import (
+    _generate_plugin_tarball,
+    _generate_tarball,
+    _replace_files_in_tarball,
+)
+from openhands.sdk.plugin import PluginSource
+from openhands.workspace import RepoSource
 
 
 class TestBuildTarball:
@@ -60,6 +69,65 @@ class TestBuildTarball:
             assert setup_file is not None
             setup = setup_file.read().decode()
             assert "pip install" in setup
+
+
+def _plain_tar(members: list[tuple[str, bytes]]) -> bytes:
+    """A gzip tarball with members in the given order."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class TestIsPresetTarball:
+    """Presets carry prompt.txt at the root; scripts and URLs are not presets."""
+
+    def test_tarballs_the_preset_endpoints_write(self):
+        prompt = _generate_tarball("Do it")
+        with_repos = _generate_tarball(
+            "Do it", [RepoSource(url="owner/repo", provider="github")]
+        )
+        plugin = _generate_plugin_tarball(
+            [PluginSource(source="github:owner/repo")], "Do it"
+        )
+        edited = _replace_files_in_tarball(prompt, {"prompt.txt": "Edited"})
+
+        assert is_preset_tarball(prompt)
+        assert is_preset_tarball(with_repos)
+        assert is_preset_tarball(plugin)
+        assert edited is not None and is_preset_tarball(edited)
+        assert is_preset_tarball(canonical_tarball_bytes(plugin))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            build_tarball({"main.py": "print('hi')", "config.json": "{}"}),
+            build_tarball({"main.py": "print('hi')", "docs/prompt.txt": "x"}),
+            build_tarball({}),
+            b"not a tarball",
+            b"",
+            "https://example.com/code.tar.gz",
+        ],
+        ids=["script", "nested-prompt", "empty", "garbage", "no-bytes", "url"],
+    )
+    def test_not_a_preset(self, source):
+        assert not is_preset_tarball(source)
+
+    def test_stops_before_decompressing_a_large_member(self):
+        big = b"\0" * (16 * 1024 * 1024 + 1)
+
+        assert not is_preset_tarball(
+            _plain_tar([("data.bin", big), ("prompt.txt", b"late")])
+        )
+
+    def test_stops_after_many_members(self):
+        members = [(f"f{i}.txt", b"") for i in range(300)]
+
+        assert not is_preset_tarball(_plain_tar([*members, ("prompt.txt", b"late")]))
+        assert is_preset_tarball(_plain_tar([*members[:10], ("prompt.txt", b"x")]))
 
 
 class TestShellQuote:
