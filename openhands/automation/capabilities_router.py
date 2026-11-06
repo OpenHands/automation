@@ -185,14 +185,8 @@ async def validate_draft(
         "Validating draft for %s (automation_id=%s)", body.endpoint, body.automation_id
     )
 
-    # A saved draft has no agent profile, so the draft shape does not know the
-    # field. Creation does, and preflight answers for creation: the profile
-    # skips the shape and is checked by the model creation itself uses.
-    shape = {k: v for k, v in body.draft.items() if k != "agent_profile_id"}
     try:
-        normalized_draft = normalize_draft_body(body.endpoint, shape)
-        if "agent_profile_id" in body.draft:
-            normalized_draft["agent_profile_id"] = body.draft["agent_profile_id"]
+        normalized_draft = normalize_draft_body(body.endpoint, body.draft)
         draft = FINAL_DRAFT_MODELS[body.endpoint].model_validate(normalized_draft)
     except ValidationError as e:
         return ValidateDraftResponse(valid=False, errors=_schema_errors(e))

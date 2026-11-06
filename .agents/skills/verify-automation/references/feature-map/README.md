@@ -10,7 +10,7 @@ recipe.
 
 Maintenance baseline: `7cda26ab0f60158a2a6dc74964e9aaf84008e04a` (first pass, 2026-10-12).
 
-The map has **262 sub-features**.
+The map has **263 sub-features**.
 
 ## Baseline preconditions
 
@@ -84,7 +84,7 @@ them honest: [../maintenance.md](../maintenance.md).
 | F06 | [Prompt and plugin presets](F06-presets.md) | prompt, plugin and plugin-spec presets, generated tarball, repos, shared templates, continue-conversation rules | `/v1/preset/prompt`, `/v1/preset/plugin`, `/v1/plugin-spec` | baseline | 13 |
 | F07 | [Dispatch and run lifecycle](F07-dispatch-and-runs.md) | dispatch, run environment, phases, callbacks, cancel, runs list, a real preset run | `/v1/{id}/dispatch`, `/v1/{id}/runs`, `/v1/runs/{run_id}/...` | baseline; `llm`, `pypi` for the preset run | 16 |
 | F08 | [Cron scheduling](F08-cron-scheduling.md) | scheduler fires, run environment, timezones, no catch-up, poll floor, disabled automations | the scheduler loop (no route) | baseline; `map run --timeout 400` | 7 |
-| F09 | [Drafts](F09-drafts.md) | draft create from prompt, raw or plugin, validation, patch, test dispatch, delete | `/v1/drafts` | baseline | 19 |
+| F09 | [Drafts](F09-drafts.md) | draft create from prompt, raw or plugin, validation, patch, test dispatch, delete | `/v1/drafts` | baseline | 20 |
 | F10 | [Custom webhooks](F10-custom-webhooks.md) | webhook create, secrets and rotation, list, patch, disable, delete, signed delivery | `/v1/webhooks` | baseline | 12 |
 | F11 | [Event ingestion and triggers](F11-event-triggers.md) | signature schemes, matching, filters, dedupe, built-in GitHub, Jira and Bitbucket sources, conversation coalescing, requested types | `/v1/events/{org_id}/{source}`, `/v1/events/{source}/requested-types` | `Launch:` webhook secret | 20 |
 | F12 | [Per-automation KV store](F12-kv-store.md) | user and run-token auth, get, put, patch, delete, counters, lists, versions, batches, isolation, encryption | `/v1/kv` | baseline | 30 |
