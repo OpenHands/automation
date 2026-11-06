@@ -570,6 +570,12 @@ class TestWhichRunsStartThroughTheAppServer:
         assert start.agent_profile_id is None
         assert start.llm_profile is None
 
+    def test_prompt_preset_with_a_chosen_profile_takes_the_profiles_model(self):
+        start = _conversation_start(_automation(model=None), _RUN, None, [], {})
+        assert start is not None
+        assert start.agent_profile_id == PROFILE_ID
+        assert start.llm_profile is None
+
     def test_plugin_preset_passes_its_plugins(self):
         plugins = [{"source": "github:acme/plugin", "ref": "v1"}]
         start = _conversation_start(
@@ -931,6 +937,7 @@ class TestExecuteRunStartsTheConversation:
         run = await self._run(
             async_session_factory,
             preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+            agent_profile_id=None,
             subject_key="OpenHands/OpenHands/1",
         )
         backend = self._backend(
@@ -957,6 +964,30 @@ class TestExecuteRunStartsTheConversation:
         assert "conversation_start_fallback" in caplog.text
         reloaded = await self._reload(async_session_factory, run.id)
         assert reloaded.status == AutomationRunStatus.RUNNING
+
+    @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
+    async def test_an_app_server_without_the_contract_fails_a_run_with_a_profile(
+        self, mock_execute, async_session_factory, mock_settings, mock_client
+    ):
+        run = await self._run(
+            async_session_factory,
+            preset_metadata={"preset_type": "prompt", "prompt": "hi"},
+        )
+        backend = self._backend(
+            ConversationStartUnavailable("no route", status_code=404)
+        )
+
+        with patch("openhands.automation.dispatcher.get_backend", return_value=backend):
+            await _execute_run(run, mock_settings, async_session_factory, mock_client)
+
+        mock_execute.assert_not_awaited()
+        backend.release_context.assert_awaited_once()
+        reloaded = await self._reload(async_session_factory, run.id)
+        assert reloaded.status == AutomationRunStatus.FAILED
+        detail = cast(dict, reloaded.status_detail)
+        assert detail["code"] == "agent_profile_unsupported"
+        assert detail["transient"] is False
+        assert PROFILE_ID in detail["detail"]
 
     @patch("openhands.automation.dispatcher.execute_in_context", new_callable=AsyncMock)
     async def test_a_failed_start_fails_the_run_before_any_command(
